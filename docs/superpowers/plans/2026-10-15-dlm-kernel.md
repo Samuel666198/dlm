@@ -1023,4 +1023,25 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   这条连接不可能再服务第二个请求（实测：同连接上的第二个请求立刻 `ECONNRESET`，不是 30 s 挂住；
   E3 的守卫形状——同连接"读满的 206"→"416"——仍 1 ms/0 ms 双双通过）。
 
+**E6：Task 1 必须新建 `src/lib.rs`（简报的 `Files` 行只写了 `src/consts.rs`、`src/task.rs` 与"Modify: `src/main.rs`"，漏了它）。**
+不是风格选择，是两处硬需求没有别的落地方式，且第一处就写在 Task 1 自己的步骤里：
+
+- Task 1 Step 2/Step 4 的命令是 `cargo test --lib task::tests` / `cargo test --lib`。bin-only 的 crate 跑这条命令
+  **连编译都不进**，实测（临时移走 `src/lib.rs` 后重跑）：`error: no library targets found in package \`dlm\``，退出码 101。
+  简报预期的 RED 是"`Task` 未定义"，没有 lib target 时连那个 RED 都拿不到。
+- Tasks 6/7/8/10 的 `tests/integration.rs`（本计划第 722–740 行、第 762 行起、第 809 行起、第 893 行起）写的是
+  `dlm::task::Task { .. }`、`dlm::probe::run(..)` 这样的路径。`tests/` 下的集成测试是**另一个 crate**，
+  只能经由 lib target 导入 `dlm::…`；写在 `src/main.rs` 里的 `mod task;` 对它们不可见（bin crate 不是依赖）。
+
+裁定与落地形状（只改模块声明的落点，别的结构不动）：新建 `src/lib.rs`，内容就是 `pub mod consts;` + `pub mod task;`，
+后续任务往这里逐条追加。于是**本计划所有 "Modify: `src/main.rs`（`mod X;`）" 一律读作 "Modify: `src/lib.rs`（`pub mod X;`）"**
+（第 178/315/574/625/671/715/762/809/853 行；`pub` 是必需的，`mod` 私有则 `dlm::task::Task` 在集成测试里不可见）。
+`src/main.rs` 保持占位 `fn main() {}` 直到 Task 9 真正组装——同名 lib + bin 并存是 cargo 支持的形状，
+`cargo test` 会同时跑 `unittests src\lib.rs` 与 `unittests src\main.rs` 两个二进制（实测后者 0 tests，不报错）。
+
+不受本条影响的部分：E2 关于"Step 3 代码块优先于 `Produces` 摘要行"的裁定照旧生效，Task 1 实际落地 **12 条常量**
+（`grep -c "^pub const" src/consts.rs` = 12；与代码块那 13 行逐字 diff，只差被删的 `PROBE_USES_CONNECTION_CLOSE`
+及其上方的文档注释行，其余顺序与字面值不变）。Task 1 落地后的门禁实测：`cargo test --lib` = 4 passed、
+`cargo test`（lib + bin + doc 全目标）全绿、`cargo clippy --all-targets -- -D warnings` 零输出。
+
 
