@@ -58,7 +58,7 @@ v1 只做内核与 CLI。不做守护进程、不做浏览器扩展、不做 GUI
 | `PROBE_READ_BYTES` | 236032 | **观测**：IDM 4 次独立运行落在 236030–236040，与文件总长无关。来源未证明（不是 64 KiB 整数倍），环回链路所测 |
 | `MIN_SEGMENT_BYTES` | 16384 | **观测**：IDM 三次未限速运行分别停在 15913/14588/14028。"尺寸触底"与"最大连接数用完"两约束未分离 |
 | `MAX_CONNECTIONS` | 8 | **观测**：环回实测 1 试探 + 7 分段。IDM 官方手册反而建议别超过 4 |
-| `STALL_TIMEOUT` | 15 s 无数据即判卡 | **自定** |
+| `STALL_TIMEOUT` | 15 s 无数据即判卡 | **自定**，实现手段见文末勘误 R1（reqwest blocking 无 `read_timeout`，改为**窗口化子请求**） |
 | `STATE_SAVE_MIN_INTERVAL` | 1 s（事件驱动 + 每 5 s 兜底） | **自定**，IDM 说法是"每分钟多次" |
 
 三个观测值都可用命令行覆盖。覆盖掉它们不影响正确性，只影响"像不像 IDM"。
@@ -145,3 +145,37 @@ bit1 = 忽略 Last-Modified、bit2 = 完成后保留断点文件。
 
 `clap`（derive）、`reqwest`（blocking + rustls-tls + webpki-roots，不依赖系统证书栈）、
 `serde` + `serde_json`、`anyhow`、`sha2`。edition 2024。除此之外不加依赖。
+
+---
+
+## 10. 勘误（写计划前的实测推翻，正文不回改，以此节为准）
+
+**R1：`STALL_TIMEOUT` 的实现手段换了。** 计划依赖前我在本机真编真跑过 reqwest：
+读 `$CARGO_HOME/registry/.../reqwest-0.13.5/src/blocking/client.rs`，`read_timeout` 出现 **0 次**，
+blocking 构建器只有 `timeout`（整请求含体）、`connect_timeout`、`tcp_keepalive`、`tcp_nodelay`、`pool_idle_timeout`。
+⇒ "15 秒无数据判卡"**不能**用库级读超时实现。改为**窗口化子请求**：每段每次只领一个窗口
+（`max_bytes` + 按窗口大小给的 `overall_timeout`），读满即主动断开，把剩余部分交回调度器再派。
+副作用是积极的：这与 IDM 实测的形状一致（那次 8 条连接里 **6 条是被主动掐断的** `pending=true`），
+不需要抢占一个正阻塞在 `read()` 上的线程，也就不会泄漏线程。
+
+**R2：工具链必须显式固定为 msvc。** 本机 `rustup show` 实测：默认工具链是
+`stable-x86_64-pc-windows-gnu`，用它在 scratch crate 里 `cargo build` 直接失败：
+`error: error calling dlltool 'dlltool.exe': program not found`（`getrandom`、`windows-sys` 编不过），
+尽管 `rust-mingw-x86_64-pc-windows-gnu` 组件显示已安装。同目录 `windows-sys` 等依赖在
+`cargo +stable-x86_64-pc-windows-msvc build` 下**全部编过**（只剩我探针程序自己的 API 用错）。
+⇒ 项目内放 `rust-toolchain.toml` 钉 `stable-x86_64-pc-windows-msvc`，**不动用户的全局默认**。
+
+**R3：reqwest 的 feature 名与直觉不符。** `cargo add reqwest --no-default-features
+--features blocking,rustls-tls,webpki-roots` **静默失败**——它只打印可用 feature 列表，
+Cargo.toml 里根本没有 reqwest。0.13.5 的可用名是 `rustls`（没有 `rustls-tls`/`webpki-roots`）。
+定稿写法（已验能解析能编译）：
+`reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }`。
+
+**R4：416 分支尚未验通，是已知缺陷不是已完成事实。** 我的探针程序连发三请求：
+无 Range 试探（得 `200`+`accept-ranges: bytes`+`content-length: 50331648`，`.take(236032)` 正好读到 236032 字节 ✓）、
+`Range: bytes=1000000-`（得 `206`+`content-range: bytes 1000000-50331647/50331648` ✓）、
+`Range: bytes=9999999999-`（期望 416）→ **`operation timed out`**。
+用裸 socket 打同一请求，服务器 160 字节响应完整、以 `0\r\n\r\n` 结束、连接关闭 ⇒ 服务端没问题。
+我试过给 416 加 `Content-Length: 0`、试过加 `Connection: close`，**两次都仍然超时**，根因未定位。
+可疑点是试探请求只读 236032 字节就 `drop`，把一条没读干净的连接留在连接池里。
+⇒ 实现计划第 0 个任务必须先出一个最小复现并修掉它，否则 §7 的 416 集成测试是在许诺一个跑不通的东西。
