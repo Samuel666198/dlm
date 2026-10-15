@@ -8,7 +8,7 @@
 
 **Tech Stack:** rustc 1.95（**必须 msvc 工具链**）、reqwest 0.13.5（blocking + rustls）、clap 4（derive）、serde/serde_json、anyhow、sha2、node（测试对端 harness）。
 
-**Spec:** `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md`（含文末勘误 R1–R4，**正文与勘误冲突时以勘误为准**）
+**Spec:** `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md`（含文末勘误 R1–R5，**正文与勘误冲突时以勘误为准**）
 
 ## Global Constraints
 
@@ -930,3 +930,47 @@ Expected: 全绿。任一场景红 ⇒ 停下修，不许放宽判据（改测�
 - **占位符**：全文出现的 `unimplemented!` 都在其所在任务的步骤里被明确要求替换成真实断言后方可提交；无 TBD/TODO。
 - **类型一致性**：`Interval/Event/Action/ProbeFacts/Decision/Outcome/Config/Report` 的字段名与签名在定义任务与引用任务间一致
   （`Decision::Fresh{reason}`、`Outcome::Advanced{bytes}`、`Event::Progress{worker, abs_end}`）。
+
+---
+
+## 勘误（Task 0 及其修复轮的实测推翻，任务正文不回改，以此节为准）
+
+同一约定见 spec `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md` §10（R1–**R5**，R5 取代 R4）。
+证据：`.superpowers/sdd/2026-10-15-dlm-kernel/task-0-report.md` §3–§4 与其后的「修复轮」一节。
+
+**E1：Task 0 Step 5 的 `build:` 前缀与计划自身的约束清单冲突。** Global Constraints 第 21 行只允许
+`feat:`/`test:`/`fix:`/`docs:`。冲突时**约束清单赢**：已落地的 `70f4d7f` 不回改（底线是"只加新提交、不 amend"），
+它的更正提交用 `fix:`，并在提交信息里把被证伪的措辞纠正过来（见 E2/R5）。
+
+**E2：`PROBE_USES_CONNECTION_CLOSE` 整条删除，不带给 Task 1。** 该常量取值 `false`、又不门控任何代码，
+是"为一个不会发生的场景留的开关"；它的知识承载在 spec R5 与 `tests/harness/probe-server.mjs` 的注释里。
+Task 0 Step 4 建的 `src/consts.rs`（未进模块树，删除后 `cargo build`/`cargo test` 实测仍绿）已随修复轮删掉，
+Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
+- Task 1 Step 3 代码块：删掉 `PROBE_USES_CONNECTION_CLOSE` 那一行与它上面的文档注释行，其余常量**原样实现**。
+  代码块现在写的是 13 条，去掉这条后是 **12 条**；而 Task 1 的 `Produces` 行只列了 9 条（少列了
+  `WINDOW_MIN_TIMEOUT_SECS`、`WINDOW_MAX_TIMEOUT_SECS`、`STATE_SAVE_MAX_INTERVAL_SECS` 等）——**以 Step 3 代码块为准**。
+- Task 6 `Interfaces` 的 `Consumes` 去掉 `consts::PROBE_USES_CONNECTION_CLOSE`。
+- Task 6 Step 2 末句"试探路径必须带 `Connection: close`"、Step 4 末句"带 `Connection: close`"，以及
+  Task 6 Step 3 判定段（第 151–152 行）给出的两条补救，**全部作废**：Task 6/7 不得加 `Connection: close`，
+  也不得设 `pool_max_idle_per_host(0)`（依据见 R5；加了不致错，只是每条试探多拆一次连接，并把
+  "复用连接上打 416"这条真实路径从测试覆盖里关掉）。
+
+**E3：Task 6 增补一条集成用例——同一连接上"读满的 206"后接"416"必须双双完成。** 形状：一个客户端先请求
+`bytes=0-<n>` 并把 body **读到 EOF**（连接干净入池），再在**同一连接**上发 `Range: bytes=9999999999-`，
+断言拿到 `416` + `Content-Range: bytes */50331648` 且不卡。这条用例是 harness `res.end()` 修复的守卫：
+一旦有人把推流循环改回"写满只 log 不 `res.end()`"，它立刻变红（Task 0 的原始病症就是这样复现的）。
+
+**E4：Task 10 的限速/卡死场景改用有界限速流 `/sz/<小值>s`，不要用 `/slow` 打整块 48 MiB。**
+裁定给的理由是"`/slow` 约每 200 ms 发 64 KiB ⇒ 整块要 ~157 s"，**本机实测不成立**，两条都要记下：
+- 实测（同一台 harness）：`/slow`（768 个 64 KiB 块、50,331,648 字节）服务端从 `request` 到 `response_done`
+  只花 **114 ms**、客户端 `time_total=0.138 s`；`/sz/1048576s`（16 块）`1 ms`。那个 200 ms 的 `setTimeout`
+  **从没生效**：`push()` 里 `if (!res.write(c)) res.once("drain", push); else if (slow) setTimeout(push, 200);`
+  —— 64 KiB 的写在这台机器上基本每次都让 `res.write()` 返回 `false`，于是走 drain 分支、绕开限速。
+- ⇒ 后果一：结论方向不变但理由变了——用 `/sz/<小值>s` 不是因为"整块要跑 157 s"，而是因为**整块 0.14 s 就流完，
+  卡死/超时判据根本没机会出现**；有界流至少能让 Task 10 的 stall 场景把窗口/超时逻辑跑到一个小而可控的量上。
+- ⇒ 后果二（需要控制方裁定）：**"限速"这一档目前在 harness 上没有可用对端**——spec §7 场景 2 的
+  "48 MiB 限速"与 Task 10 场景 B 名义上都依赖 `/slow` 真的慢。要坐实限速得改 `push()` 的分支次序
+  （`slow` 时无条件 `setTimeout`，或把 chunk 降到 backpressure 阈值以下并让 sleep 与 drain 并存），
+  这属于 harness 行为变更、不在本轮裁定范围内，**本轮只改文档、未动这段代码**。Task 10 Step 3 与 IDM 的
+  `/slow` 对照只作参考不作门禁，可照旧跑（会是全速）。
+

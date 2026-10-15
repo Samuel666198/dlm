@@ -57,11 +57,16 @@ http.createServer((req, res) => {
   const wantSz = mSz ? Math.min(parseInt(mSz[1], 10), SIZE) : (flaky ? 4 * 1024 * 1024 : SIZE);
   const sendLen = wantSz;
   if (req.url.startsWith("/noranges")) {
-    log("request", { ...head, served: "noranges" });
+    // 每条请求只留一条 `request` 记录：上面那条无条件记录就是它。简报片段曾在这里又打一次
+    // `log("request", ...)`，于是 /noranges 路径每条请求计两条——Task 6/7/10 用这份 JSONL 断言
+    // 请求数与 Range 序列时会偏一位。`served` 判别位改记在本分支的 `response` 记录上
+    // （与 416 / HEAD 分支同一形状），既不再重复记请求，也仍然辨得出是谁服务了这条请求。
+    const n = Math.min(sendLen, 1024 * 1024);
     res.writeHead(200, { "Content-Type": "application/octet-stream",
-      "Content-Length": String(Math.min(sendLen, 1024 * 1024)), "ETag": ETAG });
+      "Content-Length": String(n), "ETag": ETAG });
     // 故意不回 Accept-Ranges，且无视 Range：始终从 0 发满 1 MiB
-    res.end(BLOB.subarray(0, Math.min(sendLen, 1024 * 1024)));
+    res.end(BLOB.subarray(0, n));
+    log("response", { ...head, served: "noranges", status: 200, bytes: n });
     return;
   }
   const rng = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
@@ -87,9 +92,11 @@ http.createServer((req, res) => {
   let off = start, sent = 0, chunkN = 0;
   const CH = 64 * 1024;
   (function push() {
-    // 必须 res.end()：不收尾的响应会让 node 把这条连接后续所有响应的字节永久排队
-    // （socket._httpMessage 一直指向这条未完成的响应），于是同连接第二个请求永远拿不到
-    // 响应——curl / 裸 socket / reqwest 都一样卡住。Task 0 的"416 超时"就是这个。
+    // 必须 res.end()：本机实测（Task 0）——写满后不收尾时，node 把这条 keep-alive 连接后续响应
+    // 的字节留在 socket 的 pending 队列里不再 flush：服务端日志显示它解析并回调了第二个请求、
+    // handler 也 writeHead+end 了，而客户端在超时内一个字节收不到（206→206 与 206→416 同样表现）。
+    // 在这台 harness 上 curl / 裸 node socket / reqwest 三种客户端观测到同一现象，说明与本服务器的
+    // 收尾方式有关。以上只是本 harness 的实测形状，不对其他服务器或客户端库作任何断言。
     if (off > end) { res.end(); log("response_done", { conn: rec.id, url: req.url, status, bytes: sent, chunks: chunkN }); return; }
     const c = BLOB.subarray(off, Math.min(off + CH, end + 1));
     off += c.length; sent += c.length; chunkN++;
