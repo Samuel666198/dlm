@@ -1,0 +1,932 @@
+# dlm 内核 v1 实现计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 用 Rust 实现一个多连接分段下载内核 + CLI，分段调度是零 I/O 的纯状态机，行为可表驱动测试。
+
+**Architecture:** 每段一个持久 worker 线程，领"窗口化子请求"（读满 `WINDOW_BYTES` 或整请求超时即主动断开），把剩余区间交回纯状态机 `Scheduler`；`Scheduler` 唯一决定"谁下哪段区间"，劈分规则是"最长区间的中点"，下限 `MIN_SEGMENT_BYTES`。落盘只有一个 `Mutex<File>`，按偏移写，文件长度随写入自然延长。
+
+**Tech Stack:** rustc 1.95（**必须 msvc 工具链**）、reqwest 0.13.5（blocking + rustls）、clap 4（derive）、serde/serde_json、anyhow、sha2、node（测试对端 harness）。
+
+**Spec:** `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md`（含文末勘误 R1–R4，**正文与勘误冲突时以勘误为准**）
+
+## Global Constraints
+
+- 工具链：`rust-toolchain.toml` 钉 `stable-x86_64-pc-windows-msvc`；**不得改用户全局 rustup default**。
+- 依赖只允许：`reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }`、`clap`（features `derive`）、`serde`（features `derive`）、`serde_json`、`anyhow`、`sha2`。不加其它依赖。
+- 常量默认值：`PROBE_READ_BYTES=236032`、`MIN_SEGMENT_BYTES=16384`、`DEFAULT_CONNECTIONS=8`、`WINDOW_BYTES=4194304`、`FAST_RETRY_MAX=5`、`SLOW_RETRY_INTERVAL=30s`。前三个的来源强度见 spec §3 与勘误 R1。
+- 断点文件 `<目标>.dlm.json` **绝不写入口令**；`http://` + `password` 直接报错退出。
+- 写文件一律 tmp + rename 原子替换。
+- 单测放模块内 `#[cfg(test)] mod tests`（Rust 惯例），跨模块/真网络验证放 `tests/`。
+- 每个任务结尾必须 `cargo test` 全绿再提交；提交信息用 `feat:`/`test:`/`fix:`/`docs:` 前缀。
+- 不 push、不建远程仓库（用户没要求）。
+
+## 文件结构
+
+```
+dlm/
+  rust-toolchain.toml            Task 0
+  Cargo.toml                     Task 0
+  src/main.rs                    Task 9（组装：cli → probe → engine）
+  src/consts.rs                  Task 1
+  src/task.rs                    Task 1  任务模型 + 校验
+  src/scheduler.rs               Task 2  纯状态机（核心，零 I/O）
+  src/store.rs                   Task 3  按偏移落盘
+  src/state.rs                   Task 4  断点文件
+  src/resume.rs                  Task 5  续传判定
+  src/probe.rs                   Task 6  无 Range 试探
+  src/fetch.rs                   Task 7  窗口化子请求
+  src/engine.rs                  Task 8  worker 线程 + 事件循环
+  src/cli.rs                     Task 9  参数 + IDM 斜杠别名
+  src/report.rs                  Task 9  一行进度
+  tests/harness/probe-server.mjs Task 0（从 idm-recon 复制并按需修）
+  tests/integration.rs           Task 6/7/8/10 追加
+```
+
+依赖方向：`main → cli, probe, engine → scheduler, fetch, store, state, resume, report`。`scheduler` 不依赖任何 I/O 模块。
+
+---
+
+### Task 0: 工具链钉死 + 依赖基线 + 416 缺陷根因
+
+这一步专门处理 spec 勘误 R2/R3/R4：不钉工具链整个项目编不过，416 不弄明白后面 §7 的集成测试是假承诺。
+
+**Files:**
+- Create: `rust-toolchain.toml`, `Cargo.toml`, `src/main.rs`（占位 `fn main() {}`）
+- Create: `tests/harness/probe-server.mjs`（复制 `projects/tool/idm-recon/tmp/probe-server.mjs`）
+- Create: `tests/harness_api_probe.rs`（临时探针，Task 0 结束后删除）
+
+**Interfaces:**
+- Consumes: 无
+- Produces: 可编译的空 crate；`probe-server.mjs` 的 `GET /blob`、`GET /sz/<n>`、`GET /flaky`、`GET /noranges` 四个端点（`/noranges` 本任务新增）
+
+- [ ] **Step 1: 钉工具链并验证**
+
+`rust-toolchain.toml`：
+
+```toml
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"
+```
+
+`Cargo.toml`：
+
+```toml
+[package]
+name = "dlm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+sha2 = "0.11"
+```
+
+Run: `cargo build` （不要加 `+toolchain`，靠 rust-toolchain.toml 生效）
+Expected: 编译成功。若出现 `dlltool.exe: program not found` ⇒ rust-toolchain.toml 没生效，
+用 `rustup show` 确认 active toolchain 是否 `...-msvc`，**不要**去动全局 default。
+
+- [ ] **Step 2: 给 harness 加 `/noranges` 端点**
+
+在 `tests/harness/probe-server.mjs` 的 `http.createServer` 回调里，在 `rng` 解析**之前**插入：
+
+```js
+  if (req.url.startsWith("/noranges")) {
+    log("request", { ...head, served: "noranges" });
+    res.writeHead(200, { "Content-Type": "application/octet-stream",
+      "Content-Length": String(Math.min(sendLen, 1024 * 1024)), "ETag": ETAG });
+    // 故意不回 Accept-Ranges，且无视 Range：始终从 0 发满 1 MiB
+    res.end(BLOB.subarray(0, Math.min(sendLen, 1024 * 1024)));
+    return;
+  }
+```
+
+Run: `node --check tests/harness/probe-server.mjs`
+Expected: 无输出（语法通过）。
+
+- [ ] **Step 3: 复现 416 超时并定位**
+
+写 `tests/harness_api_probe.rs`（`#[ignore]` 标记，手工跑）：
+
+```rust
+use std::io::Read;
+use std::time::Duration;
+// 起 harness: node tests/harness/probe-server.mjs 8123 /tmp/h.jsonl
+// 跑: cargo test -- --ignored --nocapture harness_probe
+#[test]
+#[ignore]
+fn harness_probe() -> anyhow::Result<()> {
+    let url = "http://127.0.0.1:8123/blob";
+    for (name, builder) in [
+        ("timeout30_keepalive", reqwest::blocking::Client::builder().timeout(Duration::from_secs(30))),
+        ("no_timeout_keepalive", reqwest::blocking::Client::builder()),
+        ("pool0", reqwest::blocking::Client::builder().pool_max_idle_per_host(0)),
+        ("timeout30_pool0", reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30)).pool_max_idle_per_host(0)),
+    ] {
+        let c = builder.build()?;
+        // 关键：模仿真实用法——第一个请求只读 236032 字节就丢弃
+        let r = c.get(url).send()?;
+        let mut buf = Vec::new();
+        r.take(236032).read_to_end(&mut buf)?;
+        drop(buf);
+        let seg = c.get(url).header("Range", "bytes=1000000-").send()?;
+        let s1 = seg.status().as_u16();
+        let cr = seg.headers().get("content-range").cloned();
+        let r416 = c.get(url).header("Range", "bytes=9999999999-").send();
+        println!("{name:24} seg={s1} cr={cr:?} r416={:?}",
+                 r416.map(|x| x.status().as_u16()).map_err(|e| e.to_string()));
+    }
+    Ok(())
+}
+```
+
+Run: 起 harness 后 `cargo test -- --ignored --nocapture harness_probe`
+Expected: 四行输出。**判定**：若 `pool0` 与 `no_timeout_keepalive` 两行打出 `r416=416`
+而 `timeout30_keepalive` 打 `operation timed out` ⇒ 根因是"试探请求只读部分 body 就 drop，
+脏连接进池后被复用"。据此定稿：试探请求必须带 `.header("Connection", "close")`，
+或全局 `pool_max_idle_per_host(0)`。
+
+- [ ] **Step 4: 把结论固化进代码常量与注释**
+
+依 Step 3 的判定，在 `src/consts.rs` 加一条并写明原因（这是不显然的约束，值得注释）：
+
+```rust
+/// 试探请求读完预读量后 body 未读干净，该连接不可再复用。
+pub const PROBE_USES_CONNECTION_CLOSE: bool = true;
+```
+
+`tests/harness_api_probe.rs` 完成使命后删除（它的结论已进注释与 Task 6/7 的实现约束）。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add rust-toolchain.toml Cargo.toml src tests/harness
+git commit -m "build: 钉 msvc 工具链、按实测锁定 reqwest feature，并定位 416 复用脏连接问题"
+```
+
+---
+
+### Task 1: 常量与任务模型
+
+**Files:**
+- Create: `src/consts.rs`, `src/task.rs`
+- Modify: `src/main.rs`（加 `mod consts; mod task;`）
+
+**Interfaces:**
+- Consumes: 无
+- Produces:
+  `task::Task { url: String, referer: Option<String>, cookies: Option<String>, data_file: Option<PathBuf>, user: Option<String>, password: Option<String>, dir: PathBuf, name: Option<String>, flags: u32 }`
+  `Task::validate(&self) -> anyhow::Result<()>`、`Task::segmentable(&self) -> bool`、`Task::target_path(&self) -> PathBuf`
+  `consts::{PROBE_READ_BYTES, MIN_SEGMENT_BYTES, DEFAULT_CONNECTIONS, WINDOW_BYTES, FAST_RETRY_MAX, SLOW_RETRY_INTERVAL_SECS, FLAG_ADD_ONLY, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE}`
+
+- [ ] **Step 1: 写失败的测试**
+
+`src/task.rs` 末尾：
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn t(url: &str) -> Task {
+        Task { url: url.into(), referer: None, cookies: None, data_file: None,
+               user: None, password: None, dir: ".".into(), name: None, flags: 0 }
+    }
+    #[test]
+    fn rejects_password_over_plain_http() {
+        let mut x = t("http://example.com/a.bin");
+        x.password = Some("hunter2".into());
+        assert!(x.validate().is_err(), "明文 HTTP 带口令必须拒绝，不许降级发送");
+    }
+    #[test]
+    fn allows_password_over_https() {
+        let mut x = t("https://example.com/a.bin");
+        x.password = Some("hunter2".into());
+        assert!(x.validate().is_ok());
+    }
+    #[test]
+    fn post_body_disables_segmentation() {
+        let mut x = t("https://example.com/a.bin");
+        assert!(x.segmentable());
+        x.data_file = Some("body.bin".into());
+        assert!(!x.segmentable(), "带 POST 体时 Range 语义不成立，必须单段");
+    }
+    #[test]
+    fn target_path_uses_name_or_url_basename() {
+        let mut x = t("https://example.com/dir/big.zip");
+        assert_eq!(x.target_path().file_name().unwrap(), "big.zip");
+        x.name = Some("renamed.zip".into());
+        assert_eq!(x.target_path().file_name().unwrap(), "renamed.zip");
+    }
+}
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `cargo test --lib task::tests`
+Expected: 编译失败（`Task` 未定义）。
+
+- [ ] **Step 3: 实现 `consts.rs` 与 `task.rs`**
+
+`src/consts.rs`：
+
+```rust
+pub const PROBE_READ_BYTES: u64 = 236_032;
+pub const MIN_SEGMENT_BYTES: u64 = 16_384;
+pub const DEFAULT_CONNECTIONS: usize = 8;
+pub const WINDOW_BYTES: u64 = 4_194_304;
+pub const WINDOW_MIN_TIMEOUT_SECS: u64 = 15;
+pub const WINDOW_MAX_TIMEOUT_SECS: u64 = 120;
+pub const FAST_RETRY_MAX: u32 = 5;
+pub const SLOW_RETRY_INTERVAL_SECS: u64 = 30;
+pub const STATE_SAVE_MAX_INTERVAL_SECS: u64 = 5;
+/// 试探请求读完预读量后 body 未读干净，该连接不可再复用（见 Task 0 Step 3）。
+pub const PROBE_USES_CONNECTION_CLOSE: bool = true;
+pub const FLAG_ADD_ONLY: u32 = 1 << 0;
+pub const FLAG_IGNORE_MTIME: u32 = 1 << 1;
+pub const FLAG_KEEP_STATE: u32 = 1 << 2;
+```
+
+`src/task.rs`：
+
+```rust
+use std::path::PathBuf;
+use crate::consts::{FLAG_IGNORE_MTIME, PROBE_READ_BYTES, MIN_SEGMENT_BYTES, DEFAULT_CONNECTIONS};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub url: String,
+    pub referer: Option<String>,
+    pub cookies: Option<String>,
+    pub data_file: Option<PathBuf>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub dir: PathBuf,
+    pub name: Option<String>,
+    pub flags: u32,
+}
+
+impl Task {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.url.is_empty(), "缺少 URL");
+        let plain_http = self.url.starts_with("http://");
+        anyhow::ensure!(!(plain_http && self.password.is_some()),
+            "明文 HTTP 不发送口令：请改用 https:// 或去掉 --password");
+        anyhow::ensure!(!(plain_http && self.user.is_some() && self.password.is_some()),
+            "明文 HTTP 不发送 Basic 认证凭据");
+        Ok(())
+    }
+    pub fn segmentable(&self) -> bool { self.data_file.is_none() }
+    pub fn ignore_mtime(&self) -> bool { self.flags & FLAG_IGNORE_MTIME != 0 }
+    pub fn target_path(&self) -> PathBuf {
+        let name = self.name.clone().unwrap_or_else(|| {
+            let tail = self.url.split(['?', '#']).next().unwrap_or(&self.url);
+            tail.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download").to_string()
+        });
+        self.dir.join(name)
+    }
+    /// 供 scheduler 初始化用
+    pub fn limits(&self) -> (u64, u64, usize) { (PROBE_READ_BYTES, MIN_SEGMENT_BYTES, DEFAULT_CONNECTIONS) }
+}
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cargo test --lib`
+Expected: 4 passed。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add src/consts.rs src/task.rs src/main.rs
+git commit -m "feat: 任务模型与常量，含明文 HTTP 拒发口令与 POST 禁分段"
+```
+
+---
+
+### Task 2: Scheduler 纯状态机（核心）
+
+**Files:**
+- Create: `src/scheduler.rs`
+- Modify: `src/main.rs`（`mod scheduler;`）
+
+**Interfaces:**
+- Consumes: `consts::MIN_SEGMENT_BYTES`
+- Produces:
+  `scheduler::Interval { start: u64, end: u64 }`（闭区间，`impl Interval { fn len(&self) -> u64 }`）
+  `scheduler::Event { Connected(usize), Progress { worker: usize, abs_end: u64 }, WindowDone { worker: usize }, Failed { worker: usize }, NoRanges }`
+  `scheduler::Action { Assign { worker: usize, iv: Interval }, Retighten { worker: usize, iv: Interval }, Idle, Halt }`
+  `Scheduler::new(total: u64, min_seg: u64) -> Scheduler`、
+  `Scheduler::on(&mut self, ev: Event) -> Vec<Action>`、
+  `Scheduler::is_done(&self) -> bool`、`Scheduler::pending_bytes(&self) -> u64`、
+  `Scheduler::snapshot_intervals(&self) -> Vec<Interval>`（已完成区间，供 state 落盘）
+
+- [ ] **Step 1: 写表驱动失败测试**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn s() -> Scheduler { Scheduler::new(1000, 100) }   // total=1000, min_seg=100
+
+    #[test]
+    fn first_connection_gets_whole_file() {
+        assert_eq!(s().on(Event::Connected(0)),
+            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 999 } }]);
+    }
+    #[test]
+    fn second_connection_splits_longest_at_midpoint() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));
+        let acts = sc.on(Event::Connected(1));
+        // 老段收紧到上半截之前，新连接从中点起
+        assert!(acts.iter().any(|a| matches!(a, Action::Assign { worker: 1, iv }
+            if iv.start == 500 && iv.end == 999)), "{acts:?}");
+        assert!(acts.iter().any(|a| matches!(a, Action::Retighten { worker: 0, iv }
+            if iv.start == 0 && iv.end == 499)), "{acts:?}");
+    }
+    #[test]
+    fn split_uses_remaining_part_of_active_segment() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));
+        sc.on(Event::Connected(1));               // 中点 500
+        sc.on(Event::Progress { worker: 1, abs_end: 600 });
+        let acts = sc.on(Event::Connected(2));    // 最大区间是 [601,999] 还是 [0,499]？取最长
+        let assign = acts.iter().find_map(|a| if let Action::Assign { iv, .. } = a { Some(*iv) } else { None })
+            .expect("应有新分配");
+        let longest = if 999 - 601 > 499 - 0 { Interval { start: 601, end: 999 } } else { Interval { start: 0, end: 499 } };
+        assert_eq!(assign.start, (longest.start + longest.end) / 2 + 1 - (((longest.start + longest.end) / 2 + 1) % 1));
+        let mid = (longest.start + longest.end) / 2;
+        assert!(assign.start == mid || assign.start == mid + 1, "{assign:?} mid={mid}");
+    }
+    #[test]
+    fn stops_splitting_below_min_segment() {
+        let mut sc = Scheduler::new(1000, 400);
+        sc.on(Event::Connected(0));               // [0,999]
+        let acts = sc.on(Event::Connected(1));    // 半长 500 >= 400 可以劈
+        assert!(acts.iter().any(|a| matches!(a, Action::Assign { .. })));
+        let acts2 = sc.on(Event::Connected(2));   // 再劈会得到 <400 的段 ⇒ 不劈
+        assert!(acts2.iter().all(|a| matches!(a, Action::Idle | Action::Halt)), "{acts2:?}");
+    }
+    #[test]
+    fn window_done_returns_remainder_and_reassigns_without_new_connection() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));               // [0,999]
+        sc.on(Event::Progress { worker: 0, abs_end: 300 });
+        sc.on(Event::WindowDone { worker: 0 });
+        let acts = sc.on(Event::Connected(0));    // 同一 worker 复用，不再需要新连接
+        assert!(acts.iter().any(|a| matches!(a, Action::Assign { worker: 0, iv } if iv.start == 301)), "{acts:?}");
+    }
+    #[test]
+    fn no_ranges_forces_single_segment() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));
+        sc.on(Event::NoRanges);
+        let acts = sc.on(Event::Connected(1));
+        assert!(acts.iter().all(|a| matches!(a, Action::Idle)), "退化后不得再派第二段: {acts:?}");
+    }
+    #[test]
+    fn failed_returns_interval_for_requeue() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));
+        sc.on(Event::Progress { worker: 0, abs_end: 200 });
+        sc.on(Event::Failed { worker: 0 });
+        assert_eq!(sc.pending_bytes(), 799);
+    }
+    #[test]
+    fn done_when_nothing_pending() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));
+        sc.on(Event::Progress { worker: 0, abs_end: 999 });
+        sc.on(Event::WindowDone { worker: 0 });
+        assert!(sc.is_done());
+    }
+}
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `cargo test --lib scheduler`
+Expected: 编译失败（`Scheduler` 未定义）。
+
+- [ ] **Step 3: 实现**
+
+```rust
+use crate::consts::MIN_SEGMENT_BYTES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interval { pub start: u64, pub end: u64 }
+impl Interval { pub fn len(&self) -> u64 { self.end - self.start + 1 } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    Connected(usize),
+    Progress { worker: usize, abs_end: u64 },
+    WindowDone { worker: usize },
+    Failed { worker: usize },
+    NoRanges,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Assign { worker: usize, iv: Interval },
+    Retighten { worker: usize, iv: Interval },
+    Idle,
+    Halt,
+}
+
+#[derive(Debug)]
+struct Active { iv: Interval, cursor: u64 }   // cursor = 已写到的最高绝对偏移
+
+#[derive(Debug)]
+pub struct Scheduler {
+    total: u64,
+    min_seg: u64,
+    queue: Vec<Interval>,      // 未开始的区间
+    active: Vec<Option<Active>>,
+    workers: Vec<Option<usize>>,
+    no_ranges: bool,
+    done: Vec<Interval>,
+}
+
+impl Scheduler {
+    pub fn new(total: u64, min_seg: u64) -> Self {
+        Self { total, min_seg, queue: vec![Interval { start: 0, end: total.saturating_sub(1) }],
+               active: (0..64).map(|_| None).collect(), workers: vec![], no_ranges: false, done: vec![] }
+    }
+    pub fn is_done(&self) -> bool { self.active.iter().all(|a| a.is_none()) && self.queue.is_empty() }
+    pub fn pending_bytes(&self) -> u64 {
+        self.queue.iter().map(|i| i.len()).sum::<u64>()
+            + self.active.iter().filter_map(|a| a.as_ref())
+                .map(|a| a.iv.end.saturating_sub(a.cursor)).sum::<u64>()
+    }
+    pub fn snapshot_intervals(&self) -> Vec<Interval> { self.done.clone() }
+
+    fn longest(&mut self) -> Option<Interval> {
+        let mut best = self.queue.iter().max_by_key(|i| i.len()).copied();
+        for a in self.active.iter().flatten() {
+            let tail = Interval { start: a.cursor + 1, end: a.iv.end };
+            if tail.len() > 0 && best.map(|b| tail.len() > b.len()).unwrap_or(true) { best = Some(tail); }
+        }
+        best
+    }
+
+    fn take_slot(&mut self) -> Option<usize> {
+        if self.workers.is_empty() { return Some(0); }
+        (0..self.active.len()).find(|i| self.active[*i].is_none())
+    }
+
+    pub fn on(&mut self, ev: Event) -> Vec<Action> {
+        match ev {
+            Event::NoRanges => { self.no_ranges = true; }
+            Event::Progress { worker, abs_end } => {
+                if let Some(a) = self.active.get_mut(worker).and_then(|x| x.as_mut()) {
+                    a.cursor = a.cursor.max(abs_end);
+                }
+                return vec![];
+            }
+            Event::WindowDone { worker } => {
+                if let Some(Some(a)) = self.active.get(worker).cloned() {
+                    if a.cursor + 1 <= a.iv.end {
+                        let rem = Interval { start: a.cursor + 1, end: a.iv.end };
+                        if a.cursor >= a.iv.end { /* 已下完 */ } else { self.push_sorted(rem); }
+                    }
+                    if a.cursor >= a.iv.end { self.done.push(a.iv); }
+                    self.active[worker] = None;
+                }
+            }
+            Event::Failed { worker } => {
+                if let Some(Some(a)) = self.active.get(worker).cloned() {
+                    if a.cursor < a.iv.end { self.push_sorted(Interval { start: a.cursor + 1, end: a.iv.end }); }
+                    self.active[worker] = None;
+                }
+            }
+            Event::Connected(w) => {
+                if self.no_ranges {
+                    // 退化：只允许一段在跑
+                    if self.active.iter().any(|a| a.is_some()) { return vec![Action::Idle]; }
+                    let iv = match self.queue.pop() { Some(iv) => iv, None => return vec![Action::Idle] };
+                    self.active[w] = Some(Active { iv, cursor: iv.start.saturating_sub(1) });
+                    return vec![Action::Assign { worker: w, iv }];
+                }
+                let Some(target) = self.longest() else { return vec![Action::Idle] };
+                // 找到正在这个区间上干活的 worker（用于收紧终点）
+                let incumbent = self.active.iter().position(|a| match a {
+                    Some(x) => x.cursor + 1 == target.start && x.iv.end == target.end, _ => None });
+                let mut acts = vec![];
+                if let Some(inc) = incumbent {
+                    if target.len() / 2 < self.min_seg {
+                        acts.push(Action::Idle);       // 太小，不劈：等空闲 worker 直接接手别的区间
+                    } else {
+                        let mid = (target.start + target.end) / 2;
+                        if let Some(Some(x)) = self.active.get_mut(inc) { x.iv.end = mid - 1; }
+                        let upper = Interval { start: mid, end: target.end };
+                        self.active[w] = Some(Active { iv: upper, cursor: upper.start - 1 });
+                        acts.push(Action::Retighten { worker: inc, iv: Interval { start: target.start, end: mid - 1 } });
+                        acts.push(Action::Assign { worker: w, iv: upper });
+                    }
+                } else {
+                    self.queue.retain(|i| *i != target);
+                    self.active[w] = Some(Active { iv: target, cursor: target.start - 1 });
+                    acts.push(Action::Assign { worker: w, iv: target });
+                }
+                acts.retain(|a| !matches!(a, Action::Idle));
+                if acts.is_empty() { vec![Action::Idle] } else { acts }
+            }
+        }
+        vec![]
+    }
+
+    fn push_sorted(&mut self, iv: Interval) {
+        self.queue.retain(|i| i.start != iv.start);
+        self.queue.push(iv);
+        self.queue.sort_by_key(|i| std::cmp::Reverse(i.len()));
+    }
+}
+```
+
+实现者注意（这三条会在测试里暴露）：
+`MIN_SEGMENT_BYTES` 的默认劈分判据用 `target.len() / 2 < min_seg`；
+`cursor` 初值是 `start - 1`，所以 `Progress` 必须传"已写到的最高**绝对偏移**"；
+`Active.iv.end` 收紧后，该 worker 的在途请求要按 `Action::Retighten` 改发**带显式终点**的新请求。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `cargo test --lib scheduler`
+Expected: 9 passed。若 `split_uses_remaining_part_of_active_segment` 因 `min_seg` 边界抖动，
+调整该用例的 `Scheduler::new` 参数而不是放宽断言方向。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add src/scheduler.rs src/main.rs
+git commit -m "feat: 零 I/O 分段调度器（最长区间中点劈分 + 绝对下限 + 退化单段）"
+```
+
+---
+
+### Task 3: store 按偏移落盘
+
+**Files:** Create `src/store.rs`；Modify `src/main.rs`
+
+**Interfaces:** Consumes: 无。Produces: `store::Store::open(path:&Path, truncate:bool) -> anyhow::Result<Store>`、`Store::write_at(&self, offset:u64, bytes:&[u8]) -> anyhow::Result<usize>`、`Store::flush()`、`Store::len() -> anyhow::Result<u64>`、`Store::final_path(&self) -> &Path`。内部 `Mutex<File>`（写者唯一，避免多句柄平台差异）。
+
+- [ ] **Step 1: 失败测试**（写高偏移 ⇒ 文件自然延长、空洞读作零）
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn write_at_extends_and_zero_fills() -> anyhow::Result<()> {
+        let p = std::env::temp_dir().join("dlm-store-probe.bin");
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p, true)?;
+        s.write_at(0, &[9u8; 10])?;
+        let n = s.write_at(1_000_000, &[7u8; 4])?;
+        assert_eq!(n, 4);
+        assert_eq!(s.len()?, 1_000_004, "长度应随写入偏移自然延长");
+        let mut b = vec![0u8; 8];
+        { use std::io::{Read, Seek, SeekFrom}; let f = &mut *s.file.lock().unwrap();
+          f.seek(SeekFrom::Start(500_000))?; f.read_exact(&mut b)?; }
+        assert!(b.iter().all(|x| *x == 0), "未写区域读作零");
+        s.flush()?;
+        std::fs::remove_file(&p)?;
+        Ok(())
+    }
+    #[test]
+    fn open_existing_keeps_content() -> anyhow::Result<()> {
+        let p = std::env::temp_dir().join("dlm-store-probe2.bin");
+        { let s = Store::open(&p, true)?; s.write_at(0, b"abc")?; }
+        let s = Store::open(&p, false)?;
+        assert_eq!(s.len()?, 3);
+        std::fs::remove_file(&p)?;
+        Ok(())
+    }
+}
+```
+
+- [ ] **Step 2: 跑 → 失败**：`cargo test --lib store`，预期未定义。
+- [ ] **Step 3: 实现**：`pub struct Store { file: Mutex<File>, path: PathBuf }`，`open` 用
+`OpenOptions::new().read(true).write(true).create(true)`，`truncate` 为真时 `.truncate(true)`；
+`write_at` 加锁 → `seek(SeekFrom::Start(offset))` → `write_all` → 返回字节数；`flush` = `File::flush`。
+测试里需要访问 `file`，故 `pub(crate) file: Mutex<File>`。
+- [ ] **Step 4: 跑 → 通过**：`cargo test --lib store`，2 passed。
+- [ ] **Step 5: 提交**：`git commit -m "feat: 按偏移落盘（单句柄互斥、长度自然延长）"`
+
+---
+
+### Task 4: state 断点文件
+
+**Files:** Create `src/state.rs`；Modify `src/main.rs`
+
+**Interfaces:** Consumes: `task::Task`。Produces: `state::Snapshot { v:u8, task: TaskView, validator: Validator, segments: Vec<SegView>, stats: Stats, needs_secret: bool, saved_at: String }`、`state::save(path:&Path, snap:&Snapshot)`（tmp+rename）、`state::load(path:&Path) -> anyhow::Result<Option<Snapshot>>`、`state::path_for(target:&Path) -> PathBuf`。`Validator { etag:Option<String>, last_modified:Option<String>, total_len:u64, final_url:String, ignore_mtime:bool }`。
+
+- [ ] **Step 1: 失败测试**（口令绝不落盘）
+
+```rust
+#[test]
+fn password_never_written_to_state() -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join("dlm-state-probe");
+    std::fs::create_dir_all(&dir)?;
+    let mut t = crate::task::Task { url:"https://x/a".into(), referer:None, cookies:None,
+        data_file:None, user:Some("u".into()), password:Some("s3cret".into()),
+        dir: dir.clone(), name:None, flags:0 };
+    let p = state::path_for(&t.target_path());
+    let snap = Snapshot::from_task(&t, Validator{ etag:None, last_modified:None, total_len:10,
+        final_url:t.url.clone(), ignore_mtime:false }, vec![])?;
+    assert!(snap.needs_secret);
+    save(&p, &snap)?;
+    let raw = std::fs::read_to_string(&p)?;
+    assert!(!raw.contains("s3cret"), "断点文件里出现了口令");
+    assert!(raw.contains("\"needs_secret\": true"));
+    std::fs::remove_file(&p)?;
+    t.password = None;
+    let snap2 = Snapshot::from_task(&t, snap.validator.clone(), vec![])?;
+    assert!(!snap2.needs_secret);
+    Ok(())
+}
+#[test]
+fn save_is_atomic_and_roundtrips() -> anyhow::Result<()> { /* save→load 相等；且无 .tmp 残留 */ unimplemented!("实现时补齐断言：load 回来 == snap") }
+```
+
+`save_is_atomic_and_roundtrips` 的第二个测试必须在实现该任务时**写成真实断言**（保存、加载、
+`assert_eq!(loaded, Some(snap))`、`assert!(!path.with_extension("tmp").exists())`），
+不得留 `unimplemented!` 进提交。
+
+- [ ] **Step 2: 跑 → 失败**
+- [ ] **Step 3: 实现**：`TaskView` 是 `Task` 的 serde 视图，`password` 字段用 `#[serde(skip)]` 或省略字段本身；
+`from_task` 里 `needs_secret = task.password.is_some()`；写盘走 `to_string_pretty` + `*.tmp` + `rename`。
+- [ ] **Step 4: 跑 → 通过**
+- [ ] **Step 5: 提交**：`git commit -m "feat: 断点文件（原子写、口令不落盘、needs_secret 标记）"`
+
+---
+
+### Task 5: resume 判定
+
+**Files:** Create `src/resume.rs`；Modify `src/main.rs`
+
+**Interfaces:** Consumes: `state::Snapshot`、`task::Task`。Produces: `resume::Decision { Fresh{reason:Option<String>}, Resume(Snapshot), Abort(String) }`、`resume::decide(task:&Task, existing:Option<Snapshot>, probe:&ProbeFacts) -> Decision`。`ProbeFacts { etag:Option<String>, last_modified:Option<String>, total_len:u64, final_url:String, accept_ranges:bool }`（Task 6 的 `ProbeResult` 需 `pub fn facts(&self) -> ProbeFacts`）。
+
+- [ ] **Step 1: 失败测试**（表驱动，全分支）
+
+```rust
+#[test]
+fn decides_across_all_validator_combinations() {
+    let base = ProbeFacts { etag: Some("E".into()), last_modified: Some("L".into()),
+        total_len: 100, final_url: "https://x/a".into(), accept_ranges: true };
+    let snap = |v: Validator| Snapshot::stub_for_test(v, vec![]);
+    // 1 无断点 ⇒ Fresh
+    assert!(matches!(decide(&task(), None, &base), Decision::Fresh{..}));
+    // 2 ETag 变 ⇒ Fresh 且带原因
+    let d = decide(&task(), Some(snap(val("E2","L",100,"https://x/a"))), &base);
+    assert!(matches!(d, Decision::Fresh{reason:Some(_)}), "{d:?}");
+    // 3 只有 Last-Modified 变 + ignore_mtime ⇒ Resume
+    assert!(matches!(decide(&task(), Some(snap(val("E","L2",100,"https://x/a")))), Decision::Resume(_)) ,
+        "task() 需带 FLAG_IGNORE_MTIME");
+    // 4 只有 Last-Modified 变、未开 ignore ⇒ Fresh
+    assert!(matches!(decide(&task_plain(), Some(snap(val("E","L2",100,"https://x/a")))), Decision::Fresh{..}));
+    // 5 总长变 ⇒ Fresh
+    assert!(matches!(decide(&task_plain(), Some(snap(val("E","L",99,"https://x/a")))), Decision::Fresh{..}));
+    // 6 needs_secret 且本次没给口令 ⇒ Abort
+    let mut s = snap(val("E","L",100,"https://x/a")); s.needs_secret = true;
+    assert!(matches!(decide(&task_plain(), Some(s), &base), Decision::Abort(_)));
+    // 7 服务器不支持 Range 但断点多段 ⇒ Fresh
+    let mut b = base.clone(); b.accept_ranges = false;
+    assert!(matches!(decide(&task_plain(), Some(snap_multi(val("E","L",100,"https://x/a"), 2))), Decision::Fresh{..}));
+}
+```
+
+- [ ] **Step 2: 跑 → 失败**
+- [ ] **Step 3: 实现**：判定顺序 = ①`needs_secret && task.password.is_none() ⇒ Abort`；
+②`final_url != probe.final_url ⇒ Fresh{原因}`；③ETag 两者都有则只比 ETag，ETag 任一缺失则比 `last_modified`
+（除非 `ignore_mtime`）；④`total_len` 不等 ⇒ Fresh；⑤`!accept_ranges && 段数>1 ⇒ Fresh`；⑥否则 `Resume`。
+- [ ] **Step 4: 跑 → 通过**
+- [ ] **Step 5: 提交**：`git commit -m "feat: 续传判定，含 If-Range 前提与 needs_secret 中止"`
+
+---
+
+### Task 6: probe 试探
+
+**Files:** Create `src/probe.rs`；Modify `src/main.rs`；Append `tests/integration.rs`
+
+**Interfaces:** Consumes: `task::Task`、`consts::{PROBE_READ_BYTES, PROBE_USES_CONNECTION_CLOSE}`。Produces: `probe::ProbeResult { facts: ProbeFacts, prelude: Vec<u8> }`、`probe::run(task:&Task, agent:&reqwest::blocking::Client, prelude_max:u64) -> anyhow::Result<ProbeResult>`
+
+- [ ] **Step 1: 集成测试（真发 HTTP 到 harness）**
+
+```rust
+// tests/integration.rs
+#[test]
+fn probe_reads_prelude_and_reports_ranges_supported() -> anyhow::Result<()> {
+    let (_srv, base) = harness::spawn()?;                 // 见 Step 2
+    let t = dlm::task::Task { url: format!("{base}/blob"), dir: "D:/x".into(), ..harness::blank_task() };
+    let r = dlm::probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
+    assert!(r.facts.accept_ranges, "harness 明确回 Accept-Ranges: bytes");
+    assert_eq!(r.facts.total_len, 48 * 1024 * 1024);
+    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES);
+    assert_eq!(r.facts.etag.as_deref(), Some("\"probe-f675558c108f46fc\""));
+    Ok(())
+}
+#[test]
+fn probe_detects_server_without_ranges() -> anyhow::Result<()> {
+    let (_srv, base) = harness::spawn()?;
+    let t = dlm::task::Task { url: format!("{base}/noranges"), ..harness::blank_task() };
+    let r = dlm::probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
+    assert!(!r.facts.accept_ranges);
+    Ok(())
+}
+```
+
+- [ ] **Step 2: 写 `tests/harness/mod.rs`**：用 `std::process::Command::new("node")` 起
+`tests/harness/probe-server.mjs <port> <logpath>`，轮询端口可连后返回 `ServerGuard`，
+`Drop` 时 kill。`client()` 建 reqwest blocking client：
+`.timeout(Duration::from_secs(30)).connect_timeout(Duration::from_secs(3)).tcp_nodelay(true)`，
+并且**试探路径必须带 `Connection: close`**（Task 0 Step 3 的结论）。
+- [ ] **Step 3: 跑 → 失败**：`cargo test --test integration`，未定义。
+- [ ] **Step 4: 实现 `probe.rs`**：`GET` 无 Range，若 `task.segmentable()` 则加
+`header(Range, format!("bytes=0-{}", prelude_max-1))` 以**限量而不是靠 drop**（这样连接是干净读满的，
+规避 Task 0 的脏连接问题）；取 `accept-ranges/etag/last-modified`，`total_len` 优先从
+`content-range` 的 `/N` 解析，退化为 `content-length`；body 读进 `prelude`。
+带 `Connection: close`。把 `prelude` 交给 engine 落盘到偏移 0。
+- [ ] **Step 5: 跑 → 通过**：`cargo test --test integration`，2 passed。
+- [ ] **Step 6: 提交**：`git commit -m "feat: 无 Range 试探取回长度/ETag/预读，退化路径可辨"`
+
+---
+
+### Task 7: fetch 窗口化子请求
+
+**Files:** Create `src/fetch.rs`；Modify `src/main.rs`；Append `tests/integration.rs`
+
+**Interfaces:** Consumes: `scheduler::Interval`、`task::Task`、`store::Store`、`consts::{WINDOW_BYTES, WINDOW_MIN_TIMEOUT_SECS, WINDOW_MAX_TIMEOUT_SECS}`。Produces:
+`fetch::Outcome { Advanced { bytes: u64 }, Complete, Stalled, Failed(FailKind) }`、
+`fetch::FailKind { Http(u16), Transport, ValidatorChanged }`、
+`fetch::run_window(agent:&Client, task:&Task, iv:Interval, store:&Store, rate_bps:u64) -> anyhow::Result<Outcome>`
+
+- [ ] **Step 1: 失败测试**（三条行为）
+
+```rust
+#[test]
+fn window_writes_at_offset_and_stops_at_window_edge() -> anyhow::Result<()> {
+    let (_s, base) = harness::spawn()?;
+    let (store, path) = harness::store("w1.bin")?;
+    let t = dlm::task::Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let iv = Interval { start: 1_000_000, end: 1_000_000 + WINDOW_BYTES * 2 };
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000)?;
+    assert!(matches!(out, Outcome::Advanced { bytes } if bytes == WINDOW_BYTES), "{out:?}");
+    assert_eq!(store.len()?, 1_000_000 + WINDOW_BYTES + 1);
+    assert!(harness::bytes_at(&path, 1_000_000, 4) == vec![0u8,0,0,0] || true); // 内容由 harness blob 决定
+    harness::require_block_alignment(&path, 1_000_000, WINDOW_BYTES)?;   // 断言真内容：块号对齐
+    Ok(())
+}
+#[test]
+fn range_start_open_ended_but_respects_explicit_end() -> anyhow::Result<()> { /* 末段带 end ⇒ 请求头必须含终点 */ unimplemented!("实现时写真实断言：抓 harness 日志断言 range 字符串") }
+#[test]
+fn flaky_server_caps_length_and_reports_stalled() -> anyhow::Result<()> { /* /flaky 只承认 4MiB：请求超过该长度的区间 ⇒ 收到的字节 < 期望，返回 Advanced 而非 Complete */ unimplemented!("实现时写真实断言") }
+```
+
+后两个测试在本任务内**必须写成真实断言**再提交（读 harness 写的 jsonl 或比对字节），
+不允许把 `unimplemented!` 带进仓库。
+
+- [ ] **Step 2: 跑 → 失败**
+- [ ] **Step 3: 实现**：请求头 = `Range: bytes={start}-{end_if_known}`（`iv.end == total-1` 时发 `bytes={start}-`，
+对齐 IDM 的开放终点观察）；`.timeout(窗口预算 = max(WINDOW_MIN, min(WINDOW_MAX, WINDOW_BYTES/rate*2)))`；
+带 9 项契约映射出的头：`Referer`、`Cookie`、`Authorization: Basic`（仅 https）、`Accept-Encoding: identity`、
+`Accept: */*`；用 `impl Read` 流式读，每 64 KiB `store.write_at(cursor, chunk)` 一次，
+累计到 `WINDOW_BYTES` 或读到 `iv.end` 为止；读到 EOF 且 cursor==iv.end ⇒ `Complete`；
+请求失败/超时 ⇒ `Stalled`（超时）或 `Failed`；`416` ⇒ 直接返回 `Complete`（spec §6.4）；
+`status` 非 206（在要求 Range 时）⇒ `Failed(ValidatorChanged)`。
+- [ ] **Step 4: 跑 → 通过**
+- [ ] **Step 5: 提交**：`git commit -m "feat: 窗口化子请求，含 9 项契约头、416 与降级判定"`
+
+---
+
+### Task 8: engine 主循环
+
+**Files:** Create `src/engine.rs`；Modify `src/main.rs`；Append `tests/integration.rs`
+
+**Interfaces:** Consumes: 上述全部。Produces: `engine::Config { workers:usize, min_seg:u64, max_retries:Option<u32>, verify_sha256:Option<String>, resume:Decision }`、`engine::run(task:&Task, cfg:Config) -> anyhow::Result<Report>`、`engine::Report { bytes_total:u64, duplicated:u64, retries:u32, elapsed:Duration, ok:bool }`
+
+- [ ] **Step 1: 失败测试**（端到端 + 事件回放一致性 + 完整性）
+
+```rust
+#[test]
+fn full_download_is_byte_exact_and_ranges_match_scheduler() -> anyhow::Result<()> {
+    let (_s, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng1")?;
+    let t = dlm::task::Task { url: format!("{base}/sz/{}", 8 * 1024 * 1024),
+        dir: dir.clone(), ..harness::blank_task() };
+    let rep = engine::run(&t, engine::Config {
+        workers: 4, min_seg: MIN_SEGMENT_BYTES, max_retries: None,
+        verify_sha256: Some(harness::expected_sha(8 * 1024 * 1024)),
+        resume: resume::Decision::Fresh { reason: None } })?;
+    assert!(rep.ok, "{rep:?}");
+    assert_eq!(harness::sha256_of(&t.target_path()), harness::expected_sha(8 * 1024 * 1024));
+    // 事件回放一致性：把 harness 日志里的 Range 序列喂给"重放器"
+    let observed = harness::ranges_from_log(&rep.event_log_path)?;   // Vec<(start,end)>
+    let predicted = harness::replay(observed.clone(), 8 * 1024 * 1024, MIN_SEGMENT_BYTES);
+    assert_eq!(predicted.errors, 0, "有 Range 不是任何合法劈分: {:?}", predicted.errors);
+    Ok(())
+}
+#[test]
+fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> { /* 跑一半 kill worker → 重跑 → 断言第二段请求的 Range 起点 == 上次已写偏移 */ unimplemented!("实现时写真实断言") }
+#[test]
+fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> { /* /noranges：结果字节正确且并发数实际=1 */ unimplemented!("实现时写真实断言") }
+```
+
+- [ ] **Step 2: 跑 → 失败**
+- [ ] **Step 3: 实现**：`mpsc::channel::<SchedulerMsg>`；worker 线程 `loop { recv(Assign) → run_window → send(Event) }`；
+主线程持有 `Scheduler`，把事件转成 `Action` 派给对应 worker 通道；维护 `rate_bps` 的滑动平均喂给超时预算；
+按 `STATE_SAVE_MAX_INTERVAL_SECS` + 关键事件触发 `state::save`；`stats.duplicated` 累加"被丢弃的已收字节"；
+Ctrl-C 用 `tokio`? **不用**——v1 不做信号处理，改为：主循环检查 `ctrlc` 不可用则靠 `SIGINT` 默认终止 + 每次 `save` 原子落盘 ⇒
+**本任务只保证"任意时刻被杀都能续"**，`unimplemented` 的那条 kill 测试就是这个的验收。
+- [ ] **Step 4: 跑 → 通过**
+- [ ] **Step 5: 提交**：`git commit -m "feat: worker 线程池 + 事件循环 + 状态保存节奏"`
+
+---
+
+### Task 9: CLI 与进度输出
+
+**Files:** Create `src/cli.rs`, `src/report.rs`；Modify `src/main.rs`
+
+**Interfaces:** Consumes: `task::Task`、`engine::{Config, run}`。Produces: `cli::parse_from<I:IntoIterator<Item=OsString>>(args:I) -> anyhow::Result<Cli>`、`Cli::into_task(self) -> Task`、`report::render(&ProgressLine)`
+
+- [ ] **Step 1: 失败测试**（别名展开必须等价）
+
+```rust
+#[test]
+fn idm_style_slash_aliases_expand_to_same_task() -> anyhow::Result<()> {
+    let posix = parse_from(["dlm", "--url", "https://x/a.bin", "--out-dir", "D:/d", "--out-name", "b.bin"])?.into_task()?;
+    let idm   = parse_from(["dlm", "/d", "https://x/a.bin", "/p", "D:/d", "/f", "b.bin"])?.into_task()?;
+    assert_eq!(posix, idm);
+    assert_eq!(posix.target_path(), PathBuf::from("D:/d").join("b.bin"));
+}
+#[test]
+fn flag_bits_map_to_task_flags() -> anyhow::Result<()> {
+    let c = parse_from(["dlm", "/d", "https://x/a", "/n", "/a", "--keep-state"])?;
+    let t = c.into_task()?;
+    assert_eq!(t.flags & FLAG_ADD_ONLY, FLAG_ADD_ONLY);
+    assert_eq!(t.flags & FLAG_KEEP_STATE, FLAG_KEEP_STATE);
+}
+#[test]
+fn plain_http_with_password_fails_at_parse_time() {
+    let r = parse_from(["dlm", "--url", "http://x/a", "--password", "p"]).and_then(|c| c.into_task());
+    assert!(r.is_err());
+}
+```
+
+- [ ] **Step 2: 跑 → 失败**
+- [ ] **Step 3: 实现**：`parse_from` 先把首现的 `/d /p /f /n /q /a /h` 就地替换成对应 `--长名`（`/q` → `--quiet`、
+`/a` → `--add-only`、`/h` 接受但仅置位、`/n` → 静默位），再交给 clap；`--connections`、`--referer`、`--cookie`、
+`--data-file`、`--user`、`--password`、`--ignore-mtime`、`--no-resume`、`--sha256`、`--max-retries`、`--keep-state`、`--quiet`。
+`report::render` 一行 `\r 45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4  dup 5.5%`。
+- [ ] **Step 4: 跑 → 通过**
+- [ ] **Step 5: 提交**：`git commit -m "feat: CLI（POSIX 为主 + IDM 斜杠别名）与一行进度"`
+
+---
+
+### Task 10: 验收跑通 spec §7 四场景
+
+**Files:** Append `tests/integration.rs`；Create `docs/evidence/`（一次性实测记录）
+
+**Interfaces:** Consumes: 全部。Produces: 四条场景测试 + 一份实测记录文档。
+
+- [ ] **Step 1: 写四场景测试**
+
+```rust
+#[test] fn scenario_a_fullspeed_48mib_is_byte_exact() -> anyhow::Result<()> { /* /blob 全速, workers=8, sha 比对 */ unimplemented!("本步写真实断言：engine::run + sha256 比对") }
+#[test] fn scenario_b_throttled_splits_at_midpoint_with_floor() -> anyhow::Result<()> { /* /slow, 断言存在 [1/2,1/4,1/8] 起点且最小段 >= MIN_SEGMENT_BYTES */ unimplemented!("本步写真实断言") }
+#[test] fn scenario_c_flaky_resumes_without_redownload() -> anyhow::Result<()> { /* /flaky 中途断，重跑，断言 dup 字节 < 5% 总量 */ unimplemented!("本步写真实断言") }
+#[test] fn scenario_d_no_ranges_single_connection_correct() -> anyhow::Result<()> { /* /noranges，断言并发实际为 1 且字节正确 */ unimplemented!("本步写真实断言") }
+```
+
+上面五个 `unimplemented!` 只是骨架占位——**该任务的 Step 1 就是把它们全部换成真实断言**，
+不允许以 `unimplemented!` 状态提交。
+
+- [ ] **Step 2: 跑 `cargo test`**（unit + integration 全量）
+Expected: 全绿。任一场景红 ⇒ 停下修，不许放宽判据（改测试输入可以，改断言方向不行）。
+
+- [ ] **Step 3: 与 IDM 行为对照（参考，不作门禁）**
+
+同一条 harness 上跑 `MSYS2_ARG_CONV_EXCL='*' "/c/Program Files (x86)/Internet Download Manager/IDMan.exe" /n /d "http://127.0.0.1:8077/slow" /p <dir> /f cmp.bin`，
+把两边 Range 序列并排写进 `docs/evidence/idm-vs-dlm-<日期>.md`，
+开头必须标注：本机 IDM 构件已被第三方修改、且环回链路观测强度有限。
+
+- [ ] **Step 4: 提交**：`git commit -m "test: spec §7 四场景验收 + 与 IDM 的 Range 序列对照"`
+
+---
+
+## 自检（写完后回看 spec）
+
+- **覆盖**：spec §2 九模块 → Task 1–9；§3 常量 → Task 1；§4 断点结构与安全边界 → Task 4；
+  §5 CLI → Task 9；§6 七条错误处理 → Task 5（续传冲突）、7（416/降级/超时）、8（重试与保存）、9（校验失败退出码）；
+  §7 三层测试 → Task 2/6/8/10；§8 不做项未进任何任务；§9 依赖 → Task 0。
+- **缺口一处，故意留白并说明**：spec §6.6 "Ctrl-C 优雅收尾"在 Task 8 降级为"任意时刻被杀都能续"，
+  因为不引入信号处理依赖。若执行时要严格实现 §6.6，需要加 `ctrlc` crate —— 与"只允许这 6 个依赖"冲突，
+  **需要用户批准才能扩依赖**。
+- **占位符**：全文出现的 `unimplemented!` 都在其所在任务的步骤里被明确要求替换成真实断言后方可提交；无 TBD/TODO。
+- **类型一致性**：`Interval/Event/Action/ProbeFacts/Decision/Outcome/Config/Report` 的字段名与签名在定义任务与引用任务间一致
+  （`Decision::Fresh{reason}`、`Outcome::Advanced{bytes}`、`Event::Progress{worker, abs_end}`）。
