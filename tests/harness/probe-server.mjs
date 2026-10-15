@@ -100,7 +100,12 @@ http.createServer((req, res) => {
     if (off > end) { res.end(); log("response_done", { conn: rec.id, url: req.url, status, bytes: sent, chunks: chunkN }); return; }
     const c = BLOB.subarray(off, Math.min(off + CH, end + 1));
     off += c.length; sent += c.length; chunkN++;
-    if (!res.write(c)) res.once("drain", push); else if (slow) setTimeout(push, 200); else setImmediate(push);
+    // `slow` 必须在两条恢复路径上都成立：64 KiB 的写会让 `res.write()` 返回 false（自己限速必然
+    // 触发 backpressure），于是恢复只能从 `drain` 回来。若 drain 回调直接 `push()`，节拍就被绕过 ——
+    // round 1 实测：`/slow` 48 MiB 只花 114 ms、`/sz/1048576s` 1 ms，"限速"名不副实。
+    // 所以 drain 与"写得进去"两条分支统一走 resume()：限速时每块之间 sleep 200 ms，否则 setImmediate。
+    const resume = () => (slow ? setTimeout(push, 200) : setImmediate(push));
+    if (!res.write(c)) res.once("drain", resume); else resume();
   })();
   res.on("close", () => log("conn_close_side", { conn: rec.id, url: req.url, sent, pending: off <= end, ms: Date.now() - t0 }));
 }).on("connection", s => {

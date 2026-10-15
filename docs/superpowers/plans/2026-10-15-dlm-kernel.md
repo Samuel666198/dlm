@@ -936,7 +936,8 @@ Expected: 全绿。任一场景红 ⇒ 停下修，不许放宽判据（改测�
 ## 勘误（Task 0 及其修复轮的实测推翻，任务正文不回改，以此节为准）
 
 同一约定见 spec `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md` §10（R1–**R5**，R5 取代 R4）。
-证据：`.superpowers/sdd/2026-10-15-dlm-kernel/task-0-report.md` §3–§4 与其后的「修复轮」一节。
+证据：`.superpowers/sdd/2026-10-15-dlm-kernel/task-0-report.md` §3–§4 与其后的「修复轮」（F1–F6）
+与「修复轮 2」（G1–G3）两节。
 
 **E1：Task 0 Step 5 的 `build:` 前缀与计划自身的约束清单冲突。** Global Constraints 第 21 行只允许
 `feat:`/`test:`/`fix:`/`docs:`。冲突时**约束清单赢**：已落地的 `70f4d7f` 不回改（底线是"只加新提交、不 amend"），
@@ -960,17 +961,34 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
 断言拿到 `416` + `Content-Range: bytes */50331648` 且不卡。这条用例是 harness `res.end()` 修复的守卫：
 一旦有人把推流循环改回"写满只 log 不 `res.end()`"，它立刻变红（Task 0 的原始病症就是这样复现的）。
 
-**E4：Task 10 的限速/卡死场景改用有界限速流 `/sz/<小值>s`，不要用 `/slow` 打整块 48 MiB。**
-裁定给的理由是"`/slow` 约每 200 ms 发 64 KiB ⇒ 整块要 ~157 s"，**本机实测不成立**，两条都要记下：
-- 实测（同一台 harness）：`/slow`（768 个 64 KiB 块、50,331,648 字节）服务端从 `request` 到 `response_done`
-  只花 **114 ms**、客户端 `time_total=0.138 s`；`/sz/1048576s`（16 块）`1 ms`。那个 200 ms 的 `setTimeout`
-  **从没生效**：`push()` 里 `if (!res.write(c)) res.once("drain", push); else if (slow) setTimeout(push, 200);`
-  —— 64 KiB 的写在这台机器上基本每次都让 `res.write()` 返回 `false`，于是走 drain 分支、绕开限速。
-- ⇒ 后果一：结论方向不变但理由变了——用 `/sz/<小值>s` 不是因为"整块要跑 157 s"，而是因为**整块 0.14 s 就流完，
-  卡死/超时判据根本没机会出现**；有界流至少能让 Task 10 的 stall 场景把窗口/超时逻辑跑到一个小而可控的量上。
-- ⇒ 后果二（需要控制方裁定）：**"限速"这一档目前在 harness 上没有可用对端**——spec §7 场景 2 的
-  "48 MiB 限速"与 Task 10 场景 B 名义上都依赖 `/slow` 真的慢。要坐实限速得改 `push()` 的分支次序
-  （`slow` 时无条件 `setTimeout`，或把 chunk 降到 backpressure 阈值以下并让 sleep 与 drain 并存），
-  这属于 harness 行为变更、不在本轮裁定范围内，**本轮只改文档、未动这段代码**。Task 10 Step 3 与 IDM 的
-  `/slow` 对照只作参考不作门禁，可照旧跑（会是全速）。
+**E4：`slow` 标志此前是死代码，Task 0 修复轮 2 已把限速做实；Task 10 的有节拍对端用 `GET /sz/<字节数>s`。**
+一句话根因：`push()` 收尾写成 `if (!res.write(c)) res.once("drain", push); else if (slow) setTimeout(push, 200);`
+—— 64 KiB 的写在这台机器上让 `res.write()` 返回 `false`（限速流自己造成 backpressure），恢复只从 `drain`
+分支回来，而那条分支**不带任何延时**地直接 `push()`，于是 `slow` 只在"写得进去"这一支生效、实际从不生效。
+本条**取代**这条勘误原先写下的前提（"`/slow` 约每 200 ms 发 64 KiB ⇒ 整块 48 MiB 要 ~157 s"）：那句话当时不成立，
+现在成立。
+
+- 修前实测（port 8151，`target/g2-before.jsonl`）：`/sz/524288s`（8 块）服务端 `request`→`response_done`
+  **9 ms**、客户端 38 ms；`/sz/1048576s`（16 块）**1 ms**、客户端 5 ms；修复轮 1 另测 `/slow` 整块 48 MiB **114 ms**。
+  节拍若生效应分别是 1600 ms / 3200 ms / ~154 s ⇒ 差两个数量级，"限速"名不副实。
+- 修后实测（port 8152/8153，`target/g2-after.jsonl`、`target/g2-after2.jsonl`）。改法只一行：drain 分支与
+  "写得进去"分支统一走 `resume()`，`slow` 时 `setTimeout(push, 200)`、否则 `setImmediate(push)`；64 KiB chunk 与
+  200 ms 都没动，`res.end()` 及其上方注释原样保留。`/sz/524288s` 服务端 **1639 / 1624 ms**（期望 8×200=1600）；
+  `/sz/1048576s` **3463 ms**（期望 16×200=3200）；带 `Range` 的有节拍 206（`/sz/524288s` + `bytes=65536-393215`，
+  5 块）**1023 ms**（期望 5×200=1000）；`/slow` 逐块到达客户端的时刻为 0 / 216 / 420 / 623 / 824 ms（此后客户端
+  主动断链，没有等满 154 s）。客户端计时比服务端跨度少约一个节拍：最后一块写完后还要 sleep 一次才走到 `res.end()`。
+- 非限速路径**没有变慢**（同一会话内对照）：`/sz/524288` 服务端 2 ms → 1 ms；`/flaky`（64 块、非限速）17 ms → 12 ms；
+  `/sz/1024` 与 `/blob` 的 206 / 416、HEAD、`/noranges` 的状态码与响应头（含 `Content-Range`、`Accept-Ranges`
+  该缺失处仍缺失）以及 `request` / `response` / `response_done` / `conn_close_side` 记录形状逐项不变。
+  E3 的守卫形状（同连接读满 206 → 再打 416）仍 1 ms 通过；把那个 206 换成有节拍的 body（`/sz/196608s` 读满）后
+  同连接再打 416 也通，只是第二个请求要**多等最多一个节拍**（`res.end()` 排在最后一次 sleep 之后）——
+  Task 7/10 在复用连接上排后续请求时要把这 200 ms 计入预期。
+- **Task 10 用哪个形状**：`GET /sz/<字节数>s`，字节数取 65536 的整数倍，期望时长 ≈ `(字节数/65536)×200 ms`
+  （`/sz/196608s` ≈ 0.6 s、`/sz/524288s` ≈ 1.6 s、`/sz/1048576s` ≈ 3.2 s）；要窗口/偏移形状就同时带 `Range`，
+  206 同样按节拍出块。`/slow` 现在是货真价实的 ~154 s 整块（48 MiB = 768 块），**不要**拿它做有界等待的测试对端。
+- **本 harness 不提供"服务端自己停在 body 中间、永远不发完"的对端**：本轮只让 `slow` 的节拍生效，服务器写满
+  仍旧必然收尾（`res.end()`，理由见 `push()` 上方那段注释）。停在中间目前只能由**客户端**断链造成（实测：
+  `socket.destroy()` 之后服务端记 `conn_close_side ... pending=true`），那与"对端慢慢把字节送过来"不是同一种病症。
+  spec §7 场景 2 若需要后者，得另给 harness 加一个"发够 N 块就挂住不 finish"的端点——那是**控制方另行裁定**的事，
+  不在本轮范围内自行发明。
 
