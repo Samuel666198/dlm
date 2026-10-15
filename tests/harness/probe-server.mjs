@@ -53,6 +53,8 @@ http.createServer((req, res) => {
   const flaky = req.url.startsWith("/flaky");
   // /sz/<字节数>[s]  s 表示限速；/slow 等价于 /sz/48MiB 且限速
   const mSz = /^\/sz\/(\d+)(s?)/.exec(req.url);
+  // /drop/<字节数>  n 计的是**本条响应写出的 body 字节数**（不是文件偏移），可与 Range 组合
+  const mDrop = /^\/drop\/(\d+)/.exec(req.url);
   const slow = req.url.startsWith("/slow") || (mSz && mSz[2] === "s");
   const wantSz = mSz ? Math.min(parseInt(mSz[1], 10), SIZE) : (flaky ? 4 * 1024 * 1024 : SIZE);
   const sendLen = wantSz;
@@ -78,6 +80,18 @@ http.createServer((req, res) => {
     status = 206;
   }
   const len = end - start + 1;
+  // /drop/<n>：服务端在 body 中间把连接拆掉的对端（Task 0 修复轮 3 新增）。
+  // 存在的原因：spec §7 场景 3 写的是"`/flaky`（中途断）"，而 `/flaky` 实测从不中断——它只是
+  // 把服务长度改成 4 MiB（`wantSz`）后照常走完 `res.end()`。"响应比 Content-Length 短"这一
+  // 病症以前在本 harness 上没有对端，拿 `/flaky` 写中断断言会**碰巧通过**。
+  // 本路由不改任何响应头的算法：状态码、Content-Length、Content-Range、Accept-Ranges、ETag、
+  // Last-Modified 全都按正常路径如实算出来（也就是说头是诚实的、body 是不完整的），
+  // 只在 body 写到第 n 字节之后 destroy socket、永不收尾（`n=0` ⇒ 头发完、body 一个字节不发）。
+  // n >= 本条响应总长时没有可截的东西，响应正常结束（等价于不打 `/drop`）。
+  // 这不违反下面那段 `res.end()` 纪律：那条缺陷是"连接还活着、响应没收尾"，于是同连接的第二个
+  // 请求被挂进 pending 队列。这里我们把 socket 直接拆掉，这条连接不可能再服务第二个请求。
+  const dropAt = mDrop && parseInt(mDrop[1], 10) < len ? parseInt(mDrop[1], 10) : -1;
+  const bodyEnd = dropAt >= 0 ? start + dropAt - 1 : end;   // 本次要写到的最后一个字节下标
   const headers = {
     "Content-Type": "application/octet-stream",
     "Content-Length": String(req.method === "HEAD" ? sendLen : len),
@@ -91,6 +105,13 @@ http.createServer((req, res) => {
   // 分块写出，边写边看 IDM 是否在中途换连接
   let off = start, sent = 0, chunkN = 0;
   const CH = 64 * 1024;
+  const dropNow = () => {
+    // 事件类型是新的 `response_drop`，与顶部那条唯一的 `request`、与正常收尾的 `response_done`
+    // 都区分得开（`/noranges` 那条"一条请求只留一条 request 记录"的教训不能再犯一遍）
+    log("response_drop", { conn: rec.id, url: req.url, status, bytes: sent, chunks: chunkN,
+      expected: len, drop_at: dropAt, range: req.headers.range || null, total: sendLen });
+    if (res.socket) res.socket.destroy(); else req.destroy();
+  };
   (function push() {
     // 必须 res.end()：本机实测（Task 0）——写满后不收尾时，node 把这条 keep-alive 连接后续响应
     // 的字节留在 socket 的 pending 队列里不再 flush：服务端日志显示它解析并回调了第二个请求、
@@ -98,8 +119,18 @@ http.createServer((req, res) => {
     // 在这台 harness 上 curl / 裸 node socket / reqwest 三种客户端观测到同一现象，说明与本服务器的
     // 收尾方式有关。以上只是本 harness 的实测形状，不对其他服务器或客户端库作任何断言。
     if (off > end) { res.end(); log("response_done", { conn: rec.id, url: req.url, status, bytes: sent, chunks: chunkN }); return; }
-    const c = BLOB.subarray(off, Math.min(off + CH, end + 1));
+    const c = BLOB.subarray(off, Math.min(off + CH, bodyEnd + 1));
     off += c.length; sent += c.length; chunkN++;
+    if (dropAt >= 0 && off > bodyEnd) {
+      // 最后一块已被 `bodyEnd` 截短到"恰好 dropAt 字节"。等 node 把这块 flush 出去（`write` 回调）
+      // 再拆 socket：若写完立刻 destroy，还在 socket 发送缓冲里没出手的字节会一起丢掉，
+      // 客户端收到的就不是 n 字节，`n` 的语义（"本条响应写出的 body 字节数"）就不可复现了。
+      // `dropAt === 0` 也走这里，此时 c 是 0 字节：这次空写的作用是把响应头 flush 出去
+      // （`writeHead()` 只缓存、不落 socket；实测直接 destroy 会让客户端一个头都收不到，
+      // 那就成了"没有响应"而不是"响应被截断"）。
+      res.write(c, dropNow);
+      return;
+    }
     // `slow` 必须在两条恢复路径上都成立：64 KiB 的写会让 `res.write()` 返回 false（自己限速必然
     // 触发 backpressure），于是恢复只能从 `drain` 回来。若 drain 回调直接 `push()`，节拍就被绕过 ——
     // round 1 实测：`/slow` 48 MiB 只花 114 ms、`/sz/1048576s` 1 ms，"限速"名不副实。

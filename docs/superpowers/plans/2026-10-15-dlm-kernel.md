@@ -936,8 +936,8 @@ Expected: 全绿。任一场景红 ⇒ 停下修，不许放宽判据（改测�
 ## 勘误（Task 0 及其修复轮的实测推翻，任务正文不回改，以此节为准）
 
 同一约定见 spec `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md` §10（R1–**R5**，R5 取代 R4）。
-证据：`.superpowers/sdd/2026-10-15-dlm-kernel/task-0-report.md` §3–§4 与其后的「修复轮」（F1–F6）
-与「修复轮 2」（G1–G3）两节。
+证据：`.superpowers/sdd/2026-10-15-dlm-kernel/task-0-report.md` §3–§4 与其后的「修复轮」（F1–F6）、
+「修复轮 2」（G1–G3）与「修复轮 3」（H1–H4）三节。
 
 **E1：Task 0 Step 5 的 `build:` 前缀与计划自身的约束清单冲突。** Global Constraints 第 21 行只允许
 `feat:`/`test:`/`fix:`/`docs:`。冲突时**约束清单赢**：已落地的 `70f4d7f` 不回改（底线是"只加新提交、不 amend"），
@@ -990,5 +990,37 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   仍旧必然收尾（`res.end()`，理由见 `push()` 上方那段注释）。停在中间目前只能由**客户端**断链造成（实测：
   `socket.destroy()` 之后服务端记 `conn_close_side ... pending=true`），那与"对端慢慢把字节送过来"不是同一种病症。
   spec §7 场景 2 若需要后者，得另给 harness 加一个"发够 N 块就挂住不 finish"的端点——那是**控制方另行裁定**的事，
-  不在本轮范围内自行发明。
+  不在本轮范围内自行发明。**（本条末段已被 E5 取代：那样的对端在修复轮 3 已落地为 `GET /drop/<n>`；
+  本条关于节拍的实测与"`slow` 该怎么用"的结论不受影响，不在此重述。）**
+
+**E5：`/flaky` 从不打断 body（它只是把服务长度改成 4 MiB）；spec §7 场景 3 的"中途断"对端现在是 `GET /drop/<n>`。**
+一句话根因：`/flaky` 在 harness 里唯一的作用是 `wantSz = ... : (flaky ? 4 * 1024 * 1024 : SIZE)`，之后仍走同一段
+推流并 `res.end()` 收尾——它给的是"**一个更短的完整文件**"，不是"中途断"。
+实测证据（修复轮 3，改动前的 harness 在 port 8161）：`GET /flaky` ⇒ `advertised-cl=4194304 received=4194304 err=-`；
+`GET /drop/100000` 当时不被识别为特殊路由、按普通 blob 服务 ⇒ `advertised-cl=50331648 received=50331648 err=-`。
+⇒ 本 harness 此前**没有任何对端能产出"响应比 `Content-Length` 短"**：fetch 的"body 短于 Content-Length ⇒ Failed"
+分支、以及成功判据 ③"掐断后能续且不重下已完成段"都没有可测的对端；拿 `/flaky` 写"中途断"断言会**碰巧通过**
+（它是一次完整响应，续传路径根本没机会出现）。
+
+- 新增路由 `GET /drop/<n>`（`tests/harness/probe-server.mjs`，Task 0 修复轮 3）：`n` 计的是**本条响应实际写出的
+  body 字节数**（不是文件偏移），可与 `Range` 组合。响应头一律按现有代码路径如实算（诚实的 `Content-Length`、
+  `Content-Range`、`Accept-Ranges: bytes`、`ETag`、`Last-Modified`），body 写到第 `n` 字节后 `res.socket.destroy()`、
+  永不 `res.end()`。实测形状（port 8163，逐字数据见报告「修复轮 3」）：无 `Range` ⇒ `advertised-cl=50331648 /
+  received=100000`；带 `Range: bytes=65536-393215` ⇒ `advertised-cl=327680 / received=100000 /
+  Content-Range: bytes 65536-393215/50331648`。客户端侧三种读法各报其形状：undici `TypeError: terminated`
+  ← `SocketError: other side closed [UND_ERR_SOCKET]`；curl `curl: (18) end of response with 227680 bytes missing`；
+  裸 socket 收到 **FIN（不是 RST）**。边界：`n >= 本条响应总长` ⇒ 不截断、正常收尾；`n=0` ⇒ 头发完、body 0 字节。
+- **Task 10 的"掐断"场景（成功判据 ③ 与 `scenario_c_flaky_resumes_without_redownload`）必须改用 `/drop/<n>`**，
+  不再用 `/flaky`：先 `GET /drop/<n>` 带 `Range: bytes=<lo>-<hi>` 只拿到 `<n>` 字节，再 `GET` 带
+  `Range: bytes=<lo+n>-<hi>` 续，断言已完成段不重下。实测这条形状可跑：`bytes=0-327679` 截在 100000 后，
+  续传 `bytes=100000-327679` 得 227680 字节，两段拼接与一次读完的 327680 字节**逐字节相同**。
+  `/flaky` 仍然是合法的**尺寸变化**端点（4 MiB 完整体）——要测"服务端只承认一个比原始文件短的长度"照旧用它，
+  只是它不承担"中途断"的语义，别拿它验证截断/续传。
+- 日志：截断记成**新事件类型** `response_drop`（`{conn,url,status,bytes,chunks,expected,drop_at,range,total}`），
+  一条 HTTP 请求仍然只有顶部那一条 `request` 记录（实测整轮 38 条请求 ⇒ 38 条 `request`，按
+  `(conn,reqNoOnConn)` 去重后仍是 38 ⇒ 没有 F1 那类重复计数）；断链一侧照旧 `conn_close_side ... pending=true`。
+- 与 `res.end()` 纪律的关系：其它所有路径的收尾行为一字未动。截断路径不构成回归，因为它把 socket 一起拆了，
+  这条连接不可能再服务第二个请求（实测：同连接上的第二个请求立刻 `ECONNRESET`，不是 30 s 挂住；
+  E3 的守卫形状——同连接"读满的 206"→"416"——仍 1 ms/0 ms 双双通过）。
+
 
