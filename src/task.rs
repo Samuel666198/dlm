@@ -17,11 +17,9 @@ pub struct Task {
 impl Task {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.url.is_empty(), "缺少 URL");
-        let plain_http = self.url.starts_with("http://");
+        let plain_http = self.url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("http://"));
         anyhow::ensure!(!(plain_http && self.password.is_some()),
             "明文 HTTP 不发送口令：请改用 https:// 或去掉 --password");
-        anyhow::ensure!(!(plain_http && self.user.is_some() && self.password.is_some()),
-            "明文 HTTP 不发送 Basic 认证凭据");
         Ok(())
     }
     pub fn segmentable(&self) -> bool { self.data_file.is_none() }
@@ -55,6 +53,19 @@ mod tests {
         let mut x = t("https://example.com/a.bin");
         x.password = Some("hunter2".into());
         assert!(x.validate().is_ok());
+    }
+    #[test]
+    fn scheme_case_does_not_weaken_the_password_rule() {
+        // scheme 按 RFC 3986 大小写不敏感，`HTTP://` 一样是明文 HTTP，不能因为调用方写了大写就绕过。
+        for url in ["HTTP://example.com/a.bin", "HtTp://example.com/a.bin"] {
+            let mut x = t(url);
+            x.password = Some("hunter2".into());
+            assert!(x.validate().is_err(), "{url} 是明文 HTTP，带口令必须拒绝");
+        }
+        // 反过来：大写 https 仍然是加密的，不能被误判成明文。
+        let mut ok = t("HTTPS://example.com/a.bin");
+        ok.password = Some("hunter2".into());
+        assert!(ok.validate().is_ok(), "HTTPS:// 带口令必须放行");
     }
     #[test]
     fn post_body_disables_segmentation() {
