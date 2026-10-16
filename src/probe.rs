@@ -10,14 +10,21 @@
 //! ## 本模块的形状决定（都有对应用例钉着）
 //!
 //! 1. **一次请求，不多问第二枪。** 长度优先从 `Content-Range` 的分母取（我们那条限量 Range 换回来的
-//!    206 自己就把全长说了），取不到就退到 `Content-Length`。**不**为了"问出一个更大的长度"再发
-//!    第二条请求：那是简报没有、spec 也没要求的动作，而且会给对端多打一发。
+//!    206 自己就把全长说了），取不到就退到 `Content-Length` —— **这一退只在不回 `206` 时成立**
+//!    （第 11 条：206 的 `Content-Length` 是本次窗口的大小，不是文件长度）。**不**为了"问出一个更大的
+//!    长度"再发第二条请求：那是简报没有、spec 也没要求的动作，而且会给对端多打一发。
 //! 2. **限量靠 `Range`，不靠 drop**（简报 Step 4 的机制，派发第 4 条保留）：`task.segmentable()` 时发
-//!    `bytes=0-<prelude_max-1>`，响应于是被**完整读完**、连接干净。这同时也是**不用** `Connection: close`
+//!    `bytes=0-<prelude_max-1>`。**对端认 Range 时**响应于是被**完整读完**、连接干净；这同时也是**不用**
+//!    `Connection: close`
 //!    的前提（spec §10 勘误 **R5**、计划 **E2**：Task 6/7 不得加 close、不得设
 //!    `pool_max_idle_per_host(0)`）—— Task 0 实测 416 卡死的根因在本仓库测试服务器的收尾
 //!    （推流循环漏 `res.end()`），不在 reqwest 的连接池；加 close 会把"复用连接上打 416"这条真实
 //!    路径从测试覆盖里关掉，正是勘误 **E3** 守卫用例要跑的那条。
+//!    **对端无视那条 `Range` 时（评审 I1 补的限定），上面那句"连接干净"不成立**：body 比预读量大，
+//!    `read_bounded` 停在上限、剩下的字节留在连接里 ⇒ 那条连接是被**拆掉**的，不回池复用。拆连接本身
+//!    安全（我们拿到的前缀是完整的、body 从偏移 0 起没错位），但 **Task 8/10 不许把"试探之后连接可
+//!    复用"当成退化路径的性质**：E3 那两条守卫用例跑的都是非退化那一支（`/blob` 答 206、读满预读），
+//!    退化那一支（`/noranges` 交 1 MiB、我们只读 236032）不在它们的覆盖里。
 //! 3. **`!task.segmentable()`（带 POST 体）时不发 `Range`**：POST 语义下 Range 不成立（spec §2.2）。
 //!    **评审 F1 之后这一支在 `run()` 里已经到不了** —— 带体的任务在发请求之前就被拒（见"本模块没做的
 //!    事"第 1 条）。判据**留着**不删：`prelude_range` 只回答"这条任务能不能发 Range"，而"能不能试探"
@@ -69,6 +76,29 @@
 //!    `accept_ranges = true` 这一味是**解读**而不是抄头：本仓库的服务器与窄对端的 416 分支都**不**发
 //!    `Accept-Ranges`（线上取证见该用例文档 ③），依据是"416 本身就是按 Range 语义给的回答"。
 //!    对端自己没 Range 可谈时（`prelude_max == 0`）我们不发 Range，那一支的 416 就退回报错。
+//! 10. **`accept_ranges` 是合取，不是"两条证据取其一"**（评审 **I1**，判据住在 `peer_accepts_ranges`；
+//!     派发点名的 spec §2.2 第二条）：头说 `bytes` 与"这次真按 Range 答了 206"两条**取其一**算证据，
+//!     但**我们发过 `Range` 而响应不是 `206`** 时无条件为假。spec 那句写的是"无 `Accept-Ranges` **或**
+//!     首请求返回 `200` 而非预期的 `206`"—— 那个"或"挂在**退化的触发条件**上，不是"两条证据可以互相
+//!     顶替"。旧写法把合取写成了析取，于是"发 `Accept-Ranges: bytes` 却把 `bytes=0-236031` 当没有"的
+//!     对端（反代吞 Range、只把源站的头透出来是常见形状）被报成认 Range ⇒ `scheduler` 的
+//!     `Event::NoRanges`（spec §2.1 里叫 `ServerSaysNoRanges`）退化永不触发（段表不合并，靠后的
+//!     区间会把内容写错位置），`resume` 的 ⑤
+//!     也会替一份多段快照说话。**没有**给 `ProbeFacts` 加字段：这个合取已经把全部信号收进了一味，
+//!     而那个结构是 Task 5 的契约（五字段，多处按字面构造）。四格真值表由单元用例
+//!     `peer_accepts_ranges_is_conjunctive_once_we_sent_a_range` 钉，线上那一侧由
+//!     `a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads` 与
+//!     `an_ordinary_redirect_still_lands_and_is_reported` 钉（后一条的期望**是本轮更正掉的**：它原来
+//!     钉的正是这个缺陷）。
+//! 11. **`206` 说不出可用的总长 ⇒ 拒绝，不拿 `Content-Length` 兜底**（评审 **I2**，`total_len` 的
+//!     第二参）：206 的 `Content-Length` 按定义只是**本次窗口**的大小，而窗口又正好等于预读量，于是
+//!     那份谎**永远自洽** —— `accept_ranges` 靠真 206 读成 true、预读长度对上假全长、spec §6 第 7 条
+//!     "没给 `--sha256` 就只校验已写字节数 == total_len"照样通过 ⇒ 236 KiB 的截断文件被报成 48 MiB
+//!     下完了，之后每一次续传都同意这个谎。这正是本函数自己那条注释（"把它当文件全长会让引擎以为
+//!     文件只有预读那么大"）警告的形状。触发它**不需要**对端撒谎：`Content-Range: bytes 0-236031/*`
+//!     是 RFC 9110 §14.3 允许的合法回答（总数未知），分母是垃圾、或 206 干脆不带 `Content-Range`
+//!     也算。修法与"两个长度头都没有"那一支同一立场（不猜一个数、错误里**不回显那个数字**）；
+//!     `Content-Length` 兜底只在**非 206**（退化的 `200`，模块文档第 4 条）时合法。
 //!
 //! ## 本模块**没**做的事（照实登记，不是遗漏）
 //!
@@ -211,13 +241,21 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
         bail!("试探请求被服务器拒绝：HTTP {status}");
     }
 
-    let total_len = total_len(&headers).with_context(|| {
-        // 对端既没给 `Content-Range` 也没给 `Content-Length`（chunked 且不支持 Range 是这种形状）。
-        // 猜一个数（尤其 0）比报错坏得多：0 在引擎里读起来就是"这活儿干完了"。见模块文档第 1 条。
-        "对端既没回 Content-Length 也没回 Content-Range，无法确定文件长度（不猜一个数出来）"
+    let total_len = total_len(&headers, status).with_context(|| {
+        // 两种"定不出长度"分开说，因为缺的东西不同（评审 **I2**）：
+        // - 206：分母不可用（`/*`、垃圾、或压根没发 `Content-Range`）。这一支**不许**退到
+        //   `Content-Length` —— 那只是本次窗口的大小，猜出来的数永远自洽（见 `total_len` 的文档）。
+        // - 其余：两个头都没有（chunked 且不支持 Range 是这种形状）。
+        // 两支都只点名**缺的是哪个头**，一个长度值都不抄进消息：猜一个数（尤其 0）比报错坏得多，
+        // 把那个数抄出来也一样（用户会照着它判断，而它正是我们不确定起来的那个东西）。
+        if status == StatusCode::PARTIAL_CONTENT {
+            "服务器回了 206 却没在 Content-Range 里给出可用的文件总长度，无法确定文件长度\
+             （206 的 Content-Length 只是本次窗口的大小，不拿它猜一个数出来）"
+        } else {
+            "对端既没回 Content-Length 也没回 Content-Range，无法确定文件长度（不猜一个数出来）"
+        }
     })?;
-    let accept_ranges = accepts_bytes(header_text(&headers, ACCEPT_RANGES).as_deref())
-        || range_honored(status, range.is_some(), &headers);
+    let accept_ranges = peer_accepts_ranges(status, range.is_some(), &headers);
 
     let facts = ProbeFacts {
         etag: header_text(&headers, ETAG),
@@ -315,15 +353,30 @@ fn header_text(headers: &HeaderMap, name: HeaderName) -> Option<String> {
     headers.get(name)?.to_str().ok().map(str::to_string)
 }
 
-/// 全长：先 `Content-Range` 的分母，退 `Content-Length`（模块文档第 1 条）。
+/// 全长：先 `Content-Range` 的分母，退 `Content-Length`（模块文档第 1 条、第 11 条）。
 ///
 /// 顺序不能反：206 的 `Content-Length` 是**本次响应**的字节数（限量预读时就是 `prelude_max`），
 /// 把它当文件全长会让引擎以为文件只有预读那么大 —— 于是"下完 236032 字节就报告完成"。
 /// 这条顺序由用例 `total_len_prefers_the_content_range_denominator` 钉着。
-fn total_len(headers: &HeaderMap) -> Option<u64> {
+///
+/// **但 `206` 这一支连"退"都不许退**（评审 **I2**，集成用例
+/// `a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_length`）：
+/// 分母取不到就交 `None` 让 `run()` 报错。理由是那份
+/// 谎**永远自洽** —— `Content-Range: bytes 0-236031/*` 是 RFC 9110 §14.3 允许的合法回答（总长未知），
+/// 退化读法于是把窗口 236032 报成全长，而 `accept_ranges` 靠真 206 读成 true、预读正好等于假全长、
+/// spec §6 第 7 条"没给 `--sha256` 就只校验已写字节数 == total_len"照样通过 ⇒ 截断的 236 KiB 被报成
+/// 48 MiB 下载完成，之后每次续传都同意这个谎。`200`（对端无视我们那条 Range，或本次根本没发 Range）
+/// 才轮到 `Content-Length`：那一份就是它交出来的整个 body，模块文档第 4 条。
+fn total_len(headers: &HeaderMap, status: StatusCode) -> Option<u64> {
     header_text(headers, CONTENT_RANGE)
         .and_then(|v| content_range_total(&v))
-        .or_else(|| header_text(headers, CONTENT_LENGTH).and_then(|v| v.trim().parse().ok()))
+        .or_else(|| {
+            if status == StatusCode::PARTIAL_CONTENT {
+                None
+            } else {
+                header_text(headers, CONTENT_LENGTH).and_then(|v| v.trim().parse().ok())
+            }
+        })
 }
 
 /// `Content-Range` 里的**总长**那一段：`bytes 0-236031/50331648` ⇒ `Some(50331648)`；
@@ -341,15 +394,42 @@ fn content_range_total(value: &str) -> Option<u64> {
 /// `Accept-Ranges` 是否说了 `bytes`（按逗号分 token、大小写不敏感）。
 ///
 /// `none`、缺失、只列 `uncompressed` 之类 ⇒ 假。这一支只看**头**，"服务器实际按 Range 答了没有"
-/// 是下面 `range_honored` 那一条，两条并列取其一（`/noranges` 两个都不成立，真实 206 两个都成立）。
+/// 是下面 `range_honored` 那一条；**两条怎么合住在那里**（`peer_accepts_ranges`），不在这里 ——
+/// 头单独成立过不了评审 **I1** 那一道："它说了认 Range"和"它这次真按 Range 答了"不是一回事。
 fn accepts_bytes(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("bytes")))
 }
 
 /// 服务器**确实** honoring 了我们那条 Range：回 `206` 且带 `Content-Range`。
 /// 这是"认 Range"的直接证据，比头更硬（有些服务器不发 `Accept-Ranges` 却照样答 206）。
+///
+/// 反方向也成立，所以这一味只算**证据**、不算结论：回了 `206` 却没带 `Content-Range` 的
+/// 是畸形对端（本模块随后还会因为定不出总长而拒它，见 `total_len`）。
 fn range_honored(status: StatusCode, asked_for_range: bool, headers: &HeaderMap) -> bool {
     asked_for_range && status == StatusCode::PARTIAL_CONTENT && headers.contains_key(CONTENT_RANGE)
+}
+
+/// `ProbeFacts.accept_ranges` 的**合并规则**（评审 **I1**；模块文档第 10 条）。
+///
+/// 两条证据取其一（头说认 / 行为上答了 206），**但**我们发过 `Range` 而对端没回 `206` 时一律为假。
+/// 依据是 spec §2.2 的第二条：它把"无 `Accept-Ranges`"与"首请求返回 `200` 而非预期的 `206`"列为
+/// **两个各自独立的退化触发条件**（"或"字挂在触发条件上），不是两条可以互相顶替的证据。
+/// HTTP 层面这件事没有第二种读法：我们问了区间、它给了 `200`，那它就不按 Range 答话，头里写什么都一样。
+///
+/// 旧写法 `accepts_bytes(..) || range_honored(..)` 取的是后一种读法，代价具体：
+/// "发 `Accept-Ranges: bytes`、却把我们的 `bytes=0-236031` 当没有"的对端会被报成认 Range ⇒
+/// `scheduler` 那条 `Event::NoRanges` 退化永不触发（段表不合并，**靠后的区间会把内容写错位置**），
+/// `resume` 的 ⑤ 也会替一份多段快照说话、把接不上的进度当接得上。
+///
+/// 四格真值表（头有无 × 答没答 206）由 `peer_accepts_ranges_is_conjunctive_once_we_sent_a_range` 钉；
+/// 线上那一侧由 `a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads`
+/// 与 `an_ordinary_redirect_still_lands_and_is_reported` 钉（本仓库 `/noranges` 两条证据**一起**坏，
+/// 单独它挡不住"合取还是析取"这一维）。
+fn peer_accepts_ranges(status: StatusCode, asked_for_range: bool, headers: &HeaderMap) -> bool {
+    let evidence = accepts_bytes(header_text(headers, ACCEPT_RANGES).as_deref())
+        || range_honored(status, asked_for_range, headers);
+    let ignored_our_range = asked_for_range && status != StatusCode::PARTIAL_CONTENT;
+    evidence && !ignored_our_range
 }
 
 /// 读预读，**上限说话**：最多取 `prelude_max` 字节，多的留在连接里。
@@ -423,15 +503,50 @@ mod tests {
             ("content-range", "bytes 0-236031/50331648"),
             ("accept-ranges", "bytes"),
         ]);
-        assert_eq!(total_len(&h), Some(50_331_648), "取错边就变成\"文件只有预读那么大\"");
+        assert_eq!(
+            total_len(&h, StatusCode::PARTIAL_CONTENT),
+            Some(50_331_648),
+            "取错边就变成\"文件只有预读那么大\""
+        );
         // 200（对端无视我们那条 Range，或 `prelude_max == 0` 那一支根本没发 Range）：没有
-        // Content-Range ⇒ 退 Content-Length。
+        // Content-Range ⇒ 退 Content-Length。这一支**必须**继续成立：模块文档第 4 条说得很清楚，
+        // 退化路径的长度就是这一次响应交出来的字节数。
         let degraded = headers(&[("content-length", "1048576")]);
-        assert_eq!(total_len(&degraded), Some(1_048_576));
+        assert_eq!(total_len(&degraded, StatusCode::OK), Some(1_048_576));
         // 两个都没有 ⇒ None（`run` 在那里报错，绝不猜 0）。
-        assert_eq!(total_len(&headers(&[("etag", "\"x\"")])), None);
+        assert_eq!(total_len(&headers(&[("etag", "\"x\"")]), StatusCode::OK), None);
         // Content-Length 不是数字（chunked 或对端在说谎）⇒ 也走 None。
-        assert_eq!(total_len(&headers(&[("content-length", "gzip-ish")])), None);
+        assert_eq!(total_len(&headers(&[("content-length", "gzip-ish")]), StatusCode::OK), None);
+    }
+
+    /// 评审 **I2**：`206` 上"分母不可用"这一支**不许**退到 `Content-Length`（那是本次窗口的大小）。
+    ///
+    /// 三种形状都算：`*`（RFC 9110 §14.3 允许的"总数未知"，**不需要**对端撒谎）、分母不是数字、
+    /// 206 干脆不带 `Content-Range`。线上取证（真打一次网络的那三条）归集成用例
+    /// `a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_length`；
+    /// 这里钉的是判据本身，因为它同时钉住"别把窗口当全长"和"别顺手把 200 那支也一起改掉"。
+    #[test]
+    fn a_206_without_a_usable_content_range_total_has_no_fallback_to_the_window() {
+        // 合法但对端说不出总数：窗口 236032 就在 Content-Length 上等着被误读。
+        let unknown = headers(&[
+            ("content-length", "236032"),
+            ("content-range", "bytes 0-236031/*"),
+            ("accept-ranges", "bytes"),
+        ]);
+        assert_eq!(total_len(&unknown, StatusCode::PARTIAL_CONTENT), None, "不是 236032");
+        // 分母是垃圾（`content_range_total` 已经在 `bytes 0-9/*` 那一格给 None，这里是第二种坏法）。
+        let garbage = headers(&[("content-length", "236032"), ("content-range", "bytes 0-236031/nine")]);
+        assert_eq!(total_len(&garbage, StatusCode::PARTIAL_CONTENT), None);
+        // 206 压根不带 `Content-Range`（畸形对端，`range_honored` 那一条也会给假）。
+        let missing = headers(&[("content-length", "236032"), ("accept-ranges", "bytes")]);
+        assert_eq!(total_len(&missing, StatusCode::PARTIAL_CONTENT), None);
+        // 反方向（不能顺手改坏的那一支）：同一批头、状态是 `200` ⇒ 这一次它就是交出了整个 body，
+        // `Content-Length` 兜底合法（模块文档第 4 条；线上取证是集成用例
+        // `a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads`）。
+        // 注意 `unknown` 里那条 `Content-Range: bytes 0-236031/*` 在 200 上同样是"分母不可用"，
+        // 两种坏法（`/*` 与压根没发）在这一支上落到同一个读数 —— 变的只有状态码。
+        assert_eq!(total_len(&unknown, StatusCode::OK), Some(236_032), "200 上分母不可用 ⇒ 照旧退 Content-Length");
+        assert_eq!(total_len(&missing, StatusCode::OK), Some(236_032), "200 + 只有 Content-Length ⇒ 照旧退它");
     }
 
     #[test]
@@ -465,6 +580,47 @@ mod tests {
         assert!(!range_honored(StatusCode::PARTIAL_CONTENT, false, &h));
         assert!(!range_honored(StatusCode::OK, true, &h));
         assert!(!range_honored(StatusCode::PARTIAL_CONTENT, true, &headers(&[("content-length", "2")])));
+    }
+
+    /// 评审 **I1** 的真值表：**发过 Range 之后，"头怎么说"就不作数了**。
+    ///
+    /// 为什么单测这一层（集成那两条钉的是线上形状，这一条钉的是判据的格子）：② 那一格是原裁定
+    /// 留下的"行为比头硬"（本轮**没有**动它），③ 那一格才是缺陷 —— 旧写法把 `||` 用在了 ③ 上，
+    /// 于是③ 读成 true。④（`/noranges`）在旧写法下也给 false，所以那条路由挡不住这个缺陷；
+    /// 线上进取证因此用的是 ③ 那一格的两个真对端用例（见模块文档第 10 条）。
+    #[test]
+    fn peer_accepts_ranges_is_conjunctive_once_we_sent_a_range() {
+        let header_and_206 = headers(&[("accept-ranges", "bytes"), ("content-range", "bytes 0-1/2")]);
+        let only_206 = headers(&[("content-range", "bytes 0-1/2")]);
+        let header_but_200 = headers(&[("accept-ranges", "bytes"), ("content-length", "2")]);
+        let nothing = headers(&[("content-length", "2")]);
+
+        // ① 发了 Range、回 206、带头：两条证据都在 ⇒ true（诚实的限量预读，`/blob` 的形状）。
+        assert!(peer_accepts_ranges(StatusCode::PARTIAL_CONTENT, true, &header_and_206));
+        // ② 回了 206 + Content-Range 但**没有** `Accept-Ranges` ⇒ true（原裁定：行为比头硬）。
+        assert!(peer_accepts_ranges(StatusCode::PARTIAL_CONTENT, true, &only_206));
+        // ③ **本轮的缺陷格**：头说 `bytes`，行为上把我们的 `bytes=0-…` 当没有（回 200）⇒ false。
+        assert!(
+            !peer_accepts_ranges(StatusCode::OK, true, &header_but_200),
+            "问了区间却拿 200 回答 ⇒ 这个对端不按 Range 答话，头里写什么都一样"
+        );
+        // ④ 头没有、也没答 206（`/noranges`）⇒ false。
+        assert!(!peer_accepts_ranges(StatusCode::OK, true, &nothing));
+
+        // `Accept-Ranges: none` 与"头缺失"在 `accepts_bytes` 里同一读法（都不给 `bytes` 这个 token），
+        // 所以 ③/④ 与 ② 的对应格子必须一致，别让"明说不认"反而比"没说"更容易被当成认。
+        let says_none = headers(&[("accept-ranges", "none"), ("content-length", "2")]);
+        assert!(!peer_accepts_ranges(StatusCode::OK, true, &says_none));
+        let none_but_206 = headers(&[("accept-ranges", "none"), ("content-range", "bytes 0-1/2")]);
+        assert_eq!(
+            peer_accepts_ranges(StatusCode::PARTIAL_CONTENT, true, &none_but_206),
+            peer_accepts_ranges(StatusCode::PARTIAL_CONTENT, true, &only_206),
+            "头明说 none 与头缺失必须走同一格（都是\"没有行为以外的证据\"）"
+        );
+
+        // 没发 Range 的那两格（`prelude_max == 0`）只看头：那时我们没有行为证据可看。
+        assert!(peer_accepts_ranges(StatusCode::OK, false, &header_but_200));
+        assert!(!peer_accepts_ranges(StatusCode::OK, false, &nothing));
     }
 
     #[test]

@@ -580,6 +580,80 @@ pub fn spawn_416_stub() -> Result<Stub> {
     })
 }
 
+/// 对我们的 `Range` 回 **200**、却照样发 `Accept-Ranges: bytes` 的对端（评审 **I1**）。
+///
+/// 为什么需要它（而不是只改那条重定向对端的期望）：本仓库的 node 服务器是**诚实**的退化对端
+/// —— `/noranges` 无视 `Range` 时**同时**不发 `Accept-Ranges`，两条证据一起为假，于是它挡不住
+/// "两条证据取其一"这个错写法（旧写法 `accepts_bytes || range_honored` 在那条路由上照样给 false）。
+/// 真正要钉的是**只坏一条**的形状：头说认 Range，行为上把 `bytes=0-…` 当没有。线上这种对端不少
+/// （反代/CDN 把 Range 吞掉但把源站的头透出来），而 spec §2.2 第二条把它判成**退化**：
+/// "无 `Accept-Ranges` **或**首请求返回 `200` 而非预期的 `206`" ⇒ 两条都是触发退化的条件，
+/// 不是两条可以互相顶替的证据。
+///
+/// 形状：`/claims-bytes-answers-200` ⇒ `200` + `Accept-Ranges: bytes` + `ETag` +
+/// `Content-Length: <body_len>` + 正好 `<body_len>` 字节 body。**body 与 `Content-Length` 严格一致**
+/// （它只在"认不认 Range"这一件事上骗人，别处诚实），所以 `read_bounded` 读得满、
+/// 退化读法的 `total_len` 就是 `body_len`。
+pub fn spawn_range_ignoring_stub(body_len: u64) -> Result<Stub> {
+    spawn_stub(move |target| {
+        if !target.starts_with("/claims-bytes-answers-200") {
+            return "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string();
+        }
+        let len = usize::try_from(body_len).unwrap_or(0);
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+             Content-Length: {body_len}\r\nAccept-Ranges: bytes\r\nETag: \"stub-ignores-range\"\r\n\
+             \r\n{}",
+            "r".repeat(len)
+        )
+    })
+}
+
+/// 回 **206** 但**说不出文件总长**的对端（评审 **I2**），外加一条诚实的对照组。
+///
+/// 为什么需要它：本仓库的 node 服务器在 206 上**永远**发得出可用分母
+/// （`Content-Range: bytes <s>-<e>/<sendLen>`，`sendLen` 是它自己算出来的整数），所以
+/// `bytes 0-…/*`（RFC 9110 §14.3 允许"总长未知"写成 `*`）、分母是垃圾、206 干脆不发
+/// `Content-Range` 这三种形状它都产不出。而这三形状下"退到 `Content-Length`"读回来的都是
+/// **本次窗口**的字节数 —— 窗口又正好等于预读量，于是那份谎**永远自洽**：`accept_ranges` 靠 206
+/// 读成 true、预读长度对上假全长、spec §6 第 7 条那句"已写字节数 == total_len"照样通过，
+/// 236 KiB 的截断文件被报成 48 MiB 下完了，之后每一次续传都同意这个谎。
+///
+/// `window` 是本次窗口的字节数（调用方传 `PROBE_READ_BYTES`）：三条拒绝形状都把它写成
+/// `Content-Length`，body 也正好是那么多字节 —— 这正是"看起来完全成功"的那一份谎。
+///
+/// 路由：
+/// - `/unknown-total` ⇒ `Content-Range: bytes 0-<window-1>/*`（总长未知）
+/// - `/garbage-total` ⇒ `Content-Range: bytes 0-<window-1>/nine`（分母不是数字）
+/// - `/no-content-range` ⇒ 206 **不带** `Content-Range`
+/// - `/known-total`（**对照组**）⇒ `Content-Range: bytes 0-<window-1>/50331648` ⇒ 必须照常成功，
+///   且读出的全长是 48 MiB 而不是窗口。没有这一支，"把所有 206 都拒掉"也算修好了。
+pub fn spawn_unknown_total_stub(window: u64) -> Result<Stub> {
+    const FULL_LEN: u64 = 48 * 1024 * 1024;
+    let last = window.saturating_sub(1);
+    let body = "w".repeat(usize::try_from(window).unwrap_or(0));
+    spawn_stub(move |target| {
+        // 状态行下面那一条 `Content-Range` 由路由决定；`/no-content-range` 刻意一条都不带。
+        let head = match target {
+            "/known-total" => Some(format!("Content-Range: bytes 0-{last}/{FULL_LEN}\r\n")),
+            "/garbage-total" => Some(format!("Content-Range: bytes 0-{last}/nine\r\n")),
+            "/no-content-range" => Some(String::new()),
+            "/unknown-total" => Some(format!("Content-Range: bytes 0-{last}/*\r\n")),
+            // 认不出的路由给 404 而不是随便挑一种 206 形状：拼错 URL 时用例要当场红，
+            // 不能悄悄落到某条真路由上恒绿。
+            _ => None,
+        };
+        let Some(head) = head else {
+            return "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string();
+        };
+        format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+             Content-Length: {window}\r\n{head}Accept-Ranges: bytes\r\nETag: \"stub-window\"\r\n\
+             \r\n{body}"
+        )
+    })
+}
+
 /// 从一条 HTTP/1.1 连接上取走一条请求的**请求目标**（并把请求头读干；本对端从不收 body）。
 fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut buf = Vec::new();

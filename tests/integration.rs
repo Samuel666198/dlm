@@ -383,6 +383,65 @@ fn a_response_without_any_length_header_is_refused_not_guessed() -> anyhow::Resu
     Ok(())
 }
 
+/// 评审 **I2**：`206` 上拿 `Content-Length` 当全长 = 拿**本次窗口**当文件长度 ⇒ 必须报错，不许猜。
+///
+/// 三种"分母不可用"的形状都合法或至少现实（`Content-Range` 的总数可以写成 `*`，见 RFC 9110 §14.3），
+/// 而旧写法一律退到 `Content-Length` ⇒ 读出 `prelude_max`（236032）。那份谎**永远自洽**：
+/// `accept_ranges` 靠 `range_honored`（真 206 + 有 Content-Range）读成 true、预读正好等于假全长、
+/// spec §6 第 7 条那句"没给 `--sha256` 就只校验已写字节数 == total_len"照样通过 ⇒
+/// 236 KiB 的截断文件被报成 48 MiB 下载完成，之后每一次续传都同意这个谎。
+/// 这正是 `total_len` 自己那条注释（"把它当文件全长会让引擎以为文件只有预读那么大"）警告的形状。
+///
+/// 用窄对端：本仓库的 node 服务器在 206 上**永远**给得出整数分母（`bytes <s>-<e>/<sendLen>`），
+/// 造不出 `/*`、垃圾分母、或干脆不发 `Content-Range` 这三种形状。
+/// 第四条 `/known-total` 是**对照组**：分母可用时必须照常读出 48 MiB（不是窗口）——
+/// 没有它，"把所有 206 都拒掉"也算修好了。
+#[test]
+fn a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_length(
+) -> anyhow::Result<()> {
+    let fake = PROBE_READ_BYTES.to_string(); // 那个假数字就是窗口大小 = 236032
+    let stub = harness::spawn_unknown_total_stub(PROBE_READ_BYTES)?;
+    let client = harness::client()?;
+
+    for (route, shape) in [
+        ("/unknown-total", "Content-Range 的总长写成 `*`（RFC 9110 允许的未知总长）"),
+        ("/garbage-total", "Content-Range 的分母不是数字"),
+        ("/no-content-range", "206 根本不带 Content-Range"),
+    ] {
+        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
+        // 用 `match` 而不是 `let Err(..) else`：后者在 else 分支里叫不出那份"成功"，
+        // 而本轮要的恰恰是把它的 `total_len` 打出来当证据。
+        let err = match probe::run(&t, &client, PROBE_READ_BYTES) {
+            Err(err) => err,
+            Ok(r) => panic!(
+                "{shape} 时 probe 必须报错，不许把本次窗口的字节数当文件全长交回去 —— \
+                 它成功了，total_len = {}（预读读了 {} 字节，两者自洽 ⇒ 截断会被报成下载完成）",
+                r.facts.total_len,
+                r.prelude.len(),
+            ),
+        };
+        let msg = err.to_string();
+        eprintln!("---- 206 说不出总长（{route}）的拒绝原文 ----\n{msg}");
+        assert!(msg.contains("长度"), "错误要说清是长度定不下来：{msg}");
+        assert!(msg.contains("206"), "错误要点名这次的响应形状：{msg}");
+        assert!(
+            !msg.contains(&fake),
+            "错误里把那个当不得全长的数字抄出来了（{fake} 正是窗口大小）：{msg}"
+        );
+        assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
+        assert!(stub.saw(route), "必须真打到对端：{:?}", stub.seen());
+    }
+
+    // 对照组：同一台对端、分母可用 ⇒ 全长来自分母，不是窗口。
+    let t = Task { url: format!("{}/known-total", stub.base()), ..harness::blank_task() };
+    let r = probe::run(&t, &client, PROBE_READ_BYTES)?;
+    eprintln!("---- 对照组（分母可用的 206）----\n{:?}", r.facts);
+    assert_eq!(r.facts.total_len, 48 * 1024 * 1024, "读的是 Content-Range 的分母，不是 Content-Length");
+    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES, "窗口照样读满");
+    assert!(r.facts.accept_ranges, "206 + 可用的 Content-Range ⇒ 认 Range（不受 I1 的合取影响）");
+    Ok(())
+}
+
 // ---------------------------------------------------------------- 9 项契约头
 
 /// probe 发出的请求要带上任务里的 `referer`/`cookies`（以及 `Accept-Encoding: identity`），
@@ -494,10 +553,59 @@ fn an_ordinary_redirect_still_lands_and_is_reported() -> anyhow::Result<()> {
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
     assert_eq!(r.facts.final_url, land_url, "落地 URL 要如实记下（spec §6.5：续传按它比对）");
-    assert!(r.facts.accept_ranges, "落地那条自己发了 Accept-Ranges: bytes");
+    // **期望更正（评审 I1），不是削弱断言**：落地那条自己发了 `Accept-Ranges: bytes`，却对我们那条
+    // `bytes=0-236031` 回 `200` ⇒ 这个对端**不**按 Range 答话。原写法 `assert!(.., "落地那条自己发了
+    // Accept-Ranges: bytes")` 钉的正是缺陷本身（把"头怎么说"当成"行为上做没做"）：那种读法下
+    // `scheduler` 的 `NoRanges` 退化永不触发（段表不合并，靠后的区间会把内容写错位置），
+    // `resume` 的 ⑤ 也会替一份多段快照说话。见 `src/probe.rs` 模块文档第 10 条。
+    assert!(
+        !r.facts.accept_ranges,
+        "对我们那条 Range 回了 200 ⇒ 头里的 Accept-Ranges 不作数（spec §2.2 第二条）：{:?}",
+        r.facts
+    );
     assert_eq!(r.facts.etag.as_deref(), Some("\"stub\""), "ETag 原样保留，含协议要求的引号");
     assert_eq!(r.facts.total_len, 0, "落地那条是 Content-Length: 0");
     assert!(stub.saw("/landed"), "必须真的跟随了重定向：{:?}", stub.seen());
+    Ok(())
+}
+
+/// 评审 **I1** 的正面钉：对端**发了** `Accept-Ranges: bytes` 又拿 **200** 回答我们那条 `Range`
+/// ⇒ `accept_ranges` 必须为**假**，且长度**退到 `Content-Length`**（退化读法）。
+///
+/// 为什么 `/noranges` 挡不住这一支：那条路由把头和行为**一起**改坏了（既不发 `Accept-Ranges`
+/// 也不答 206），于是"两条证据取其一"的旧写法在它上面照样给 false —— 只有**只坏一条**的对端
+/// （头说认 Range、行为上把 Range 当没有）才测得出合取还是析取。这种对端线上很常见：
+/// 反代/CDN 吞掉 `Range` 但把源站的 `Accept-Ranges` 透出来。
+///
+/// 用窄对端而不是 node 服务器：本仓库的服务器是诚实的，`Range` 要么答 206 要么整个不发那个头，
+/// 造不出这个自相矛盾的形状（它也不该被改造成骗子 —— `probe-server.mjs` 不在本轮授权里）。
+#[test]
+fn a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads() -> anyhow::Result<()>
+{
+    const BODY: u64 = 4096;
+    let stub = harness::spawn_range_ignoring_stub(BODY)?;
+    let t = Task {
+        url: format!("{}/claims-bytes-answers-200", stub.base()),
+        ..harness::blank_task()
+    };
+
+    let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
+    assert!(
+        !r.facts.accept_ranges,
+        "发了 `Accept-Ranges: bytes` 却对 Range 回 200 ⇒ 不认 Range，段表要退化：{:?}",
+        r.facts
+    );
+    assert_eq!(
+        r.facts.total_len, BODY,
+        "退化读法：全长退到 Content-Length（这一支是诚实 200 交出来的整个 body）"
+    );
+    assert_eq!(r.prelude.len() as u64, BODY, "body 比预读量小 ⇒ 预读就是整份 body");
+    assert_eq!(r.facts.etag.as_deref(), Some("\"stub-ignores-range\""), "退化不丢验证子");
+    assert!(
+        stub.saw("/claims-bytes-answers-200"),
+        "必须真打到对端（否则本用例没测到任何请求行为）：{:?}",
+        stub.seen()
+    );
     Ok(())
 }
 
