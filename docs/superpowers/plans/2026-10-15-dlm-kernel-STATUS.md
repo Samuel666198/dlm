@@ -1,8 +1,8 @@
 # dlm 内核 v1 — 执行状态与恢复说明
 
-计划：[`2026-10-15-dlm-kernel.md`](./2026-10-15-dlm-kernel.md)（末尾 `## 勘误` E1–E6 为权威，与正文冲突时以勘误为准）
-设计：[`../specs/2026-10-15-dlm-kernel-design.md`](../specs/2026-10-15-dlm-kernel-design.md)（§10 勘误 R1–R5，R5 已作废 R4）
-分支 `sdd/dlm-kernel`，未 push、无远程。**2026-10-15 收工断点。**
+计划：[`2026-10-15-dlm-kernel.md`](./2026-10-15-dlm-kernel.md)（末尾 `## 勘误` E1–E13 为权威，与正文冲突时以勘误为准）
+设计：[`../specs/2026-10-15-dlm-kernel-design.md`](../specs/2026-10-15-dlm-kernel-design.md)（§10 勘误 R1–R7，R5 已作废 R4）
+分支 `sdd/dlm-kernel`，未 push、无远程。**2026-10-16 更新。**
 
 ## 进度
 
@@ -13,10 +13,15 @@
 | T2 Scheduler 纯状态机（核心） | ✅ 评审通过（1 轮修复：补 `SegmentComplete`、退化模式改起点优先、删死变体 `Halt`） | `89a0eb2..0ee1d5b` |
 | T3 store 按偏移落盘 | ✅ 评审通过（1 轮修复：`flush` 改走 `sync_all`，`len` 守卫收紧到 500 µs） | `0ee1d5b..b1da691`（+ `0d18e96` docs E8） |
 | T4 state 断点文件 | ✅ 评审通过（1 轮修复：`stub_for_test` 共用段表闸、`validate()` 拒 userinfo URL、`Task` 的 `Debug` 掩码口令） | `0d18e96..f241ed5`（含 `1d0c0af` docs R6/E9） |
-| **T5 resume 判定** | **下一个，未派发** | — |
-| T6 probe · T7 fetch · T8 engine · T9 CLI · T10 验收 | 未开始 | — |
+| **T5 resume 判定** | ✅ 评审通过（1 轮修复：补 ①b「请求本身变了」闸；另修两条**恒真假绿夹具**——关键词 `"URL"` 被两条路的串同时满足） | `23e39fd..8b2921f`（含 `ec78d25`/`4353719` docs E10） |
+| **T6 probe 试探** | ✅ 评审通过（1 轮修复 + **补发**的 scoped 复审全绿：`accept_ranges` 改带否决的合取、206 不许回落 `Content-Length`） | `4353719..840b0e5` |
+| **T7 fetch 窗口化子请求** | ✅ 评审通过（1 轮修复 + scoped 复审：钉住 206 起点 / `Complete` 边界 / 416 分母三格存活变异，`FailKind::Transport(String)`） | `840b0e5..1c140e8`（含 `ba906f4` docs R7/E11/E12） |
+| **T8 engine 主循环** | **下一个，未派发**（简报有三处接口是断的 ⇒ 必读 **E13**） | — |
+| T9 CLI · T10 验收 | 未开始 | — |
 
-计划文末 `## 勘误` 现有 **E1–E9**（E7/E8/E9 都是执行期实测后才写进计划的，正文不回改）；设计稿 §10 现有 **R1–R6**。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
+计划文末 `## 勘误` 现有 **E1–E13**（E7–E13 都是执行期实测后才写进计划的，正文不回改）；设计稿 §10 现有 **R1–R7**。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
+
+**当前基线（2026-10-16 控制器实测于 `1c140e8`）**：`cargo test --lib` **135 passed / 0 failed**、`cargo test --test integration` **57 passed / 0 failed**（约 17.6 s）、`cargo clippy --all-targets -- -D warnings` 静默。下一任务的验收下限就是这个数：**只许增、不许删、不许改判据方向**。
 
 
 ## 恢复步骤（照做即可，别凭记忆）
@@ -26,7 +31,7 @@ cd /e/WorkSpace/projects/tool/dlm
 SDD="C:/Users/ROG/.qoder-cn/plugins/cache/qoder-marketplace/superpowers/6.3.0/skills/subagent-driven-development/scripts"
 git rev-parse --abbrev-ref HEAD          # 应为 sdd/dlm-kernel
 cat .superpowers/sdd/2026-10-15-dlm-kernel/progress.md | head -3   # 首行须指向本计划，否则不是本计划的账
-bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 2
+bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 ```
 
 账本在 `.superpowers/sdd/`（被 `.superpowers/sdd/.gitignore` 整目录忽略 ⇒ `git clean -fdx` 会连账一起清，届时以本文件 + `git log` 为恢复源）。每任务循环：`task-brief` → 派实现者（记 BASE）→ `review-package PLAN BASE HEAD` → 派评审 → 需要则修复轮（≤5）→ 记账 `Task N: complete`。
@@ -40,6 +45,11 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 2
 5. **T9 的两处计划缺陷预先改掉**：`parse_from` 签名泛化为 `<I, S> where S: Into<OsString> + Clone`（否则计划自己的测试字面量 `["dlm", "--url", …]` 编译不过，断言不许改）；`ProgressLine` 无人定义 ⇒ 由 `src/report.rs` 自造，字段反推自 `:885` 那行渲染格式。
 6. **T6 要补一条守卫用例**（E3）：同一连接上"读满一个 206 → 再发一个 416"必须都完成 —— 这是唯一守住 `res.end()` 修复不被回退的东西。
 7. **T10 的"掐断后能续、且不重下已完成段"必须用 `/drop/<n>`**（E5），不是 `/flaky` —— `/flaky` 从来只把长度改成 4 MiB，不会中断 body。限速场景用 `GET /sz/<n>s`（n 取 65536 的整数倍，约 n/65536×200 ms），不用 `/slow`（48 MiB 真限速后要跑约 154 秒）。
+8. **T8 的简报有三处断接口，一律按 E13 改**：`Scheduler` 没有续传播种门（要加 `resume(total, min_seg, done)` 并配"与 `new`＋逐个封存等价"的用例）；`Config.resume: Decision` 站不住 ⇒ **引擎自走 `load → probe → decide`**，`Config` 改 `{workers, min_seg, max_retries, verify_sha256, force_fresh, keep_state}`；Step 1 那条 `harness::replay(Range 序列)` 与 spec §7.2 相反 ⇒ 录**事件序列**回放给真 `Scheduler`，比"动作 vs 实际派发 vs 线上 Range"三道链接。
+9. **`FailKind::Transport(String)`**（T7 裁定 D）⇒ `Outcome`/`FailKind` 从 `Copy` 降为 **`Clone`**（worker 线程发结论走克隆）。原因串在生产侧已保证**单行、≤200 字符、不含 body 字节** ⇒ **T9 打印时不许再截断或再拼接**（两处截断会互相吃掉信息）。
+10. **`probe::run` 对带 `data_file` 的任务在上网前硬拒**（E11①）⇒ 引擎必须跳过 probe、用 `fetch::run_whole`，且**这一枪只发一次**（重发＝二次提交表单，spec R7 已封顶）；该形状**既不读也不写断点文件**（E13④：存一份段表等于造一条永远执行不了的假 `Resume`）。
+11. **完成判定分两本账**（E7 追加段 + E13④）：`sched.is_done()` **且** `store.len() == total_len` 才算完；`snapshot_intervals()`/`confirmed_bytes()` 是"归属已定的字节"，**永远不许**当"已写字节数"去过 spec §6.7 的闸。给了 `--sha256` 就读真文件算（`sha2` 早在依赖里，不是新增），不匹配则**保留文件与断点**并报错退出。
+12. **进程内窄桩的天花板是 `MAX_CONNECTIONS = 8` × `PER_CONNECTION = 4`** ⇒ 多 worker 的引擎用例一律用 node 对端（无上限）；已**授权把 `PER_CONNECTION` 抬到 64**（E13⑤），抬完既有断言一条不许改。
 
 ## 实测才知道的坑
 
@@ -49,6 +59,8 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 2
 - Git Bash 把 `/x` 这类开关改写成盘符；给原生 node/curl 传路径时用 `MSYS2_ARG_CONV_EXCL='*'`，日志路径写仓库内 `target/`，别写 `/tmp`。
 - harness 限速生效后有条尾巴：同一条 keep-alive 连接上的**第二个**请求要等一拍（实测 201/203 ms）。T7 的窗口超时判据若贴着 200 ms 量纲会被它干扰 —— 时序预算要算进去。
 - `pipeline` 里取退出码要单独跑；`node --check` 只验语法不验行为。
+- **`File::open` 一个目录在本机是直接失败的**（`PermissionDenied, os error 5`），不是"打开成功、读到才炸"。我给 T7 的 drive-by 写过的前提是错的，实现者实测推翻并只保留了"消息更准确"这一条价值。⇒ **派发里写的"库行为/症状成因"和数字一样要先复量。**
+- **评审者报的观察也要复量**：T6 复审说发包 diff "被截断"，我未测就落了账；实测 `tail -n +13 包文件` 与 `git diff -U10 BASE..HEAD` **逐字节相同**（626 行对 626 行）⇒ 发包无罪，真因是最后一个 hunk 只有 10 行尾上下文、恰好停在一段中文文档中间。以后怀疑缺内容就拿 `git diff --stat` 的行数对账。
 
 ## 挂账的 minor（评审判"不阻塞"，最终评审 triage）
 

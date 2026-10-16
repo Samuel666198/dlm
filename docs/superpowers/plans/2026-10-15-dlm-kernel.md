@@ -1184,6 +1184,33 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   ⑧ **POST 那一枪的功能封顶**（设计稿 R7）：`run_whole` 是"一发请求读完全部"，最多只能拿到一个窗口预算内到达的字节，
   而**重发这一枪就是二次提交表单**（E11① 的理由）⇒ Task 8 不许靠重发续完，跑不完就如实报未完成并以非零码退出。
 
+- **E13：Task 8 的简报有三处接口是断的（我在 T7 收口时通读六模块对外形状量出来的），派发前按本条改；任务正文不回改。**
+  ① **`Scheduler` 没有"把断点喂回来"的门。** 它只有 `new(total, min_seg)`（`src/scheduler.rs:127`）＋ `on/ is_done/ pending_bytes/ snapshot_intervals`；
+  `state::SegView::interval()` 的注释（"Task 8 若要把断点喂回调度器"）**假设的门不存在** ⇒ `Decision::Resume(snap)` 到了引擎手里只能**重下**（要么就是再造一本覆盖账，E7 明令禁止）。
+  ⇒ Task 8 必须给 `scheduler` 加一个播种入口（名字建议 `resume(total, min_seg, done: &[Interval]) -> Self`），**内部走既有的 `seal()` 同一条路**，
+  并配一条**等价性用例**：`resume(seed)` 的后续行为 == `new()` 之后把那批区间逐个封存的后续行为（同一事件流下动作序列逐条相同）。
+  这条是"新模块改旧模块"，评审时按契约变更对待，不许只加不测。
+  ② **`Config { …, resume: Decision }` 这个形状站不住。** `Decision::Fresh{reason}` 里**没有任何事实**，而引擎必须知道
+  `total_len`（喂 `Scheduler` 与 `run_window` 的第 6 个参数）、`accept_ranges`（要不要发 `NoRanges`）与验证子（存断点要用）；
+  这三样只在 `ProbeFacts` 里，而 `probe::run` 又必须被调（它拒绝 `data_file` 那一支，E11①）。把 probe 放在 CLI 里 ⇒ Task 9 那个"解析参数＋打进度行"的任务
+  凭空背上网络与断点文件两套账，且 `Decision::Abort` 在 CLI 与引擎之间无家可归。
+  ⇒ **裁定：引擎自己走完整条链** `state::load → probe（`data_file` 跳过）→ resume::decide → 执行`；
+  `Config` 去掉 `resume`，改为 `{ workers, min_seg, max_retries, verify_sha256, force_fresh, keep_state }`
+  （`force_fresh` 就是 spec §4 的 `--no-resume`，`keep_state` 就是 spec §4 的"完成后不删断点"）。
+  `Abort` ⇒ `engine::run` 返回 `Err(原因)` 且**不碰断点文件**（T5 转派第 ④ 条）；"跑完了但没跑全"⇒ `Ok(Report{ ok: false, … })`，非零退出码归 Task 9。
+  ③ **Step 1 那条"事件回放一致性"的实现路径与设计稿 §7.2 相反。** 简报写的是 `harness::replay(observed_ranges, total, min_seg)` 造一条 `predicted` 再比 ——
+  §7.2 明令"**不能直接拿『预测序列』对比，因为劈分时机取决于真实时序**"。要做的是**录事件**：`Report` 带一条本次运行喂给调度器的事件序列
+  （简报第 823 行的 `rep.event_log_path` 因此作废 —— 引擎在生产里不写日志文件，别为测试造一条），测试把**同一串事件**回放给一个全新 `Scheduler`，
+  断言它给出的 `Assign{iv}`/`Retighten{iv}` 与引擎**实际派发**的区间逐条相等，再与 node 侧日志里**线上真收到的 `Range`** 对齐。
+  两道链接各有独立价值：前者抓"引擎没照调度器办事"，后者抓"引擎说派了但线上不是那个 Range"。
+  ④ 三条配套裁定：**退避不许造假时钟** —— 把 `spec §6.1/§6.2` 的退避抽成纯函数 `next_retry_delay(attempt, max_retries) -> Option<Duration>`（`1,2,4,8,16` 后转 `30 s` 无限；
+  `max_retries` 封顶 ⇒ `None` ⇒ 整任务失败），表驱动单测零睡眠，另配**一条真睡 1 秒**的集成用例证明退避真的接进了循环；
+  **完成判定分两本账**（E7 追加段）—— `sched.is_done()` 且 `store.len() == total_len` 才算完，覆盖集字节数**永远不许**当"已写字节数"过 §6.7 的闸，
+  给了 `--sha256` 就读真文件算（`sha2 = "0.11"` 早在 `Cargo.toml` 里，不是新依赖），不匹配则**保留文件与断点**并报错；
+  **`data_file` 那一支既不读也不写断点文件** —— POST 不可续（E12⑧），若给它存一份段表就等于凭空造出一条"下轮会判 `Resume` 却永远执行不了"的假路径。
+  ⑤ 夹具天花板要现在就拆：进程内窄桩上限是 `MAX_CONNECTIONS = 8` × `PER_CONNECTION = 4`（`tests/harness/mod.rs:463/:464`）⇒ 多 worker 的引擎用例一律用 node 对端（无上限），
+  并**授权把 `PER_CONNECTION` 抬到 64**（T7 复审登记的挂账：现有两条用例正好把 4 格占满，再补一发会以"30 秒客户端超时"失败而不是断言红）。抬完之后既有断言一条不许改。
+
 
 
 
