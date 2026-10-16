@@ -996,6 +996,29 @@ fn a_body_that_never_starts_is_a_countable_transport_failure() -> anyhow::Result
     Ok(())
 }
 
+/// 裁定 4 的另一支零进度：**干净的 EOF**、body 长度是 0（`Content-Length: 0` 的降级 `200`）。
+///
+/// 为什么单独立一条而不是靠上面那条 `/drop/0`：那条走的是"读的时候报错"那一支，这一条走的是
+/// "读到 `Ok(0)`"那一支 —— 两条都是零字节，但代码路径不同。变异 M9（把 EOF 支改成无条件
+/// `Advanced{bytes}`）在这仓库里**只有这一条**会红：`Advanced { bytes: 0 }` 交回 Task 8 就是
+/// "写了 0 个字节，请再派一次"，重试上限一个也数不到 ⇒ 一条永不给字节的对端可以让我们无限循环。
+/// 零进度必须是 `Failed`，这样 §6.1/§6.2 的封顶才有东西可计。
+#[test]
+fn an_empty_degraded_body_for_a_non_empty_interval_is_a_countable_failure() -> anyhow::Result<()> {
+    let stub = harness::spawn_range_ignoring_stub(0)?;
+    let (store, path) = harness::store("t7-empty-body.bin")?;
+    let t = Task { url: format!("{}/claims-bytes-answers-200", stub.base()), ..harness::blank_task() };
+    let iv = Interval { start: 0, end: 4096 * 4 - 1 };
+
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    assert_eq!(out, Outcome::Failed(FailKind::Transport), "区间要 16 KiB、对端交了 0 字节 ⇒ 零进度必须计一次失败：{out:?}");
+    assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
+    assert!(stub.saw("/claims-bytes-answers-200"), "必须真打到对端：{:?}", stub.seen());
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
 /// 裁定 3(c) 的正支（真·卡死）：对端收了请求**永不回答**。窗口预算到点 ⇒ `Stalled`。
 ///
 /// 为什么这一条要 15 s：预算是 plan 第 796 行那个式子，下界 `WINDOW_MIN_TIMEOUT_SECS = 15`，
