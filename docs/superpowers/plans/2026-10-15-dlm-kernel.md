@@ -1095,6 +1095,7 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
 
 - **`snapshot_intervals()` 返回的是"已确认字节的极小覆盖集"（升序、相邻/重叠已合并、两两不重叠），不是 IDM 的分段边界列表。**
   本计划第 326 行那句"已完成区间，供 state 落盘"要按这个措辞读，第 627 行 Task 4 的 `SegView { start, end, written, state }`
+  （**这四个字段的写法已被 E9 取代：实际落地是 `{ start, end }`**）
   **不得假设"一条 = 一个曾经派出去过的分段"**：一段被劈过再交回，这里只剩合并后的一条；`SegmentComplete` 封存的段也照样
   出现在里面（其 `written` 请按上面那条理解）。这是上一轮报告 §5 顾虑 2 的正式化，实现见 `src/scheduler.rs:148`
   与 `push_done()`（`:333` 附近，合并逻辑）。
@@ -1112,6 +1113,21 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   ③ **它不是断电级保证**，`flush` 的文档已明写"进了设备"不等于"断电不丢"（设备写缓存另算）；任何"断电安全"的说法都不许由这句调用衍生。
   本轮同时把 `len()` 的性能守卫从 `avg_micros < 5_000` **收紧**到 `< 500`（实测均值 3 µs、加载下最差 6 µs、余量 83 倍），
   报告 §4 那句"< 500 µs"现在与代码一致了；断言只变严、无任何放宽。
+
+- **E9：`SegView` 落地只有 `{ start, end }` —— 本计划第 627 行写的 `{ start, end, written, state }` 两字段作废（Task 4 执行期定，配套设计稿勘误 R6）。**
+  裁决理由三条，都可在码上核：① 设计稿第 81 行自己的示例 `{start:0, end:236032, written:236032}` 里 `written` **没有定义**
+  （既不是包含式字节数 236033，也不是相对偏移），没有语义可保；② `state` 恒为 `"done"`，是常量字段；
+  ③ E7/T2-D 之后 `Event::SegmentComplete` 会把**从未落盘**的字节记进覆盖集，留着 `written` 就是让断点文件对磁盘内容说谎 ——
+  而"落盘量"的真相归 `store.len()`（E8/E7），不归本文件。落盘名以 `src/state.rs` 为准：`stats` 是
+  `bytes_delivered` / `bytes_duplicated` / `retries`，**本计划第 843 行那句 `stats.duplicated` 按 `bytes_duplicated` 读**（Task 8 派发时必须这样写）。
+  配套政策（设计稿 R6 已陈述一次，这里只指路）：五个结构体一律 `deny_unknown_fields` 且无 `#[serde(default)]` ⇒
+  新增字段是破坏性变更，必须同时抬 `v`。
+  **另加一条 `Task::validate()` 的新规则（评审实证：口令防的是"字段"而不是"值"）**：`--url https://alice:s3cret@x/a.bin`
+  会把凭据原样落进 `task.url` 与 `validator.final_url` 两处，而 `state` 模块删不掉 URL（续传要用）。
+  故 userinfo 形态的凭据在 `validate()` 里**直接拒绝**，错误信息指使用 `--user` / `--password`。
+  这样 E7/T2-D 之后"口令不落盘"这条硬规定才真的成立，且它住在唯一的校验闸口里（`from_task` 已经调 `validate()`，磁盘边界自动受保护）。
+  代价：真要用 userinfo URL 的人得改写成两个参数 —— 而这正是我们想要的可见性。
+
 
 
 

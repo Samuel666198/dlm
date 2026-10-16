@@ -208,3 +208,12 @@ R4 正文按本节约定不回改。Task 0 实测（完整转录见 `.superpower
 - 另记一个未定位的副产物：矩阵里 `K_drain_notimeout` 没配 `.timeout()`，仍在 **30.005 s** 报
   `error sending request`。时长来源没查清（修好 harness 后同场景 1 ms 返回），但 Task 7 判 `Stalled` 时
   **不要假设"不配 timeout 就等于永不等"**。
+
+**R6（Task 4 执行期实测后补，正文第 81 行的示例不回改，以本条为准）：`segments` 行的形状是 `{ "start": 0, "end": 236032 }`，没有 `written`、没有 `state`。**
+本条示例里 `written: 236032` 本身就没有定义 —— 它既不是包含式字节数（那应是 236033），也不是相对偏移（那就是 `end`），
+所以没有任何语义需要保住；`state` 则恒为 `"done"`，是常量字段。更要紧的是 R5 之后 `Event::SegmentComplete` 会把
+**从未落盘的字节**记进覆盖集，留着 `written` 就等于让断点文件对磁盘内容说谎。落盘字段名以 `src/state.rs` 为准：
+`stats` 是 `bytes_delivered` / `bytes_duplicated` / `retries`（计划里简写 `stats.duplicated` 的地方按此读）。
+另：五个结构体一律 `deny_unknown_fields` 且没有 `#[serde(default)]` ⇒ **新增字段就是破坏性变更，必须同时动 `v`**，
+这条政策只在本节陈述一次。
+
