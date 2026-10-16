@@ -1197,6 +1197,9 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   ⇒ **裁定：引擎自己走完整条链** `state::load → probe（`data_file` 跳过）→ resume::decide → 执行`；
   `Config` 去掉 `resume`，改为 `{ workers, min_seg, max_retries, verify_sha256, force_fresh, keep_state }`
   （`force_fresh` 就是 spec §4 的 `--no-resume`，`keep_state` 就是 spec §4 的"完成后不删断点"）。
+  **本条写下五分钟后自纠一处**：`keep_state` **不进 `Config`** —— 它已经是 `Task::flags` 里的 `FLAG_KEEP_STATE`（`src/consts.rs:12`），
+  而 `flags` 会随 `TaskView` 进断点文件；两处都能读＝两本账。⇒ 引擎从 `task.flags & FLAG_KEEP_STATE` 读，`Config` 只留
+  `{ workers, min_seg, max_retries, verify_sha256, force_fresh }`。`force_fresh` 保持不进 `flags`（`--no-resume` 是"这一次怎么办"，不是"这个任务是什么"）。
   `Abort` ⇒ `engine::run` 返回 `Err(原因)` 且**不碰断点文件**（T5 转派第 ④ 条）；"跑完了但没跑全"⇒ `Ok(Report{ ok: false, … })`，非零退出码归 Task 9。
   ③ **Step 1 那条"事件回放一致性"的实现路径与设计稿 §7.2 相反。** 简报写的是 `harness::replay(observed_ranges, total, min_seg)` 造一条 `predicted` 再比 ——
   §7.2 明令"**不能直接拿『预测序列』对比，因为劈分时机取决于真实时序**"。要做的是**录事件**：`Report` 带一条本次运行喂给调度器的事件序列
