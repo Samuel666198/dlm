@@ -3,9 +3,11 @@
 //!
 //! 依据：spec §4 末段（凭据硬规约与 `needs_secret`）、spec §6.3（第 110–111 行「续传冲突」）、spec §6.5
 //! （第 113 行「最终 URL 记进 `validator.final_url`，续传按它比对」）、spec §3 末段（第 67 行
-//! 「续传请求带 `If-Range: <etag>`」—— 本模块的 ③ 就是这条的前提）、plan 第 705–707 行的判定顺序 ①–⑥。
+//! 「续传请求带 `If-Range: <etag>`」—— 本模块的 ③ 就是这条的前提）、spec §2.2（POST 形状是一等公民，
+//! ①b 因此存在）、plan 第 705–707 行的判定顺序 ①–⑥。
 //! 计划勘误与本任务派发裁定：**E6**（模块声明进 `src/lib.rs`）、**E9/R6**（`SegView` 只有 `start`/`end`）、
-//! 以及"`ProbeFacts` 住在本文件"（见下）。
+//! **E10**（③ 的两步并列读法，已批准 ⇒ 本模块的 ③ 保持原样）、Task 5 评审 **F1** 的裁定（①b：判
+//! "请求本身变没变"住在本模块，字段集见下）、以及"`ProbeFacts` 住在本文件"（见下）。
 //!
 //! ## 本模块不做 I/O
 //!
@@ -13,6 +15,9 @@
 //! 读断点文件（`state::load`）与试探服务器（Task 6 的 `probe::run`）都在调用方（Task 8 的 engine）手里；
 //! `--no-resume`（spec §4：无视已存在的断点文件）同样归调用方 —— 它只要把 `existing` 传成 `None`，
 //! 本模块就给 `Fresh { reason: None }`。这里**不读** `task.flags` 里的 `FLAG_KEEP_STATE`，那是收尾的活。
+//! ①b 比 `data_file` 时比的是**路径字符串**（`Option<PathBuf>` 整体相等），既不 `stat` 也不打开那个文件：
+//! 所以"同名文件内容被改过"这一支本模块发现不了（要闭合它得把内容散列落盘，设计稿没给这个字段）。
+//! 这与"不比 `password` 值"同一类：都是纯函数边界买不到的东西，登记给下游（见「①b 的字段集」）。
 //!
 //! ## `ProbeFacts` 为什么住在 `resume.rs` 而不是 `probe.rs`
 //!
@@ -28,16 +33,42 @@
 //! |---|---|---|
 //! | — | `existing` 为 `None`（没有断点文件，含 `--no-resume`） | `Fresh { reason: None }` |
 //! | ① | `snap.needs_secret && task.password.is_none()` | `Abort(原因)` |
+//! | ①b | 断点里的请求视图 `snap.task` 与本次 `task` 相比，`url`/`referer`/`cookies`/`data_file`/`user` 任一处不符（**不比** `flags`、`dir`/`name`、`password`：见「①b 的字段集」） | `Fresh { reason }` |
 //! | ② | `snap.validator.final_url != probe.final_url` | `Fresh { reason }` |
 //! | ③ | 第一步：两边都有 ETag 且不等 ⇒ `Fresh`（`ignore_mtime` 救不了这一条）。第二步：**不论 ETag 是相等还是缺**，再按 `Option` 整体比一次 Last-Modified，不等 ⇒ `Fresh`；本次任务带 `ignore_mtime` 时整步跳过 | 任一步不符则 `Fresh { reason }` |
 //! | ④ | `snap.validator.total_len != probe.total_len` | `Fresh { reason }` |
 //! | ⑤ | `!probe.accept_ranges && snap.segments.len() > 1` | `Fresh { reason }` |
 //! | ⑥ | 以上全过 | `Resume(snap)`（原样交回，不改一个字节） |
 //!
-//! 顺序是有意的：越靠前的判据越根本。口令缺失（①）时谈"资源是不是同一个"没有意义；重定向换了目标（②）
+//! 顺序是有意的：越靠前的判据越根本。口令缺失（①）时谈"资源是不是同一个"没有意义；请求本身换了（①b）
+//! 时连"服务器那份文件变没变"都无从谈起 —— 两侧确认字节的**不是同一次请求**；重定向换了目标（②）
 //! 意味着后面的比对对象都可能已经不是同一个资源；ETag/mtime（③）判"同一个资源"，长度（④）判"同一份内容"，
 //! Range（⑤）只判"这份进度还接得上吗"。多处同时不符时，交出去的原因是**第一条**不符的那条 ——
 //! 用例 `when_several_rules_disagree_the_first_one_wins` 钉住这一点（Task 9 只打一行，理由给错方向最误导人）。
+//!
+//! ### ①b 的字段集：为什么正好是这五个（评审 F1）
+//!
+//! ②③④⑤ 全部只在问"服务器那份文件变没变"，① 只问"口令给没给"。剩下第三件事没人管：**这次要发出的
+//! 请求，是不是当初确认这些字节的那一个**。它不是纸上风险 —— spec §2.2 把 POST 形状列为一等公民：
+//! 同 `--url`、同落地 URL，服务器对 POST 不回 `ETag`/`Last-Modified`（很常见），上一轮 `--data-file bodyA`、
+//! 这一轮 `--data-file bodyB` ⇒ ③ 无事可做、④ 长度照样相等、⑤ 不触发 ⇒ 只能由 ①b 拦。放过去的后果就是
+//! 设计稿第 67 行给 `If-Range` 写的那句话所指的**静默错误**，只不过这次"变"发生在客户端这一侧。
+//!
+//! - **比**：`url`、`referer`、`cookies`、`data_file`、`user` —— 五个都会进入请求、都能改变响应的字节。
+//! - **不比 `flags`**：简报自己的分支 3 就是"用户重跑时加了 `--ignore-mtime`，而正是这个旗标让它续得起来"。
+//!   断点里的 `TaskView` 存的是**上一轮**的旗标，不可能带着这一轮新加的那一位；让它参与比较，分支 3 会
+//!   先变成 ①b 的 `Fresh` ⇒ `--ignore-mtime` 在续传路径上**永久失效**。用例
+//!   `flags_are_deliberately_outside_the_request_comparison` 两个方向都钉住了。
+//! - **不比 `dir` / `name`**：断点文件的路径由目标路径派生（`state::path_for` = `<目标>.dlm.json`，与目标
+//!   同目录）⇒ 换落点意味着**读的是另一个断点文件**（多半读不到，走"没有断点"那一支），这里没有东西可
+//!   对账。`a_different_output_location_is_not_a_request_change` 挡的是"后来人顺手把比较集扩成整个
+//!   `TaskView`"。
+//! - **不比 `password`**：`TaskView` 里没有这个字段（spec §4 硬规约：口令不落盘）⇒ 本模块**拿不到值可比**。
+//!
+//! **已知盲区（照实登记，不要以为 ①b 覆盖了全部凭据变更）**：上一轮 `needs_secret=true`、这一轮又给了
+//! 一个**不同的**口令时，① 只看"给没给"、①b 看不到值，本模块**发现不了**口令换过。要闭合它只能把口令
+//! （或其散列）落盘，那与 spec §4 的硬规约直接冲突 ⇒ 维持现状，把这一条记进 T8/T9 的账（同一位用户换
+//! 口令通常伴随 401，那时由重试路径处理）。
 //!
 //! ### ③ 的四种存在组合（规则原文只写了"两者都有 / 任一缺失"两支，这里必须补齐）
 //!
@@ -92,7 +123,7 @@
 //! 且**绝不引用 `task.password` 的值**（`Task` 的手写 `Debug` 掩码的是另一条通道；这里根本不需要值，
 //! 断点文件里也没有：`TaskView` 少这个字段，E9）。
 
-use crate::state::Snapshot;
+use crate::state::{Snapshot, TaskView};
 use crate::task::Task;
 
 /// 试探（Task 6）之后关于远端文件**此刻**的事实，即 ②③④⑤ 的比对面。
@@ -151,6 +182,20 @@ pub fn decide(task: &Task, existing: Option<Snapshot>, probe: &ProbeFacts) -> De
         );
     }
 
+    // ①b 评审 F1：**请求本身**变了。① 只问"口令给没给"，②③④⑤ 全都只问"服务器那份文件变没变"，
+    //    而续传还依赖第三件事：**这次要发出的请求，和当初确认这些字节的那个请求，是同一个**。
+    //    具体可达形状（spec §2.2 把 POST 列为一等公民）：同 `url`、同 `final_url`，服务器不发
+    //    `ETag`/`Last-Modified`（POST 响应非常常见），上一轮 `--data-file bodyA`、这一轮 `bodyB`
+    //    （或换了 `--cookie`/`--referer`）⇒ ③ 整步无事可做、④ 的长度照样可能相等、⑤ 不触发，
+    //    没有这一步就会返回 `Resume`：把**另一个请求确认过的字节**接着用 —— 正是设计稿第 67 行
+    //    「文件已变但仍按旧段续 会变成静默错误」要挡的那件事，只是这次"变"在客户端这一侧。
+    //    比哪些字段（以及**刻意不比**哪些）见 `changed_request` 的文档。
+    if let Some(part) = changed_request(&snap.task, task) {
+        return fresh(format!(
+            "请求与断点不符：换了 {part} —— 已确认的字节出自另一个请求，续传会把两次请求的结果拼在一起，从头下载"
+        ));
+    }
+
     // ② spec §6.5：跟随重定向后把最终 URL 记进 `validator.final_url`，续传按它比对。
     //    换了落地地址 = 后面每一条比对的对象都可能不是同一个资源，所以排在验证子之前。
     if snap.validator.final_url != probe.final_url {
@@ -206,7 +251,43 @@ pub fn decide(task: &Task, existing: Option<Snapshot>, probe: &ProbeFacts) -> De
     Decision::Resume(snap)
 }
 
-/// `Fresh` 但一定带原因：②③④⑤ 每一条都必须说得出"哪条判据不同意"（Task 9 会打这句）。
+/// ①b 的判据：断点里那份请求视图（`snap.task`）与本次 `task` 相比，**第一条**不符的字段。
+///
+/// 只比这五个，因为判据要的是"对端交出的字节是不是同一批"，而这五个字段都会进入请求、都能改变响应：
+/// `url`、`referer`、`cookies`、`data_file`、`user`。
+///
+/// 刻意**不**比的三处（每一处都有用例挡"以后有人顺手把比较集扩大"）：
+/// - `flags`：简报自己的分支 3 就是"用户重跑时加了 `--ignore-mtime`，而正是这个旗标让它续得起来"。
+///   断点里的 `TaskView` 存的是**上一轮**的旗标，不可能带着这一轮新加的那一位 ⇒ 一旦参与比较，
+///   加分支 3 会变成 ①b 的 `Fresh`，`--ignore-mtime` 在续传路径上就**永久失效**。其余两位
+///   （`--keep-state`、`--no-start`）同样不改变请求内容（用例
+///   `flags_are_deliberately_outside_the_request_comparison`）。
+/// - `dir` / `name`：断点文件的路径是**由目标路径派生**的（`state::path_for`：`<目标>.dlm.json`，与目标
+///   同目录），所以换输出目录/换名意味着读的是**另一个**断点文件（通常读不到 ⇒ 走"没有断点"那一支），
+///   这里没有需要对账的东西（用例 `a_different_output_location_is_not_a_request_change`）。
+/// - `password`：`TaskView` 里**根本没有**这个字段（spec §4 的硬规约：口令不落盘），本模块拿不到值可比。
+///   ① 管的是"要不要给"，管不到"给的是不是同一个口令" ⇒ 这是本模块的**已知盲区**（见模块文档）。
+///
+/// 只报第一条：五处不符给的是同一个结论（`Fresh`），Task 9 只打得下一行。
+/// 报的是**字段名 + 对应参数**而不是字段值：`cookies`/`referer` 都可能带着凭据（`state.rs` 第 2 条把
+/// 这个风险登记给了 Task 9），把值抄进原因等于替它再多开一条外传通道。
+fn changed_request(saved: &TaskView, now: &Task) -> Option<&'static str> {
+    if saved.url != now.url {
+        Some("URL（--url）")
+    } else if saved.referer != now.referer {
+        Some("Referer（--referer）")
+    } else if saved.cookies != now.cookies {
+        Some("Cookie（--cookie）")
+    } else if saved.data_file != now.data_file {
+        Some("POST 体（--data-file）")
+    } else if saved.user != now.user {
+        Some("用户名（--user）")
+    } else {
+        None
+    }
+}
+
+/// `Fresh` 但一定带原因：①b②③④⑤ 每一条都必须说得出"哪条判据不同意"（Task 9 会打这句）。
 fn fresh(reason: String) -> Decision {
     Decision::Fresh { reason: Some(reason) }
 }
@@ -214,9 +295,9 @@ fn fresh(reason: String) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consts::FLAG_IGNORE_MTIME;
+    use crate::consts::{FLAG_ADD_ONLY, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
     use crate::scheduler::Interval;
-    use crate::state::{SegView, Validator};
+    use crate::state::{SegView, TaskView, Validator};
 
     const URL: &str = "https://x/a";
     const SECRET: &str = "hunter2";
@@ -461,6 +542,197 @@ mod tests {
         assert!(matches!(d, Decision::Fresh { reason: None }), "{d:?}");
     }
 
+    // ---- ①b 请求本身变了（评审 F1：这一条原先没人管）----
+
+    /// 把快照里的 `task` 视图换成**上一轮那次真实的请求**（其余字段取自 `stub_for_test`）。
+    ///
+    /// `stub_for_test` 落的是 `url = validator.final_url` 的占位值，把"用户请求的 URL"与"重定向落地的
+    /// URL"混成一件事 —— ①b 比的就是这个视图，所以凡涉及"请求/落地地址不一致"的夹具都必须由本函数
+    /// 显式给出上一轮的请求形状，否则用例是在对一个盘上不可能的形状成立（同 `state.rs` 的 F2 理由）。
+    fn snap_after(v: Validator, prev: &Task) -> Snapshot {
+        let mut s = Snapshot::stub_for_test(v, vec![]);
+        s.task = TaskView::from(prev);
+        s
+    }
+
+    /// 上一轮那次请求的"最小形状"：不带任何旗标，除要比的那一个字段外全空（= `task_plain()`）。
+    /// 名字叫出来是为了让 ①b 的每组用例读起来是"上一轮 vs 这一轮"，而不是两个不相干的夹具。
+    fn plain_prev_run() -> Task {
+        task_plain()
+    }
+
+    #[test]
+    fn a_changed_request_field_is_a_fresh_even_when_every_validator_agrees() {
+        // 这是 F1 的具体可达形状：同 url、同 final_url、服务器不发 ETag/Last-Modified（POST 的常见形状），
+        // 于是 ③ 无事可做、④ 长度照样相等、⑤ 空表放行 —— 除了 ①b，没有任何判据能发现"确认字节的那个
+        // 请求已经换了"。§3 第 67 行要挡的静默错误正是这一支。
+        let p = facts(None, None, 100, URL, true);
+        let cases: Vec<(Task, Task, &str)> = vec![
+            // (上一轮的请求, 本次的请求, 原因里必须点名的那一部分)
+            (plain_prev_run(), Task { url: "https://x/a?retry=2".into(), ..plain_prev_run() }, "URL"),
+            (
+                Task { referer: Some("https://ref/a".into()), ..plain_prev_run() },
+                plain_prev_run(),
+                "Referer",
+            ),
+            (Task { cookies: Some("sid=42".into()), ..plain_prev_run() }, plain_prev_run(), "Cookie"),
+            (
+                Task { data_file: Some("bodyA".into()), ..plain_prev_run() },
+                Task { data_file: Some("bodyB".into()), ..plain_prev_run() },
+                "POST",
+            ),
+            (
+                Task { data_file: Some("bodyA".into()), ..plain_prev_run() },
+                plain_prev_run(),
+                "POST",
+            ),
+            (Task { user: Some("alice".into()), ..plain_prev_run() }, plain_prev_run(), "用户"),
+        ];
+        for (prev, now, keyword) in cases {
+            // 对照：请求字段没变的同一份夹具必须能续 —— 少了这条，上面的断言可能在测夹具本身。
+            let same = decide(&prev, Some(snap_after(val_opt(None, None, 100, URL), &prev)), &p);
+            assert!(matches!(same, Decision::Resume(_)), "请求没变时这一支该续（否则下面的断言测的是别的东西）：{same:?}");
+
+            let d = decide(&now, Some(snap_after(val_opt(None, None, 100, URL), &prev)), &p);
+            let text = reason(&d).unwrap_or_else(|| panic!("请求变了也要给原因（{keyword}）：{d:?}"));
+            assert!(matches!(d, Decision::Fresh { .. }), "换了请求字段必须 Fresh，实际 {d:?}");
+            assert!(text.contains(keyword), "原因要说出是哪一部分的请求变了（{keyword}）：{text}");
+            assert!(!text.contains('\n'), "原因必须是一行：{text}");
+            assert!(text.chars().count() <= 200, "原因太长了，进度行放不下：{text}");
+        }
+    }
+
+    #[test]
+    fn the_request_change_reason_names_the_part_and_never_echoes_the_credential() {
+        // ①b 的判据是"哪个字段变了"，字段值不需要给用户看：`cookies`/`referer` 都可能带着凭据
+        // （cookie 是凭据这条风险登记在 `state.rs` 第 2 条，处置归 Task 9），把它们抄进原因等于
+        // 替它再多开一条外传通道；`--url` 那一支用户自己刚敲过，更没必要复述。
+        // 每支**只改一个字段**：①b 报的是"第一条不符"，同时改两处会把原因归到别的头上。
+        let cases: Vec<(Task, Task, &str)> = vec![
+            (
+                Task { referer: Some("https://ref/?t=OLDTOKEN".into()), ..plain_prev_run() },
+                plain_prev_run(),
+                "Referer",
+            ),
+            (
+                Task { cookies: Some("sid=OLDTOKEN".into()), ..plain_prev_run() },
+                Task { cookies: Some("sid=NEWTOKEN".into()), ..plain_prev_run() },
+                "Cookie",
+            ),
+            (
+                Task { user: Some("alice".into()), ..plain_prev_run() },
+                Task { user: Some("bob".into()), ..plain_prev_run() },
+                "用户",
+            ),
+            (
+                Task { data_file: Some("bodyA".into()), ..plain_prev_run() },
+                Task { data_file: Some("bodyB".into()), ..plain_prev_run() },
+                "POST",
+            ),
+        ];
+        for (prev, now, keyword) in cases {
+            let d = decide(&now, Some(snap_after(val("E", "L", 100, URL), &prev)), &base());
+            let text = reason(&d).unwrap_or_else(|| panic!("{keyword} 变了要给原因：{d:?}"));
+            assert!(text.contains(keyword), "原因该点名 {keyword}：{text}");
+            for value in ["OLDTOKEN", "NEWTOKEN", "alice", "bob", "bodyA", "bodyB", "sid="] {
+                assert!(!text.contains(value), "原因里把字段的值抄出去了（{value}）：{text}");
+                assert!(!format!("{d:?}").contains(value), "Debug 里也不该有（{value}）：{d:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_headline_shapes_from_the_finding_are_caught_and_name_their_flag() {
+        // 派发点名的两条具体路径各钉一支，并要求原因把**参数名**写出来（用户要能照着改）。
+        let p = facts(None, None, 100, URL, true); // 没有验证子、长度还照样相等
+        let saved_post = Task { data_file: Some("bodyA".into()), ..plain_prev_run() };
+        let now_post = Task { data_file: Some("bodyB".into()), ..plain_prev_run() };
+        let d = decide(&now_post, Some(snap_after(val_opt(None, None, 100, URL), &saved_post)), &p);
+        let text = reason(&d).expect("换了 POST 体也要给原因");
+        assert!(
+            matches!(d, Decision::Fresh { .. }),
+            "F1 的正主：bodyA 确认的字节不能接着给 bodyB 用，{d:?}"
+        );
+        assert!(text.contains("--data-file"), "原因要指名是哪个参数变了：{text}");
+
+        let saved_cookie = Task { cookies: Some("sid=42".into()), ..plain_prev_run() };
+        let now_cookie = plain_prev_run(); // 本次没带 cookie
+        let d = decide(&now_cookie, Some(snap_after(val_opt(None, None, 100, URL), &saved_cookie)), &p);
+        let text = reason(&d).expect("换了 Cookie 也要给原因");
+        assert!(matches!(d, Decision::Fresh { .. }), "同一份文件在另一个身份下可能是另一个资源：{d:?}");
+        assert!(text.contains("--cookie"), "原因要指名是哪个参数变了：{text}");
+    }
+
+    #[test]
+    fn flags_are_deliberately_outside_the_request_comparison() {
+        // 裁定：**不比 `flags`**，这不是风格问题。简报分支 3 就是"用户重跑时加了 `--ignore-mtime`，
+        // 而正是这个旗标让它能续"：断点里存的 `flags` 不可能带着这个旗标，一旦参与比较，加旗标就会先
+        // 撞上"请求变了"⇒ 该旗标在续传路径上永久失效。
+        let prev = plain_prev_run(); // flags = 0
+        let now = task(); // flags = FLAG_IGNORE_MTIME
+        assert_eq!(now.flags, FLAG_IGNORE_MTIME, "夹具：两个任务只差那一个旗标");
+        // 请求字段全同、mtime 真的变了 ⇒ 说话的是 ③b 的旗标豁免，不是 ①b。
+        assert!(
+            matches!(decide(&now, Some(snap_after(val("E", "L2", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            "加了 --ignore-mtime 反而变成 Fresh，就是这个旗标被 ①b 吃掉了"
+        );
+        // 反方向：上一轮开了旗标、这一轮没开，其余全等（mtime 也相等）⇒ 同样不是"请求变了"。
+        assert!(
+            matches!(decide(&prev, Some(snap_after(val("E", "L", 100, URL), &now)), &base()), Decision::Resume(_)),
+            "旧文件带过的旗标不该在本次反向绑架判定（这里没有任何不符可言）"
+        );
+        // 其余旗标（完成后保留断点 / 只入队不下）都不影响对端返回什么字节 ⇒ 照样不参与比较。
+        let others = task_with(FLAG_KEEP_STATE | FLAG_ADD_ONLY, None);
+        assert_eq!(others.flags, prev.flags ^ (FLAG_KEEP_STATE | FLAG_ADD_ONLY), "夹具：只动了旗标");
+        assert!(
+            matches!(decide(&others, Some(snap_after(val("E", "L", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            "旗标差异一律不构成 Fresh"
+        );
+    }
+
+    #[test]
+    fn a_different_output_location_is_not_a_request_change() {
+        // 裁定：**不比 `dir` / `name`**。断点文件的路径是由目标路径派生的（`state::path_for`：
+        // `<目标>.dlm.json`，与目标同目录），所以换输出目录/换名意味着**读的是另一个断点文件**（多半
+        // 读不到），这里根本没有需要对账的东西；把它们纳入比较只会让"换个目录继续下"变成整份重下。
+        // 这条用例是给后来人挡"顺手把比较集扩成整个 `TaskView`"的。
+        let prev = plain_prev_run();
+        let moved = Task { dir: "D:/other/place".into(), ..plain_prev_run() };
+        assert_ne!(moved.target_path(), prev.target_path(), "夹具：落点确实换了");
+        assert!(
+            matches!(decide(&moved, Some(snap_after(val("E", "L", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            "只换输出目录不构成 Fresh"
+        );
+        let renamed = Task { name: Some("renamed.bin".into()), ..plain_prev_run() };
+        assert_ne!(renamed.target_path(), prev.target_path(), "夹具：目标文件名确实换了");
+        assert!(
+            matches!(decide(&renamed, Some(snap_after(val("E", "L", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            "只换目标文件名不构成 Fresh"
+        );
+    }
+
+    #[test]
+    fn the_request_check_sits_after_the_secret_abort_and_before_the_final_url() {
+        // 位置由裁定写死：① 仍然最前（缺口令时连"请求变没变"都不谈），①b 排在 ② 之前
+        // （请求换了比落地地址换了更早、更可行动 —— 后者是服务器做的事）。
+        let mut secret = snap_after(val("E", "L", 100, URL), &plain_prev_run());
+        secret.needs_secret = true;
+        let new_request = Task { cookies: Some("sid=9".into()), ..plain_prev_run() };
+        assert!(
+            matches!(decide(&new_request, Some(secret), &base()), Decision::Abort(_)),
+            "① 必须仍排在 ①b 之前"
+        );
+        let redirected = facts(Some("E"), Some("L"), 100, "https://cdn.example/b.bin", true);
+        let d = decide(
+            &new_request,
+            Some(snap_after(val("E", "L", 100, URL), &Task { cookies: Some("sid=1".into()), ..plain_prev_run() })),
+            &redirected,
+        );
+        let text = reason(&d).expect("两处不符也要给原因");
+        assert!(text.contains("Cookie"), "该先说请求变了：{text}");
+        assert!(!text.contains("最终 URL"), "原因只能有一条：{text}");
+    }
+
     // ---- ⑤ 的边界：单行必须能续（派发点名的可达组合）----
 
     #[test]
@@ -563,7 +835,11 @@ mod tests {
             (task_plain(), snap(val("E2", "L", 100, URL)), base(), "ETag"),
             (task_plain(), snap(val("E", "L2", 100, URL)), base(), "Last-Modified"),
             (task_plain(), snap(val("E", "L", 99, URL)), base(), "长度"),
-            (task_plain(), snap(val("E", "L", 100, "https://x/elsewhere")), base(), "URL"),
+            // 夹具修复（F1 的比对让这里不能再图省事）：`stub_for_test` 把 `task.url` 落成了
+            // `validator.final_url`，于是这份夹具读起来像"上一轮请求的就是 /elsewhere"⇒ 会先撞上 ①b
+            // （换了 URL）而不是本用例要测的 ②（最终 URL 与断点不符）。讲得通的上一轮是
+            // "请求 /a、被重定向带到 /elsewhere"，所以请求视图取 `task_plain()` 自己。
+            (task_plain(), snap_after(val("E", "L", 100, "https://x/elsewhere"), &task_plain()), base(), "URL"),
             (task_plain(), snap_multi(val("E", "L", 100, URL), 2), no_ranges, "Range"),
             (task_plain(), secret, base(), "口令"),
             (task_plain(), s_len, facts(Some("E"), Some("L"), 100, URL, true), "Last-Modified"),
@@ -594,7 +870,10 @@ mod tests {
             (given.clone(), Some(secret), facts(Some("E2"), Some("L"), 9, "https://x/z", false)),
             (
                 given.clone(),
-                Some(snap(val("E2", "L2", 9, "https://x/z"))),
+                // 夹具修复（同上）：这份断点记的落地地址是 /z，而本次请求的是 URL ⇒ 旧写法把
+                // `task.url` 也落成 /z，看起来像"用户换了 --url"，会被 ①b 抢先。上一轮请求 /a 被带到 /z
+                // 才是讲得通的形状，于是请求视图取 `given` 自己（口令照样不落盘：`TaskView` 没这个字段）。
+                Some(snap_after(val("E2", "L2", 9, "https://x/z"), &given)),
                 facts(Some("E"), Some("L"), 100, URL, true),
             ),
             (task_with(0, Some(SECRET)), Some(snap(val("E", "L2", 100, URL))), base()),
