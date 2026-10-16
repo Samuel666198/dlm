@@ -166,6 +166,31 @@ impl Server {
         }
     }
 
+    /// 服务端看到的每一条请求的 `Range` 头，按到达顺序；那一枪没发 `Range` ⇒ `None`。
+    ///
+    /// 存在的理由（**E13③** 的第二道链接）：引擎"说我派了这个区间"证明不了线上真是那个 Range
+    /// —— 只有对端记下来的这条才是"发出去过什么头"的唯一权威证据。
+    /// 必须在 `Server` 的 guard 还活着时读（`Drop` 会删掉日志）。
+    pub fn ranges(&self) -> Result<Vec<Option<String>>> {
+        Ok(self
+            .requests()?
+            .into_iter()
+            .map(|r| r.get("range").and_then(Value::as_str).map(str::to_string))
+            .collect())
+    }
+
+    /// 服务端看到的每一条请求的**方法**（`GET` / `POST` / `HEAD`…），按到达顺序。
+    ///
+    /// "引擎绝不试探 `--data-file` 那一枪"只能在这里证：`probe` 发的是 GET，`run_whole` 发的是 POST，
+    /// 两边的 URL 可以完全一样（`src/probe.rs:190` 的那道闸挡不挡住，看的是线上有没有多出一条 GET）。
+    pub fn methods(&self) -> Result<Vec<String>> {
+        Ok(self
+            .requests()?
+            .into_iter()
+            .map(|r| r.get("method").and_then(Value::as_str).unwrap_or_default().to_string())
+            .collect())
+    }
+
     /// 杀掉 node 进程（`Drop` 调它）。
     fn stop(&mut self) {
         let _ = self.child.kill();
@@ -461,7 +486,12 @@ impl Stub {
 /// 起一个通用窄对端。`responder(target)` 返回**整段原始响应字节**（含状态行与结尾的空行）。
 fn spawn_stub(responder: impl Fn(&str) -> String + Send + 'static) -> Result<Stub> {
     const MAX_CONNECTIONS: usize = 8;
-    const PER_CONNECTION: usize = 4;
+    /// 每条 keep-alive 连接上最多服务的请求数。**E13⑤ 授权从 4 抬到 64**。
+    /// 抬的理由（T7 复审登记的挂账）：现有两条用例正好把这 4 格占满，第 5 发会以
+    /// "30 秒客户端超时"失败而不是断言红 —— 那不是被测代码的缺陷，是夹具的天花板。
+    /// 多 worker 的引擎用例一律走 node 对端（无上限）；这条天花板只是**抬高**，
+    /// 既有断言一条没改（`MAX_CONNECTIONS` 也没动）。
+    const PER_CONNECTION: usize = 64;
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("窄对端 bind 失败")?;
     let port = listener.local_addr().context("拿不到窄对端的端口")?.port();
@@ -1235,3 +1265,177 @@ pub fn scratch_body(name: &str, content: &[u8]) -> Result<PathBuf> {
     std::fs::write(&path, content).with_context(|| format!("写请求体文件失败：{}", path.display()))?;
     Ok(path)
 }
+
+// ---------------------------------------------------------------- Task 8 的落点与散列取证
+
+/// 一条用例**独占**的临时目录，落在 gitignored 的 `target/harness-scratch/` 下，`Drop` 时整目录删掉。
+///
+/// 为什么每条用例要各有一份：Task 8 的引擎用例会同时留下目标文件、`<目标>.dlm.json`、
+/// 原子写的 `.tmp` 兄弟，以及续传用例第二轮的证据。共用 `harness-scratch` 的扁平名字空间
+/// 会让两条并行用例互相踩（`blank_task()` 那个共享目录只服务"不落盘"的模块）。
+///
+/// 名字带 `pid` + 进程内自增序号 + 调用方给的标签 ⇒ 同机并行跑多个测试进程也不重名。
+/// `Drop` 用 `remove_dir_all`，失败一律忽略：留下来的东西在 `target/` 里不进版本库，
+/// 而"删不掉"不该把一条本来通过了的测试弄红。
+#[derive(Debug)]
+pub struct TmpDir {
+    path: PathBuf,
+}
+
+impl TmpDir {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// 建一条用例独占的临时目录。见 `TmpDir`。
+pub fn tmp_dir(tag: &str) -> Result<TmpDir> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::SeqCst);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("harness-scratch")
+        .join(format!("{}-{tag}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).with_context(|| format!("建用例临时目录失败：{}", dir.display()))?;
+    Ok(TmpDir { path: dir })
+}
+
+/// 真文件的 sha256（十六进制小写）。分块读，不把整个文件吸进内存。
+///
+/// 它是 `verify_sha256` 那条闸的**独立**读者：引擎算它的校验和用的是 `src/engine.rs` 里的同一套
+/// `sha2`，所以这条只用来证明"盘上的文件确实是那份内容"，不用来交叉验证引擎的哈希实现。
+pub fn sha256_of(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    const CHUNK: usize = 64 * 1024;
+    let mut f = File::open(path).with_context(|| format!("打开散列取证文件失败：{}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = f.read(&mut buf).with_context(|| format!("读散列取证文件失败：{}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// 服务端 blob 前 `len` 字节的 sha256 —— **"字节级正确"那个 oracle 本身**。
+///
+/// 形状照抄 `tests/harness/probe-server.mjs:11-12`：`Buffer.allocUnsafe(48 MiB)`，
+/// 每 4096 字节块首写块号（小端 u32），其余是分配器留下的零。`GET /sz/<n>` 交回的就是
+/// 那份 blob 的前 `n` 字节（`n` 超过 48 MiB 时服务端自己截到 48 MiB，这里同一个读法）。
+///
+/// **这份内容在本仓库里生成了两遍**（一遍 JS、一遍这里的 Rust）。两边一旦不一致，
+/// 所有"字节级相等"的断言都只是装饰 ⇒ `the_sha_oracle_matches_what_the_server_serves`
+/// 那条用例负责把这里与真 socket 对齐，它是本轮最有价值的一条测试。
+///
+/// 依赖的那件"分配器副产品"：块与块之间的填充字节本机实测全为零（48 MiB 走大页分配），
+/// 而 `mod.rs` 上方 `assert_blob_block_numbers` 的文档明说那不是契约。所以这条 oracle
+/// **只服务 `/sz/<n>` 的整段散列**，块内非块首字节的语义仍然只由那条用例的 socket 比对兜着。
+pub fn expected_sha(len: u64) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOB: u64 = 48 * 1024 * 1024;
+    const BLOCK: u64 = 4096;
+    let len = len.min(BLOB);   // 与服务器那句 `Math.min(size, SIZE)` 同形
+    let mut hasher = Sha256::new();
+    let mut block = [0u8; 4096];
+    let mut offset = 0u64;
+    while offset < len {
+        let take = (len - offset).min(BLOCK) as usize;
+        for b in block.iter_mut() {
+            *b = 0;
+        }
+        block[..4].copy_from_slice(&u32::try_from(offset / BLOCK).expect("块号超出 u32").to_le_bytes());
+        hasher.update(&block[..take]);
+        offset += take as u64;
+    }
+    hex(&hasher.finalize())
+}
+
+/// `Range` 字符串 → `(start, 含端终点)`，开放终点（`bytes=N-`）按 `total_len` 补齐。
+///
+/// 为什么要补：`fetch::range_header` 对**最后一段**（`iv.end + 1 >= total_len`）故意发开放写法
+/// （spec §2 表里那一条，也是 IDM 实测的形状），而调度器交回的区间总有显式终点。两边不在同一个
+/// 形状上比较，就等于把"线上真是那个区间"这道链接写成假断言。
+/// 看不懂的形状 ⇒ `Err`（宁可是夹具当场红，也不要悄悄少算一枪）。
+pub fn wire_span(value: &str, total_len: u64) -> Result<(u64, u64)> {
+    let (start, end) = parse_range(value).with_context(|| format!("服务端记下的 Range 看不懂：{value:?}"))?;
+    let end = match end {
+        Some(e) => e,
+        None => total_len.checked_sub(1).context("开放终点的 Range 碰上空文件")?,
+    };
+    anyhow::ensure!(start <= end, "Range 的起点晚于终点：{value:?}");
+    Ok((start, end))
+}
+
+/// `Server::ranges()` 的结果折成闭区间表（**每一条都必须带着 Range**，否则当场 `Err`）。
+///
+/// 引擎在可分段的形状上每一枪都发 `Range`（`src/fetch.rs` 里那道 F1 闸保证带体的任务进不了
+/// 窗口这条路），所以"有一条没发"只能是被测代码的问题，不是夹具的分支。
+pub fn wire_spans(ranges: &[Option<String>], total_len: u64) -> Result<Vec<(u64, u64)>> {
+    ranges
+        .iter()
+        .map(|r| {
+            let value = r.as_deref().context("服务端收到了一条**没有** Range 的请求（窗口化的每一枪都该带）")?;
+            wire_span(value, total_len)
+        })
+        .collect()
+}
+
+/// 字节 → 小写十六进制（不加依赖：`hex`  crate 不在 spec §9 的白名单里）。
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// `hex` 与 `sha2` 的格式必须一致（写反一位，所有散列断言都会红得让人怀疑被测代码而不是夹具）。
+#[test]
+fn the_harness_hex_encoder_is_lower_case_and_two_digits_per_byte() {
+    assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    assert_eq!(hex(&[]), "");
+}
+
+/// oracle 自己也要被证一遍（派发点名：这是本轮价值最高的一条用例）。
+///
+/// `expected_sha(n)` 说"服务器会交出那些字节的散列是 X"，而它的证据只能来自**真 socket**：
+/// 一次完整的 `GET /sz/<n>`，把收到的字节自己散一遍，与 `expected_sha(n)` 比。
+/// 这条一红就说明 `probe-server.mjs` 与这里的 Rust 两份 blob 生成器已经分家，
+/// 届时本轮所有"字节级正确"的断言都不作数 —— 所以它必须排在它们前面跑、且必须能跑。
+#[test]
+fn the_sha_oracle_matches_what_the_server_serves() -> anyhow::Result<()> {
+    // `_srv`：服务器要活到这一轮断言跑完，但用例不读它的日志（名字下划线只压"没用到"这条
+    // 警告，不影响 drop 时机 —— `Server` 的 `Drop` 在函数末尾才杀进程）。
+    let (_srv, base) = spawn()?;
+    // 三种长度各有分工：整块对齐 / 跨块的常规尺寸 / **不足一块的尾巴**（走 `take < 4` 那一支，
+    // 那里落进散列的是块号小端表示的前几个字节，不是整块号）。
+    for len in [65_536u64, 4 * 1024 * 1024 + 4096, 1_000_000, 5_000, 3] {
+        let url = format!("{base}/sz/{len}");
+        let got = client()?.get(&url).send().with_context(|| format!("GET {url} 失败"))?;
+        assert_eq!(got.status().as_u16(), 200, "整段 GET 该是 200");
+        let body = got.bytes().with_context(|| format!("读 {url} 的 body 失败"))?;
+        assert_eq!(body.len() as u64, len, "服务器自己说的长度");
+        assert_eq!(
+            sha256_of_bytes(&body),
+            expected_sha(len),
+            "oracle 与真 socket 分家了：`expected_sha` 生成的字节不是 `{base}/sz/{len}` 交回来的那批"
+        );
+    }
+    Ok(())
+}
+
+/// `sha256_of` 的内存版（同一套实现，只是读者已经在手里）。
+fn sha256_of_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex(&Sha256::digest(bytes))
+}
+
