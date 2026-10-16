@@ -16,12 +16,19 @@
 | **T5 resume 判定** | ✅ 评审通过（1 轮修复：补 ①b「请求本身变了」闸；另修两条**恒真假绿夹具**——关键词 `"URL"` 被两条路的串同时满足） | `23e39fd..8b2921f`（含 `ec78d25`/`4353719` docs E10） |
 | **T6 probe 试探** | ✅ 评审通过（1 轮修复 + **补发**的 scoped 复审全绿：`accept_ranges` 改带否决的合取、206 不许回落 `Content-Length`） | `4353719..840b0e5` |
 | **T7 fetch 窗口化子请求** | ✅ 评审通过（1 轮修复 + scoped 复审：钉住 206 起点 / `Complete` 边界 / 416 分母三格存活变异，`FailKind::Transport(String)`） | `840b0e5..1c140e8`（含 `ba906f4` docs R7/E11/E12） |
-| **T8 engine 主循环** | **下一个，未派发**（简报有三处接口是断的 ⇒ 必读 **E13**） | — |
+| **T8 engine 主循环** | 🟡 **进行中**：阶段1–4 已提交（`4a105e4`/`5a785ab`/`8f108d7`/`32140a0`），**任务级评审还没发**；阶段5（简报另两条测试 + `trace` 回放三道链接 + 附加用例）未做 | `1c140e8..32140a0` |
 | T9 CLI · T10 验收 | 未开始 | — |
 
 计划文末 `## 勘误` 现有 **E1–E13**（E7–E13 都是执行期实测后才写进计划的，正文不回改）；设计稿 §10 现有 **R1–R7**。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
 
-**当前基线（2026-10-16 控制器实测于 `1c140e8`）**：`cargo test --lib` **135 passed / 0 failed**、`cargo test --test integration` **57 passed / 0 failed**（约 17.6 s）、`cargo clippy --all-targets -- -D warnings` 静默。下一任务的验收下限就是这个数：**只许增、不许删、不许改判据方向**。
+**当前基线（2026-10-16 收工实测于 `32140a0`）**：`cargo test --lib` **158 passed / 0 failed**、`cargo test --test integration` **60 passed / 0 failed**（约 17.7 s）、`cargo clippy --all-targets -- -D warnings` **退出码 0**。下一任务的验收下限就是这个数：**只许增、不许删、不许改判据方向**。
+
+## 下一个动作（2026-10-16 收工断点，照此顺序）
+
+1. **先裁 `T8-R1`**（账本 `## Task 8` 末段，三条选项都写全了）：`Action::Retighten` 现在**没法当成一枪打出去** —— 收紧只作用于下一枪，在途那一枪照旧读满窗口，实测 **8 MiB 的文件重复下载 8.2 MiB（≈2× 流量）**。我倾向**乙**（把"当前终点"做成 worker 可观察的 `Arc<AtomicU64>`，`run_window` 的 64 KiB 循环每块查一次、提前 `break`），但这条要连改 `fetch` 契约 ⇒ **要和实现者一起定**，不许在派发里当既成事实。**这条不定，阶段5 的测试形状就没法定。**
+2. 派 **T8 阶段5**：简报 Step 1 的另外两条测试（kill 后续传不重下已完成段／`/noranges` 退化且并发=1）、`Report.trace` 的**三道链接**回放（录事件 → 真 `Scheduler` → 动作 vs 实际派发 vs 线上 Range），外加那批附加用例。**记得剔掉 probe 自己那一枪**（`T8-R2`：实测 17 条线上 vs 16 条真开）。
+3. 发 **T8 的任务级评审**（diff `1c140e8..阶段5 head`，评审包 `review-package PLAN 1c140e8 HEAD`）→ 需要则修复轮 → scoped 复审 → 记账 complete。
+4. **T9 CLI**、**T10 四场景验收**（`/drop/<n>` 与 `/sz/<n>s`，证据落 `docs/evidence/`），最后**全分支最终评审** + `.superpowers/sdd/` 清理 + 交一份"我替你做过的全部裁定"清单。
 
 
 ## 恢复步骤（照做即可，别凭记忆）
@@ -30,7 +37,10 @@
 cd /e/WorkSpace/projects/tool/dlm
 SDD="C:/Users/ROG/.qoder-cn/plugins/cache/qoder-marketplace/superpowers/6.3.0/skills/subagent-driven-development/scripts"
 git rev-parse --abbrev-ref HEAD          # 应为 sdd/dlm-kernel
-cat .superpowers/sdd/2026-10-15-dlm-kernel/progress.md | head -3   # 首行须指向本计划，否则不是本计划的账
+git log --oneline -4                     # 应为 32140a0 / 8f108d7 / 5a785ab / 4a105e4
+git status --porcelain                   # 应为空（不空就是树里有在制品，先按 md5 备份再动）
+cargo test --lib 2>&1 | tail -2          # 应为 158 passed
+tail -40 .superpowers/sdd/2026-10-15-dlm-kernel/progress.md   # 末段是 T8-R1 那条待裁项与三个选项
 bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 ```
 
@@ -61,6 +71,9 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 - `pipeline` 里取退出码要单独跑；`node --check` 只验语法不验行为。
 - **`File::open` 一个目录在本机是直接失败的**（`PermissionDenied, os error 5`），不是"打开成功、读到才炸"。我给 T7 的 drive-by 写过的前提是错的，实现者实测推翻并只保留了"消息更准确"这一条价值。⇒ **派发里写的"库行为/症状成因"和数字一样要先复量。**
 - **评审者报的观察也要复量**：T6 复审说发包 diff "被截断"，我未测就落了账；实测 `tail -n +13 包文件` 与 `git diff -U10 BASE..HEAD` **逐字节相同**（626 行对 626 行）⇒ 发包无罪，真因是最后一个 hunk 只有 10 行尾上下文、恰好停在一段中文文档中间。以后怀疑缺内容就拿 `git diff --stat` 的行数对账。
+- **一发子代理撑不住一个整任务**：T8 第一发跑了 43 分钟 / 117 次工具调用后被 "Model response interrupted" 打断，且**没写报告文件** ⇒ 现场只能靠 `git log` + `git diff --numstat` 重建。按阶段拆发之后（第 2 发只做阶段4）同样 115 次调用走完并留下了报告。**判据：任务里有 2 个以上"可独立评审"的落点，就先拆发。**
+- **被打断时"保 WIP"必须先于"量基线"**：那份 WIP（`src/engine.rs` +339/−74，编译不过）唯一的存在处就是工作树 ⇒ 先 `cp` 进 `.superpowers/sdd/<plan>/` 并**两侧 md5 复验**，再临时换成 HEAD 版本跑 `cargo test --lib` 取真实下限（这次量出 144），最后放回并复验 md5 与 numstat 未变。全程没碰 `git restore`/`checkout --`。
+- 派发里引用的基线数字要**当场重测**：我给阶段4 的 dispatch 写 integration 下限 57，实际是 59（阶段3 自己加了两条 harness 测试）—— 实现者纠正了我。
 
 ## 挂账的 minor（评审判"不阻塞"，最终评审 triage）
 
@@ -70,6 +83,16 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 - `--cookie` / `--referer` 同样是凭据，明文 HTTP 下照发；spec §4 只管口令，本轮不自作规则。
 - 依赖基线不可复现：`Cargo.toml` 用开区间，`.gitignore` 还忽略着 `Cargo.lock`（应用型 crate 通常该提交 lockfile）。
 - 计划勘误文案两处错标：E2 把"判定段"标成 Task 6 Step 3（实为 Task 0 Step 3）；E4 被取代那段把"停在 body 中间"写成 §7 场景 2（应是场景 3，E5 用的编号才对）。
+
+### T6/T7 收口后新挂的 minor（2026-10-16，同样只进最终评审 triage，本轮不动）
+
+- `src/probe.rs:84-85` 文档第 10 条写"发过 Range 而响应不是 206 时**无条件**为假"，但保留的 416 分支（`:216-231`，F3 批准过）在此之前把 `accept_ranges` 硬置 `true` ⇒ 行为无误、**文档与代码相反**，措辞要收成"走 `peer_accepts_ranges` 的那一支"。
+- `src/probe.rs:614-621` 一条真值表断言比的是**两个生产输出**（只能抓一类变异）；承重方向在 `:599-608`/`:622-623` 按字面钉着 ⇒ 可接受，但别把"比两个产物"当模板。
+- `src/fetch.rs`（T7 修复轮）三处措辞/断言强度：`:180-188` 与 `:757-761` 那句"这一支在本仓库的夹具下打不进去"**是过度声明**（复审给了配方：`200` + `Content-Length: 0` + `Content-Range: bytes 0-4194303/50331648` 走 `spawn_stub` ⇒ `:763` 与兄弟 `:768-777` 可达且可测，只是没做）；`tests/integration.rs:1793-1794` 把两条 cell 各杀哪个变异**说反了**；`:1081` 与 `:2007` 的关键字断言（`响应体`＋`干净结束`）被两条路各自自造的常量同时满足 ⇒ 钉不住来源分支（判别词是 `响应头` vs `声明了长度`）。
+- `tests/integration.rs:1947-1951` 用"绑端口→放开→再连"造 connection refused，有 **TOCTOU 偶发红**风险（要真修得换 accept-then-close 的确定性载体）。`take_transport_note`（`:1925`）把 200 硬写在测试里而不是引用 `TRANSPORT_NOTE_MAX_CHARS`（跨 crate 边界看不见私有常量）⇒ 上限被调会脱钩。
+- `task-7-report.md` §2 的 RED 行号锚点 `integration.rs:2039` 已漂到 `:2046`（文档块长行）。**报告里的行号会腐烂，复验时按消息文本找。**
+- 越界观察（评审判非阻塞）：`content_range_total`（`src/probe.rs:386-392`）**不核对 206 的窗口与我们请求的 Range 是否一致**；窄桩 `read_request_target` 只记 target、丢头 ⇒ 没有任何 probe 用例在**线上**断言 Range 真到了对端；`tests/harness/mod.rs` 顶部仍是文件级 `#[allow(dead_code)]`（下一个未用 helper 不会警告）。
+- `FailKind::ValidatorChanged` 不带消息 ⇒ 引擎/T9 只能说"验证子不符"，说不出是四格里哪一格（长度变了／起点不对／416 分母不对／…）。是未来的候选裁定，不是本轮缺陷。
 
 ## 等用户点头的两件跨项目事（不动 dlm 之外任何文件）
 
