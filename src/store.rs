@@ -97,17 +97,41 @@ impl Store {
         Ok(bytes.len())
     }
 
-    /// 把 std 的 `Write::flush` 原样转给句柄。
+    /// 把这条句柄已写出的字节真正同步到磁盘：`File::sync_all`（**T3-A**）。
     ///
-    /// 诚实的说法：`File` 不带用户态缓冲，std 文档（`impl Write for &File` 的 `flush` 注记）写明
-    /// 它在 Unix 与 Windows 上**目前是空操作**。所以这条**不是**断电级持久化 —— 那需要
-    /// `File::sync_all()`（Windows 的 `FlushFileBuffers`），本模块不调它：v1 的中断模型是
-    /// "进程被杀、机器还在"，那种情况下 `WriteFile` 已交出的字节对同机任何读者都可见，续传靠
-    /// `len()` 与自然延长就接得上。留这个方法只为调用方（Task 8 收尾）的形状与 plan 第 576 行一致。
+    /// 原来的实现是转 `File::flush`，而 std 源码（本机 `rustc -V` = 1.95.0，按该 tag 读上游；
+    /// 本机没装 `rust-src`）对 `impl Write for &File` 的 `flush` 写得很明白："Since a `File`
+    /// structure doesn't contain any buffers, this function is currently a **no-op** on Unix and
+    /// Windows"。一个名字承诺落盘、方法体什么都不做的 API 会骗到调用方，所以按裁定换掉。
+    /// `sync_all` 在 Windows 上走 `c::FlushFileBuffers`（`library/std/src/sys/fs/windows.rs` 的
+    /// `fsync`），顺带一提：那里 `datasync` 直接转 `fsync`，**Windows 上 `sync_data` 与 `sync_all`
+    /// 是同一个调用**，没有"换个便宜点的"这个选项，也就不必纠结选哪个。
+    ///
+    /// ## 只在任务收尾调用一次，别进热路径
+    ///
+    /// 调用点是"下载完成、可以给校验和 / 改状态"的那一刻（Task 8）。**不要放进 `run_window` 的
+    /// 每块循环**：`FlushFileBuffers` 要等这条句柄的全部在途写穿过系统缓存抵达设备。本机
+    /// （`target/` 所在卷，dev profile，64 块 × 64 KiB = 4 MiB，6 轮实测）：
+    /// - 每写一个 64 KiB 块就 flush：**2.3–7.3 ms/块**；
+    /// - 同一批写不打断、只在收尾 flush 一次：写本身 **15–38 µs/块**，收尾那次 **3.4–17.7 ms**。
+    ///
+    /// 也就是说热路径上调它是 **每块 60–480 倍**的白送开销（两端相除），而中途那份"持久性"没人消费：
+    /// `write_at` 交回的字节对同机后来的读者（Task 10 的校验读、`len()`）本来就已经可见。
+    ///
+    /// ## 保证到哪一步为止
+    ///
+    /// 在"进程被杀 / 机器还在"（v1 的中断模型，续传靠 `len()` + 自然延长接上）之上，再多保证一层
+    /// "OS 内部缓存的内容与元数据都进了设备"（std 文档：sync_all "sync all OS-internal file content
+    /// and metadata to disk"；元数据里就包括靠延长得到的长度）。它**不是断电级保证** —— 磁盘自己的
+    /// 易失写缓存不归 std 管，需要卷级/设备级手段。所以本模块没有任何"断电后字节还在"的断言或测试，
+    /// 也不许调用方这么写。
+    ///
+    /// 拿锁是必须的（`sync_all` 问的就是那条装在 `Mutex` 里的句柄，模块文档第 2 条）。方法名与
+    /// 签名仍与 plan 第 576 行的 `Store::flush()` 一致，Task 8 的调用形状不变。
     pub fn flush(&self) -> anyhow::Result<()> {
-        let mut file = self.handle();
-        file.flush()
-            .with_context(|| format!("flush 失败：{}", self.path.display()))?;
+        let file = self.handle();
+        file.sync_all()
+            .with_context(|| format!("同步落盘失败：{}", self.path.display()))?;
         Ok(())
     }
 
@@ -270,6 +294,39 @@ mod tests {
         Ok(())
     }
 
+    /// T3-A 之后 `flush()` 走 `File::sync_all`（原来的 `File::flush` 对文件是 std 文档写明的空操作）。
+    /// 这条只断言**在这台机器上真能断言的两件事**：开着的 store 上调用成功（含一个字节都没写过的
+    /// fresh store、含连调两次），以及 flush 之前写进去的字节 —— 包括高偏移写留下的空洞 ——
+    /// flush 之后按路径用另一条句柄读回来全在。
+    ///
+    /// **故意不写**"断电后字节还在"那种用例：它需要掉电注入，单测里做不到，写一条假装证明它的
+    /// 断言比不写更糟。也别说本条能区分 `sync_all` 与 no-op —— 同机读者本来就看得到 `WriteFile`
+    /// 交出的字节。方法体真的换成了 `sync_all` 的证据是成本量级变了（方法文档里的实测数字，
+    /// 原始 no-op 版实测中位 0 µs/次 → 现在 2.4–3.2 ms/次），不是这条断言。
+    #[test]
+    fn flush_succeeds_and_earlier_bytes_are_readable_afterwards() -> anyhow::Result<()> {
+        let p = scratch("t3_flush_then_read.bin");
+        let s = Store::open(&p, true)?;
+        s.flush()?; // 空 store 也刷得动：fresh 之后、第一块到达之前就收尾是合法路径
+        s.write_at(0, b"head")?;
+        s.write_at(1_000, b"tail")?;
+        s.flush()?;
+        s.flush()?; // 可重复调用，Task 8 收尾 + drop 前再刷一次不该报错
+        assert_eq!(s.len()?, 1_004, "flush 不改变长度");
+        let got = std::fs::read(&p).with_context(|| format!("flush 之后重开读不回：{}", p.display()))?;
+        assert_eq!(got.len(), 1_004);
+        assert_eq!(&got[0..4], b"head", "flush 前写的低偏移块");
+        assert_eq!(&got[1_000..1_004], b"tail", "flush 前写的高偏移块");
+        assert!(
+            got[4..1_000].iter().all(|&b| b == 0),
+            "空洞读回来仍是零 —— sync_all 不该往没写过的地方塞东西"
+        );
+        drop(s);
+        assert_eq!(std::fs::read(&p)?, got, "句柄关掉后内容一字不变");
+        std::fs::remove_file(&p)?;
+        Ok(())
+    }
+
     /// **E7** 的语义底：`len()` 是"磁盘上真有多少字节"，不是本模块内部的计数。
     /// 证据：本模块之外的一条句柄把文件写大，下一次 `len()` 立刻如实报出。
     #[test]
@@ -420,12 +477,19 @@ mod tests {
         Ok(())
     }
 
-    /// **E7** 让 `len()` 变成进度行的数据源（一秒可能调几次）。这里钉量级：上限给到实测均值
-    /// 两个数量级以上的余量，免得机器忙时假红 —— 它要挡的是"变成开文件/走路径查询/同步磁盘"
-    /// 那一类退化，不是抖动。
+    /// **E7** 让 `len()` 变成进度行的数据源（一秒可能调几次）。这里钉量级：本机实测均值
+    /// **3 µs/次**（50_000 次一轮，空载连跑 20 轮全在 3–5，另在 8 路 CPU 负载下跑到过 6），
+    /// 上限 **500 µs/次** —— 距实测最差还有 80 倍以上余量，挡得住忙时的抖动；但"退化成每次重开
+    /// 句柄 / 走路径解析 / 顺带同步磁盘"那一类一定撞线（后一种实测中位就有 2.4–3.2 ms/次，
+    /// 见 `flush` 的方法文档）。
+    ///
+    /// 上限从 5 000 µs 收到 500 µs 是为了修掉 `.superpowers/sdd/2026-10-15-dlm-kernel/task-3-report.md`
+    /// §4 与本文件的不一致：报告写的"< 500 µs"才是当初的意图，代码里却留了 `5_000`。按实测数字
+    /// 裁定**收常数**（更严的一侧），文档与代码从此是同一个数。
     #[test]
     fn len_is_cheap_enough_to_call_per_progress_line() -> anyhow::Result<()> {
         const CALLS: u64 = 50_000;
+        const MAX_AVG_MICROS: u64 = 500;
         let p = scratch("t3_len_cost.bin");
         let s = Store::open(&p, true)?;
         s.write_at(1_000_000, b"abc")?;
@@ -436,12 +500,12 @@ mod tests {
         let elapsed = started.elapsed();
         let avg_micros = elapsed.as_micros() as u64 / CALLS;
         eprintln!(
-            "len() {CALLS} 次共 {elapsed:?}，均值 {avg_micros} µs/次（{} 字节文件）",
+            "len() {CALLS} 次共 {elapsed:?}，均值 {avg_micros} µs/次，上限 {MAX_AVG_MICROS} µs/次（{} 字节文件）",
             s.len()?
         );
         assert!(
-            avg_micros < 5_000,
-            "len() 平均 {avg_micros} µs/次 —— 慢到不该拿去做进度行"
+            avg_micros < MAX_AVG_MICROS,
+            "len() 平均 {avg_micros} µs/次，超过 {MAX_AVG_MICROS} µs 上限 —— 慢到不该拿去做进度行"
         );
         std::fs::remove_file(&p)?;
         Ok(())
