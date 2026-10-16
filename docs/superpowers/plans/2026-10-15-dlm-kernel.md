@@ -1044,4 +1044,48 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
 及其上方的文档注释行，其余顺序与字面值不变）。Task 1 落地后的门禁实测：`cargo test --lib` = 4 passed、
 `cargo test`（lib + bin + doc 全目标）全绿、`cargo clippy --all-targets -- -D warnings` 零输出。
 
+**E7：Task 2 的评审修复轮改掉了 `scheduler` 的四处对外形状 —— Task 4/7/8 引用简报 `Produces` 时以本条为准（任务正文不回改）。**
+证据全在 `src/scheduler.rs`（行号取修复轮提交后的文件）与 `.superpowers/sdd/2026-10-15-dlm-kernel/task-2-report.md`
+的「修复轮（I1/I2/I3）」节；判据来源是 spec `docs/superpowers/specs/2026-10-15-dlm-kernel-design.md` §2.2（第 51–52 行
+「段表退化为单段」）、§6.4（第 112 行「416 → 该段直接标完成，不重试」）、§7.1（第 122–124 行六条必测用例的第六行
+「416 后该段标完成」）与 §7.2（第 127–130 行 sha256 门槛 + "已完成段不重下"）。
+
+- **`Event` 增一个 `SegmentComplete { worker: usize }`（`src/scheduler.rs:70`；分支 `:170`；落账 `seal()` `:203`）。
+  本计划第 321 行列的五种事件现在是六种。Task 7 第 800 行的「`416` ⇒ 直接返回 `Complete`」到调度器这一层必须映射成
+  `Event::SegmentComplete{worker}`，不再折成 `WindowDone`。** 语义 = "这个 worker 的区间就此收尾，不需要交回任何字节"：
+  release 路径的显式分支，整段并进 `done`，**不看 `written`**、不产生队列项。为什么必须新增而不是复用现有形状：
+  ① 416 折成零字节 `WindowDone` 时 `release()`（`:186-195`）会把**整段**推回队列 ⇒ "再派→再 416→再回队"的无界 HTTP 活锁，
+  而 spec §6.1/§6.2 的快速 5 次 / 慢速 30 s 封顶只挂在 `Failed` 上，这条路径永远接不上；
+  ② 用现有形状硬凑"416 ⇒ 完成"只有一条捷径 —— `Progress{abs_end: iv.end}` + `WindowDone`，那会把**从未落盘的字节**
+  记成"已确认落盘"，直接污染 Task 4 的断点文件与 §7.2 的 sha256 门槛（拿数据损坏换掉活锁，不可接受）。
+  代价要说清楚：被 `SegmentComplete` 封存的那一段里可能含本地没有的字节，这是 §6.4 裁定本身（Range 越界的字节拿不到），
+  不是新漏；Task 4/8 按"归属已定、不再下载"理解它。钉住的用例：
+  `segment_complete_marks_a_zero_progress_interval_done_and_never_requeues`（`:639`）、
+  `segment_complete_seals_its_interval_exactly_once_and_is_not_redispatched`（`:654`）、
+  对照行 `zero_progress_window_done_still_requeues_the_whole_interval`（`:674`，钉"两个事件不得合并"）；
+  随机不变量用例的事件流里也加进了这条（`:755` 的 `rng.next(4)`）。
+
+- **`Action::Halt` 删除：本计划第 322 行的四种动作现在是三种（`Assign`/`Retighten`/`Idle`，`src/scheduler.rs:77-84`）。**
+  它没有任何生产者 —— spec §6.6 的 Ctrl-C 在本计划里已降级（第 927–929 行自检段），Task 7/8 都不产出它，
+  留着唯一的效果是让两条"停劈"地板断言写成 `matches!(a, Idle | Halt)`；现已收紧为 `all(Idle)`
+  （`src/scheduler.rs:426`、`:550`，测试侧 `track()` 同步 `:819`）。
+  **Task 8 若真要"停发新请求"的通道，得自己提出新形状，不要复活 `Halt` 这个名字。**
+
+- **退化模式（spec §2.2「段表退化为单段」）做实了两条，Task 7/8 对"退化后按什么顺序派"的假设随之改变。**
+  ① 派发判据换成**起点最低**：`first_pending()`（`src/scheduler.rs:218`）在退化分支生效（`:243`），"最长优先"只留在正常模式
+  （`longest_pending()` `:211`）。原行为下队列 `{[201,499],[700,999]}` 会先派 [700,999]（更长），而对端不认 Range 时只会从
+  字节 0 交出整个 body，`fetch::run_window` 按 `iv.start` 落盘 ⇒ 内容写进中段、文件错位；POST 降级（§2.2 第一条）走的是同一条边。
+  ② `NoRanges` 到达即**塌表**：`collapse_pending()`（`:317`，入口 `:157`）把无人认领的区间合并成一段，退化期交回的尾巴
+  也并回那一段（`:309`）。只合并**相邻/重叠**者 —— 中间隔着已确认或在途字节的不合并，否则会把已落盘字节重算成待下载
+  （不变量 `done + pending <= total` 会当场红）。所以"单段"的准确说法是"表里相邻的空位不重复登记、每次只派一段"。
+  ③ 上一轮裁定 B 的读法②保留：在途段**不被打断**，按各自（已收紧的）终点自然收尾。钉住的用例：
+  `degraded_dispatch_is_start_ascending`（`:579`）、`no_ranges_collapses_the_pending_table_into_one_segment`（`:610`）。
+
+- **`snapshot_intervals()` 返回的是"已确认字节的极小覆盖集"（升序、相邻/重叠已合并、两两不重叠），不是 IDM 的分段边界列表。**
+  本计划第 326 行那句"已完成区间，供 state 落盘"要按这个措辞读，第 627 行 Task 4 的 `SegView { start, end, written, state }`
+  **不得假设"一条 = 一个曾经派出去过的分段"**：一段被劈过再交回，这里只剩合并后的一条；`SegmentComplete` 封存的段也照样
+  出现在里面（其 `written` 请按上面那条理解）。这是上一轮报告 §5 顾虑 2 的正式化，实现见 `src/scheduler.rs:148`
+  与 `push_done()`（`:333` 附近，合并逻辑）。
+
+
 

@@ -11,9 +11,13 @@
 //!    `consts::MIN_SEGMENT_BYTES`），本模块不读 `consts`，为的是边界能在任意尺寸上用表钉死。
 //!    劈不动时不空等：退回去派无人认领的区间；没有 ⇒ `Idle`。
 //! 3. `NoRanges`（spec §2.2：对端不认 Range，或首响应是 200）之后退化为单段顺序下载：
+//!    到达那一刻就把**无人认领的区间表合并成一段**（`collapse_pending`，只合并相邻/重叠的区间；
+//!    中间隔着已确认或在途字节的不合并 ⇒ 不会把已落盘字节重算成待下载），此后每次派发取
+//!    **起点最低**的那段（不是"最长"：对端只会从字节 0 起交出整个 body，派靠后的区间会把内容写错位置）。
 //!    不再有新段被派出，直到在途段全部交回；此后一次只派一段、永不劈分（不产生 `Retighten`）。
-//!    已在途的段**不被打断** —— v1 不发 `Halt`，让它们按各自（已收紧的）终点自然收尾，
-//!    所以退化点落在多段在途时，短暂会有"多段并行收尾"，但绝不会新增并行段。
+//!    已在途的段**不被打断**，让它们按各自（已收紧的）终点自然收尾，
+//!    所以退化点落在多段在途时，短暂会有"多段并行收尾"，但绝不会新增并行段；
+//!    交回的尾巴并进那唯一的一段，段表不会因失败重新变多。
 //!    已写的字节不会被重下（剩余区间从已写偏移之后起算）。
 //!
 //! 记账不变量（Task 4 断点文件的底）：`done` 只收**已确认落盘**的字节 —— worker 交回区间时，
@@ -21,10 +25,14 @@
 //! `pending_bytes()` = 队列区间 + 各在途区间的未写后缀，与 `done` 互不重叠。
 //! ⇒ `is_done()` 为真时 `done` 必然整段覆盖文件。
 //!
-//! `Action::Halt` 是 Task 8 的收尾通道（Ctrl-C / 任务失败时停发新请求），本模块 v1 **不产出**它。
-//! spec §6.4 的 416 由 Task 7 折成 `Outcome::Complete` ⇒ 到本模块就是 `WindowDone`；
-//! 若该段一个字节都没写过，`WindowDone` 会把整段交回队列（不标记完成），
-//! 所以"反复 416"的退避归 Task 8 的重试逻辑管，不在这里发明规则。
+//! 一条例外：`Event::SegmentComplete`（spec §6.4 的 416 ⇒「该段标完成」）封存整段时**不看 `written`**，
+//! 所以那段里可能有从未落盘的字节 —— 那是设计裁定（Range 越界的字节本来就拿不到），
+//! `snapshot_intervals()` 如实把它报为"归属已定、不再下载"的已确认覆盖集，Task 4 按这个措辞落盘。
+//! 416 的上游契约随之改为 Task 7 报 `SegmentComplete`（不再折成 `WindowDone`）：
+//! 走 `WindowDone` 会把整段推回队列 ⇒ "再派→再 416"的无界活锁，且因为它不是 `Failed`，
+//! spec §6 的快速/慢速重试封顶也拦不住；其余失败/截断仍走 `Failed`。
+//! `Action` 只有三种：`Assign`/`Retighten`/`Idle` —— v1 不产出"让 worker 停手"的命令
+//! （spec §6.6 的 Ctrl-C 在计划里已降级为"任意时刻被杀都能续"，没有生产者就不留这个变体）。
 
 use std::cmp::Reverse;
 
@@ -56,6 +64,10 @@ pub enum Event {
     WindowDone { worker: usize },
     /// 该 worker 这一段失败/被掐断：未写的尾巴交回队列，已写的字节不丢。
     Failed { worker: usize },
+    /// 该 worker 的区间**就此收尾，不需要交回任何字节**：spec §6.4 的 416（Range 越界 ⇒ 该段标完成）。
+    /// 与 `WindowDone`/`Failed` 的区别只在记账：整段直接并进 `done`，**不看 `written`**、不回队列。
+    /// 这是本模块唯一一条"字节没落盘也记 done"的通道，理由见模块文档的记账不变量。
+    SegmentComplete { worker: usize },
     /// 对端不支持 Range ⇒ 整个任务退化为单段顺序下载（spec §2.2）。
     NoRanges,
 }
@@ -69,8 +81,6 @@ pub enum Action {
     Retighten { worker: usize, iv: Interval },
     /// 这一轮没活可派。
     Idle,
-    /// 让该 worker 停手（v1 不由调度器产出，留给 Task 8 的收尾）。
-    Halt,
 }
 
 /// 一个 worker 手上压着的区间。`written` = 已确认落盘的最高绝对偏移，`None` = 一个字节都没写。
@@ -131,7 +141,10 @@ impl Scheduler {
         queued.saturating_add(in_flight)
     }
 
-    /// 已完成区间（升序、相邻段已合并），供 `state` 落盘。
+    /// **已确认字节的极小覆盖集**：按 `start` 升序、相邻/重叠已合并、两两不重叠。
+    /// 它不是"段表边界列表"（IDM 的断点文件按分段边界记，这里按字节覆盖记）：一段被劈过再交回，
+    /// 这里可能只有合并后的一条；`SegmentComplete` 封存的段也照样出现在这里。
+    /// ⇒ Task 4 的 `SegView` 得按"已确认覆盖区间"措辞，不要按"分段"措辞。
     pub fn snapshot_intervals(&self) -> Vec<Interval> {
         self.done.clone()
     }
@@ -141,6 +154,7 @@ impl Scheduler {
         match ev {
             Event::NoRanges => {
                 self.no_ranges = true;
+                self.collapse_pending();
                 vec![]
             }
             Event::Progress { worker, abs_end } => {
@@ -150,6 +164,11 @@ impl Scheduler {
             // 窗口读满与失败在记账上是同一件事：写完的进 done，没写完的回队列。
             Event::WindowDone { worker } | Event::Failed { worker } => {
                 self.release(worker);
+                vec![]
+            }
+            // 416（spec §6.4）：整段就此封存，字节不必落盘、也不得再回队列。
+            Event::SegmentComplete { worker } => {
+                self.seal(worker);
                 vec![]
             }
             Event::Connected(worker) => self.dispatch(worker),
@@ -175,9 +194,29 @@ impl Scheduler {
         }
     }
 
+    /// 封存 worker 的整段：**不查 `written`、不产生队列项**（spec §6.4 的 416 ⇒「该段标完成」）。
+    /// 为什么不复用 `release()`：那条路径会把未写部分推回队列 ⇒ 再派→再 416 的无界活锁，
+    /// 而它不是 `Failed`，spec §6 的快速/慢速重试封顶拦不住；
+    /// 也不让 Task 7 用 `Progress{abs_end: iv.end}` + `WindowDone` 绕：那等于把从未写入的字节
+    /// 记成"已确认落盘" ⇒ Task 4 的断点文件与 spec §7.2 的 sha256 门槛都被污染。
+    /// 手上没活（或序号越界）⇒ 幂等空操作，`done` 靠 `push_done` 的合并保证同一段只记一次。
+    fn seal(&mut self, worker: usize) {
+        let Some(Some(a)) = self.active.get(worker).cloned() else { return };
+        self.active[worker] = None;
+        self.push_done(a.iv);
+    }
+
     /// 最长的无人认领区间；等长时取起点最低的（保证测试可复现、Task 8 的回放一致）。
+    /// **只在正常模式使用**：退化模式下对端不认 Range，派发顺序必须跟着文件顺序走（`first_pending`）。
     fn longest_pending(&self) -> Option<Interval> {
         self.queue.iter().min_by_key(|i| (Reverse(i.len()), i.start)).copied()
+    }
+
+    /// 起点最低的无人认领区间 —— 退化模式（spec §2.2）唯一的派法。
+    /// 对端只会从字节 0 开始把整个 body 交出来，而 `fetch::run_window` 按 `iv.start` 落盘；
+    /// 派一个起点靠后的区间等于把 0.. 的内容写到文件中段 ⇒ 字节级错位。
+    fn first_pending(&self) -> Option<Interval> {
+        self.queue.iter().min_by_key(|i| i.start).copied()
     }
 
     /// 最长的在途尾巴，连同它的 incumbent worker 序号。
@@ -197,10 +236,11 @@ impl Scheduler {
         }
         if self.no_ranges {
             // 退化：一次只允许一段在途，且永不劈分（不产生 Retighten）。
+            // 派发的判据是**起点最低**，不是"最长" —— 见 `first_pending`。
             if self.active.iter().any(|a| a.is_some()) {
                 return vec![Action::Idle];
             }
-            return match self.longest_pending() {
+            return match self.first_pending() {
                 Some(iv) => self.assign_whole(worker, iv),
                 None => vec![Action::Idle],
             };
@@ -264,6 +304,29 @@ impl Scheduler {
             return;
         }
         self.queue.push(iv);
+        // 退化模式下交回的尾巴要和表里其余区间并回一段，否则段表会随每一次失败重新变多。
+        if self.no_ranges {
+            self.collapse_pending();
+        }
+    }
+
+    /// spec §2.2「段表退化为单段」：**把无人认领的区间合并成尽可能少的连续段**。
+    /// 只合并相邻（`cur.start <= last.end + 1`）或重叠的区间 —— 被 `done` 或被在途区间挡在中间的字节
+    /// **不会**被并进来：那等于把已确认落盘的字节重新算成待下载，`done + pending <= total` 会当场红。
+    /// 于是"一段"的含义是"一段连续的空位"，而派发顺序（`first_pending`）保证它是文件里最靠前的那段。
+    fn collapse_pending(&mut self) {
+        if self.queue.len() < 2 {
+            return;
+        }
+        self.queue.sort_by_key(|i| i.start);
+        let mut merged: Vec<Interval> = Vec::with_capacity(self.queue.len());
+        for cur in std::mem::take(&mut self.queue) {
+            match merged.last_mut() {
+                Some(last) if cur.start <= last.end.saturating_add(1) => last.end = last.end.max(cur.end),
+                _ => merged.push(cur),
+            }
+        }
+        self.queue = merged;
     }
 
     /// 插入并合并相邻/重叠的已确认段，维持 `done` 升序且无相邻段。
@@ -360,7 +423,7 @@ mod tests {
         let acts = sc.on(Event::Connected(1));    // 半长 500 >= 400 可以劈
         assert!(acts.iter().any(|a| matches!(a, Action::Assign { .. })));
         let acts2 = sc.on(Event::Connected(2));   // 再劈会得到 <400 的段 ⇒ 不劈
-        assert!(acts2.iter().all(|a| matches!(a, Action::Idle | Action::Halt)), "{acts2:?}");
+        assert!(acts2.iter().all(|a| matches!(a, Action::Idle)), "{acts2:?}");
     }
     #[test]
     fn window_done_returns_remainder_and_reassigns_without_new_connection() {
@@ -415,7 +478,7 @@ mod tests {
         step(&mut sc, Event::Failed { worker: 2 }, "F2");         // 已写的 [250,300] 进 done，[301,499] 回队列
         assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 300 }], "相邻的已确认段必须合并");
         assert_eq!(sc.pending_bytes(), 199 + 500, "回队列 199 + 在途 [500,999] 500");
-        step(&mut sc, Event::Connected(3), "C3");                 // 在途尾 [500,999] 比空闲 [301,499] 长 ⇒ 劈后者
+        step(&mut sc, Event::Connected(3), "C3");                 // 在途尾 [500,999] 比空闲 [301,499] 长 ⇒ 劈在途尾（空闲那段原样留着）
         step(&mut sc, Event::Progress { worker: 3, abs_end: 999 }, "P3");
         step(&mut sc, Event::WindowDone { worker: 3 }, "WD3");
         step(&mut sc, Event::Progress { worker: 1, abs_end: 749 }, "P1");
@@ -484,7 +547,7 @@ mod tests {
             if iv.start == M && iv.end == M * 2 - 1)), "{acts:?}");
         assert!(acts.iter().any(|a| matches!(a, Action::Retighten { worker: 0, iv }
             if iv.start == 0 && iv.end == M - 1)), "{acts:?}");
-        assert!(sc.on(Event::Connected(2)).iter().all(|a| matches!(a, Action::Idle | Action::Halt)),
+        assert!(sc.on(Event::Connected(2)).iter().all(|a| matches!(a, Action::Idle)),
             "第二刀会得到 M/2 的半段 ⇒ 必须触底停劈");
     }
 
@@ -506,6 +569,117 @@ mod tests {
         assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })));
         assert_eq!(sc.pending_bytes(), 299);
         check_invariants(&sc, 1000, "noranges-after-splits");
+    }
+
+    /// spec §2.2「段表退化为单段」的第一条判据：**派发的顺序必须是文件顺序**。
+    /// 对端不认 Range ⇒ 它只会从 0 开始把整个 body 交出来，而 `fetch::run_window` 按
+    /// `iv.start` 落盘；把 [700,999] 排在 [201,499] 前面就等于把 0.. 的字节写到 700 之后 ⇒ 文件错位。
+    /// 所以退化模式一律取**起点最低**的无人认领区间，"最长优先"只在正常模式成立。
+    #[test]
+    fn degraded_dispatch_is_start_ascending() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));                                   // [0,999]
+        sc.on(Event::Connected(1));                                   // ⇒ w0 [0,499] + w1 [500,999]
+        sc.on(Event::NoRanges);
+        sc.on(Event::Progress { worker: 0, abs_end: 200 });
+        sc.on(Event::WindowDone { worker: 0 });                       // done [0,200]，队列 [201,499]
+        sc.on(Event::Progress { worker: 1, abs_end: 699 });
+        sc.on(Event::WindowDone { worker: 1 });                       // done 再多 [500,699]，队列再多 [700,999]
+        assert_eq!(sc.pending_bytes(), 299 + 300, "两段无人认领：[201,499] 与 [700,999]");
+        let acts = sc.on(Event::Connected(2));
+        assert_eq!(acts, vec![Action::Assign { worker: 2, iv: Interval { start: 201, end: 499 } }],
+            "退化模式必须按起点升序派，不得因为 [700,999] 更长就先派它: {acts:?}");
+        assert_eq!(sc.on(Event::Connected(3)), vec![Action::Idle], "退化期一次只允许一段在途");
+        sc.on(Event::Progress { worker: 2, abs_end: 499 });
+        sc.on(Event::WindowDone { worker: 2 });                       // done 并进 [0,499]
+        let acts = sc.on(Event::Connected(3));
+        assert_eq!(acts, vec![Action::Assign { worker: 3, iv: Interval { start: 700, end: 999 } }],
+            "轮到 [700,999] 时前一段必须已经交回: {acts:?}");
+        sc.on(Event::Progress { worker: 3, abs_end: 999 });
+        sc.on(Event::WindowDone { worker: 3 });
+        assert!(sc.is_done());
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }]);
+        check_invariants(&sc, 1000, "degraded-start-ascending");
+    }
+
+    /// spec §2.2「段表退化为单段」的第二条判据：`NoRanges` 到达时，**队列里并存的区间必须塌成一段**。
+    /// 今天三条无人认领的区间（[0,249]/[250,499]/[500,999]）会原样留在表里、被按"最长"逐条派出去
+    /// ⇒ 既不是一整段，也不是文件顺序。相邻的无人认领区间合并成一段，
+    /// 中间隔着已确认/在途字节的段**不合并**（那会把已确认字节重新算成待下载）。
+    #[test]
+    fn no_ranges_collapses_the_pending_table_into_one_segment() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));                                   // [0,999]
+        sc.on(Event::Connected(1));                                   // ⇒ w0 [0,499] / w1 [500,999]
+        sc.on(Event::Connected(2));                                   // ⇒ w0 [0,249] / w2 [250,499] / w1 [500,999]
+        sc.on(Event::Failed { worker: 0 });                           // 队列 [0,249]
+        sc.on(Event::Failed { worker: 2 });                           // 队列 [0,249] + [250,499]
+        sc.on(Event::WindowDone { worker: 1 });                       // 队列再多 [500,999]（今天表里三段并存）
+        assert_eq!(sc.pending_bytes(), 1000, "一个字节都没写 ⇒ 全部仍是待下载");
+        sc.on(Event::NoRanges);                                       // ⇒ 段表塌成一段
+        let acts = sc.on(Event::Connected(3));
+        assert_eq!(acts, vec![Action::Assign { worker: 3, iv: Interval { start: 0, end: 999 } }],
+            "退化后的段表必须是**一段**、且从最低的未确认偏移起: {acts:?}");
+        assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })), "退化期永不劈分");
+        assert_eq!(sc.on(Event::Connected(4)), vec![Action::Idle], "退化期一次只允许一段在途");
+        sc.on(Event::Failed { worker: 3 });                           // 交回 [0,999]
+        assert_eq!(sc.on(Event::Connected(4)), vec![Action::Assign { worker: 4, iv: Interval { start: 0, end: 999 } }],
+            "退化期交回的尾巴并回同一段，段表不得重新变多");
+        assert_eq!(sc.pending_bytes(), 1000);
+        check_invariants(&sc, 1000, "noranges-collapse");
+    }
+
+    /// spec §7.1 表里此前缺失的第六行：「416 后该段标完成」。Task 7 把 416 映射成
+    /// `Event::SegmentComplete { worker }` —— "这个 worker 的区间已经收尾，不需要交回任何字节"：
+    /// release 路径的**显式分支**，整段并入 `done`，**不看 `written`**、不回队列。
+    /// 为什么不能用旧形状表达：唯一捷径是 `Progress{abs_end: iv.end}` + `WindowDone`，
+    /// 那会把**从未落盘的字节**记成已确认 ⇒ 污染 Task 4 的断点文件与 spec §7.2 的 sha256 门槛；
+    /// 而零字节的 `WindowDone` 把整段推回队列 ⇒ "再派→再 416→再回队"的无界 HTTP 活锁，
+    /// 且那条路径不是 `Failed`，spec §6 的快速/慢速重试封顶永远不会生效。
+    #[test]
+    fn segment_complete_marks_a_zero_progress_interval_done_and_never_requeues() {
+        let mut sc = s();
+        assert_eq!(sc.on(Event::Connected(0)), vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 999 } }]);
+        sc.on(Event::SegmentComplete { worker: 0 });                // 一个字节都没写 ⇒ 416
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "整段恰好入 done 一次");
+        assert_eq!(sc.pending_bytes(), 0, "该段不得回队列（活锁的根）");
+        assert!(sc.is_done());
+        assert_eq!(sc.on(Event::Connected(1)), vec![Action::Idle], "没有第二段可派 ⇒ 不会再打第三次 416");
+        assert_eq!(sc.on(Event::SegmentComplete { worker: 0 }), Vec::<Action>::new(), "手上没活 ⇒ 幂等空动作");
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "重复上报不得把 done 记两次");
+        check_invariants(&sc, 1000, "segment-complete");
+    }
+
+    /// 封存的段**只入 done 一次**，且永不回队列；与已写字节相邻时按相邻合并。
+    #[test]
+    fn segment_complete_seals_its_interval_exactly_once_and_is_not_redispatched() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));                                 // [0,999]
+        sc.on(Event::Connected(1));                                 // ⇒ w0 [0,499] / w1 [500,999]
+        sc.on(Event::Progress { worker: 1, abs_end: 600 });
+        sc.on(Event::SegmentComplete { worker: 1 });                // 写到 600 之后对端回 416
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 500, end: 999 }]);
+        assert_eq!(sc.pending_bytes(), 500, "只剩 w0 的 [0,499]");
+        sc.on(Event::Progress { worker: 0, abs_end: 499 });
+        sc.on(Event::WindowDone { worker: 0 });                     // 相邻 ⇒ 并进 [0,999]
+        let acts = sc.on(Event::Connected(1));
+        assert_eq!(acts, vec![Action::Idle], "被封存的 [500,999] 不得再被派出: {acts:?}");
+        assert!(sc.is_done());
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "done 只记一次并相邻合并");
+        check_invariants(&sc, 1000, "segment-complete-partial");
+    }
+
+    /// 对照行：零字节的 `WindowDone` **仍然**把整段回队列 —— 那是"窗口读满/连接断了但字节没到手"的形状。
+    /// 两个事件不能合并，否则 416 与普通截断无从区分；也正因此 416 必须走 `SegmentComplete`。
+    #[test]
+    fn zero_progress_window_done_still_requeues_the_whole_interval() {
+        let mut sc = s();
+        sc.on(Event::Connected(0));
+        sc.on(Event::WindowDone { worker: 0 });
+        assert_eq!(sc.pending_bytes(), 1000, "WindowDone 不封存任何字节");
+        assert!(sc.snapshot_intervals().is_empty());
+        assert_eq!(sc.on(Event::Connected(1)), vec![Action::Assign { worker: 1, iv: Interval { start: 0, end: 999 } }],
+            "回队列的段照旧可再派 ⇒ 416 若折成 WindowDone 就是活锁");
     }
 
     #[test]
@@ -555,6 +729,7 @@ mod tests {
 
     /// 表里没写的最后一道闸：任意顺序的事件流（Task 8 的劈分时机由真实时序决定，所以"任意顺序"才是主判据）
     /// 必须 ① 不丢字节、不重复计字节，② 派出去的在途区间互不重叠，③ 一直派活总能收工。
+    /// 事件流里四种 worker 事件（`Progress`/`WindowDone`/`SegmentComplete`/`Failed`）都可能落在任何时刻。
     #[test]
     fn arbitrary_event_orders_never_lose_or_double_count_bytes() {
         let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
@@ -578,7 +753,7 @@ mod tests {
                 } else {
                     match held.iter().find(|(hw, _)| *hw == w).copied() {
                         Some((_, iv)) => {
-                            match rng.next(3) {
+                            match rng.next(4) {
                                 0 => {
                                     let advance = rng.next(iv.len());
                                     sc.on(Event::Progress { worker: w, abs_end: iv.start + advance })
@@ -586,6 +761,11 @@ mod tests {
                                 1 => {
                                     held.retain(|(hw, _)| *hw != w);
                                     sc.on(Event::WindowDone { worker: w })
+                                }
+                                2 => {
+                                    // spec §6.4 的 416 落在任意时刻、任意 written 状态上
+                                    held.retain(|(hw, _)| *hw != w);
+                                    sc.on(Event::SegmentComplete { worker: w })
                                 }
                                 _ => {
                                     held.retain(|(hw, _)| *hw != w);
@@ -637,7 +817,7 @@ mod tests {
                     assert!(iv.end >= cur.start && iv.end < cur.end, "收紧后的区间得是原区间的前缀: {cur:?} -> {iv:?}");
                     *cur = iv;
                 }
-                Action::Idle | Action::Halt => {}
+                Action::Idle => {}
             }
         }
         let mut in_flight: Vec<Interval> = held.iter().map(|(_, iv)| *iv).collect();
