@@ -640,14 +640,24 @@ pub fn spawn_range_ignoring_stub(body_len: u64) -> Result<Stub> {
 /// - `/no-content-range` ⇒ 206 **不带** `Content-Range`
 /// - `/known-total`（**对照组**）⇒ `Content-Range: bytes 0-<window-1>/50331648` ⇒ 必须照常成功，
 ///   且读出的全长是 48 MiB 而不是窗口。没有这一支，"把所有 206 都拒掉"也算修好了。
+/// - `/wrong-start`（Task 7 修复轮 A 加的一味）⇒ `Content-Range: bytes <window>-<2*window-1>/50331648`：
+///   头**说得出**一个起点，只是那个起点不是我们问的那一个。`probe` 的三条形状都是"说不出总长"，
+///   而 A 那一条要钉的是"说出的起点 ≠ `iv.start`"—— 那是最危险的一格：照我们问的偏移硬写盘，
+///   文件就错位了，而错位后的长度与字节数照样自洽（`Complete` 封存的是一段从没落过的字节）。
+///   起点取 `window`（既不是 0，也不等于本仓库任何用例的 `iv.start`），body 与 `Content-Length`
+///   照旧严格一致 —— 这一支只坏"位置"，不坏"长度"，也不坏"诚实的框架长度"。
 pub fn spawn_unknown_total_stub(window: u64) -> Result<Stub> {
     const FULL_LEN: u64 = 48 * 1024 * 1024;
     let last = window.saturating_sub(1);
+    // `saturating_*`：`window == 0` 时 `window * 2 - 1` 是一次减法下溢（debug 直接 panic），
+    // 夹具不该在被测代码之前砸进程 —— 虽然本仓库现在两个调用方给的都不是 0。
+    let (lie_start, lie_last) = (window, window.saturating_mul(2).saturating_sub(1));
     let body = "w".repeat(usize::try_from(window).unwrap_or(0));
     spawn_stub(move |target| {
         // 状态行下面那一条 `Content-Range` 由路由决定；`/no-content-range` 刻意一条都不带。
         let head = match target {
             "/known-total" => Some(format!("Content-Range: bytes 0-{last}/{FULL_LEN}\r\n")),
+            "/wrong-start" => Some(format!("Content-Range: bytes {lie_start}-{lie_last}/{FULL_LEN}\r\n")),
             "/garbage-total" => Some(format!("Content-Range: bytes 0-{last}/nine\r\n")),
             "/no-content-range" => Some(String::new()),
             "/unknown-total" => Some(format!("Content-Range: bytes 0-{last}/*\r\n")),

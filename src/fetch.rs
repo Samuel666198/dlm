@@ -24,7 +24,12 @@
 //!    `Failed(ValidatorChanged)`，让 spec §6.1/§6.2 的重试上限真介入，而不是悄悄封一份截断文件。
 //!    `Complete` 在 Task 8 那里折成 `Event::SegmentComplete`（**不看已写字节就把整段并进 done**），
 //!    所以这个值必须只说"真的没活儿"，别无分号。
-//!    用例：`a_416_whose_denominator_is_our_length_is_complete`（正支）、
+//!    可达形状按 **E12**②是 `iv.start >= total_len`（续传时区间起点已落在 EOF 上），也就是
+//!    `iv.start` 与 `total_len` 在野外**是两个不同的数** —— 判据必须能把它们分辨开（修复轮 C）：
+//!    正支把起点放到 `total_len + 4096`，反支让分母正好等于 `iv.start`。
+//!    用例：`a_416_whose_denominator_is_our_length_is_complete`（正支，`iv.start > total_len`）、
+//!    `a_416_that_answers_with_our_interval_start_is_validator_changed`（分母=起点那一格，外加
+//!    "没有 `Content-Range`"与"分母读不出来"两格）、
 //!    `a_416_with_a_disagreeing_or_missing_denominator_is_validator_changed`（反支三种形状）、
 //!    `a_beyond_length_interval_on_a_shorter_server_is_validator_changed`（真服务器那一支）。
 //! 3. **简报第 3 条用例的前提是假的**（裁定 3，E5：`/flaky` 从不在中途打断，它只是把服务长度
@@ -41,6 +46,13 @@
 //!    （`require_block_alignment`：blob 每 4 KiB 块首写着自己的块号）。
 //!    顺带一处**简报的第二个不可成立点**：它取证用的 `1_000_000` **不是 4096 的整数倍**，而块号只
 //!    写在块首 ⇒ 拿那个起点断"内容对不对"，断的其实是未初始化填充字节。用例改用 4096 对齐的起点。
+//!    **`Complete` 的判据是 `cursor > iv.end` 而不是 `>=`**（修复轮 B）：`iv.end` 是**含端点**的，
+//!    所以"区间最后一个字节到了"才是 `Complete` 的承诺，而 `cursor` 必须走到 `iv.end + 1` 才兑现它。
+//!    区间长度为 `WINDOW_BYTES + 1` 时 `stop = iv.start + WINDOW_BYTES = iv.end` ⇒ `cursor` 最多
+//!    **正好等于** `iv.end`，那一个字节还没到，只能 `Advanced`；写成 `>=` 就会把从没落盘的尾巴封成
+//!    `SegmentComplete`（E7/E9：封存不看盘）。两条边界各一条用例，字节级取证：
+//!    `an_interval_of_exactly_one_window_is_complete`（`iv.end` 那个下标**读得出来**）与
+//!    `an_interval_one_byte_wider_than_the_window_is_never_complete`（同一个下标**读不出来**）。
 //! 6. **发了 `Range` 而对端回 `200` ⇒ 先流掉前 `iv.start` 个字节再落盘**（裁定 6，计划 **E7**②
 //!    交给 Task 7 的下游义务）：那种 body 的第 0 字节对应**文件偏移 0**，直接按 `iv.start` 写就是把
 //!    内容写进中段。丢字节是**流式**的（每块 64 KiB 的读循环里切掉一段），不把整个 body 吸进内存。
@@ -48,12 +60,16 @@
 //!    真对端 + 块号取证）、`a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body`
 //!    （进程内节拍对端，另加一条"对端在客户端挂断前写出了多少字节"钉住不许缓冲整个 body）。
 //!
-//! ## 另外三条钉住的性质
+//! ## 另外四条钉住的性质
 //!
 //! - **`206` 却说不出它交的是哪一段**（没有 `Content-Range`，或它的起点不等于 `iv.start`）⇒
 //!   `Failed(ValidatorChanged)`。偏移核对不了的字节**一个都不许写盘**：那是裁定 6 的镜像面 —— 那边
 //!   是"200 的 body 起点在 0"，这边是"206 声称的起点与我们问的不是同一个"。
-//!   用例 `a_206_that_cannot_show_its_offset_is_validator_changed`。
+//!   **两个分支都得钉**（修复轮 A）：`asked_at.is_none()` 那种写法在"缺头 + `iv.start == 0`"那一格
+//!   读起来与正确判据一模一样，而它放过去的是"对端答了另一个偏移、我们照自己问的偏移写"⇒ 文件错位
+//!   且看起来完整。用例 `a_206_that_cannot_show_its_offset_is_validator_changed`（缺头那一格）+
+//!   `a_206_that_claims_another_offset_than_the_one_we_asked_for_writes_nothing`（起点不符那一格，
+//!   两条：对端声称 0 / 声称一个第三方数，两条都另加"文件长度仍然是 0"的独立取证）。
 //! - **不发 `Connection: close`、也不设 `pool_max_idle_per_host(0)`**（spec §10 **R5** / 计划 **E2**，
 //!   派发点名 Task 6/7 都不得加）：`fetch` 根本不建 `Client`（`agent` 由调用方持有并复用），
 //!   而 `a_drained_window_leaves_the_connection_reusable` 用服务端的连接号证明**整段读完**那一枪
@@ -65,6 +81,18 @@
 //!   `fetch` 里不重写第二个版本 —— ①b 判的正是"请求是不是同一个"，两处各写一遍迟早读成两样。
 //!   本模块只往上加 `Range` 与窗口预算那一条 `timeout`。
 //!   用例 `fetch_carries_the_nine_item_contract_headers_on_the_wire`（服务端日志取证）。
+//! - **`Transport` 带着原因**（修复轮 D 的契约改动，勘误 **E12**⑦）：`FailKind::Transport(String)`
+//!   里那句是"这一次为什么没成"，由**唯一一个**构造器 [`transport_note`] 产出（`run_window` 与
+//!   `run_whole` 共用，两支的措辞不会分岔）：错误自己的 message + `source()` 链上第一条带来新信息
+//!   的，折成一行、截到 200 个**字符**（按字节切会在中文环境里 panic）、**不抄 body**、reqwest 抄在
+//!   尾巴上那截 URL **摘掉**（URL 不是原因，而 Task 8 打印这句时旁边就站着这条 URL）。
+//!   代价要说清：`String` 不 `Copy` ⇒ `FailKind` 与 `Outcome` 从 `Copy` 降级成 `Clone`
+//!   （Task 8 交回结论那一步改成克隆，性质不变：交出去一份、手里还留一份能打印）。
+//!   用例：四条形状的单元用例（`a_transport_note_…` / `the_note_…` / `a_cause_we_author_…`）+
+//!   线上那三条（`a_transport_failure_from_the_execute_side_names_the_cause_without_repeating_the_url`
+//!   钉两处 `execute` 支、`a_transport_note_holds_no_byte_of_the_body_it_handed_back` 钉"到过读缓冲的
+//!   那 4096 个字节一个都不进账"、`a_body_that_never_starts_…` / `a_whole_shot_cut_off_…` 钉两处读支）。
+//!   两处零进度支**没有**错误对象（`read` 给的是 `Ok(0)`），原因由本模块自己写死，仍走同一个构造器。
 //!
 //! ## 与 reqwest blocking 的形状关系（实测过的事实，含**本轮推翻的一条**）
 //!
@@ -137,14 +165,100 @@ use crate::task::{Task, authority_has_userinfo};
 /// 巨大的拷贝占住。64 KiB 的粒度让"读一块、写一块、放锁"交替进行。
 const CHUNK_BYTES: usize = 64 * 1024;
 
+/// `FailKind::Transport` 那句原因的**长度上界**（字符数，不是字节数 —— 勘误 **E12**⑦）。
+///
+/// 为什么是 200 个**字符**：这一句要跟着进度行打到用户眼前，长了会把行撑断；而这个 crate 跑在
+/// Windows 的中文环境里，错误消息（以及它后面挂着的 hyper/rustls 那些）里随时可能出现多字节字符，
+/// 按**字节**切 `&s[..200]` 会切在一个字符中间 ⇒ 当场 panic。截断这件事不该有 panic 的余地。
+const TRANSPORT_NOTE_MAX_CHARS: usize = 200;
+
+/// `run_window` 里"读到干净 EOF、可是一个字节都没落到盘上"那一支的原因（那里**没有**错误对象可抄）。
+///
+/// 为什么这一支没有 `io::Error`：`resp.read()` 交回的是 `Ok(0)`（对端正常收尾），失败**不在**任何
+/// 一次调用上，而在"区间要字节而对端一份都不给"这个事实里。措辞刻意只用中文、一个 ASCII 字母都不带
+/// —— 集成用例 `a_transport_note_holds_no_byte_of_the_body_it_handed_back` 就是拿这条性质当探针：
+/// 那一枪的响应体是 4096 个 `'r'`，账里只要混进任何一个字节，断言立刻红。
+const WINDOW_EOF_WITHOUT_BYTES: &str = "对端交出了响应头，响应体却在任何字节被读到之前就干净结束了";
+
+/// `run_whole` 里"对端声明了长度、响应体却干净结束在零字节"那一支的原因（同样没有错误对象）。
+///
+/// 这一支在本仓库的夹具下**打不进去**（`Content-Length` 用尽才有 `Ok(0)`，body 比它短会被 reqwest
+/// 报成读错误 ⇒ 归 [`transport_note`] 那一条），它是"200 带一个比 body 大的分母"那种骗子对端的形状；
+/// 代码检查成立、没有用例，与它下面那条 `bytes != facts.total_len` 的防御分支同一地位。
+const WHOLE_EMPTY_DOCUMENT: &str = "对端声明了长度，响应体却一个字节都不给就干净结束了";
+
+/// 把一次传输失败压成**一句话的账**（`FailKind::Transport` 的载荷；契约见 [`TRANSPORT_NOTE_MAX_CHARS`]）。
+///
+/// `run_window` 与 `run_whole` 的四个"有错误对象"的失败支**都**走这里（两支不会各写一套措辞），
+/// 另外两支（[`WINDOW_EOF_WITHOUT_BYTES`] / [`WHOLE_EMPTY_DOCUMENT`]）那里根本没有错误对象，
+/// 于是把自造的那句原因套进一个 `io::Error` 再走同一个函数 —— 为的是"一行 / 截断 / 不重复"这三条
+/// 规则只有**一个**实现，而不是自造句免检。
+///
+/// 四条规则（都是契约，不是风格）：
+/// 1. **只读错误自己的 `Display` 与它的 `source()` 链**：取链上第一条**带来新信息**的（reqwest 的
+///    包法是一层套一层、同一句话重复两三次 —— 实测形状
+///    `io::Error{Other ← reqwest::Error{Kind::Body ← Kind::Body ← TimedOut}}`，见模块文档），
+///    重复的跳过、空的跳过，找到一条就收手（不是整条链拼起来：那会把 200 字符的额度喂给废话）。
+/// 2. **压成一行**：`split_whitespace` 折叠所有换行、回车与制表符（Windows 上 `io::Error` 的消息
+///    常带 `\r\n`，多行会把 Task 8 的单行进度栏拆成两截）。
+/// 3. **截到 200 个字符，且只在 `char` 边界切**：超了就在最后一格放一个 `…`，总长仍恰好 200 个字符。
+/// 4. **绝不抄 body 字节，也不自己拼 URL**：签名只收 `&(impl Error + ?Sized)` ⇒ 那些字节在这里
+///    没有通路进来；reqwest 把 URL 抄在 `Display` 的尾巴上（`error.rs:300-302`，形状
+///    `"... for url (https://…)"`），那一段**摘掉** —— URL 不是**原因**，而 Task 8 打印这一句时
+///    旁边本来就站着这条 URL。（凭据那一半不用在这里防：`Task::validate()` 已经拒绝 userinfo 形态
+///    的 URL，`probe::LANDED_CREDENTIALS` 那道闸也守着落地地址。）
+fn transport_note(err: &(impl std::error::Error + ?Sized)) -> String {
+    /// reqwest 的 `Display` 把 URL 附在消息尾巴上的那一段（`reqwest-0.13.5/src/error.rs:300-302`）。
+    const URL_TAIL: &str = " for url (";
+
+    /// 一条消息去掉"尾巴上那截 URL"之后的样子。`find` 给的字节下标落在 ASCII 子串开头 ⇒ 切片
+    /// 必在 `char` 边界上，不会把多字节字符劈开。
+    fn without_url(msg: &str) -> &str {
+        match msg.find(URL_TAIL) {
+            Some(at) => &msg[..at],
+            None => msg,
+        }
+    }
+
+    let mut note = without_url(&err.to_string()).to_string();
+    // 链上第一条"说了新东西"的：同句重复（reqwest 那种套娃）与空串都不算话。
+    let mut source = err.source();
+    while let Some(cause) = source {
+        // 先绑住 `to_string()` 的那个 `String`：`without_url` 交回的是借出去切片的 `&str`，
+        // 直接 `let line = without_url(&cause.to_string())` 会让临时值在语句结束就掉（E0716）。
+        let msg = cause.to_string();
+        let line = without_url(&msg);
+        if !line.is_empty() && !note.contains(line) {
+            note.push_str(": ");
+            note.push_str(line);
+            break;
+        }
+        source = cause.source();
+    }
+    // 规则 2：一行。规则 3：按字符截，不按字节。
+    let flat = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= TRANSPORT_NOTE_MAX_CHARS {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(TRANSPORT_NOTE_MAX_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// 这一枪为什么没成。三个变体各自对应 Task 8 该记的**一种账**：
 /// `Http` 是"服务器有说法"（状态码进错误消息），`Transport` 与 `ValidatorChanged` 是"对端不对劲"
 /// （spec §6.1/§6.2 的快速 5 次 / 慢速 30 s 封顶挂在这两支上），而 `ValidatorChanged` 额外说明
 /// **"服务端长度与我们脚下这份不一致"** —— 那一支最终要报明确的"长度变了"，不是笼统的传输失败（**E7**）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Transport` **带着原因**（勘误 **E12**⑦，本轮的契约改动）：裸枚举交回 Task 8 只剩"网络错了"
+/// 这种没法行动的话，而 reqwest / `io::Error` 本来就说了"读到一半对端拆了线"还是"连不上"。
+/// 那句载荷的形状由 [`transport_note`] 一处定死（一行、≤ [`TRANSPORT_NOTE_MAX_CHARS`] 字符、
+/// 不抄 body、不重复 URL）。也因此 `FailKind` 与 `Outcome` **不再是 `Copy`**（`String` 不 `Copy`），
+/// 改成 `Clone` —— Task 8 的 worker 线程照样能把结论发出去，只是走克隆。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailKind {
     Http(u16),
-    Transport,
+    Transport(String),
     ValidatorChanged,
 }
 
@@ -155,7 +269,7 @@ pub enum FailKind {
 /// `bytes` 的语义（裁定 4/5 同源）：**这一枪经 `store.write_at` 确认落盘的字节数**，不是"从 socket
 /// 读到的字节数"，也不是"区间剩下的字节数"。`Complete` 不带字节：它是"这个区间不需要（再）取字节"，
 /// 而不是"取到了 `iv.len()` 个字节"（后者由 `Advanced` 说）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// 这一枪**有**字节落到盘上了（哪怕随后被掐断、超时或读到比期望短的 body）。
     Advanced { bytes: u64 },
@@ -269,7 +383,24 @@ fn build_request(agent: &Client, task: &Task, range: &str, budget: Duration) -> 
 ///
 /// 错误消息：**点名路径，一个体的字节都不抄**（spec §4 那条硬规约管的是凭据，而 POST 体里
 /// 常常就躺着一个表单口令）。
+///
+/// **先问"这是不是一个普通文件"**（本轮 drive-by，派发点名的第二条；**派发给的理由在本机不成立，
+/// 于是按实测改这段说明，而不是迁就派发**）：那句"Windows 上 `File::open` 对目录是成功的、错误要到
+/// reqwest 的驱动线程读体时才冒出来"实测**不是**这个形状 —— 对目录 `File::open` 在打开那一步就失败
+/// （`PermissionDenied` / `拒绝访问。 (os error 5)`；Windows 要求目录句柄带
+/// `FILE_FLAG_BACKUP_SEMANTICS`，std 不带）。所以这道闸买到的不是"少一次上线"，而是**一句说对了
+/// 的话**：旧写法把"你给的是目录"报成"拒绝访问"，而那条路径明明存在、明明可读，用户照着去查 ACL
+/// 就白跑一趟。闸的位置照旧必须在打开**之前**（`File` 还没建出来，自然没有任何东西能上线）；判据
+/// 用 `is_file()` 而不是 `!is_dir()`：设备、FIFO、命名管那些形状同样当不了请求体，而"不存在的路径"
+/// 落在这一道闸上给出的也是一句对的话。`File::open` 那一条 `with_context` 留着，管的是"确实是文件
+/// 却打不开"那种真·权限/被占用失败 —— 那里 os error 才是有用的信息。
 fn open_request_body(path: &Path) -> Result<Body> {
+    ensure!(
+        path.is_file(),
+        "读 --data-file 的请求体：{} 不是一个能当请求体的普通文件（目录、设备或不存在的\
+         路径都不行；请把 --data-file 指向一个真文件）",
+        path.display()
+    );
     let file = File::open(path)
         .with_context(|| format!("读 --data-file 的请求体文件失败：{}", path.display()))?;
     Ok(Body::from(file))
@@ -346,11 +477,11 @@ pub fn run_window(
                 bail!("{}", probe::LANDED_CREDENTIALS);
             }
             // 这一支还没开始读 body ⇒ 必然零进度（`is_timeout` 在这里直接可用：`execute` 交回的是
-            // `reqwest::Error`，不是被包了一层的 `io::Error`）。
+            // `reqwest::Error`，不是被包了一层的 `io::Error`）。原因取自那一枪自己的错误（E12⑦）。
             return Ok(if e.is_timeout() {
                 Outcome::Stalled
             } else {
-                Outcome::Failed(FailKind::Transport)
+                Outcome::Failed(FailKind::Transport(transport_note(&e)))
             });
         }
     };
@@ -433,15 +564,20 @@ pub fn run_window(
         let wrote = store
             .write_at(cursor, &slice[..take])
             .with_context(|| format!("把窗口的字节写到偏移 {cursor} 失败"))?;
-        cursor += wrote as u64;
+        // `saturating_add`（本轮 drive-by）：`cursor` 是本模块唯一的进度真相，它不许在加法上回绕。
+        // 今天 `wrote <= take <= CHUNK_BYTES` 远不到 `u64` 的上界，可一旦哪里算错了，debug 构建会
+        // panic（release 构建会**绕回 0**，然后从文件开头重写下整段）。这一条不改变任何可达行为。
+        cursor = cursor.saturating_add(wrote as u64);
     }
 
     let bytes = written(iv, cursor);
     if let Some(err) = read_err {
         // 裁定 4：写下去过的字节都是真进度；只有零进度那两支才让重试上限去计。
+        // 零进度那一支带着原因（E12⑦）：`err` 就是这一次读到的那个 `io::Error`（读侧超时的形状
+        // 见模块文档；不是超时才走到 `Transport`，所以这里不需要 `is_read_timeout` 之外的判断）。
         return Ok(match (bytes, is_read_timeout(&err)) {
             (0, true) => Outcome::Stalled,
-            (0, false) => Outcome::Failed(FailKind::Transport),
+            (0, false) => Outcome::Failed(FailKind::Transport(transport_note(&err))),
             _ => Outcome::Advanced { bytes },
         });
     }
@@ -449,12 +585,25 @@ pub fn run_window(
         // body 比区间短（`/drop`、`/sz/<小n>`、`/noranges` 交完 1 MiB 就结束）：绝不是 `Complete`
         // ——那会把这段的尾巴**永远封存**。一个字节都没落到盘上才是失败。
         return Ok(if bytes == 0 {
-            Outcome::Failed(FailKind::Transport)
+            // 这一支**没有**错误对象可抄：`read` 给的是 `Ok(0)`（对端正常收尾），失败在"区间要字节、
+            // 对端一份不给"这个事实里 ⇒ 原因取自 [`WINDOW_EOF_WITHOUT_BYTES`]，但仍走
+            // [`transport_note`] 那一个构造器（一行 / 截断 / 不重复的规则不许有第二套）。
+            Outcome::Failed(FailKind::Transport(transport_note(&std::io::Error::other(
+                WINDOW_EOF_WITHOUT_BYTES,
+            ))))
         } else {
             Outcome::Advanced { bytes }
         });
     }
     // 走到这里是"自己收手"（`cursor >= stop`）：区间读完 ⇒ `Complete`；窗口用满 ⇒ `Advanced`。
+    //
+    // **`>` 而不是 `>=`**（评审 B）：`iv.end` 是**含端点**的，所以 `Complete` 承诺的是
+    // "`iv.end` 那个字节也落了盘"，而 `cursor` 走到 `iv.end + 1` 才叫兑现了这个承诺。区间长度
+    // `WINDOW_BYTES + 1` 时 `stop = iv.start + WINDOW_BYTES = iv.end` ⇒ `cursor` 最多**正好等于**
+    // `iv.end`，那一个字节还没到 ⇒ 只能 `Advanced`。写成 `>=` 会把一个从没落盘的尾巴封成
+    // `SegmentComplete`（E7/E9：封存不看盘）。钉它的用例：`an_interval_of_exactly_one_window_is_complete`
+    // （左半边，含端点那个字节读得出来）与 `an_interval_one_byte_wider_than_the_window_is_never_complete`
+    // （右半边，含端点那个字节**读不出来**）。
     Ok(if cursor > iv.end {
         Outcome::Complete
     } else {
@@ -543,7 +692,8 @@ pub fn run_whole(
                 if e.is_timeout() {
                     Outcome::Stalled
                 } else {
-                    Outcome::Failed(FailKind::Transport)
+                    // 与 `run_window` 那**同一个**构造器（E12⑦）：两条入口的措辞不许分岔。
+                    Outcome::Failed(FailKind::Transport(transport_note(&e)))
                 },
                 None,
             ));
@@ -580,7 +730,8 @@ pub fn run_whole(
                 let wrote = store
                     .write_at(cursor, &buf[..n])
                     .with_context(|| format!("把整份的字节写到偏移 {cursor} 失败"))?;
-                cursor += wrote as u64;
+                // `saturating_add`：与 `run_window` 那一侧同一个处理（进度真相不许在加法上回绕）。
+                cursor = cursor.saturating_add(wrote as u64);
             }
             Err(e) => {
                 read_err = Some(e);
@@ -590,11 +741,12 @@ pub fn run_whole(
     }
     let bytes = cursor;
     if let Some(err) = read_err {
-        // 与 `run_window` 同一支判法：写下去过的都是真进度，只有零进度才让重试上限去计。
+        // 与 `run_window` 同一支判法：写下去过的都是真进度，只有零进度才让重试上限去计
+        // （零进度那一支的原因取自同一个 [`transport_note`]，措辞不会分岔）。
         return Ok((
             match (bytes, is_read_timeout(&err)) {
                 (0, true) => Outcome::Stalled,
-                (0, false) => Outcome::Failed(FailKind::Transport),
+                (0, false) => Outcome::Failed(FailKind::Transport(transport_note(&err))),
                 _ => Outcome::Advanced { bytes },
             },
             Some(facts),
@@ -604,7 +756,15 @@ pub fn run_whole(
     if bytes == 0 && facts.total_len > 0 {
         // 对端声明了长度却一个字节都不给：零进度必须是**可数的失败**，不能是 `Advanced { bytes: 0 }`
         // （Task 8 拿到 0 字节进度 ⇒ 快速/慢速封顶一个也数不到 ⇒ 无限循环）。变异 M9 的同一条纪律。
-        return Ok((Outcome::Failed(FailKind::Transport), Some(facts)));
+        // 原因取自 [`WHOLE_EMPTY_DOCUMENT`]（这一支同样没有错误对象：`read` 给的是 `Ok(0)`）。
+        // 可达性与下面那条 `bytes != facts.total_len` 同一地位 —— 代码检查成立、本仓库的夹具造不出
+        // 那个形状，所以这一支**没有**用例（登记在报告里，不当成已验证性质）。
+        return Ok((
+            Outcome::Failed(FailKind::Transport(transport_note(&std::io::Error::other(
+                WHOLE_EMPTY_DOCUMENT,
+            )))),
+            Some(facts),
+        ));
     }
     if bytes != facts.total_len {
         // 干净 EOF 却没读完对端自己声明的长度 ⇒ 这个结论**不许**叫 `Complete`
@@ -773,14 +933,156 @@ mod tests {
                 Outcome::Advanced { .. } | Outcome::Complete | Outcome::Stalled | Outcome::Failed(_) => {}
             }
         }
-        // `bytes` 与 `total_len` 是 `u64`（Task 8 直接把它加进偏移）；`Http` 装的是 `u16` 状态码。
-        let kinds = [FailKind::Http(416), FailKind::Transport, FailKind::ValidatorChanged];
+        // `bytes` 与 `total_len` 是 `u64`（Task 8 直接把它加进偏移）；`Http` 装的是 `u16` 状态码；
+        // `Transport` 装的是那句**原因**（E12⑦：折成裸枚举到 Task 8 那里就只剩"网络错了"）。
+        let kinds = [
+            FailKind::Http(416),
+            FailKind::Transport("响应体读到一半对端拆了线".to_string()),
+            FailKind::ValidatorChanged,
+        ];
         assert_eq!(kinds[0], FailKind::Http(416));
         assert_ne!(kinds[1], kinds[2], "Transport 与 ValidatorChanged 不许折成同一个账");
-        // `Copy`：Task 8 的 worker 线程要把结论发给主循环，不该在这里管所有权。
-        let a = Outcome::Stalled;
-        let b = a;
-        assert_eq!(a, b);
+        // `Transport` 的**载荷**也是一笔账：同一支 Transport，原因不同就是两个不同的结论
+        // （Task 8 要把那句话原样交给用户）。把它折成"只看涨不看话"的写法在这里当场红。
+        assert_ne!(
+            kinds[1],
+            FailKind::Transport("连不上（Connection refused）".to_string()),
+            "Transport 的原因进了相等性：不许两条不同的失败读成同一条"
+        );
+        // **`Clone`（本轮由 `Copy` 降级）**：`Transport` 带着 `String`，`Outcome` 就再也不是 `Copy`。
+        // 要保住的那条性质没变：Task 8 的 worker 线程把结论发给主循环时不该在这里管所有权 ——
+        // 现在是"克隆一份交出去、手里留一份能打印"，两份必须相等。
+        let a = Outcome::Failed(FailKind::Transport("响应体读到一半对端拆了线".to_string()));
+        let b = a.clone();
+        assert_eq!(a, b, "克隆一份结论之后原件还在、且两份相等（Task 8 才能一边打日志一边把它发出去）");
+    }
+
+    // ---- 本轮 D：`FailKind::Transport` 那句原因的构造规则（勘误 E12⑦） ----
+
+    /// 单元层用的**假错误**：`reqwest::Error` 没有公开构造器（模块文档末节记着同一条困难），
+    /// 而这里要钉的四条规则（一行 / 截断 / 链首句 / 摘 URL）需要的恰恰是"把任意形状的消息与任意
+    /// 形状的链喂进去"。真错误是不是那个形状，归集成用例（`a_transport_failure_from_the_execute_side_…`
+    /// 与两条零进度支）。
+    #[derive(Debug)]
+    struct FakeErr {
+        msg: String,
+        cause: Option<Box<FakeErr>>,
+    }
+
+    impl FakeErr {
+        fn new(msg: &str) -> Self {
+            FakeErr { msg: msg.to_string(), cause: None }
+        }
+        fn caused_by(msg: &str, cause: FakeErr) -> Self {
+            FakeErr { msg: msg.to_string(), cause: Some(Box::new(cause)) }
+        }
+    }
+
+    impl std::fmt::Display for FakeErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.msg)
+        }
+    }
+
+    impl std::error::Error for FakeErr {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.cause.as_ref().map(|c| &**c as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn a_transport_note_is_one_line_even_when_the_cause_is_three() {
+        // Windows 上 `io::Error` 的消息常带 `\r\n`（OS 文本原样带着），而 Task 8 把它打在进度行里
+        // ⇒ 多行会把那一行拆成三截。折叠规则只有一条：所有空白段 ⇒ 一个空格。
+        let note = transport_note(&FakeErr::new("第一行\n第二行\r\n第三行"));
+        assert_eq!(note, "第一行 第二行 第三行", "换行与回车都被折成空格，文字一个不丢：{note}");
+        assert!(!note.contains('\n') && !note.contains('\r'), "原因必须是一行：{note:?}");
+        // 前后多余空白也一并收掉（不然 `{note}` 打进进度行会留一个看起来像空格的空档）。
+        assert_eq!(transport_note(&FakeErr::new("  头  \n  尾 ")), "头 尾");
+    }
+
+    #[test]
+    fn a_long_transport_note_is_cut_on_a_char_boundary_not_through_a_character() {
+        // 300 个中文（每个 3 字节）：按**字节**切到 200 会落在某个字符的中段 ⇒ `&s[..200]` 当场
+        // panic（这就是契约写"char 边界"的原因：截断这件事不许有 panic 的余地）。
+        let long = "断".repeat(300);
+        let note = transport_note(&FakeErr::new(&long));
+        assert_eq!(note.chars().count(), TRANSPORT_NOTE_MAX_CHARS, "上界是**字符**数，不是字节数");
+        let mut head: String = long.chars().take(TRANSPORT_NOTE_MAX_CHARS - 1).collect();
+        head.push('…');
+        assert_eq!(note, head, "截断只动尾巴，前面照原样，并且看得出来是被截的：{note}");
+
+        // 让"第 200 个字符"正好落在多字节字符上那种形状：199 个 ASCII + 一串中文。
+        let mixed = format!("{}{}", "a".repeat(TRANSPORT_NOTE_MAX_CHARS - 1), "中文中文");
+        let note = transport_note(&FakeErr::new(&mixed));
+        assert_eq!(note.chars().count(), TRANSPORT_NOTE_MAX_CHARS);
+        assert!(note.ends_with('…'), "按字符切才谈得上边界：{note}");
+        // 没超长的一字不动（不许有"顺手裁剪合法文本"的读法）。
+        assert_eq!(transport_note(&FakeErr::new("刚好没那么长")), "刚好没那么长");
+    }
+
+    #[test]
+    fn the_note_appends_the_first_cause_line_that_says_something_new() {
+        // reqwest 实测的套娃形状：外层与它包着的那层**同一句话**（`io::Error{Other ←
+        // reqwest::Error{Kind::Body ← Kind::Body ← TimedOut}}`），只取"第一条带来新信息的"才是话。
+        let err = FakeErr::caused_by(
+            "request or response body error",
+            FakeErr::caused_by(
+                "request or response body error",
+                FakeErr::caused_by("request or response body error", FakeErr::new("other side closed")),
+            ),
+        );
+        assert_eq!(
+            transport_note(&err),
+            "request or response body error: other side closed",
+            "重复的那几层不许各算一句话（那会把 200 个字符的额度喂给废话）"
+        );
+        // 空消息不算话，继续往下找。
+        let err = FakeErr::caused_by("外层", FakeErr::caused_by("", FakeErr::new("真正的原因")));
+        assert_eq!(transport_note(&err), "外层: 真正的原因");
+        // 没有链的时候就只有自己这一句（不许补"未知错误"那种编出来的话）。
+        assert_eq!(transport_note(&FakeErr::new("孤零零的一句")), "孤零零的一句");
+        // 找到**一条**就收手：第三条不再进来（"first useful line" 是契约的措辞）。
+        let err = FakeErr::caused_by("甲", FakeErr::caused_by("乙", FakeErr::new("丙")));
+        assert_eq!(transport_note(&err), "甲: 乙", "链上只取首条新信息：{err:?}");
+    }
+
+    #[test]
+    fn the_note_drops_reqwest_s_url_tail_because_the_caller_already_prints_the_url() {
+        // reqwest 的 `Display` 把 URL 抄在尾巴上（`reqwest-0.13.5/src/error.rs:300-302`：
+        // `write!(f, " for url ({url})")`）。留着它 = 同一件事说两遍（Task 8 打印这一句的时候
+        // 旁边就站着这条 URL），而 URL 本来也**不是**原因。
+        let note = transport_note(&FakeErr::new(
+            "error sending request for url (https://example.com/a.bin?sid=1)",
+        ));
+        assert_eq!(note, "error sending request", "尾巴那截 URL 整个摘掉：{note}");
+        assert!(!note.contains("http") && !note.contains("sid=1"), "URL 的成分还留着：{note}");
+        // 链上那层的 URL 尾巴同样摘掉（hyper 的 cause 里也可能带）。
+        let err = FakeErr::caused_by(
+            "error decoding response body for url (http://127.0.0.1:9/x)",
+            FakeErr::new("connection closed for url (http://127.0.0.1:9/x)"),
+        );
+        assert_eq!(transport_note(&err), "error decoding response body: connection closed");
+    }
+
+    #[test]
+    fn a_cause_we_author_themself_still_goes_through_the_same_builder() {
+        // 两支零进度支**没有**错误对象可抄（`read` 给的是 `Ok(0)`），于是把自造的原因套进
+        // `io::Error` 走同一个构造器 —— "一行 / 截断 / 不重复"这三条规则不许有第二套，也不许免检。
+        assert_eq!(
+            transport_note(&std::io::Error::other(WINDOW_EOF_WITHOUT_BYTES)),
+            WINDOW_EOF_WITHOUT_BYTES,
+            "自造那句原因该原样进来、原样出去（它本来已经是一行且远短于上界）"
+        );
+        assert_eq!(transport_note(&std::io::Error::other(WHOLE_EMPTY_DOCUMENT)), WHOLE_EMPTY_DOCUMENT);
+        // 这两句里一个 ASCII 字母/数字都不带 ⇒ 集成用例 `a_transport_note_holds_no_byte_of_the_body_…`
+        // 能拿"那一枪的响应体全是 'r'"当探针：账里混进任何一个 body 字节都会当场红。
+        for cause in [WINDOW_EOF_WITHOUT_BYTES, WHOLE_EMPTY_DOCUMENT] {
+            assert!(
+                cause.chars().all(|c| !c.is_ascii_alphanumeric()),
+                "自造的原因里出现了 ASCII 字母/数字 ⇒ 那条探针就不成立：{cause}"
+            );
+        }
     }
 
     #[test]

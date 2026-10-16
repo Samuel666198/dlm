@@ -908,18 +908,76 @@ fn a_beyond_length_interval_on_a_shorter_server_is_validator_changed() -> anyhow
 
 /// 裁定 2 的正支：416 的 `Content-Range: bytes */N`，**N == total_len** ⇒ 这个区间确实不需要字节
 /// ⇒ `Complete`（Task 8 把它折成 `Event::SegmentComplete`，所以 `Complete` 必须留给"真没活儿"）。
+///
+/// **修复轮 C 改的是这一条的输入**：原先取 `iv.start == total_len`，于是"`total_len`"与"`iv.start`"
+/// 是两个**同一个数**，判据写成 `reported == Some(iv.start)`（或干脆 `reported.is_some()`）在它身上
+/// 读起来一模一样 ⇒ 变异存活。按 **E12②**，可达的形状是 `iv.start >= total_len`（续传时区间起点
+/// 已落在 EOF **上或之后**），所以这里把起点放到 `total_len + 4096`：两个量从此是两个不同的数，
+/// 正支只认分母那一个。反支（分母 = 我们的 `iv.start` 而不是 `total_len`）归
+/// `a_416_that_answers_with_our_interval_start_is_validator_changed`。
 #[test]
 fn a_416_whose_denominator_is_our_length_is_complete() -> anyhow::Result<()> {
     let stub = harness::spawn_416_stub()?;
     let (store, path) = harness::store("t7-416-agrees.bin")?;
     let total = 4_194_304;
     let t = Task { url: format!("{}/total/{total}", stub.base()), ..harness::blank_task() };
-    let iv = Interval { start: total, end: total * 2 - 1 };
+    // 起点**越过**全长 4096 个字节（不是正好落在全长上）：`total_len` 与 `iv.start` 必须是两个数。
+    let iv = Interval { start: total + 4_096, end: total * 3 - 1 };
 
     let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
-    assert_eq!(out, Outcome::Complete, "N 与我们的 total_len 相等 ⇒ 确实无字节可取：{out:?}");
+    assert_eq!(
+        out,
+        Outcome::Complete,
+        "N 与我们的 total_len 相等（而 `iv.start` 是另一个数）⇒ 确实无字节可取：{out:?}"
+    );
     assert_eq!(store.len()?, 0);
     assert!(stub.saw("/total/"), "必须真打到对端（否则测的是连接失败）：{:?}", stub.seen());
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
+/// **修复轮 C 的反支**：416 报回来的分母**正好等于我们问的那个起点**（`iv.start`）、却不等于
+/// `total_len` ⇒ 必须 `Failed(ValidatorChanged)`。
+///
+/// 为什么单独立一条而不是把既有那条的输入改改了事：既有那条原本取 `iv.start == total_len`，两个量
+/// 在那条里是**同一个数** ⇒ 判据怎么写都看不出来（那正是评审 C 说的存活变异）。把它改成
+/// `iv.start = total_len + 4096` 之后正支自己就能挡 `Some(iv.start)` 那一版了，但**反方向**还需要
+/// 一条：分母**正好等于 `iv.start`** 而对端的全长另有其数 —— 那才是野外真会出现的形状（区间由旧的
+/// `total_len` 推出来、服务端长度已经变小）。两条合起来把判据的两个方向都钉住：
+///
+/// - 写成 `reported == Some(iv.start)` ⇒ 这条给 `Complete`（红）、正支那条也给 `Complete`（红）；
+/// - 写成 `reported.is_some()` ⇒ 这条与既有那条 `a_416_with_a_disagreeing_or_missing_…` 一起红。
+///
+/// 另外照派发要求带上"没有 `Content-Range`"与"分母读不出来"两格：这两格在既有那条里已经钉过，
+/// 这里在**同一台对端、同一条 `iv`**（`iv.start > total_len` 的那个形状）上再钉一遍，是为了让
+/// "起点越过全长"这一支的三种分母形状各有归属，而不是共用一条旧 `iv`。
+///
+/// 三枪打在同一台新桩上（`PER_CONNECTION = 4`，未越界；既有那条反支用它自己的 4 枪）。
+#[test]
+fn a_416_that_answers_with_our_interval_start_is_validator_changed() -> anyhow::Result<()> {
+    let stub = harness::spawn_416_stub()?;
+    let client = harness::client()?;
+    let (store, path) = harness::store("t7-416-start-not-length.bin")?;
+    let total = 4_194_304;
+    let iv = Interval { start: total + 4_096, end: total * 3 - 1 };
+
+    for (route, shape) in [
+        (format!("/total/{}", iv.start), "分母**等于我们问的起点**、却不等于 total_len（C 点名的那一格）"),
+        (String::from("/no-content-range"), "416 压根不带 Content-Range"),
+        (String::from("/garbage-total"), "416 的分母读不出来"),
+    ] {
+        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
+        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total)?;
+        eprintln!("---- C 反支：我们的 total_len={total}、iv.start={} ----\n{route} ⇒ {out:?}", iv.start);
+        assert_eq!(
+            out,
+            Outcome::Failed(FailKind::ValidatorChanged),
+            "{shape} ⇒ 只能算「服务端长度在我们脚下变了」，不许封成 Complete：{out:?}"
+        );
+        assert_eq!(store.len()?, 0, "{shape} 这一支不许写过盘");
+    }
+    assert_eq!(stub.seen().len(), 3, "三枪都要真打出去：{:?}", stub.seen());
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -989,7 +1047,11 @@ fn a_body_that_never_starts_is_a_countable_transport_failure() -> anyhow::Result
     let iv = Interval { start: ALIGNED, end: ALIGNED + 65_536 - 1 };
 
     let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
-    assert_eq!(out, Outcome::Failed(FailKind::Transport), "零字节 + 对端拆线 ⇒ 只能算失败：{out:?}");
+    // 本轮 D：变体判断没有变松（`take_transport_note` 不是 Transport 就当场 panic），只是 additionally
+    // 要求这一支**带着那句原因**回来 —— 这一支的 `err` 是 reqwest 包过一层的 `io::Error`（对端拆线，
+    // 不是超时），所以那句话取自库的 message + `source()` 链首句。
+    let note = take_transport_note(&out, "零字节 + 对端拆线 ⇒ 只能算失败");
+    eprintln!("---- D：/drop/0 那一枪的原因原文 ----\n{note}");
     assert_eq!(store.len()?, 0);
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -1011,7 +1073,12 @@ fn an_empty_degraded_body_for_a_non_empty_interval_is_a_countable_failure() -> a
     let iv = Interval { start: 0, end: 4096 * 4 - 1 };
 
     let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
-    assert_eq!(out, Outcome::Failed(FailKind::Transport), "区间要 16 KiB、对端交了 0 字节 ⇒ 零进度必须计一次失败：{out:?}");
+    // 本轮 D：这一支的 `read` 给的是 `Ok(0)`（**没有**错误对象），所以那句原因是我们自己写的
+    // （`src/fetch.rs` 的 `WINDOW_EOF_WITHOUT_BYTES`），它要**说清是哪一种零进度**，
+    // 而不是留给 Task 8 一句"网络错了"。M9 那条纪律（零进度必须是可数的失败）原样保留。
+    let note = take_transport_note(&out, "区间要 16 KiB、对端交了 0 字节 ⇒ 零进度必须计一次失败");
+    eprintln!("---- D：干净 EOF 而零字节那一支的原因原文 ----\n{note}");
+    assert!(note.contains("响应体") && note.contains("干净结束"), "原因要说清是\"body 干净结束、一个字节都没到\"：{note}");
     assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
     assert!(stub.saw("/claims-bytes-answers-200"), "必须真打到对端：{:?}", stub.seen());
     drop(store);
@@ -1622,7 +1689,14 @@ fn a_whole_shot_cut_off_before_the_first_byte_is_a_countable_failure() -> anyhow
     };
     let (out, facts) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000)?;
     eprintln!("---- 整份 + 头发完就拆线 ----\n{out:?} 事实 {facts:?}");
-    assert_eq!(out, Outcome::Failed(FailKind::Transport), "零字节 + 对端拆线 ⇒ 只能算失败：{out:?}");
+    // 本轮 D：`run_whole` 的这一支与 `run_window` 走的是**同一个**构造器（措辞不许在两条入口上分岔）。
+    // 这一枪的请求体（`FORM_BODY`，带着口令形状的那 33 字节）**确实**被我们打开过并送上了线 ⇒
+    // "原因里没有一个字的体"在这里不是恒真断言。
+    let note = take_transport_note(&out, "零字节 + 对端拆线 ⇒ 只能算失败");
+    eprintln!("---- D：整份那一支的原因原文 ----\n{note}");
+    for leak in ["cvv", "hunter2", "session", "user=alice"] {
+        assert!(!note.contains(leak), "原因里抄了请求体（{leak}）：{note}");
+    }
     assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
     let facts = facts.expect("响应头到了，事实就是读到的东西");
     assert_eq!(facts.total_len, 48 * 1024 * 1024, "长度照响应自己说的，不改成我们拿到的 0");
@@ -1692,5 +1766,290 @@ fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyho
     drop((store, store2));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&path2);
+    Ok(())
+}
+
+// ================================================================ Task 7 修复轮 1：A / B（存活变异的两格边界）
+//
+// 评审在 `ba906f4` 上跑出的三格**存活变异**：判据改坏之后整个套件照样绿。C（416 的分母读成
+// `iv.start`）改的是 `a_416_whose_denominator_is_our_length_is_complete` 那条既有用例，见那里；
+// 下面两条补的是 A（206 的起点不符）与 B（`iv.end` 含与不含的那一条边界）。
+
+/// **A**：206 **说得出**一个起点，但那个起点不是我们问的那一个 ⇒ `Failed(ValidatorChanged)`，
+/// 而且**一个字节都不许落盘**。
+///
+/// 为什么这一格比"对端说不出起点"危险得多：缺头那一支挡的是"按我们想要的偏移硬写"，而起点不符
+/// 那一支写下去的字节**来自文件的另一段** —— 长度对、块数对、`Advanced`/`Complete` 照样给，
+/// 于是错位的字节被报成"这一段下完了"。`E7`/`E9` 之后封存不看盘，所以错位只有到 sha256 门槛
+/// （Task 10）才现形，而那时已经"完成"了。
+///
+/// 既有那条 `a_206_that_cannot_show_its_offset_is_validator_changed` 钉不住这一格：它走
+/// `/no-content-range`（`asked_at` 是 `None`）且 `iv.start == 0`，所以把判据
+/// `asked_at != Some(iv.start)` 写成 `asked_at.is_none()` 在它身上读起来一模一样。
+///
+/// 两条形状分开钉，差的是"差多少"：
+/// - `/known-total` ⇒ 对端声称起点是 **0**，我们问的是 4096（差 `iv.start` 本身）
+/// - `/wrong-start` ⇒ 对端声称起点是 **1024**，我们问的是 4096（差一个第三方数）
+///   第二条另外挡掉"把 0 当成我们的起点"那种写法（`asked_at != Some(0)`），那种写法在第一条上
+///   与正确实现同判、在真服务器上（起点 0 是合法起点）却会把骗子放行。
+#[test]
+fn a_206_that_claims_another_offset_than_the_one_we_asked_for_writes_nothing() -> anyhow::Result<()> {
+    let stub = harness::spawn_unknown_total_stub(1024)?;
+    let client = harness::client()?;
+    let (store, path) = harness::store("t7-206-wrong-offset.bin")?;
+    let iv = Interval { start: 4_096, end: 4_096 + 1_024 - 1 };
+
+    for (route, claimed) in [("/known-total", 0u64), ("/wrong-start", 1_024)] {
+        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
+        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+        eprintln!(
+            "---- A：我们问 {}，{route} 声称 {claimed} ----\n{out:?} len={}",
+            iv.start,
+            store.len()?
+        );
+        assert_eq!(
+            out,
+            Outcome::Failed(FailKind::ValidatorChanged),
+            "{route}：对端声称的起点 {claimed} 与我们问的 {} 不是同一个 ⇒ 偏移核对不了，\
+             只能是 ValidatorChanged（写成 `asked_at.is_none()` 的判据会在这一枪放行，\
+             于是那 1024 个来自文件别处的字节被写进偏移 {} 起）：{out:?}",
+            iv.start,
+            iv.start
+        );
+        assert_eq!(store.len()?, 0, "{route}：起点不符 ⇒ 一个字节都不许落盘");
+    }
+    // "没被吸进文件"由**独立读者**证（不经 Store）：文件长度真的还是 0，不是"写过又缩回去"。
+    assert_eq!(std::fs::metadata(&path)?.len(), 0, "响应体被落进文件了（长度不是 0）");
+    assert_eq!(stub.seen().len(), 2, "两枪都要真打到对端（否则测的是连接失败）：{:?}", stub.seen());
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
+/// **B** 的左半边：区间**正好**一个窗口（长度 = `WINDOW_BYTES`）⇒ 区间的最后一个字节
+/// （`iv.end`，含）**确实**落到了盘上 ⇒ 必须 `Complete`。
+///
+/// `iv.end` 是**含端点**的（`Interval::len() = end - start + 1`），而 `run_window` 的收手条件是
+/// `stop = min(iv.end + 1, iv.start + WINDOW_BYTES)` ⇒ 区间长度 = 窗口时 `cursor` 恰好走到
+/// `iv.end + 1`，**越过了** `iv.end`。`Complete` 承诺的是"`iv.end` 那个字节到了"，所以判据只能是
+/// `cursor > iv.end`。
+#[test]
+fn an_interval_of_exactly_one_window_is_complete() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let total = srv.announced()?.size;
+    let (store, path) = harness::store("t7-window-exact.bin")?;
+    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES - 1 };
+    assert_eq!(iv.len(), WINDOW_BYTES, "这一条要的就是「正好一个窗口」那个形状");
+
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    eprintln!("---- B 左半边：len(iv) == WINDOW_BYTES ----\n{out:?} len={}", store.len()?);
+    assert_eq!(out, Outcome::Complete, "区间正好一个窗口 ⇒ 最后一个字节落盘了，必须 Complete：{out:?}");
+    assert_eq!(store.len()?, iv.end + 1, "含端点：写完 iv.len() 个字节 ⇒ 长度是 iv.end + 1");
+    // 块号取证覆盖窗口内每一个 4 KiB 块首（最后一块是第 1279 块，起点 5238784）⇒ 落盘的内容
+    // 确实来自 `[ALIGNED, ALIGNED+WINDOW_BYTES)`，没错位也没掉段。
+    harness::require_block_alignment(&path, ALIGNED, WINDOW_BYTES)?;
+    // 区间最后一个字节（下标 `iv.end`）**读得出来** —— 与右半边那条互为对照，这一对才把
+    // "`Complete` 意味着 `iv.end` 到了" 钉成字节级的凭据，而不是一句我们自己的措辞。
+    // 刻意不断它的内容：blob 只在块首写块号，块内其余字节是 `allocUnsafe` 的填充（不是契约）。
+    assert!(
+        harness::bytes_at(&path, iv.end, 1).is_ok(),
+        "报了 Complete 却连区间最后一个字节都不在盘上（长度 {}，下标 {} 读不出来）",
+        store.len()?,
+        iv.end
+    );
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
+/// **B** 的右半边：区间比窗口**多一个字节** ⇒ 那一个字节（`iv.end`）**没有**落盘 ⇒ 只能
+/// `Advanced { bytes: WINDOW_BYTES }`。
+///
+/// 这一条是 `>` 与 `>=` 的分水岭：`cursor` 在这里最多走到 `stop = iv.start + WINDOW_BYTES = iv.end`，
+/// 永远越不过 `iv.end`。判据写成 `cursor >= iv.end` 的话，一个长度为 `WINDOW_BYTES + 1` 的区间会
+/// 把**尾巴那个字节从没落盘**的一段封成 `Complete` ⇒ `E7`/`E9` 之后 `SegmentComplete` 不看盘，
+/// 那个字节就再也不会被取。所以这一条不许靠注释、要靠 `store.len()` 与"读 `iv.end` 读不出来"钉。
+#[test]
+fn an_interval_one_byte_wider_than_the_window_is_never_complete() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let total = srv.announced()?.size;
+    let (store, path) = harness::store("t7-window-plus-one.bin")?;
+    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES };
+    assert_eq!(iv.len(), WINDOW_BYTES + 1, "多一个字节 ⇒ 窗口填不满这个区间");
+    let edge = iv.end; // 区间最后一个字节所在的**下标**（格式串里不支持字段访问，取个局部名）
+
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    eprintln!("---- B 右半边：len(iv) == WINDOW_BYTES + 1 ----\n{out:?} len={}", store.len()?);
+    assert_eq!(
+        out,
+        Outcome::Advanced { bytes: WINDOW_BYTES },
+        "区间比窗口多一个字节 ⇒ 交回「正好一个窗口」，并如实说那个尾巴还没到：{out:?}"
+    );
+    assert_eq!(store.len()?, edge, "长度停在 iv.end ⇒ 下标 iv.end 那个字节不在盘上");
+    let on_disk = std::fs::metadata(&path)?.len();
+    assert!(
+        on_disk <= edge,
+        "盘上长度越过了窗口上界（{edge}）⇒ stop 算错了：len={on_disk}"
+    );
+    assert!(
+        harness::bytes_at(&path, edge, 1).is_err(),
+        "区间的最后一个字节（下标 {edge}）**必须**读不出来 —— 它没落盘，而 Complete 会把它封掉"
+    );
+    harness::require_block_alignment(&path, ALIGNED, WINDOW_BYTES)?;
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
+// ================================================================ Task 7 修复轮 1：D（Transport 带原因）+ drive-by
+//
+// 契约改动（控制方裁定，勘误 **E12**⑦已登记）：`FailKind::Transport` 从单元变体变成
+// `Transport(String)` —— 那句 `String` 是**这一次**失败的原因（reqwest / `io::Error` 的 message 加
+// `source()` 链首句，压成一行、≤200 字符、不抄 body、不重复 URL）。理由：Task 8 要把这句话交给用户，
+// 裸枚举到那里只剩"网络错了"，而"网络错了"没法行动。
+//
+// 四条形状规则由 `src/fetch.rs` 的单元用例逐条钉（假错误喂进去，那里能构造任意外形）；**这一节**钉的是
+// 每个真生产支交回来的确实是"一句能用的话"，并且线上真的没有 body 字节、没有第二条 URL。
+
+/// 把 `Outcome::Failed(FailKind::Transport(note))` 里那句原因取出来，顺带钉住它的**形状契约**
+/// （E12⑦：非空、一行、最多 200 个**字符**）。不是这一支就当场 panic —— 调用方的用例于是仍然
+/// 只测它要测的那一支，"变体对不对"这条判断没有因为换成 `Transport(_)` 而变松。
+fn take_transport_note(out: &Outcome, shape: &str) -> String {
+    let Outcome::Failed(FailKind::Transport(note)) = out else {
+        panic!("{shape} ⇒ 期待 Failed(Transport(那句原因))，实际是 {out:?}");
+    };
+    assert!(!note.is_empty(), "{shape}：Transport 不许带空原因（空话与裸枚举一样没法行动）");
+    assert!(!note.contains('\n') && !note.contains('\r'), "{shape}：原因必须是一行：{note:?}");
+    assert!(
+        note.chars().count() <= 200,
+        "{shape}：原因超过 200 个字符（{} 个）：{note}",
+        note.chars().count()
+    );
+    note.clone()
+}
+
+/// **D**：`execute` 那一支（连响应头都没等到）也必须带着原因回来。
+///
+/// 形状：向一个**刚刚放开**的临时端口打枪（`bind` 到端口 0 拿到号之后立刻 drop ⇒ 本机立刻回 RST），
+/// 于是 reqwest 交回一次连接失败。这是 `run_window` / `run_whole` 两处 `execute` 支唯一能真构造出来
+/// 的入口（其余 Transport 支要么要真断线、要么要真拆线）。
+///
+/// 钉三件事：① 两支都交回 `Transport` **且带着话**（不是空串、不是一行里的半截）；② 那句话里
+/// **没有 URL** —— reqwest 把 URL 抄在 `Display` 的尾巴上，摘掉是契约（URL 不是原因，而 Task 8
+/// 打印这句时旁边就站着这条 URL，留着等于说两遍）；③ 还没看到响应 ⇒ `run_whole` 交不回事实（`None`），
+/// 且盘上仍然是空的。
+#[test]
+fn a_transport_failure_from_the_execute_side_names_the_cause_without_repeating_the_url() -> anyhow::Result<()> {
+    let port = {
+        let listener = std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .context("向 OS 要一个空闲端口失败")?;
+        listener.local_addr().context("拿不到临时端口")?.port()
+    }; // 离开作用域即放开：下一次连这个号就是"没人听"。
+    let dead = format!("http://127.0.0.1:{port}");
+    let client = harness::client()?;
+    let (store, path) = harness::store("t7-transport-exec.bin")?;
+
+    // ① 窗口那一支（GET + Range）
+    let t = Task { url: format!("{dead}/blob"), ..harness::blank_task() };
+    let out = fetch::run_window(&client, &t, Interval { start: 0, end: 4_095 }, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let note = take_transport_note(&out, "窗口那一枪连响应头都没等到（端口没人听）");
+    eprintln!("---- D：run_window 的 execute 支 ----\n{out:?}\n原因原文：{note}");
+    assert!(!note.contains("http"), "原因里还有 URL 的成分：{note}");
+    assert!(!note.contains(&port.to_string()), "原因里抄了这次的目标端口（Task 8 打印时旁边就有 URL）：{note}");
+    assert_eq!(store.len()?, 0, "连接都没成 ⇒ 盘上必须还是空的");
+
+    // ② 整份那一支（POST）：同一个构造器、同一条规则，而且**没有**事实可交（没看到响应）。
+    let file = harness::scratch_body("f1-exec-dead-body.bin", FORM_BODY)?;
+    let pt = Task { url: format!("{dead}/submit"), data_file: Some(file.clone()), ..harness::blank_task() };
+    let (out2, facts) = fetch::run_whole(&client, &pt, &store, 10_000_000)?;
+    let note2 = take_transport_note(&out2, "整份那一枪连响应头都没等到（同一个端口）");
+    eprintln!("---- D：run_whole 的 execute 支 ----\n{out2:?}\n原因原文：{note2}");
+    assert!(facts.is_none(), "还没看到响应就失败 ⇒ 不许硬凑一份事实：{facts:?}");
+    assert!(!note2.contains("http") && !note2.contains(&port.to_string()), "同一支规则不许在两条入口上分岔：{note2}");
+    for leak in ["cvv", "hunter2", "session", "user=alice"] {
+        assert!(!note2.contains(leak), "原因里抄了请求体（{leak}）：{note2}");
+    }
+    assert_eq!(store.len()?, 0, "两支都不该动过盘");
+    let _ = std::fs::remove_file(&file);
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
+/// **D 的"不抄 body"那一半**：那 4096 个字节**确实到过我们的读缓冲**，而句原因里一个字节都不许有。
+///
+/// 形状：对端回 `200` + `Content-Length: 4096` + 4096 个 `'r'`（`spawn_range_ignoring_stub`，
+/// 刻意挑全同字节的那种 body —— 于是"原因里有没有 ASCII 字母/数字"这条断言就是"有没有 body 字节"
+/// 这条断言，没有中间地带），而区间起点正好等于 `iv.start = 4096` ⇒ 降级支把整份 body 当成要丢的
+/// **前导**流过去，一个字节都没落盘 ⇒ 零进度 ⇒ `Transport`（`run_window` 的 EOF 支，那句原因是
+/// 我们自己写的，见 `WINDOW_EOF_WITHOUT_BYTES`）。
+///
+/// 为什么这条不是恒真断言：字节真的经过了 `resp.read()` 的那个 `buf`，所以"把最后一块 / 它的长度 /
+/// 它的 Debug 形状抄进原因"那种写法会在这里红（`is_ascii_alphanumeric` 同时挡住 `'r'` 与 `[114,`）。
+/// 而 `run_window` 与 `run_whole` 共用同一个构造器 ⇒ 这一支挡住的就是那两支的规则。
+#[test]
+fn a_transport_note_holds_no_byte_of_the_body_it_handed_back() -> anyhow::Result<()> {
+    const BODY: u64 = 4_096;
+    let stub = harness::spawn_range_ignoring_stub(BODY)?;
+    let (store, path) = harness::store("t7-note-holds-no-body.bin")?;
+    let t = Task { url: format!("{}/claims-bytes-answers-200", stub.base()), ..harness::blank_task() };
+    let iv = Interval { start: BODY, end: BODY * 2 - 1 };
+
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let note = take_transport_note(&out, "区间要 4096 字节、对端那 4096 字节全是要丢的前导 ⇒ 零进度");
+    eprintln!("---- D：那句原因的原文（4096 个 'r' 一个字节都没进账）----\n{note}");
+    assert!(
+        note.chars().all(|c| !c.is_ascii_alphanumeric()),
+        "原因里出现了 ASCII 字母或数字 ⇒ 那是 body 的字节（对端交的 4096 个 'r'）或它的长度：{note}"
+    );
+    assert!(note.contains("响应体") && note.contains("干净结束"), "原因要说清是哪一种零进度：{note}");
+    assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
+    assert_eq!(std::fs::metadata(&path)?.len(), 0, "那 4096 个字节没被落进文件（独立读者）");
+    assert!(stub.saw("/claims-bytes-answers-200"), "必须真打到对端（否则测的是连接失败）：{:?}", stub.seen());
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+    Ok(())
+}
+
+/// **drive-by（派发点名的第二条）**：`--data-file` 指向**目录**时必须**当场**拒，且不碰网络。
+///
+/// 派发给的理由（"Windows 上 `File::open` 对目录是成功的，错误要到 reqwest 的驱动线程读体时才冒
+/// 出来 ⇒ POST 已经上了线"）在本机**实测不成立**：`File::open` 对一个目录在打开那一步就返回
+/// `PermissionDenied / 拒绝访问。 (os error 5)`（Windows 要求目录句柄带 `FILE_FLAG_BACKUP_SEMANTICS`，
+/// std 不带）。所以这条用例钉的不是"少一次上线"，而是**那句错误话说对了没有**：旧写法把"你给的是
+/// 目录"报成"拒绝访问" —— 路径明明存在、明明可读，用户照着去查 ACL 就白跑一趟。同时把"绝不碰网络"
+/// 也钉住（`spawn_post_stub` 是独立观察者，连请求体都收得下来），因为这道闸住在打开之前，
+/// 那条性质从此由构造保证而不是由运气保证。摘掉 `ensure!` 之后本用例红在"普通文件"那一条断言上
+/// （消息变成"读 --data-file 的请求体文件失败：…"），取证见报告。
+#[test]
+fn a_directory_handed_to_data_file_is_refused_before_the_wire_and_names_the_path() -> anyhow::Result<()> {
+    let peer = harness::spawn_post_stub(Some("bytes"), harness::positioned_body(4096))?;
+    let (store, path) = harness::store("t7-dir-as-body.bin")?;
+    // 一个**真的目录**：`harness::blank_task()` 的 `dir`（`target/harness-scratch`，夹具建好的那个）。
+    let scratch = harness::blank_task();
+    let dir = scratch.dir.clone();
+    assert!(dir.is_dir(), "这一条的输入必须是目录（{dir:?} 不是）");
+    let t = Task {
+        url: format!("{}/submit", peer.base()),
+        data_file: Some(dir.clone()),
+        ..harness::blank_task()
+    };
+
+    let Err(err) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000) else {
+        panic!("目录当请求体必须当场报错，不许把这份体交给 reqwest 去读");
+    };
+    let msg = err.to_string();
+    eprintln!("---- drive-by：目录当体 ----\n{msg}\n原因链：{err:?}");
+    assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
+    assert!(msg.contains("普通文件"), "错误要说清是「不是文件」，而不是「打不开」：{msg}");
+    assert!(!msg.contains("拒绝访问") && !msg.contains("权限"), "把「你给的是目录」报成权限问题会把用户支到 ACL 上去查：{msg}");
+    assert!(msg.contains("harness-scratch"), "路径要点名（那是用户能给对的东西）：{msg}");
+    assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
+    assert!(peer.requests().is_empty(), "拒在上网之前：对端一条请求都不该看到（POST 一旦上线就是真提交）：{:?}", peer.requests());
+    assert_eq!(store.len()?, 0, "被拒的这一枪不许动过盘");
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
 }
