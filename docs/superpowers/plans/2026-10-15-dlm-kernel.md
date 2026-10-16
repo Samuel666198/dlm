@@ -1052,14 +1052,23 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
 
 - **`Event` 增一个 `SegmentComplete { worker: usize }`（`src/scheduler.rs:70`；分支 `:170`；落账 `seal()` `:203`）。
   本计划第 321 行列的五种事件现在是六种。Task 7 第 800 行的「`416` ⇒ 直接返回 `Complete`」到调度器这一层必须映射成
-  `Event::SegmentComplete{worker}`，不再折成 `WindowDone`。** 语义 = "这个 worker 的区间就此收尾，不需要交回任何字节"：
+  `Event::SegmentComplete{worker}`，不再折成 `WindowDone`。** 但这条映射**不是无条件的**（2026-10-16 追加，Task 7 派发时以本条为准）：
+  我们的每个区间都是由 probe 拿到的 `total_len` 推出来的，所以**收到 416 本身就证明服务端长度在我们脚下变了**
+  —— 若 416 里的 `N` 等于我们的 `total_len`，合法区间的 `start` 必然 `< N`，那个 416 根本发不出去。
+  故 Task 7 的判据 = 读 416 响应的 `Content-Range: bytes */N`：**`N != total_len` ⇒ 发 `Failed`**（让 §6.1/§6.2 的重试上限真介入，
+  并最终明确报"服务端长度变化"，而不是悄悄产出一个短文件）；**只有 `N == total_len` 才允许 `SegmentComplete`**。
+  `SegmentComplete` 这个事件本身仍然保留：spec §7.1 第 6 条要在单元层可表达、可测，而活锁已由"不再退回队列"根除。 语义 = "这个 worker 的区间就此收尾，不需要交回任何字节"：
   release 路径的显式分支，整段并进 `done`，**不看 `written`**、不产生队列项。为什么必须新增而不是复用现有形状：
   ① 416 折成零字节 `WindowDone` 时 `release()`（`:186-195`）会把**整段**推回队列 ⇒ "再派→再 416→再回队"的无界 HTTP 活锁，
   而 spec §6.1/§6.2 的快速 5 次 / 慢速 30 s 封顶只挂在 `Failed` 上，这条路径永远接不上；
   ② 用现有形状硬凑"416 ⇒ 完成"只有一条捷径 —— `Progress{abs_end: iv.end}` + `WindowDone`，那会把**从未落盘的字节**
   记成"已确认落盘"，直接污染 Task 4 的断点文件与 §7.2 的 sha256 门槛（拿数据损坏换掉活锁，不可接受）。
   代价要说清楚：被 `SegmentComplete` 封存的那一段里可能含本地没有的字节，这是 §6.4 裁定本身（Range 越界的字节拿不到），
-  不是新漏；Task 4/8 按"归属已定、不再下载"理解它。钉住的用例：
+  不是新漏；Task 4/8 按"归属已定、不再下载"理解它。**会撞的具体闸（2026-10-16 追加，Task 8 派发时以本条为准）**：
+  spec §6 末条（设计稿第 116 行，"没给 sha256 则只校验『已写字节数 == total_len』"）与 Task 4 的 `written` 字段在封存之后会对得上号却**含义不同** ——
+  `snapshot_intervals()` 是"归属已定的字节"，不是"磁盘上真有的字节"。所以 T8 的收尾判定必须把这两个量分开算
+  （落盘量取自 `store.len()` 与 `Progress` 交回的字节，覆盖集取自 `snapshot_intervals()`），
+  **不许拿覆盖集当已写量去过那道"已写字节数 == total_len"的闸**。钉住的用例：
   `segment_complete_marks_a_zero_progress_interval_done_and_never_requeues`（`:639`）、
   `segment_complete_seals_its_interval_exactly_once_and_is_not_redispatched`（`:654`）、
   对照行 `zero_progress_window_done_still_requeues_the_whole_interval`（`:674`，钉"两个事件不得合并"）；
@@ -1075,6 +1084,9 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   ① 派发判据换成**起点最低**：`first_pending()`（`src/scheduler.rs:218`）在退化分支生效（`:243`），"最长优先"只留在正常模式
   （`longest_pending()` `:211`）。原行为下队列 `{[201,499],[700,999]}` 会先派 [700,999]（更长），而对端不认 Range 时只会从
   字节 0 交出整个 body，`fetch::run_window` 按 `iv.start` 落盘 ⇒ 内容写进中段、文件错位；POST 降级（§2.2 第一条）走的是同一条边。
+  **随之而来的上游义务（Task 7 必须实现，本计划第 795–801 行没写）**：对端不认 Range 时 `iv.start > 0` 的行是真会出现的
+  （`src/scheduler.rs:590` 的 `[201,499]`、`:505` 的 `[401,999]` 就是），所以 `run_window` 收到 200 响应时必须**先丢掉 body 的前
+  `iv.start` 个字节**，再从 `iv.start` 起落盘。调度器给不出这条信息 —— 只要已确认字节挡在前面，它所能产出的任何区间形状都躲不开这一跳。
   ② `NoRanges` 到达即**塌表**：`collapse_pending()`（`:317`，入口 `:157`）把无人认领的区间合并成一段，退化期交回的尾巴
   也并回那一段（`:309`）。只合并**相邻/重叠**者 —— 中间隔着已确认或在途字节的不合并，否则会把已落盘字节重算成待下载
   （不变量 `done + pending <= total` 会当场红）。所以"单段"的准确说法是"表里相邻的空位不重复登记、每次只派一段"。
