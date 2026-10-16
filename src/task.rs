@@ -66,7 +66,11 @@ fn scheme_separator_len(url: &str) -> Option<usize> {
 ///
 /// 没有合法 scheme 时把"串首到第一个 `/`、`?`、`#`"当 authority（保守那一支）：这种输入本来也走不出
 /// reqwest（"relative URL without a base"），但凭据没有理由因为少写了 `https://` 就被放过。
-fn authority_has_userinfo(url: &str) -> bool {
+///
+/// **`pub(crate)` 是 Task 6 的可见性改动（派发第 9 条），逻辑一个字没动**：`probe` 要用**同一个**判据
+/// 检查**服务器控制的**落地 URL（Task 5 评审 C3；E9 那道闸只管用户自己给的 `task.url`，够不着这里）。
+/// 一条规则有两个版本的判据，迟早读成两样 —— 复用比复制便宜，也比在 `probe` 里再写一个解析器可靠。
+pub(crate) fn authority_has_userinfo(url: &str) -> bool {
     let after = scheme_separator_len(url).map_or(url, |n| &url[n..]);
     let end = after.find(['/', '?', '#']).unwrap_or(after.len());
     after[..end].contains('@')

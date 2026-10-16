@@ -1,0 +1,578 @@
+//! 集成测试的**真对端**：起本机 node 探针服务器（同目录的 `probe-server.mjs`），
+//! 并把它的 JSONL 日志读回来当证据。只用 std + 仓库里已有的 reqwest / serde_json / anyhow。
+//!
+//! ## 三条从 Task 0 实测继承下来的硬规矩（改本文件前先读完）
+//!
+//! 1. **不加 `Connection: close`，也不设 `pool_max_idle_per_host(0)`**（spec §10 勘误 **R5**、
+//!    计划勘误 **E2**，两者都明写 Task 6/7 不得加）。Task 0 实测：416 卡死的根因是本 harness 推流
+//!    循环漏了 `res.end()`（服务端把后续响应留在 socket 的 pending 队列里），不是 reqwest 的连接池；
+//!    加 close 不致错，但会强制每发一次试探就新拆一条连接，把"**复用连接上打 416**"这条真实路径
+//!    从测试覆盖里关掉 ⇒ 勘误 **E3** 要求的守卫用例根本写不出来。
+//! 2. **超时显式配置**（R5 末段：别假设"不配 timeout 就等于永不等"，那组矩阵里没配 timeout 的
+//!    客户端仍然在 30.005 s 死掉，时长来源未查清）。形状按简报 Step 2：`timeout 30 s` +
+//!    `connect_timeout 3 s` + `tcp_nodelay`。
+//! 3. **端口每次现挑、就绪靠轮询、`Drop` 真杀进程**：cargo 用多线程并行跑用例，写死端口一定互相抢
+//!    （历史会话用过 8077/8100/8123/8161/8163）；固定 `sleep` 等就绪既慢又不稳。日志一律写在
+//!    `target/` 下（`.gitignore` 里有 `target/`），文件名带端口 + pid + 轮次，绝不复用。
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::Value;
+
+/// 试探服务器脚本（Task 0 起就固定在本仓库里，本轮**未改动**它的任何路由与收尾行为）。
+const SCRIPT: &str = "tests/harness/probe-server.mjs";
+
+/// 等就绪的兜底时限：本机 node 冷启动远快过这个数，超时就是真故障。
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(20);
+/// 日志是 node 侧异步写的，客户端拿到响应时那一行**可能**还没落盘 ⇒ 读日志一律带时限轮询。
+const LOG_TIMEOUT: Duration = Duration::from_secs(5);
+/// 一次轮询的间隔；本文件的等待对象是 localhost + 一次文件写，20 ms 足够。
+const POLL: Duration = Duration::from_millis(20);
+
+/// 规矩 3 的实现：**挑一个真的没人占的端口**。
+///
+/// 做法：向 OS 要一个空闲端口（`bind` 端口 0），拿到之后**立刻放开**，再把号报给 node。
+/// 存在一个理论上的空窗（放开到 node `listen` 之间被别人抢走），所以 `spawn()` 外面套了重试：
+/// 就绪等待发现 node 自己退掉了就换下一个号再来。
+fn free_port() -> Result<u16> {
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("向 OS 要空闲端口失败")?;
+    let port = listener.local_addr().context("拿不到临时端口的本地地址")?.port();
+    drop(listener); // 显式放开：不出作用域的话端口一直被我们占着，node 反而会 EADDRINUSE。
+    Ok(port)
+}
+
+/// `server_start` 那行日志：**服务器自己宣布**的 blob 事实。
+///
+/// 存在的原因（派发第 7 条）：简报把 ETag 写成字面量 `"\"probe-f675558c108f46fc\""`，而 harness 的
+/// ETag 是从 blob 的 sha256 现算的（`'"probe-' + SHA.slice(0, 16) + '"'`）⇒ 那个字面量是"上一轮会话
+/// 抄下来的值"，blob 一改就漂。断言的对端必须是**这台正在服务的服务器报出来的值**，不是历史值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Announced {
+    pub port: u16,
+    /// blob 总字节数（`/blob` 的 48 MiB）。
+    pub size: u64,
+    /// 整块 blob 的 sha256（十六进制小写）。
+    pub sha256: String,
+    /// 响应头 `ETag` 的原样值，**含**外层双引号。
+    pub etag: String,
+    /// 响应头 `Last-Modified` 的原样值。
+    pub last_modified: String,
+}
+
+/// 一个活着的探针服务器进程 + 它的日志路径。`Drop` 时杀进程、等它退、删日志。
+#[derive(Debug)]
+pub struct Server {
+    child: Child,
+    port: u16,
+    log: PathBuf,
+}
+
+impl Server {
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// `http://127.0.0.1:<port>`（末尾**不带**斜杠，调用方拼 `{base}/blob`）。
+    pub fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// 服务器自己宣布的事实（读 `server_start` 那行；落盘有延迟 ⇒ 轮询）。
+    pub fn announced(&self) -> Result<Announced> {
+        let evs = self
+            .events_while(|evs| evs.iter().any(|e| e["ev"] == "server_start"))
+            .context("等不到 server_start 那行日志（node 起来了却没写日志？）")?;
+        let start = evs
+            .iter()
+            .find(|e| e["ev"] == "server_start")
+            .ok_or_else(|| anyhow!("events_while 的期望没被满足却返回了（不可能到达）"))?;
+        let text = |k: &str| {
+            start[k]
+                .as_str()
+                .map(str::to_string)
+                .with_context(|| format!("server_start 里 {k} 不是字符串"))
+        };
+        Ok(Announced {
+            port: start["port"].as_u64().context("server_start.port 不是整数")? as u16,
+            size: start["size"].as_u64().context("server_start.size 不是整数")?,
+            sha256: text("sha256")?,
+            etag: text("etag")?,
+            last_modified: text("lastModified")?,
+        })
+    }
+
+    /// 此刻已落盘的全部事件（不等待）。
+    pub fn events(&self) -> Result<Vec<Value>> {
+        read_jsonl(&self.log)
+    }
+
+    /// 轮询读日志直到 `want` 满意（或 `LOG_TIMEOUT` 到）。
+    pub fn events_while(&self, want: impl Fn(&[Value]) -> bool) -> Result<Vec<Value>> {
+        let deadline = Instant::now() + LOG_TIMEOUT;
+        loop {
+            let evs = self.events()?;
+            if want(&evs) {
+                return Ok(evs);
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "{LOG_TIMEOUT:?} 内日志没满足期望（{} 行，末尾三条：{:?}；日志 {}）",
+                    evs.len(),
+                    evs.iter().rev().take(3).collect::<Vec<_>>(),
+                    self.log.display()
+                );
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    /// 服务端看到的**请求**行（`ev == "request"`），按到达顺序。
+    ///
+    /// 这是"我们的客户端到底**发出了**什么头"的唯一权威证据 —— 响应侧的断言只能证明收到什么，
+    /// 证明不了发出什么（`Range` 有没有发、发的是不是限量那一条，都只能在这里看）。
+    pub fn requests(&self) -> Result<Vec<Value>> {
+        Ok(self.events()?.into_iter().filter(|e| e["ev"] == "request").collect())
+    }
+
+    /// 等"服务端至少看到了 `n` 条请求"，返回请求行（不含 `server_start` 之类）。
+    pub fn requests_at_least(&self, n: usize) -> Result<Vec<Value>> {
+        let evs =
+            self.events_while(|evs| evs.iter().filter(|e| e["ev"] == "request").count() >= n)?;
+        Ok(evs.into_iter().filter(|e| e["ev"] == "request").collect())
+    }
+
+    /// 在 `wait` 这段时间里**守着**日志：一旦出现请求就立刻把请求行交回来；一直没有就给空表。
+    ///
+    /// "不该发出任何请求"这类断言不能用 `requests().is_empty()` 直接下 —— 日志行的落盘晚于
+    /// 客户端拿到响应，那样的断言会在真故障上碰巧为真（本项目已经踩过三次"恒绿夹具"）。
+    pub fn requests_within(&self, wait: Duration) -> Result<Vec<Value>> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let got = self.requests()?;
+            if !got.is_empty() || Instant::now() >= deadline {
+                return Ok(got);
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    /// 杀掉 node 进程（`Drop` 调它）。
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop();
+        // 日志留在 `target/` 下会长，用例跑完就删；删不掉不是故障（进程刚放开盘子时可能还没放）。
+        let _ = std::fs::remove_file(&self.log);
+    }
+}
+
+/// 起一台探针服务器，返回 `(守护, base_url)`。见模块文档第 3 条。
+///
+/// 重试的必要性：`free_port()` 放开端口到 node `listen` 之间有空窗，端口被别人抢先占掉时
+/// node 会以 `EADDRINUSE` 退出 —— 那种失败必须换号重来，而不是把超时摊给用例。
+pub fn spawn() -> Result<(Server, String)> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join(SCRIPT);
+    if !script.exists() {
+        bail!("找不到探针服务器脚本：{}", script.display());
+    }
+    let dir = log_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("建日志目录失败：{}", dir.display()))?;
+
+    let mut problems = vec![];
+    for attempt in 0..5u32 {
+        let port = free_port()?;
+        let log = dir.join(format!("probe-{}-{}-{attempt}.jsonl", port, std::process::id()));
+        // node 以 **append** 打开日志，同名残留会污染断言 ⇒ 先确保没有。
+        let _ = std::fs::remove_file(&log);
+        let mut child = start_node(&script, port, &log)?;
+        match wait_until_listening(&mut child, port, attempt) {
+            Ok(()) => {
+                let base = format!("http://127.0.0.1:{port}");
+                return Ok((Server { child, port, log }, base));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                problems.push(format!("第 {attempt} 次（端口 {port}）：{e:#}"));
+            }
+        }
+    }
+    Err(anyhow!("试了 5 次都没能把探针服务器起起来：\n{}", problems.join("\n")))
+}
+
+fn start_node(script: &Path, port: u16, log: &Path) -> Result<Child> {
+    // 三个 stdio 全挂 null：node 起来会 `console.log` 一行横幅，留着管道没人读的话
+    // 缓冲区写满会把它堵住（我们的断言全在日志文件里，不需要 stdout）。
+    let spawned = Command::new("node")
+        .arg(script)
+        .arg(port.to_string())
+        .arg(log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(child) => Ok(child),
+        // Windows 上 PATH 里通常是 `node.exe`，`Command::new("node")` 本来就能找到；
+        // 这一支只兜"只有 node.exe 这个可执行名被注册"的怪形状，错误里带上两次尝试。
+        Err(first) => Command::new("node.exe")
+            .arg(script)
+            .arg(port.to_string())
+            .arg(log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("本机没有可用的 node（先试 node 报：{first}）")),
+    }
+}
+
+/// 轮询端口直到能连；node 半路自己退出就立刻失败（不空等到超时）。
+fn wait_until_listening(child: &mut Child, port: u16, attempt: u32) -> Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = Instant::now() + SPAWN_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().context("查 node 进程状态失败")? {
+            bail!(
+                "node 自己退出了（{status}）—— 大概率是端口 {port} 在空窗里被人抢了（第 {attempt} 次尝试）"
+            );
+        }
+        // `connect_timeout` 而不是 `connect`：后者对"没人听的端口"在本机上也可能停一会儿，
+        // 那会把 SPAWN_TIMEOUT 摊薄成"每次轮询都睡几秒"。
+        if TcpStream::connect_timeout(&addr, POLL).is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("{SPAWN_TIMEOUT:?} 内端口 {port} 连不上（node 没起来或没 listen 到 127.0.0.1）");
+        }
+        thread::sleep(POLL);
+    }
+}
+
+/// 读 JSONL；文件还不存在时给空表（node 可能在 `listen` 之后才创建它）。
+fn read_jsonl(path: &Path) -> Result<Vec<Value>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).with_context(|| format!("读探针日志失败：{}", path.display())),
+    };
+    let mut out = vec![];
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue; // 纯空行；半截行由下面那一步当场报错，不静默跳过
+        }
+        let v: Value = serde_json::from_str(line)
+            .with_context(|| format!("探针日志第 {} 行不是合法 JSON：{line}", i + 1))?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// `<仓库>/target/harness`（`target/` 已在 `.gitignore` 里）。
+fn log_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("harness")
+}
+
+// ---------------------------------------------------------------- 客户端与任务夹具
+
+/// 简报 Step 2 要求的形状（见模块文档第 2 条）：**没有** `Connection: close`、**没有**
+/// `pool_max_idle_per_host(0)`。
+pub fn client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(3))
+        .tcp_nodelay(true)
+        .build()
+        .context("建 reqwest blocking 客户端失败")
+}
+
+/// 简报用例里 `..harness::blank_task()` 的那个空任务：除 `url`（和个别用例的 `dir`）外全是默认值。
+///
+/// `dir` 指向 `target/harness-scratch`（建好）：`probe` 自己不碰磁盘，但 Task 7/8 的用例拿同一个夹具
+/// 就要落盘，落点必须 gitignored。
+pub fn blank_task() -> dlm::task::Task {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("harness-scratch");
+    std::fs::create_dir_all(&dir).expect("建 harness-scratch 目录");
+    dlm::task::Task {
+        url: String::new(),
+        referer: None,
+        cookies: None,
+        data_file: None,
+        user: None,
+        password: None,
+        dir,
+        name: None,
+        flags: 0,
+    }
+}
+
+// ---------------------------------------------------------------- 线上头的独立取证
+
+/// **不经 reqwest** 手写一次 HTTP/1.1 请求，只取回响应头那一段（含状态行）。
+///
+/// 为什么需要它：`ProbeFacts` 是"我们对响应头的解读"，而解读不能拿自己的输出去证明 ——
+/// 简报要断言 `Accept-Ranges` 在 `/noranges` 上**不存在**，那就必须有一个独立于解析代码的观察者。
+/// 本函数返回原始文本，用例里 `eprintln!` 出来就是报告引用的证据。
+///
+/// 只读到头结束（`\r\n\r\n`）就松手，body 留在连接里 ⇒ 这条连接之后由 node 那侧收尾；
+/// 它**不是** probe 走的路径（probe 用 `client()`），所以它的连接状态不进任何断言。
+pub fn raw_response_head(port: u16, target: &str, extra: &[(&str, &str)]) -> Result<String> {
+    let mut sock = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
+        .with_context(|| format!("连不上 127.0.0.1:{port}"))?;
+    let mut req = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    for (k, v) in extra {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    sock.write_all(req.as_bytes()).context("手写请求没发出去")?;
+    sock.flush().context("手写请求没 flush")?;
+    let mut got = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = sock.read(&mut buf).context("读手写响应失败")?;
+        if n == 0 {
+            break; // 对端先关了
+        }
+        got.extend_from_slice(&buf[..n]);
+        if let Some(pos) = find_head_end(&got) {
+            // 只留头段：同一次读里已经带进来的 body 字节不当成"响应头"交出去
+            // （否则用例的 `eprintln!` 会往测试输出里倒几 KiB 的 blob，取证反被噪声埋掉）。
+            got.truncate(pos + 4);
+            break;
+        }
+        if got.len() > 64 * 1024 {
+            break; // 一直没等到头结束 = 对端不对劲
+        }
+    }
+    Ok(String::from_utf8_lossy(&got).into_owned())
+}
+
+/// `\r\n\r\n` 的起始下标。
+fn find_head_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// 状态行里的三位数字（`HTTP/1.1 206 ...` → `206`）。
+pub fn head_status(head: &str) -> Result<u16> {
+    let line = head.lines().next().context("响应头一段是空的")?;
+    let code = line
+        .split_whitespace()
+        .nth(1)
+        .with_context(|| format!("状态行看不出状态码：{line}"))?;
+    code.parse::<u16>().with_context(|| format!("状态码不是数字：{line}"))
+}
+
+/// 某个响应头的原样值（同名多行取第一条；名字大小写不敏感）。
+pub fn head_header(head: &str, name: &str) -> Option<String> {
+    let name = name.to_ascii_lowercase();
+    head.lines().skip(1).find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        (k.trim().to_ascii_lowercase() == name).then(|| v.trim().to_string())
+    })
+}
+
+/// 某个响应头**是否存在**。`/noranges` 的断言靠的就是"不存在"这一侧。
+pub fn head_has(head: &str, name: &str) -> bool {
+    head_header(head, name).is_some()
+}
+
+/// blob 的**内容**取证：harness 的 blob 是"每 4 KiB 块的块号（小端 u32）写在块首"
+/// （`BLOB.writeUInt32LE(i / 4096, i)`）。块与块之间是 `Buffer.allocUnsafe` 留下的未初始化字节
+/// —— 本机实测为大页分配、通常是 0，但那是分配器的副产品，不是契约 ⇒ **只断言块号那 4 字节**。
+///
+/// 为什么值得断：`prelude.len()` 只证明"读了这么多字节"，不证明"读的是开头那批字节、而且没错位"。
+/// 块号按位置递增，少读一段、或者从偏移 4096 开始读，都会在这里当场红。
+pub fn assert_blob_block_numbers(bytes: &[u8], start_offset: u64) -> Result<()> {
+    const BLOCK: usize = 4096;
+    let first_block = usize::try_from(start_offset / BLOCK as u64).context("偏移太大")?;
+    for (i, chunk) in bytes.chunks(BLOCK).enumerate() {
+        if chunk.len() < 4 {
+            continue; // 末尾不足 4 字节的一截取不出块号
+        }
+        let want = u32::try_from(first_block + i).context("块号溢出 u32")?;
+        let got = u32::from_le_bytes(chunk[..4].try_into().expect("上面已判过长度 >= 4"));
+        assert_eq!(
+            got,
+            want,
+            "第 {} 块（文件偏移 {}）开头的块号不对：拿到 {got}，blob 该是 {want} \
+             —— 预读的字节不是从 {start_offset} 起，或者中间掉过一段",
+            first_block + i,
+            start_offset + (i * BLOCK) as u64,
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- 手写的窄对端
+
+/// 一个 **std 手写**的窄对端：每条请求由调用方给的 `responder` 决定回什么原始字节，
+/// 同时记下自己收到过的请求目标。
+///
+/// 为什么不改 `probe-server.mjs`：那个 harness **没有**重定向路由，也没有"既不报 Content-Length
+/// 也不报 Content-Range"的路由，而给它加路由不在本轮授权里（派发只允许我对 `src/task.rs` 做
+/// 可见性级别的改动）。这两条形状又都是本轮必须真跑一遍的：
+/// - **落地 URL 带凭据**（派发第 9 条 / Task 5 评审 C3）：只有服务器真的 `Location` 一发，
+///   `ProbeFacts.final_url` 才是"服务器控制的值"。在测试里手搓一个 `Url` 塞给被测函数证明不了
+///   "落地 URL 来自响应"这一环，也就挡不住"忘了调那道闸"这种伪装修法。
+/// - **没有长度可取**：`total_len` 不许猜。
+///
+/// 线程模型：监听线程最多 `accept` `MAX_CONNECTIONS` 条连接、每条最多处理 `PER_CONNECTION` 个请求；
+/// 客户端不来时它阻塞在 `accept` 上 —— 那是**测试进程内的一个线程**，测试二进制退出即随进程消失，
+/// 不构成"残留监听"（`Server` 那种真 node 进程才需要 `Drop` 里 kill）。
+#[derive(Debug)]
+pub struct Stub {
+    port: u16,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl Stub {
+    pub fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// 服务端实际收到过的请求目标（`GET "<target>" HTTP/1.1` 里的那个 target）。
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("对端的记录锁没竞争者").clone()
+    }
+
+    /// 收到过某个前缀的请求吗（"确实跟随了重定向"这类断言用它，别拿 `seen()` 自己拼）。
+    pub fn saw(&self, prefix: &str) -> bool {
+        self.seen().iter().any(|t| t.starts_with(prefix))
+    }
+}
+
+/// 起一个通用窄对端。`responder(target)` 返回**整段原始响应字节**（含状态行与结尾的空行）。
+fn spawn_stub(responder: impl Fn(&str) -> String + Send + 'static) -> Result<Stub> {
+    const MAX_CONNECTIONS: usize = 8;
+    const PER_CONNECTION: usize = 4;
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("窄对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到窄对端的端口")?.port();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let thread_seen = Arc::clone(&seen);
+
+    thread::Builder::new()
+        .name("dlm-narrow-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(MAX_CONNECTIONS) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                for _ in 0..PER_CONNECTION {
+                    let Some(target) = read_request_target(&mut stream) else { break };
+                    let resp = responder(&target);
+                    thread_seen.lock().expect("线程侧记录锁").push(target);
+                    if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .context("起窄对端线程失败")?;
+
+    Ok(Stub { port, seen })
+}
+
+/// 重定向对端：`GET /start` ⇒ `302` + `Location: http://<authority>/landed`，落地那条 ⇒ 诚实的 200。
+///
+/// `authority_template` 里的 `{port}` 会被换成本对端**实际拿到**的端口（端口要 bind 之后才知道，
+/// 所以只能传模板）。例如 `alice:s3cret@127.0.0.1:{port}` ⇒
+/// `Location: http://alice:s3cret@127.0.0.1:53127/landed`。
+///
+/// 落地那条 200 的形状：`Content-Length: 0`、`Accept-Ranges: bytes`、`ETag: "stub"`（带协议要求的引号）。
+pub fn spawn_redirect_stub(authority_template: &str) -> Result<(Stub, String)> {
+    // 端口在 `spawn_stub` 里才知道 ⇒ 先 bind 一次拿端口、把 Location 拼死在闭包里，
+    // 再把同一个 listener 交给对端：所以这里自己 bind、自己起线程，不复用 `spawn_stub`。
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("重定向对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到重定向对端的端口")?.port();
+    let land_url = format!(
+        "http://{}/landed",
+        authority_template.replace("{port}", &port.to_string())
+    );
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_seen, thread_land) = (Arc::clone(&seen), land_url.clone());
+    const MAX_CONNECTIONS: usize = 8;
+
+    thread::Builder::new()
+        .name("dlm-redirect-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(MAX_CONNECTIONS) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                // 一条连接上最多两条：`/start`（回 302）与落地那条（回 200）。
+                for served in 0..2usize {
+                    let Some(target) = read_request_target(&mut stream) else { break };
+                    thread_seen.lock().expect("线程侧记录锁").push(target.clone());
+                    let resp = if target.starts_with("/start") {
+                        format!("HTTP/1.1 302 Found\r\nLocation: {thread_land}\r\nContent-Length: 0\r\n\r\n")
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                         Content-Length: 0\r\nAccept-Ranges: bytes\r\nETag: \"stub\"\r\n\r\n"
+                            .to_string()
+                    };
+                    if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
+                        break;
+                    }
+                    if served == 1 {
+                        break; // 重定向只有一次，答完落地那条就收连接
+                    }
+                }
+            }
+        })
+        .context("起重定向对端线程失败")?;
+
+    Ok((Stub { port, seen }, land_url))
+}
+
+/// "说不出长度"的对端：`/no-length` 回 `200` + `Transfer-Encoding: chunked`，
+/// **既没有** `Content-Length` **也没有** `Content-Range`，也不发 `Accept-Ranges`。
+pub fn spawn_lengthless_stub() -> Result<Stub> {
+    spawn_stub(|target| {
+        if target.starts_with("/no-length") {
+            // chunked：4 字节一块 + 终止块。头里刻意没有 Content-Length。
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+             Transfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n"
+                .to_string()
+        } else {
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+        }
+    })
+}
+
+/// 从一条 HTTP/1.1 连接上取走一条请求的**请求目标**（并把请求头读干；本对端从不收 body）。
+fn read_request_target(stream: &mut TcpStream) -> Option<String> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 64 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    // `GET /start HTTP/1.1`
+    let first = String::from_utf8_lossy(&buf).lines().next()?.to_string();
+    let mut it = first.split_whitespace();
+    let (_method, target) = (it.next()?, it.next()?);
+    Some(target.to_string())
+}

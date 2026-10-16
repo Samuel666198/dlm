@@ -1,4 +1,5 @@
 pub mod consts;
+pub mod probe;
 pub mod resume;
 pub mod scheduler;
 pub mod state;
