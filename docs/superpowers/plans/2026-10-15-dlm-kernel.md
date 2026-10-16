@@ -1141,6 +1141,49 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   边界一句：两把验证子全缺时 ③ 无事可做，续传的安全性**只剩**规则 ② 的最终 URL 与规则 ④ 的长度，且这条链路上
   `If-Range`（设计稿第 67 行）根本发不出去 —— 手里没有验证子可带。Task 5 Step 1 的分支 3/4 **不动**，它们就是本条裁定的依据。
 
+- **E11：Task 6 落地时把简报的"试探永远先发"拆成了两条入口 —— Task 7/8 引用简报 `Produces` 时以本条为准（任务正文不回改）。**
+  ① **`probe::run` 对带 `data_file` 的任务在上网之前就硬拒**（`src/probe.rs:190` 的 `ensure!`）。理由不是风格：
+  按简报字面用 GET 不带 body 去试探，收回来的事实描述的是"我们从没发过的那一发"（同一 URL 的 GET 与 POST 是两个资源，
+  长度/验证子/状态码都可能不同）；而照简报"POST 带 body 去试探"等于**把用户的表单提交两次**，是对别人服务器的真实副作用。
+  ⇒ 该形状的事实由 `fetch::run_whole` 从**这一枪自己的响应头**收割（Task 7 已落地），Task 8 的引擎必须**跳过 probe**，
+  不许把这条 `Err` 当"网络故障"重试。
+  ② **`Authorization` 的闸住在 `with_contract_headers`（`src/probe.rs:366`）里，按 scheme 挡**，不在 `Task::validate()`：
+  `validate()` 只管"明文 HTTP + 口令"这一对；`--user` 单独出现时仍会在 https 上正常发头。
+  评审另核 `reqwest-0.13.5/src/redirect.rs:239-251`：https→http 降级重定向时 reqwest 自己摘掉 `Authorization`/`Cookie`，
+  所以"只查 `task.url` 的 scheme"不成立漏洞。
+  ③ **`accept_ranges` 是带否决的合取式，不是设计稿 `:52` 那句字面上的"或"**：
+  `有证据 && !(我们发了 Range && 状态不是 206)`。五格真值表钉在单测里。
+  关键反例（我派发时写错的那格）：**对端省了 `Accept-Ranges` 头但老老实实回了 206** ⇒ 仍算 `true`（能分段），
+  用 `accepts_bytes && (!range_sent || got_206)` 会把这种诚实对端误判成不能分段，白丢并行、换不到任何正确性。
+  ④ **`206` 的长度绝不回落 `Content-Length`**：206 的 `Content-Length` 是**窗口**不是全长，拿它当 `total_len` 会让
+  调度器把整份文件砍成一小截还自洽（预读字节数恰好等于它，测试全绿）。只有 `200` 那一支的 `Content-Length` 才是"对端真给了多少"。
+  ⑤ **`final_url` 落地时要过 userinfo 闸**（`probe::LANDED_CREDENTIALS` 一份常量、三处引用）：服务器可以用一条带凭据的
+  重定向把凭据送进我们的原因串与断点文件；①b 与 ② 两侧都取自同一个函数才不会不一致。Task 7 的 `run_whole` 同形。
+  ⑥ 简报外新增的 `416 + bytes */0`（零长度文件）那一支**保留**：拒绝下载空文件才是缺陷。
+  **转派给 Task 8 的两条**：`resume.rs:136` 那句字段注释（"服务器是否广告 `Accept-Ranges: bytes`"）在 ③ 之后**已经不准**，
+  它是**行为加权**的；以及"试探之后连接可复用"**只在认 Range 的对端成立**，降级那一支不回池（`src/probe.rs:23-27`，
+  注意那句是**推理不是实测**）⇒ 引擎侧当约束用，不许当已验证性质写进断言。
+
+- **E12：Task 7 落地时改掉/补上的对外形状 —— Task 8/9 引用简报 `Produces` 时以本条为准（任务正文不回改）。**
+  ① **签名多了 `total_len`**：`run_window(agent, task, iv, store, rate_bps, total_len)`。简报的 `Produces` 行没有它，
+  但 416 的判据没有它就无法表达（见 ②）。另有一条简报里没有的入口 `run_whole(agent, task, store, rate_bps) -> (Outcome, Option<ProbeFacts>)`。
+  ② **`416` 不是"看到就完事"**：读 `Content-Range: bytes */N`，**`N == total_len` 才** ⇒ `Complete`（该段封存），
+  `N` 取不到或不等 ⇒ `Failed(ValidatorChanged)`（服务端长度在我们脚下变了，交给重试上限）。可达形状是 `iv.start >= total_len`
+  （续传时区间起点已落在 EOF 上），不是 `iv.start == total_len` —— 两者必须能被区分，见本轮钉的用例。
+  ③ **body 比区间短绝不返回 `Complete`**：交过字节 ⇒ `Advanced { bytes }`；一个字节都没落地 ⇒ `Failed(Transport)`。
+  把 `Complete` 用在这里会**永远封存一段没下完的区间**（`SegmentComplete` 不查盘上字节，E7/E9）。
+  ④ **`Stalled` 的定义按设计稿 R7**：预算到期**且零进度**才算；"活着但慢"的对端只要交过一个字节就走 `Advanced`。
+  reqwest blocking 的 `.timeout()` 是**整请求**期限（实测 `tests/integration.rs:1650`），不是静默期限。
+  ⑤ **降级那一支（发了 Range 却答 200）在 64 KiB 循环内流式丢掉前 `iv.start` 个字节**再落盘；
+  这里绝不许出现 `Vec::with_capacity(iv.start)`（那等于把整个 body 吸进内存）。
+  ⑥ **窗口上界只算一次**：`stop = min(iv.end+1, iv.start+WINDOW_BYTES)`，`bytes` 与 `store.len()` 两条断言都由它派生，
+  差一字节就一起红。`write_at` 返回 `Err` 时**往上抛**、绝不记进 `Advanced`（T3 裁定：那一块真落了几字节无从知道）。
+  ⑦ **`FailKind::Transport` 带原因**（本轮修复落地）：`Transport(String)`，取 `reqwest`/`io::Error` 的 source 链首句，
+  压成单行、上限 200 字符，**绝不回显 body 字节**。Task 8 要把它交给用户 —— 折成裸枚举就是"网络错了"这种没法行动的消息。
+  URL 天然不带凭据（`validate()` 拒绝 userinfo），所以这一串可以直接上桌。
+  ⑧ **POST 那一枪的功能封顶**（设计稿 R7）：`run_whole` 是"一发请求读完全部"，最多只能拿到一个窗口预算内到达的字节，
+  而**重发这一枪就是二次提交表单**（E11① 的理由）⇒ Task 8 不许靠重发续完，跑不完就如实报未完成并以非零码退出。
+
 
 
 
