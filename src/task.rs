@@ -76,6 +76,28 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
     after[..end].contains('@')
 }
 
+/// 这条 URL 的 scheme 是不是 `https`（**大小写都算**；认不出合法 scheme 时给假）。
+///
+/// 新增的 `pub(crate)` 辅助函数（评审 **F2**）：**不改动上面任何函数的行为**，只是把 `validate()`
+/// 里那句 scheme 比较同一个立场做成可复用的判据，交给 `probe::with_contract_headers` 决定
+/// `Authorization: Basic` 上不上线（Task 7 的 `fetch` 复用同一个构造器）。
+///
+/// 为什么这道闸要有个正式的判据而不是各写各的：
+/// - `validate()` 那条规则只管**明文 HTTP + 口令**（spec §4），**用户名单独给出**时它一句话都不说，
+///   可那半副凭据也一样不该在明文的 socket 上跑。
+/// - scheme 的比较必须大小写不敏感（Task 3 的修复轮教过：`HTTP://` 一样是明文），且要认 RFC 3986
+///   的 scheme 形状 —— 所以复用上面那个 `scheme_separator_len`，而不是随手 `starts_with("https://")`。
+/// - **认不出 scheme ⇒ 假**（保守那一支）：这种 URL 本来也走不出 reqwest（"relative URL without a
+///   base"），但凭据没有理由因为少写了 `https://` 就被送出去。
+pub(crate) fn url_is_https(url: &str) -> bool {
+    match scheme_separator_len(url) {
+        // `scheme_separator_len` 给的是 `"://" 之后`的下标，减 3 正好回到 scheme 末尾 ⇒ 那一段就是
+        // scheme 名本身（不含冒号）。
+        Some(after_scheme) => url[..after_scheme - 3].eq_ignore_ascii_case("https"),
+        None => false,
+    }
+}
+
 impl Task {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.url.is_empty(), "缺少 URL");

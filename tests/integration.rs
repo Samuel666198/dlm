@@ -162,40 +162,86 @@ fn prelude_range_and_degraded_headers_are_what_the_wire_actually_carries() -> an
     Ok(())
 }
 
-// ---------------------------------------------------------------- 简报 Step 4 的两个分支
+// ---------------------------------------------------------------- 简报 Step 4 的形状
 
-/// `task.segmentable()` 为假（带 POST 体）时**不发 Range**，读多少算多少，但**上限仍然守住**。
+/// 评审 **F1** 裁定：带 `--data-file` 的任务**不许试探** ⇒ `probe::run` 在打出任何请求之前拒。
 ///
-/// 上限这条是本用例的正主：没 Range 可限时，唯一能限量的写法就是"读 N 字节然后 drop 掉整条响应"，
-/// 那会把连接弄脏（Task 0 实测本 harness 会当场拆掉那条连接）—— 内存边界（不许把 48 MiB 全读进
-/// `Vec`）必须由 `prelude.len()` 断出来。
+/// 为什么这条从"POST 形状发 GET、不发 Range"改成"拒"（原用例挡的两件事已经不存在了）：
+/// - 那种形状取回的 `total_len`/`ETag`/`final_url` 来自**那条 GET**，而真正下载发的是 POST ⇒
+///   `resume::decide` 的 ②③④ 与 ⑤ 就在校验"一条我们从未发过的请求确认过的字节"，正是 Task 5
+///   补 ①b 要挡的形状。
+/// - 反过来"试探也发 POST"要把同一份表单交**两次**（下单/投票/发信都是真副作用），买的是一个用户
+///   以为在下一次的下载。两条都不接受 ⇒ 只剩"拒"。
+///   下游归属（不在本轮实现）：`engine` 对这种形状跳过 probe，事实取自 `fetch` 真正发出的那一枪。
+///
+/// 本用例断四件事：① 返回 `Err`；② 错误点名 `--data-file`；③ 错误里没有体的字节；
+/// ④ **服务器一条请求都没看到**（拒在上网之前）。再加一个对照组：同一台服务器、同一条 URL，
+/// 去掉 `data_file` 必须照常能试探 —— 否则"把所有非 GET 可能性一起拒掉"也算伪修通过。
 #[test]
-fn post_shaped_task_sends_no_range_and_still_bounds_the_prelude() -> anyhow::Result<()> {
+fn a_data_file_task_is_refused_before_the_probe_touches_the_wire() -> anyhow::Result<()> {
+    const SENTINEL: &str = "form-body-sentinel-8f31";
     let (srv, base) = harness::spawn()?;
     let announced = srv.announced()?;
+    let client = harness::client()?;
+
+    // 体文件是真的（`target/` 下，gitignored）：拿不存在的路径断"没抄体的字节"是恒真断言。
+    // 名字固定、入口先扫残留：本用例是唯一用这个名字的，并行跑也不冲突；上一轮 panic 在半路留下的
+    // 文件不会被下一次运行读成夹具。
+    let body = {
+        let t = harness::blank_task();
+        let p = t.dir.join("f1-data-file-body.bin");
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, format!("{SENTINEL}&cvv=999"))?;
+        p
+    };
     let t = Task {
         url: format!("{base}/blob"),
-        data_file: Some("body.bin".into()), // 这一条让 segmentable() 为假
+        data_file: Some(body.clone()),
+        user: Some("alice".into()), // 只有用户名：明文 HTTP 上合法（口令那一半另有闸）
         ..harness::blank_task()
     };
     assert!(!t.segmentable(), "夹具：带 POST 体的任务不分段（Task::segmentable 的语义）");
 
-    let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
-
-    let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs.len(), 1);
-    assert_eq!(
-        reqs[0]["range"],
-        serde_json::Value::Null,
-        "非分段形状不能发 Range：POST 语义下 Range 不成立（spec §2.2），发了会换来一份与请求不符的响应。实际：{:?}",
-        reqs[0]["range"]
+    let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
+        panic!("带 --data-file 的任务必须被 probe 拒掉，不许退化成一条无体的 GET");
+    };
+    let msg = err.to_string();
+    eprintln!("---- 带 --data-file 的拒绝原文 ----\n{msg}");
+    assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
+    assert!(!msg.contains(SENTINEL) && !msg.contains("cvv"), "错误里抄了体的字节：{msg}");
+    assert!(
+        srv.requests_within(std::time::Duration::from_millis(500))?.is_empty(),
+        "被拒的试探一个字节都不该上网（GET 打出去 = 拿另一条请求的事实冒充这条）"
     );
 
-    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES, "没 Range 限量时也必须停在预读上限");
-    assert!((r.prelude.len() as u64) < announced.size, "绝不允许把整块 blob 读进内存");
-    harness::assert_blob_block_numbers(&r.prelude, 0)?;
-    assert_eq!(r.facts.total_len, announced.size, "200 没有 Content-Range ⇒ 长度取 Content-Length");
-    assert!(r.facts.accept_ranges, "服务器照样发了 Accept-Ranges: bytes，事实与本次用不用得上无关");
+    // 对照：同一 URL、同一客户端，去掉 data_file ⇒ 必须照常试探成功。
+    let plain = Task { url: format!("{base}/blob"), data_file: None, ..t.clone() };
+    let r = probe::run(&plain, &client, PROBE_READ_BYTES)?;
+    assert_eq!(r.facts.total_len, announced.size, "对照组要真下得出结论，否则上面那支可以靠\"全都拒\"绿");
+    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES);
+    let reqs = srv.requests_at_least(1)?;
+    assert_eq!(reqs.len(), 1, "被拒那一枪不该留下请求行，只有对照组的：{reqs:?}");
+    assert_eq!(reqs[0]["url"], "/blob");
+    assert_eq!(reqs[0]["range"], prelude_range(), "对照组走的是限量 Range 那一支");
+    let _ = std::fs::remove_file(&body);
+    Ok(())
+}
+
+/// 上限 0（"只要头、不要体"）时预读必须是空的，而且**不发** `Range`。
+///
+/// 这条接替原 `post_shaped_task_...` 用例里"没有 Range 可限时靠上限限量"的那一半：F1 之后
+/// `!segmentable()` 那一支在 `run()` 里已经到不了（带体的任务整个被拒），没 Range 的形状只剩这一种。
+#[test]
+fn a_zero_prelude_limit_reads_no_body_and_sends_no_range() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let announced = srv.announced()?;
+    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+
+    let r = probe::run(&t, &harness::client()?, 0)?;
+    assert!(r.prelude.is_empty(), "上限 0 ⇒ 一个字节都不取：{}", r.prelude.len());
+    assert_eq!(r.facts.total_len, announced.size, "头照样要读出全长");
+    let reqs = srv.requests_at_least(1)?;
+    assert_eq!(reqs[0]["range"], serde_json::Value::Null, "上限 0 不许发 `bytes=0--1` 那种谎话：{reqs:?}");
     Ok(())
 }
 
@@ -225,9 +271,18 @@ fn a_file_smaller_than_the_prelude_is_reported_at_its_real_length() -> anyhow::R
 
 /// 空文件（`/sz/0`）：服务器对我们那条 `bytes=0-…` 回 **416** + `Content-Range: bytes */0`。
 ///
-/// 这是简报没写的一支，我按"读服务器已经报出来的数"处理：`bytes */0` 就是全长 0 ⇒ probe 给一份
-/// `total_len = 0`、预读为空的事实，而不是把一次合法的"没东西可下"报错。只有
-/// **416 + `*/0` + 我们确实发了 Range** 三条同时成立才走这一支，其余 416 一律 Err。
+/// 简报没写的一支，按"读服务器已经报出来的数"处理（评审 **F3** 裁定：**保留**）—— 空文件是一个
+/// 合法的对端对象，"拒不下载一个 0 字节的文件"本身就是缺陷。成立条件是**三条并列**：收到 416 +
+/// `Content-Range` 的分母是 0 + 我们**确实**发了 Range。反面的两支由
+/// `a_416_that_is_not_the_empty_file_shape_is_still_an_error` 钉着。
+///
+/// 取证分三层，都是**这台 node 服务器**的线上原文（不是手搓的头表）：
+/// ① 带 Range 的 `/sz/0` ⇒ 416 + `bytes */0`（这一支的读数来源）；
+/// ② 同一-route 不带 Range ⇒ 诚实的 200 + `Content-Length: 0` + `Accept-Ranges: bytes`
+///   （证明"0 字节"是服务器的既有事实，不是我们那条 Range 逼出来的边角）；
+/// ③ 416 那一支的响应头里**没有** `Accept-Ranges`（harness 的 416 分支只发两个头），所以
+///   `accept_ranges = true` 是**解读**（"416 本身就是按 Range 语义给的回答"），不是抄来的头 ——
+///   这里把两边都断出来，谁改这一支都得先看见这条理由。
 #[test]
 fn a_zero_length_file_yields_zero_length_facts_instead_of_an_error() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
@@ -235,15 +290,79 @@ fn a_zero_length_file_yields_zero_length_facts_instead_of_an_error() -> anyhow::
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
 
-    assert_eq!(r.facts.total_len, 0);
+    assert_eq!(r.facts.total_len, 0, "`bytes */0` 的分母就是全长，不是猜出来的");
     assert!(r.prelude.is_empty(), "空文件的预读必须是空的");
-    let head = harness::raw_response_head(srv.port(), "/sz/0", &[("Range", &prelude_range())])?;
-    eprintln!("---- 线上响应头 /sz/0 + Range ----\n{head}");
-    assert_eq!(harness::head_status(&head)?, 416, "线上确实是 416（不是我们把它当成 416）");
-    assert_eq!(harness::head_header(&head, "content-range").as_deref(), Some("bytes */0"));
-    // 416 这一支的响应头里没有 ETag/Last-Modified（harness 的 416 分支只发两个头），照实为空。
+    assert!(
+        r.facts.accept_ranges,
+        "416 是按 Range 语义给的回答 ⇒ 记成认 Range（这一味来自解读，见用例文档 ③）"
+    );
+    assert_eq!(r.facts.final_url, format!("{base}/sz/0"), "落地 URL 照样要记下");
+    // 416 那一支的响应头里没有 ETag/Last-Modified（harness 的 416 分支只发两个头），照实为空。
     assert_eq!(r.facts.etag, None);
     assert_eq!(r.facts.last_modified, None);
+
+    // ① 线上确实是 416 + `bytes */0`（不是我们把它当成 416）。
+    let head = harness::raw_response_head(srv.port(), "/sz/0", &[("Range", &prelude_range())])?;
+    eprintln!("---- 线上响应头 /sz/0 + Range ----\n{head}");
+    assert_eq!(harness::head_status(&head)?, 416);
+    assert_eq!(harness::head_header(&head, "content-range").as_deref(), Some("bytes */0"));
+    assert_eq!(harness::head_header(&head, "content-length").as_deref(), Some("0"));
+    // ③ 解读与线上文本必须对得上：这个 416 里**没有** `Accept-Ranges` 可抄。
+    assert!(!harness::head_has(&head, "accept-ranges"), "若哪天它发了这个头，上面的 `true` 就该改成抄头");
+    assert!(
+        r.facts.accept_ranges,
+        "两头都没有却给了 true ⇒ 只能是那三条并列的判据在起作用，不是解析失误"
+    );
+
+    // ② 同一-route、不带 Range：诚实的 200 + `Content-Length: 0` + `Accept-Ranges: bytes`。
+    let plain = harness::raw_response_head(srv.port(), "/sz/0", &[])?;
+    eprintln!("---- 线上响应头 /sz/0 无 Range ----\n{plain}");
+    assert_eq!(harness::head_status(&plain)?, 200, "0 字节文件在这台服务器上是既有事实，不是 Range 逼出来的");
+    assert_eq!(harness::head_header(&plain, "content-length").as_deref(), Some("0"));
+    assert_eq!(harness::head_header(&plain, "accept-ranges").as_deref(), Some("bytes"));
+    Ok(())
+}
+
+/// 416 的**反面**两支（评审 **F3**：那一支的成立条件必须是三条并列，不是"看见 416 就当空文件"）。
+///
+/// 这一条用 `harness::spawn_416_stub()`（std 手写的窄对端），**标签照实写**：本仓库的 node 服务器
+/// 拿不出这两种形状（`bytes=0-…` 起点为 0 时它的 416 分支只会给 `bytes */0`；对无 Range 的请求它
+/// 回 200），而这两支又必须真打一次网络才算测到 —— 拿手搓的 `HeaderMap` 断"解读正确"证明不了
+/// `run()` 真的读的是响应头。对端是**测试进程内的线程**，不是真进程，随测试二进制消失。
+#[test]
+fn a_416_that_is_not_the_empty_file_shape_is_still_an_error() -> anyhow::Result<()> {
+    let stub = harness::spawn_416_stub()?;
+    let client = harness::client()?;
+
+    // 支一：416 + `bytes */4194304`（分母非 0）⇒ 拒。伪修"416 一律 total_len=0"在这里红：
+    // 那份事实会在引擎里读成"这活儿已经干完了"，把一个 4 MiB 的文件当成下完了。
+    let t = Task { url: format!("{}/total/4194304", stub.base()), ..harness::blank_task() };
+    let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
+        panic!("416 + bytes */4194304 不是空文件形状，必须报错而不是给一份 total_len = 0 的事实");
+    };
+    let msg = err.to_string();
+    eprintln!("---- 416（分母非 0）的拒绝原文 ----\n{msg}");
+    assert!(msg.contains("416"), "错误要点名状态码：{msg}");
+    assert!(msg.contains("长度"), "错误要说清定不下长度：{msg}");
+    assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
+
+    // 支二：**我们没发 Range**（`prelude_max == 0` 的形状）却收到 416 + `bytes */0` ⇒ 仍要拒。
+    // 这一支钉的是"三条并列"里的第三条：分母 0 只有在"我们问过 Range"时才说得通。
+    // 放过去的话，一个把 416 当默认回答的畸形对端会让 probe 交出一份"0 字节的空文件"。
+    let no_range = Task { url: format!("{}/total/0", stub.base()), ..harness::blank_task() };
+    let Err(err) = probe::run(&no_range, &client, 0) else {
+        panic!("本次没发 Range，416 就不是\"空文件\"的证据，必须报错");
+    };
+    let msg = err.to_string();
+    eprintln!("---- 416（本次没发 Range）的拒绝原文 ----\n{msg}");
+    assert!(msg.contains("416"), "错误要点名状态码：{msg}");
+    assert!(msg.contains("没发 Range"), "错误要说清是我们没问 Range：{msg}");
+
+    assert!(
+        stub.saw("/total/4194304") && stub.saw("/total/0"),
+        "两支都必须真打到对端：{:?}",
+        stub.seen()
+    );
     Ok(())
 }
 
@@ -266,20 +385,27 @@ fn a_response_without_any_length_header_is_refused_not_guessed() -> anyhow::Resu
 
 // ---------------------------------------------------------------- 9 项契约头
 
-/// probe 发出的请求要带上任务里的 `referer`/`cookies`/`user`（以及 `Accept-Encoding: identity`）。
+/// probe 发出的请求要带上任务里的 `referer`/`cookies`（以及 `Accept-Encoding: identity`），
+/// 但 **`Authorization` 只在 https 上带**（评审 **F2** 的裁定）。
 ///
-/// 为什么试探也要带满这些头（简报没写，我按 ①b 的同一逻辑补上）：`resume` 比对的是"当初确认字节
+/// 为什么试探也要带满这些头（简报没写，按 ①b 的同一逻辑补上）：`resume` 比对的是"当初确认字节
 /// 的那个请求"与"这次的请求"是不是同一个；而如果**第一枪**（确认全长与 ETag 的这一枪）与后面几枪
 /// 带的头不一样，那 `total_len`/`ETag` 就可能来自另一份文档 —— 同一台服务器换个 Cookie 给不同长度
 /// 是很常见的形状。证据取在**服务端日志**那一侧：那才是"确实发出去了"。
+///
+/// 本用例同时是 F2 那条闸的**线上取证**：harness 是 `http://127.0.0.1`，所以这里断的是
+/// `referer`/`cookie` **照样到**（刻意的不对称，spec §4 点名的只有口令），而 `authorization`
+/// **不到**（用户名本身也是半副凭据，`Task::validate()` 只管"明文 HTTP + 口令"那一支）。
+/// `https` 那一侧的方向在单元层断（`build_request_...` 那几条）：本仓库的 node 对端不做 TLS，
+/// 装一条真 https 服务不在本轮授权里，所以那条是"请求构造层"的证据而不是"线上"的证据。
 #[test]
-fn probe_puts_the_task_headers_on_the_wire() -> anyhow::Result<()> {
+fn probe_puts_the_task_headers_on_the_wire_but_not_credentials_in_the_clear() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let t = Task {
         url: format!("{base}/sz/4096"),
         referer: Some("https://ref.example/page".into()),
         cookies: Some("sid=42".into()),
-        user: Some("alice".into()), // 只有用户名：明文 HTTP 也允许（spec §4 管的是口令）
+        user: Some("alice".into()), // 只有用户名：明文 HTTP 上 validate() 不管它（F2 的闸管）
         ..harness::blank_task()
     };
 
@@ -287,12 +413,14 @@ fn probe_puts_the_task_headers_on_the_wire() -> anyhow::Result<()> {
     let reqs = srv.requests_at_least(1)?;
     eprintln!("---- 服务端看到的请求行 ----\n{}", serde_json::to_string_pretty(&reqs[0])?);
     assert_eq!(reqs[0]["referer"], "https://ref.example/page");
-    assert_eq!(reqs[0]["cookie"], "sid=42");
+    assert_eq!(reqs[0]["cookie"], "sid=42", "Cookie 不看 scheme 照发（E9/R6：它是按设计持久化的字段）");
     assert_eq!(reqs[0]["accept_encoding"], "identity", "分段下载不能让中间人压体（Content-Length 会失真）");
-    assert_eq!(
-        reqs[0]["extra_headers"]["authorization"],
-        "Basic YWxpY2U6",
-        "用户名走 Basic（YWxpY2U6 = base64(\"alice:\")，本用例**没有**口令参与）"
+    // 服务端把非标准头单独记在 `extra_headers` 里（`authorization` 属于那一堆），这里直接查那张表：
+    // 用 `["authorization"] == Null` 那种写法的话，`extra_headers` 整个缺失时也等于 Null ⇒ 恒绿。
+    let extra = reqs[0]["extra_headers"].as_object().cloned().unwrap_or_default();
+    assert!(
+        !extra.contains_key("authorization"),
+        "明文 HTTP 上 Authorization 一个字节都不许到服务端（用户名本身也是半副凭据）。实际收到的头：{extra:?}"
     );
     assert_eq!(r.facts.total_len, 4096, "带满头的这一枪照样要能读出事实");
     Ok(())

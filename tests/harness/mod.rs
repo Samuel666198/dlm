@@ -554,6 +554,32 @@ pub fn spawn_lengthless_stub() -> Result<Stub> {
     })
 }
 
+/// 永远回 **416** 的对端：`Content-Range: bytes */<N>`，`N` 写在请求目标里
+/// （`/total/0` ⇒ `bytes */0`，`/total/4194304` ⇒ `bytes */4194304`）。
+///
+/// 为什么需要它（评审 **F3**）：`probe` 里那一支空文件分支的成立条件是**三条并列**
+/// （收到 416 + `Content-Range` 的分母是 0 + 我们**确实**发了 Range），而本仓库的 node 服务器
+/// 只在"文件真是 0 字节"时发 `bytes */0`（`/sz/0`），**拿不到**另外两支：
+/// - `*/N`（N>0）那一支要有对端：越界 Range 在这台服务器上只会得到 `bytes */<sendLen>`，
+///   而 `sendLen` 是路由算出来的，我们那条 `bytes=0-…` 打不出"N>0 的 416"（起点 0 时 `start >=
+///   sendLen` 只在 `sendLen == 0` 成立）。这一支钉的是"416 不许一律当成空文件"。
+/// - "我们没发 Range 却收到 416"那一支要有对端：`prelude_max == 0` 时 probe 确实不发 Range，
+///   但 `/sz/0` 对无 Range 的请求回的是诚实的 `200`（自己算得出来），拿不到"不对着 Range 答 416"
+///   的形状。这一支钉的是"三条并列不是两条"。
+///
+/// 头形状照 RFC 9110 §14.21 的最小回答：只有 `Content-Range` 与 `Content-Length: 0`，**不发**
+/// `Accept-Ranges`（与本仓库 node 服务器的 416 分支同一形状 —— `a_zero_length_file_...` 那条
+/// 用例把它的线上原文打了出来）。
+pub fn spawn_416_stub() -> Result<Stub> {
+    spawn_stub(|target| match target.strip_prefix("/total/") {
+        Some(total) => format!(
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\n\
+             Content-Length: 0\r\n\r\n"
+        ),
+        None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string(),
+    })
+}
+
 /// 从一条 HTTP/1.1 连接上取走一条请求的**请求目标**（并把请求头读干；本对端从不收 body）。
 fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut buf = Vec::new();

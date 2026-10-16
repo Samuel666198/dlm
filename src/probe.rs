@@ -19,9 +19,13 @@
 //!    （推流循环漏 `res.end()`），不在 reqwest 的连接池；加 close 会把"复用连接上打 416"这条真实
 //!    路径从测试覆盖里关掉，正是勘误 **E3** 守卫用例要跑的那条。
 //! 3. **`!task.segmentable()`（带 POST 体）时不发 `Range`**：POST 语义下 Range 不成立（spec §2.2）。
-//!    这一支没有头可以限量 ⇒ 只能"读到上限就停手"，连接由 reqwest 自己收尾（Task 0 在本仪器上实测：
-//!    只读预读量就丢弃响应时，harness 看到的是连接被立即拆掉、下一枪走新连接）。内存边界由
-//!    `read_bounded` 守住，绝不允许把整份 body 读进 `Vec`。
+//!    **评审 F1 之后这一支在 `run()` 里已经到不了** —— 带体的任务在发请求之前就被拒（见"本模块没做的
+//!    事"第 1 条）。判据**留着**不删：`prelude_range` 只回答"这条任务能不能发 Range"，而"能不能试探"
+//!    是另一道闸，两道闸各管各的，将来若 F1 的裁定被改回来，这一支仍然挡得住"给 POST 发 Range"。
+//!    没 Range 可限量的形状于是只剩 `prelude_max == 0`（用例
+//!    `a_zero_prelude_limit_reads_no_body_and_sends_no_range`）与"对端无视我们那条 Range"（用例
+//!    `probe_detects_server_without_ranges`：服务端发了 1 MiB，`read_bounded` 仍停在 236032）。
+//!    内存边界由 `read_bounded` 守住，绝不允许把整份 body 读进 `Vec`。
 //! 4. **不认 `Range` 的对端：`total_len` 就是这一次响应交出来的字节数。** 本仓库的 `/noranges` 刻意把
 //!    body 截在 1 MiB，所以那一支的 `total_len == 1_048_576`，不是 48 MiB。这不是要绕过的缺陷：
 //!    一个无视 `Range` 的服务器说不出比它正在交出的更多的东西。
@@ -45,20 +49,47 @@
 //!    如果**第一枪**（定全长与 ETag 的这一枪）与后面几枪带的头不一样，`total_len`/`ETag` 就可能
 //!    出自另一份文档（同一台服务器换个 Cookie 给不同长度很常见）。`Accept-Encoding: identity` 另有一层：
 //!    压过体之后 `Content-Length` 说的就不是文件字节数了。
+//! 8. **`Authorization` 由 `with_contract_headers` 自己按 scheme 挡**（评审 **F2**）：只有
+//!    `task::url_is_https(&task.url)` 为真才带上那条头。判据**不放在** `Task::validate()` 那一侧，
+//!    因为那边只管"明文 HTTP + **口令**"，而 `--user` 单独给出时它一句话都不说 —— 用户名本身也是
+//!    半副凭据。**这道闸刻意只管 `Authorization`**：`Referer`/`Cookie` 不看 scheme 照发（spec §4
+//!    点名的是口令，勘误 E9/R6 把这两个头登记为按设计带上/落盘），把不对称补成"全都挡"会改掉
+//!    退化路径的语义。Task 7 复用这个函数时**不要**把这道闸扩大，也不要因 `fetch` 只跑 https
+//!    就把它删回"无条件带 Basic"—— 四条方向都由单元用例钉着
+//!    （`no_authorization_header_is_built_for_a_url_that_is_not_https` /
+//!    `the_scheme_predicate_behind_that_gate_reads_every_shape_of_url` /
+//!    `the_authorization_header_is_built_over_https_and_carries_both_halves` /
+//!    `referer_and_cookie_cross_the_scheme_gate_by_design`），明文那一侧另有集成用例
+//!    `probe_puts_the_task_headers_on_the_wire_but_not_credentials_in_the_clear` 拿**服务端日志**作证。
+//! 9. **`416` + `Content-Range: bytes */0` + 我们确实发了 Range ⇒ 交回一份"全长 0"的事实**，而不是
+//!    报错（评审 **F3** 裁定：**保留**；简报没写这一支）。空文件是合法的对端对象，"拒不下载一个
+//!    0 字节的文件"本身就是缺陷。三条判据**并列**，缺一律拒（另两支由
+//!    `a_416_that_is_not_the_empty_file_shape_is_still_an_error` 钉着）：只看到 416 就当空文件会把
+//!    `total_len = 0` 交给一个 4 MiB 的文件，在引擎里读起来就是"这活儿干完了"。
+//!    `accept_ranges = true` 这一味是**解读**而不是抄头：本仓库的服务器与窄对端的 416 分支都**不**发
+//!    `Accept-Ranges`（线上取证见该用例文档 ③），依据是"416 本身就是按 Range 语义给的回答"。
+//!    对端自己没 Range 可谈时（`prelude_max == 0`）我们不发 Range，那一支的 416 就退回报错。
 //!
 //! ## 本模块**没**做的事（照实登记，不是遗漏）
 //!
-//! - **POST 形状下第一枪仍是 `GET`，不带 `--data-file` 的 body**（简报 Step 4 的字面形状：
-//!   "GET 无 Range，若 `task.segmentable()` 则加 Range"）。于是对 POST 任务，`total_len`/`ETag`
-//!   是从**那条 GET** 读出来的，而真正下载发的是 POST。派发点名的更正里没有动这一条，我按简报实现，
-//!   并把风险登记在报告里：这是"9 项契约里唯一一处试探与下载不是同一个请求"的形状。
+//! - **带 `--data-file` 的任务一律不试探**（评审 **F1** 的裁定，`run()` 里那道 `ensure!`）。
+//!   简报 Step 4 的字面形状是"GET 无 Range，`segmentable()` 时加 Range"，于是对带体的任务第一枪会
+//!   退化成**一条无体的 GET**：取回的 `total_len`/`ETag`/`final_url`/`accept_ranges` 说的是那条 GET，
+//!   而真正下载发的是 POST ⇒ `resume::decide` 的 ②③④ 与 ⑤ 就在校验"一条我们从未发过的请求确认过的
+//!   字节"，那正是 Task 5 补 ①b 要挡的形状。另一条显而易见的"修法"（试探也发 POST，之后再 POST 一次
+//!   下载）**被明确否决**：它把用户的表单交**两次**，对端可能留下真副作用（下单/投票/发信），
+//!   而用户以为工具只下一次。
+//!   **交接给谁（本轮不实现，只登记）**：`engine`（Task 8）在这种形状上**跳过 probe**，事实取自
+//!   `fetch`（Task 7）**真正发出的那一枪**的响应头 —— 也就是 `fetch` 要多一项"把 `ProbeFacts` 形状
+//!   的事实从它自己的响应里取出来"的职责；两枪的头仍与 `with_contract_headers` 同源，否则 ①b 又落空。
+//!   这一支的用例是 `a_data_file_task_is_refused_before_the_probe_touches_the_wire`（断"拒在上网之前"）。
 //! - 不重试、不退避（spec §6.1/§6.2 的账归 fetch/engine），不落盘、不碰 `store`，不读断点文件。
 //!   本模块唯一的 I/O 就是那一发请求。
 //! - 不校验 `total_len` 与已下段表是否自洽（那是 `resume` 的 ④ 与 `state::check_segments`）。
 
 use std::io::Read;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use reqwest::blocking::{Client, Request, RequestBuilder, Response};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_LENGTH,
@@ -67,7 +98,7 @@ use reqwest::header::{
 use reqwest::StatusCode;
 
 use crate::resume::ProbeFacts;
-use crate::task::{authority_has_userinfo, Task};
+use crate::task::{authority_has_userinfo, url_is_https, Task};
 
 /// 试探之后关于远端文件**此刻**的事实 + 已取回的预读字节。
 ///
@@ -113,6 +144,17 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     // 规则本身只住在 `Task::validate()` 一处。**不加 `.context()`**：anyhow 的 `to_string()` 只显示
     // 最外层，包一层会把"口令"三个字从消息里挤掉（`state.rs` 里同一条理由）。
     task.validate()?;
+
+    // 评审 **F1** 裁定：带 `--data-file` 的任务**不试探**（模块文档「本模块没做的事」第 1 条）。
+    // 这一道闸必须排在**建请求之前**：本轮的缺陷正是"照简报 Step 4 的形状把 GET 打出去"，
+    // 打出去的那一枪确认的是另一条请求的字节 ⇒ `resume` 的 ②③④ 与 ⑤ 就在校验从未确认过的东西。
+    // 消息点名 `--data-file`（那是用户能改的那个旋钮），并且不抄体的任何一截、不抄凭据
+    // （与 `header_value` 同一条纪律）。**不加 `.context()`**：理由同上面那道闸。
+    ensure!(
+        task.data_file.is_none(),
+        "带 --data-file 的任务不做试探：GET 试探确认的是另一条（无体）请求的字节，\
+         而 POST 试探会把同一份表单交两次（下单/投票/发信都是真副作用），两头都不接受"
+    );
 
     let range = prelude_range(task, prelude_max);
     let req = build_request(agent, task, range.as_deref())?;
@@ -203,6 +245,10 @@ fn prelude_range(task: &Task, prelude_max: u64) -> Option<String> {
 
 /// 把一发试探请求拼出来（与 Task 7 共用 `with_contract_headers`，两枪的头必须同源）。
 ///
+/// **本函数只发 `GET`**（`agent.get(..)`，别无分号）：这是简报 Step 4 的字面形状，也是 F1 那道
+/// `ensure!` 存在的原因 —— 带体的任务到不了这里。将来若要让试探覆盖 POST，改的应当是**去掉试探**
+/// 而不是在这里加一个 POST 分支（理由见模块文档"本模块没做的事"第 1 条）。
+///
 /// 之所以在 `run()` 之前就把 `Request` 建出来（而不是 `client.get(..).send()` 一步走）：
 /// 这样"请求里到底带了什么"在单元层就看得见（见 `build_request_...` 那几条用例），
 /// 不必为了一条头是否存在去打网络。
@@ -223,8 +269,22 @@ fn build_request(agent: &Client, task: &Task, range: Option<&str>) -> Result<Req
 /// `pub(crate)` 是给 Task 7 复用的（`fetch` 的每一枪都要带同一批头）：两处各写一遍，
 /// 迟早读成两样 —— 而 ①b 判的正是"请求是不是同一个"。
 ///
-/// 口令的"明文 HTTP 不发送"这条**不在这里实现**：那是 `Task::validate()`（E9/spec §4）的判据，
-/// `run()` 在发请求之前已经过了那道闸；在这里再判一次就是第二个版本的同一条规则。
+/// ## `Authorization` 只在 https 上发（评审 **F2**），Task 7 **不要"顺手补上"**
+///
+/// 判据住在**这里**（不在 `Task::validate()` 里）：决定"什么东西上得了线"的地方就是构造请求头的
+/// 这个地方。`Task::validate()` 那条规则管的是**明文 HTTP + 口令**（spec §4 / 勘误 E9），它**不说**
+/// 只给了 `--user` 的任务 —— 可用户名本身也是半副凭据（`Basic base64("user:")`），在明文的 socket
+/// 上一样是别人能读的。scheme 的比较复用 `task::url_is_https`（大小写不敏感，认不出 scheme 时算
+/// "不是 https"），与 `validate()` 那一侧不会读成两样。
+///
+/// **这条闸是刻意不对称的**：`Referer` 与 `Cookie` 不看 scheme，照发。理由是裁定里点名的分工 ——
+/// spec §4 那条硬规约说的是**口令**；勘误 **E9/R6** 把 `referer`/`cookies` 登记为"按设计落盘/带上"
+/// 的字段。把它们一起挡掉看着更"安全"，实际会改掉退化路径的行为：Cookie 一丢，同一台服务器给的
+/// 可能就是另一份文档，`total_len`/`ETag` 又出自另一个请求，①b 落空。**所以 Task 7 复用本函数时
+/// 不要"热心地"把这道闸扩大到那两个头上**，也不要因为 `fetch` 只发 https 就把它删掉。
+///
+/// 被挡掉时本模块**不报错**（与口令那一半不同：那边是 `validate()` 直接拒整个任务）。用户如果真
+/// 需要凭据，把 URL 写成 `https://` 就是唯一的修法 —— 而退化到 `http://` 的镜像站拿不到那个头。
 pub(crate) fn with_contract_headers(req: RequestBuilder, task: &Task) -> Result<RequestBuilder> {
     let mut req = req.header(ACCEPT_ENCODING, "identity").header(ACCEPT, "*/*");
     if let Some(referer) = &task.referer {
@@ -233,9 +293,10 @@ pub(crate) fn with_contract_headers(req: RequestBuilder, task: &Task) -> Result<
     if let Some(cookies) = &task.cookies {
         req = req.header(COOKIE, header_value(cookies, "Cookie")?);
     }
-    // 用户名或口令任一给出就带 Basic：只给用户名时是 `Basic base64("user:")`（与 curl 的 `-u user:`
-    // 同一形状）。反过来"给了口令却悄悄不带"是绝对不行的形状。
-    if task.user.is_some() || task.password.is_some() {
+    // 用户名或口令任一给出、**并且这条 URL 是 https** 才带 Basic：只给用户名时是
+    // `Basic base64("user:")`（与 curl 的 `-u user:` 同一形状）。反过来"给了口令却悄悄不带"是
+    // 绝对不行的形状 —— 所以这一支只在**明文**上被 scheme 挡，不在 https 上被别的东西挡。
+    if (task.user.is_some() || task.password.is_some()) && url_is_https(&task.url) {
         req = req.basic_auth(task.user.as_deref().unwrap_or(""), task.password.as_deref());
     }
     Ok(req)
@@ -342,7 +403,8 @@ mod tests {
     fn the_prelude_range_is_sent_only_for_segmentable_tasks() {
         let t = task_with("https://x/a.bin", None);
         assert_eq!(prelude_range(&t, 236_032).as_deref(), Some("bytes=0-236031"));
-        // 带 POST 体：不发（POST 语义下 Range 不成立）。
+        // 带 POST 体：不发。F1 之后这一支在 `run()` 里到不了（带体的任务整个不被试探），留着的理由是
+        // 模块文档第 3 条："能不能发 Range"与"能不能试探"是两道闸，不合并成一道。
         assert_eq!(prelude_range(&task_with("https://x/a.bin", Some("body.bin")), 236_032), None);
         // 上限 0：不发（不是 `bytes=0--1` 那种谎话）。
         assert_eq!(prelude_range(&t, 0), None);
@@ -362,7 +424,8 @@ mod tests {
             ("accept-ranges", "bytes"),
         ]);
         assert_eq!(total_len(&h), Some(50_331_648), "取错边就变成\"文件只有预读那么大\"");
-        // 200（对端无视 Range，或 POST 那一支没发 Range）：没有 Content-Range ⇒ 退 Content-Length。
+        // 200（对端无视我们那条 Range，或 `prelude_max == 0` 那一支根本没发 Range）：没有
+        // Content-Range ⇒ 退 Content-Length。
         let degraded = headers(&[("content-length", "1048576")]);
         assert_eq!(total_len(&degraded), Some(1_048_576));
         // 两个都没有 ⇒ None（`run` 在那里报错，绝不猜 0）。
@@ -475,6 +538,8 @@ mod tests {
         let post = task_with("http://x/a.bin", Some("body.bin"));
         let req = build_request(&agent(), &post, prelude_range(&post, 236_032).as_deref())
             .expect("建请求");
+        // （`run()` 到不了这一支：F1 的 `ensure!` 先把带体的任务拒了。这里单测的是"万一有 Range 参数
+        // 之外的入口"，`build_request` 自己也不许凭空长出一条 Range。）
         assert!(
             !req.headers().contains_key(RANGE),
             "带 POST 体时一条 Range 都不许出现（spec §2.2）：{:?}",
@@ -484,10 +549,10 @@ mod tests {
 
     #[test]
     fn build_request_carries_the_nine_item_contract_headers_that_have_a_wire_name() {
-        let mut t = task_with("http://x/a.bin", None);
+        let mut t = task_with("https://x/a.bin", None);
         t.referer = Some("https://ref.example/page".into());
         t.cookies = Some("sid=42".into());
-        t.user = Some("alice".into()); // 只有用户名：明文 HTTP 也带得上（口令那一半有 validate() 管）
+        t.user = Some("alice".into()); // https ⇒ F2 那道闸放行（它只看 scheme，别看别的）
         let req = build_request(&agent(), &t, Some("bytes=0-1")).expect("建请求");
         let h = req.headers();
         assert_eq!(h.get(REFERER).map(|v| v.as_bytes()), Some(&b"https://ref.example/page"[..]));
@@ -495,11 +560,11 @@ mod tests {
         assert_eq!(h.get(ACCEPT_ENCODING).map(|v| v.as_bytes()), Some(&b"identity"[..]));
         assert_eq!(h.get(ACCEPT).map(|v| v.as_bytes()), Some(&b"*/*"[..]));
         // base64("alice:") = YWxpY2U6；本用例**没有**口令参与，所以这里可以逐字断言。
-        assert_eq!(h.get("authorization").map(|v| v.as_bytes()), Some(&b"Basic YWxpY2U6"[..]));
-        assert_eq!(req.url().as_str(), "http://x/a.bin", "请求打的就是任务那条 URL");
+        assert_eq!(h.get("authorization").map(|v| v.as_bytes()), Some(BASIC_ALICE_COLON));
+        assert_eq!(req.url().as_str(), "https://x/a.bin", "请求打的就是任务那条 URL");
 
         // 反方向：什么契约头都没给 ⇒ 只有那两个通用头，绝不能凭空长出一个 Authorization。
-        let bare = build_request(&agent(), &task_with("http://x/a.bin", None), None).expect("建请求");
+        let bare = build_request(&agent(), &task_with("https://x/a.bin", None), None).expect("建请求");
         assert!(!bare.headers().contains_key("authorization"), "{:?}", bare.headers());
         assert!(!bare.headers().contains_key(COOKIE));
         assert!(bare.headers().contains_key(ACCEPT_ENCODING), "identity 是无条件的那一条");
@@ -554,6 +619,161 @@ mod tests {
         assert!(!msg.contains("发不出去"), "看起来是先发了请求才被网络拒（那口令就已经出门了）：{msg}");
     }
 
+    // ---- 评审 F1：带 `--data-file` 的任务**不许试探** ----
+
+    /// 体文件的哨兵：写进真实的临时文件里，用来证明拒绝文案一个字都不抄那份体。
+    const BODY_SENTINEL: &str = "form-body-sentinel-8f31";
+
+    /// 造一个**真的**体文件（`<仓库>/target/t6-scratch/`，`target/` 已在 `.gitignore` 里）。
+    ///
+    /// 为什么要真文件而不是一个假路径：本条用例断的是"错误里没有体的字节"。拿一个不存在的
+    /// 路径去断这句话是**恒真**的（谁都抄不出没读过的东西）；文件真的在那儿、内容真的带哨兵，
+    /// 后来人若把"读体 → 把体放进请求/错误"当成修法，这条就会红。
+    fn scratch_body(content: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t6-scratch");
+        std::fs::create_dir_all(&dir).expect("建 t6-scratch 目录");
+        // 先扫掉上一轮崩在半路的残留（这条目录只有本用例用，串行跑，删别人的文件不可能发生）。
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let p = dir.join("f1-body.bin");
+        std::fs::write(&p, content).expect("写体文件");
+        p
+    }
+
+    #[test]
+    fn a_task_carrying_a_data_file_is_refused_rather_than_probed_with_a_get() {
+        let body = scratch_body(&format!("{BODY_SENTINEL}&cvv=999"));
+        let mut t = task_with("https://not-a-real-host.invalid/a.bin", Some(&body.display().to_string()));
+        t.user = Some("alice".into());
+        t.password = Some("hunter2".into()); // https 上带口令是合法的 ⇒ 走到的是 data_file 那道闸，不是口令闸
+        let Err(err) = run(&t, &agent(), 236_032) else {
+            panic!("带 --data-file 的任务必须被 probe 拒掉：发 GET 会把另一条请求的事实当成本次的（①b 挡的那种）");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
+        assert!(!msg.contains(BODY_SENTINEL) && !msg.contains("cvv"), "错误里抄了体的字节：{msg}");
+        assert!(!msg.contains("hunter2") && !msg.contains("alice"), "错误里抄了凭据：{msg}");
+        assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
+        assert!(!msg.contains("发不出去"), "看起来是先发了请求才被网络拒（那已经把 GET 打出去了）：{msg}");
+        let _ = std::fs::remove_file(&body);
+    }
+
+    // ---- 评审 F2：`Authorization` 的 https 闸住在**头部构造**里，不只在 `Task::validate()` ----
+
+    /// `base64("alice:hunter2")`，逐字写出来只为了断言"两半都进了那条头"（只断"存在"看不出漏了口令）。
+    const BASIC_ALICE_HUNTER2: &[u8] = b"Basic YWxpY2U6aHVudGVyMg==";
+    /// `base64("alice:")`（curl `-u alice:` 的形状）。
+    const BASIC_ALICE_COLON: &[u8] = b"Basic YWxpY2U6";
+
+    #[test]
+    fn no_authorization_header_is_built_for_a_url_that_is_not_https() {
+        // 正主是前两条：`--user` 而**没有** `--password` 的任务，`Task::validate()` 一句话都不说
+        // （它只拦"明文 HTTP + 口令"），可用户名本身也是半副凭据 ⇒ 这一支必须由构造头的地方自己挡住。
+        // 口令那一半也照样列在这里：闸住在这里就意味着"与 validate() 无关也不上线"，不是补它的漏。
+        for url in ["http://x/a.bin", "HTTP://x/a.bin", "HtTp://x/a.bin"] {
+            let mut t = task_with(url, None);
+            t.user = Some("alice".into());
+            let req = build_request(&agent(), &t, None).expect("建请求");
+            assert!(
+                !req.headers().contains_key("authorization"),
+                "{url} 不是 https，Authorization 不许出现在请求上：{:?}",
+                req.headers()
+            );
+
+            let mut both = task_with(url, None);
+            both.user = Some("alice".into());
+            both.password = Some("hunter2".into());
+            let req = build_request(&agent(), &both, None).expect("建请求");
+            assert!(
+                !req.headers().contains_key("authorization"),
+                "{url} 不是 https，用户名+口令也不许上线：{:?}",
+                req.headers()
+            );
+        }
+    }
+
+    #[test]
+    fn the_scheme_predicate_behind_that_gate_reads_every_shape_of_url() {
+        // 闸的判据本身（`task::url_is_https`）：大小写、缺 scheme、近似 scheme 都得对上，
+        // 否则上面那条用例只会覆盖"写得最规矩的那一条 http"。
+        // 没有合法 scheme 的输入**在这里**断（不在上面那个循环里）：那种 URL 根本建不出 reqwest 的
+        // 请求（"relative URL without a base"），但判据仍然要给假 —— 认不出是 TLS 就不送凭据。
+        for url in [
+            "x/a.bin",                      // 无 scheme ⇒ 保守那一支
+            "alice:s3cret@x/a.bin",         // 无 scheme 且带 userinfo（E9 那边另有其闸，这里照样不是 https）
+            "httpx://x/a.bin",              // 差一个字母的 scheme 不是 https
+            "https+proxy://x/a.bin",        // 复合 scheme 也不是
+            "ftp://x/a.bin",
+            "",                             // 空串（`validate()` 会拒，判据自己不许 panic）
+            ":",
+            "://x/a.bin",                   // `://` 前面不是 scheme
+        ] {
+            assert!(!url_is_https(url), "{url:?} 不该被当成 https");
+        }
+        for url in [
+            "https://x/a.bin",
+            "HTTPS://X/A.BIN",              // 大写 scheme 仍是 https：闸不许把加密连接误判成明文
+            "HtTpS://x/a.bin",
+            "https://x:8443/a.bin?u=alice@x#frag", // scheme 之外的 @ 不参与判断
+        ] {
+            assert!(url_is_https(url), "{url:?} 就是 https，凭据必须照发（误判会静默换来 401）");
+        }
+    }
+
+    #[test]
+    fn the_authorization_header_is_built_over_https_and_carries_both_halves() {
+        let mut t = task_with("https://x/a.bin", None);
+        t.user = Some("alice".into());
+        t.password = Some("hunter2".into());
+        let req = build_request(&agent(), &t, None).expect("建请求");
+        assert_eq!(
+            req.headers().get("authorization").map(|v| v.as_bytes()),
+            Some(BASIC_ALICE_HUNTER2),
+            "https 上必须照发，而且两半都在里面"
+        );
+
+        // 大写 scheme 仍然是 https：闸不能把加密连接误判成明文（那会静默丢掉凭据、换来 401）。
+        let mut up = task_with("HTTPS://X/a.bin", None);
+        up.user = Some("alice".into());
+        up.password = Some("hunter2".into());
+        let req = build_request(&agent(), &up, None).expect("建请求");
+        assert_eq!(req.headers().get("authorization").map(|v| v.as_bytes()), Some(BASIC_ALICE_HUNTER2));
+
+        // 只有用户名的 https 支：`Basic base64("user:")`，与 curl 同形。
+        let mut bare = task_with("https://x/a.bin", None);
+        bare.user = Some("alice".into());
+        let req = build_request(&agent(), &bare, None).expect("建请求");
+        assert_eq!(req.headers().get("authorization").map(|v| v.as_bytes()), Some(BASIC_ALICE_COLON));
+
+        // 只有口令、没有用户名（`--password` 单独给）⇒ 用户名取空串，仍然是 `Basic`（"给了口令却悄悄不带"
+        // 才是绝对不行的形状）。
+        let mut pwonly = task_with("https://x/a.bin", None);
+        pwonly.password = Some("hunter2".into());
+        let req = build_request(&agent(), &pwonly, None).expect("建请求");
+        assert!(req.headers().contains_key("authorization"), "{:?}", req.headers());
+    }
+
+    #[test]
+    fn referer_and_cookie_cross_the_scheme_gate_by_design() {
+        // **刻意的不对称**（评审 F2 的裁定，理由写在模块文档第 8 条）：`Referer`/`Cookie` 不看 scheme
+        // 照发。spec §4 点名的只有口令；勘误 E9/R6 登记了 `referer`/`cookies` 是按设计落盘的字段。
+        // 这一支存在的目的：后来人不要把这道闸顺手扩大到这两个头（那会悄悄改变退化路径的行为，
+        // 而 cookie 一丢，同一台服务器给的可能就是另一份文档 —— ①b 又要落空）。
+        let mut t = task_with("http://x/a.bin", None);
+        t.referer = Some("https://ref.example/page".into());
+        t.cookies = Some("sid=42".into());
+        let req = build_request(&agent(), &t, None).expect("建请求");
+        let h = req.headers();
+        assert_eq!(h.get(REFERER).map(|v| v.as_bytes()), Some(&b"https://ref.example/page"[..]));
+        assert_eq!(h.get(COOKIE).map(|v| v.as_bytes()), Some(&b"sid=42"[..]));
+        assert!(!h.contains_key("authorization"), "这个夹具没给凭据，Authorization 不该凭空长出来：{h:?}");
+    }
+
     #[test]
     fn facts_hands_back_a_copy_of_the_same_record() {
         let facts = ProbeFacts {
@@ -573,7 +793,9 @@ mod tests {
     // 这一支**不写单元用例**：`read_bounded` 的机制就是 `Read::take(prelude_max)`，
     // 拿 `Cursor` 去测 `take` 只会证明 std 的行为，对着一个把上限写错的实现照样绿（恒绿夹具）。
     // 真正能证伪的是集成层那两条：
-    // - `post_shaped_task_sends_no_range_and_still_bounds_the_prelude`：对端发 48 MiB，
-    //   `prelude.len()` 必须正好是上限；
+    // - `probe_detects_server_without_ranges`：我们发了限量 Range，**对端无视它并交出 1 MiB** ⇒
+    //   `prelude.len()` 必须正好是上限（这一支才是"上限说话"而不是"对端配合"的形状）；
     // - `probe_reads_prelude_and_reports_ranges_supported`：对端按 Range 截到上限，读满。
+    // （原先排在这里的 `post_shaped_task_sends_no_range_and_still_bounds_the_prelude` 随评审 F1
+    //   改成了"带体任务不试探"那条拒绝用例 —— 没有 Range 可发的那一支已经不存在了。）
 }
