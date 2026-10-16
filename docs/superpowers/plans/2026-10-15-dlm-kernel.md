@@ -1099,5 +1099,20 @@ Task 1 自己新建 `src/consts.rs`。跟着作废的引用：
   出现在里面（其 `written` 请按上面那条理解）。这是上一轮报告 §5 顾虑 2 的正式化，实现见 `src/scheduler.rs:148`
   与 `push_done()`（`:333` 附近，合并逻辑）。
 
+- **E8：`Store::flush()` 不是 `File::flush` —— 本计划第 616 行那句"`flush` = `File::flush`"已被实测推翻，Task 8 按本条派发。**
+  `std::fs::File::flush` 对文件在 Windows 与 Unix **都是文档写明的空操作**（std 原文："Since a `File` structure doesn't contain
+  any buffers, this function is currently a no-op on Unix and Windows"）。Task 8 的收尾会写 `store.flush()?`，读者当真是"字节落盘了"
+  —— 名字承诺了实现给不起的东西。**裁定取"让名字为真"：`flush()` 现调 `File::sync_all()`**（std 自带、Windows 上即 `FlushFileBuffers`、
+  不加依赖），错误按兄弟方法一样 `with_context` 上抛。落地见 `src/store.rs:131-136`，文档 `:110-127`。
+  三条随之而来的下游义务（计划正文没有，Task 8 的 brief 必须写）：
+  ① **只在任务收尾调一次，禁止进 `run_window` 的每块循环** —— 实测每 64 KiB 调一次是 2.3–7.3 ms/块，而纯写只要 15–38 µs/块，
+  白送 60–480 倍吞吐；收尾那一次付 2.4–3.2 ms（4 MiB 实测 3.4–17.7 ms）。
+  ② **不许在 writer 还活着的时候调** —— `sync_all` 期间持有那把全局写锁，会把并发的 `write_at`/`len()` 一起卡住整个 syscall 时长
+  （偶发 8.3–228 ms）。所以 T8 的顺序必须是"先 join 全部 worker，再 flush"，取消/异常出口也不例外。
+  ③ **它不是断电级保证**，`flush` 的文档已明写"进了设备"不等于"断电不丢"（设备写缓存另算）；任何"断电安全"的说法都不许由这句调用衍生。
+  本轮同时把 `len()` 的性能守卫从 `avg_micros < 5_000` **收紧**到 `< 500`（实测均值 3 µs、加载下最差 6 µs、余量 83 倍），
+  报告 §4 那句"< 500 µs"现在与代码一致了；断言只变严、无任何放宽。
+
+
 
 
