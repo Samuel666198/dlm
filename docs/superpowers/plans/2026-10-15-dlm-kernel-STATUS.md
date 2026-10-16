@@ -10,8 +10,14 @@
 |---|---|---|
 | T0 工具链 / 依赖 / 416 根因 | ✅ 评审通过（3 轮修复 + 1 发合并复审） | `bc376eb..e73b848` |
 | T1 常量与任务模型 | ✅ 评审通过（0C/0I/6 minor） | `e73b848..fef292d` |
-| **T2 Scheduler 纯状态机** | **下一个，未派发** —— 本项目的核心 | — |
-| T3 store · T4 state · T5 resume · T6 probe · T7 fetch · T8 engine · T9 CLI · T10 验收 | 未开始 | — |
+| T2 Scheduler 纯状态机（核心） | ✅ 评审通过（1 轮修复：补 `SegmentComplete`、退化模式改起点优先、删死变体 `Halt`） | `89a0eb2..0ee1d5b` |
+| T3 store 按偏移落盘 | ✅ 评审通过（1 轮修复：`flush` 改走 `sync_all`，`len` 守卫收紧到 500 µs） | `0ee1d5b..b1da691`（+ `0d18e96` docs E8） |
+| T4 state 断点文件 | ✅ 评审通过（1 轮修复：`stub_for_test` 共用段表闸、`validate()` 拒 userinfo URL、`Task` 的 `Debug` 掩码口令） | `0d18e96..f241ed5`（含 `1d0c0af` docs R6/E9） |
+| **T5 resume 判定** | **下一个，未派发** | — |
+| T6 probe · T7 fetch · T8 engine · T9 CLI · T10 验收 | 未开始 | — |
+
+计划文末 `## 勘误` 现有 **E1–E9**（E7/E8/E9 都是执行期实测后才写进计划的，正文不回改）；设计稿 §10 现有 **R1–R6**。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
+
 
 ## 恢复步骤（照做即可，别凭记忆）
 
