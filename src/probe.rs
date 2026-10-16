@@ -109,9 +109,12 @@
 //!   字节"，那正是 Task 5 补 ①b 要挡的形状。另一条显而易见的"修法"（试探也发 POST，之后再 POST 一次
 //!   下载）**被明确否决**：它把用户的表单交**两次**，对端可能留下真副作用（下单/投票/发信），
 //!   而用户以为工具只下一次。
-//!   **交接给谁（本轮不实现，只登记）**：`engine`（Task 8）在这种形状上**跳过 probe**，事实取自
-//!   `fetch`（Task 7）**真正发出的那一枪**的响应头 —— 也就是 `fetch` 要多一项"把 `ProbeFacts` 形状
-//!   的事实从它自己的响应里取出来"的职责；两枪的头仍与 `with_contract_headers` 同源，否则 ①b 又落空。
+//!   **交接（Task 7 修复轮已完成，不再是待裁事项）**：`engine`（Task 8）在这种形状上**跳过 probe**，
+//!   事实取自 `fetch` **真正发出的那一枪**的响应头。落地的形状是把"响应头 + 状态 + 有没有发 Range +
+//!   落地 URL → `ProbeFacts`"抽成 `pub(crate)` 的 `facts_from_response`（本模块**唯一**一份读法），
+//!   `run()` 与 `fetch::run_whole` 各调它一次 —— 两枪的头仍与 `with_contract_headers` 同源，
+//!   否则 ①b 又落空。抽取是**行为不变**的：`total_len` / `peer_accepts_ranges` / `header_text` /
+//!   落地 URL 那道闸四个判据与两段拒绝措辞都逐字搬走，钉它们的老用例一条都没改。
 //!   这一支的用例是 `a_data_file_task_is_refused_before_the_probe_touches_the_wire`（断"拒在上网之前"）。
 //! - 不重试、不退避（spec §6.1/§6.2 的账归 fetch/engine），不落盘、不碰 `store`，不读断点文件。
 //!   本模块唯一的 I/O 就是那一发请求。
@@ -244,7 +247,45 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
         bail!("试探请求被服务器拒绝：HTTP {status}");
     }
 
-    let total_len = total_len(&headers, status).with_context(|| {
+    let facts = facts_from_response(status, range.is_some(), &headers, final_url.as_str())?;
+    let prelude = read_bounded(resp, prelude_max)?;
+    Ok(ProbeResult { facts, prelude })
+}
+
+/// **响应头 → `ProbeFacts` 的唯一一份读法**（修复轮 F2 的裁定：`probe` 与 `fetch` 不许各写一个）。
+///
+/// 参数就是这条读法需要的四样东西：状态码、**我们这次有没有发 `Range`**、响应头、落地 URL。
+/// 交回 Task 5 契约的那五个字段，其中两条是 Task 6 评审**强制**下来的读法，本函数把它们原样带走：
+/// - `accept_ranges` 是**行为加权**的合取（评审 **I1**，判据在 `peer_accepts_ranges`）；
+/// - `206` 说不出可用总长时**不许**退到 `Content-Length`（评审 **I2**，判据在 `total_len`）。
+///
+/// 抽出来是因为 `fetch::run_whole` 必须有同一份读法：带 `--data-file` 的形状**不能试探**
+/// （`run()` 里那道 `ensure!`，评审 **F1**），它的事实只能取自真发出去的那一枪的响应头。
+/// 两处各写一遍，迟早读成两样 —— 而 ①b/②③④ 校验的正是"确认字节的那个请求"。
+///
+/// ## 本函数**不**管的事（各调用方自己决定，不算重复实现）
+///
+/// "哪些状态码对我这一枪算可接受"是**每个模块自己的**决定，不是响应头的读法：
+/// - `probe::run`：416 + `bytes */0` + 确实发了 Range ⇒ 空文件那份事实（评审 **F3**，三条并列），
+///   其余非 2xx ⇒ 报错；
+/// - `fetch::run_window`：416 ⇒ 拿分母与我们的 `total_len` 比（裁定 2 / 勘误 **E7**），是个 `Outcome`；
+/// - `fetch::run_whole`：非 2xx ⇒ `Failed(Http(code))`，也是 `Outcome` 而不是 `Err`。
+///
+/// 所以那两支留在调用方，本函数只管"给定一个 2xx 的响应，这五个字段是什么"。
+///
+/// 落地 URL 那道凭据闸（模块文档第 5 条 / Task 5 评审 **C3** / 勘误 **E9**）**在本函数里**：
+/// 它是"事实能不能收下来"的一部分，而 `fetch` 这一枪同样可能被重定向到带 userinfo 的落地地址。
+/// 对 `probe::run` 是幂等的（那边排在更前面），对 `fetch` 是唯一的一道。
+pub(crate) fn facts_from_response(
+    status: StatusCode,
+    asked_for_range: bool,
+    headers: &HeaderMap,
+    final_url: &str,
+) -> Result<ProbeFacts> {
+    if authority_has_userinfo(final_url) {
+        bail!("{LANDED_CREDENTIALS}");
+    }
+    let total_len = total_len(headers, status).with_context(|| {
         // 两种"定不出长度"分开说，因为缺的东西不同（评审 **I2**）：
         // - 206：分母不可用（`/*`、垃圾、或压根没发 `Content-Range`）。这一支**不许**退到
         //   `Content-Length` —— 那只是本次窗口的大小，猜出来的数永远自洽（见 `total_len` 的文档）。
@@ -258,17 +299,13 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
             "对端既没回 Content-Length 也没回 Content-Range，无法确定文件长度（不猜一个数出来）"
         }
     })?;
-    let accept_ranges = peer_accepts_ranges(status, range.is_some(), &headers);
-
-    let facts = ProbeFacts {
-        etag: header_text(&headers, ETAG),
-        last_modified: header_text(&headers, LAST_MODIFIED),
+    Ok(ProbeFacts {
+        etag: header_text(headers, ETAG),
+        last_modified: header_text(headers, LAST_MODIFIED),
         total_len,
-        final_url: final_url.into(),
-        accept_ranges,
-    };
-    let prelude = read_bounded(resp, prelude_max)?;
-    Ok(ProbeResult { facts, prelude })
+        final_url: final_url.to_string(),
+        accept_ranges: peer_accepts_ranges(status, asked_for_range, headers),
+    })
 }
 
 /// 要不要发限量 `Range`，以及发哪一条（模块文档第 2、3 条）。
@@ -935,6 +972,61 @@ mod tests {
         assert_eq!(h.get(REFERER).map(|v| v.as_bytes()), Some(&b"https://ref.example/page"[..]));
         assert_eq!(h.get(COOKIE).map(|v| v.as_bytes()), Some(&b"sid=42"[..]));
         assert!(!h.contains_key("authorization"), "这个夹具没给凭据，Authorization 不该凭空长出来：{h:?}");
+    }
+
+    // ---- 修复轮 F2：抽出来的那份"响应头 → 事实"的读法 ----
+
+    /// 抽出来之后，`run()` 与 `fetch::run_whole` 用的必须是**这一个**函数。
+    ///
+    /// 这条用例钉的是"抽出来的是位置，不是判据"：五个字段的值与 `run()` 当年内联构造的那一份同值，
+    /// 而 `asked_for_range` 那一格（`run_whole` 送进去的就是 `false`）走的还是 `peer_accepts_ranges`
+    /// 里"没发 Range 时只看头"的既有分支 —— 与 `prelude_max == 0` 时 probe 的读法同一格。
+    #[test]
+    fn the_shared_reader_hands_back_the_same_five_fields_run_used_to_build() {
+        let h = headers(&[
+            ("content-range", "bytes 0-236031/50331648"),
+            ("etag", "\"probe-abc\""),
+            ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+            ("accept-ranges", "bytes"),
+        ]);
+        let facts = facts_from_response(StatusCode::PARTIAL_CONTENT, true, &h, "https://x/a.bin")
+            .expect("这一份响应读得出事实");
+        assert_eq!(
+            facts,
+            ProbeFacts {
+                etag: Some("\"probe-abc\"".into()),
+                last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+                total_len: 50_331_648,
+                final_url: "https://x/a.bin".into(),
+                accept_ranges: true,
+            },
+            "落地 URL 按原样存、长度取分母、验证子不归一化 —— 与抽出前逐字段同值"
+        );
+
+        // `asked_for_range = false`（`run_whole` 那一格）：只看头。头说 bytes 就认，头说 none 就不认。
+        let claims = headers(&[("content-length", "10"), ("accept-ranges", "bytes")]);
+        let facts = facts_from_response(StatusCode::OK, false, &claims, "https://x/a.bin").expect("读得出事实");
+        assert!(facts.accept_ranges, "没发 Range 时行为上没有证据可看，只能由头说");
+        assert_eq!(facts.total_len, 10, "200 的 Content-Length 就是它交出来的整个 body（模块文档第 4 条）");
+        let denies = headers(&[("content-length", "10"), ("accept-ranges", "none")]);
+        assert!(!facts_from_response(StatusCode::OK, false, &denies, "https://x/a.bin").expect("读得出事实").accept_ranges);
+        // 反方向（不许被顺手改掉）：发过 Range 而对方回 200 ⇒ 仍然不认（评审 I1 那一格）。
+        assert!(!facts_from_response(StatusCode::OK, true, &claims, "https://x/a.bin").expect("读得出事实").accept_ranges);
+    }
+
+    #[test]
+    fn the_shared_reader_applies_the_landing_credentials_gate_itself() {
+        // 这道闸必须住在读法**里面**：`fetch::run_whole` 不经过 `probe::run`，外面那道闸够不着它；
+        // 而它拒绝用的必须是同一个常量，不是第二个版本的措辞（`probe` 那一侧因此多一次同值判断，无副作用）。
+        let h = headers(&[("content-length", "10")]);
+        let Err(err) = facts_from_response(StatusCode::OK, false, &h, "https://alice:s3cret@host/x") else {
+            panic!("落地 URL 带 userinfo（E9 / Task 5 评审 C3）时不许交回事实");
+        };
+        let msg = err.to_string();
+        assert_eq!(msg, LANDED_CREDENTIALS, "同一个常量，不许有第二个版本：{msg}");
+        for leak in ["alice", "s3cret", "@", "http://", "https://"] {
+            assert!(!msg.contains(leak), "拒绝文本里出现了 URL 的成分（{leak}）：{msg}");
+        }
     }
 
     #[test]

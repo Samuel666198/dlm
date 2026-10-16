@@ -747,7 +747,10 @@ pub fn require_block_alignment(path: &Path, start: u64, len: u64) -> Result<()> 
 /// 拿它证"降级 200 时前 `iv.start` 个字节被丢掉了、剩下的落在该落的位置"会是一条**瞎测试**
 /// （不丢的写法在那种 body 上写出的一模一样）。派发点名用那条对端，这里保留它的语义
 /// （`Accept-Ranges: bytes` + 回 `200`），只把 body 换成能定位的那一份。
-fn positioned_body(len: usize) -> Vec<u8> {
+///
+/// `pub` 是修复轮的可见性改动：F1 的那几条用例要交一份"位置可辨的**响应**体"，
+/// 好把"落盘的字节确实是响应体"与"落盘的字节确实是请求体"这两件事分辨开（两者内容必须不同）。
+pub fn positioned_body(len: usize) -> Vec<u8> {
     let mut body = vec![0u8; len];
     for i in (0..len).step_by(4096) {
         if i + 4 <= len {
@@ -843,6 +846,9 @@ pub struct PacedPeer {
     port: u16,
     seen: Arc<Mutex<Vec<String>>>,
     written: Arc<AtomicU64>,
+    /// 每条请求带来的 `Range` 原样值（没有那条头 ⇒ 空串）。修复轮加这一味是因为
+    /// `spawn_paced_partial_stub` 要按它决定交哪一段，取证也就得能看到它。
+    ranges: Arc<Mutex<Vec<String>>>,
 }
 
 impl PacedPeer {
@@ -854,6 +860,10 @@ impl PacedPeer {
     }
     pub fn saw(&self, prefix: &str) -> bool {
         self.seen().iter().any(|t| t.starts_with(prefix))
+    }
+    /// 收到过的 `Range`（按到达顺序；没有那条头的那一枪记成空串）。
+    pub fn ranges(&self) -> Vec<String> {
+        self.ranges.lock().expect("节拍对端的 Range 记录锁没竞争者").clone()
     }
     /// 已经交给 socket 的 body 字节数（含内核缓冲里还没被读走的那一段）。
     pub fn written(&self) -> u64 {
@@ -876,7 +886,9 @@ pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Dura
     let port = listener.local_addr().context("拿不到节拍降级对端的端口")?.port();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
     let written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    let (thread_seen, thread_written) = (Arc::clone(&seen), Arc::clone(&written));
+    let ranges: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_seen, thread_written, thread_ranges) =
+        (Arc::clone(&seen), Arc::clone(&written), Arc::clone(&ranges));
     let body = positioned_body(usize::try_from(body_len).context("body 长度超出 usize")?);
 
     thread::Builder::new()
@@ -886,6 +898,7 @@ pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Dura
                 let Ok(mut stream) = stream else { break };
                 let Some(target) = read_request_target(&mut stream) else { continue };
                 thread_seen.lock().expect("线程侧记录锁").push(target);
+                thread_ranges.lock().expect("线程侧 Range 记录锁").push(String::new());
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
                      Content-Length: {body_len}\r\nAccept-Ranges: bytes\r\n\
@@ -909,5 +922,306 @@ pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Dura
         })
         .context("起节拍降级对端线程失败")?;
 
-    Ok(PacedPeer { port, seen, written })
+    Ok(PacedPeer { port, seen, written, ranges })
+}
+
+/// 按**节拍**交出**诚实 206** 的对端（`run_window` 读侧超时那条命名用例要它）。
+///
+/// 为什么 node 那台 200 ms 的限速对端不够用（E4）：窗口预算的下界是
+/// `WINDOW_MIN_TIMEOUT_SECS = 15 s`，而 64 KiB / 200 ms 的节拍下**读满一个窗口**
+/// （4 MiB = 64 块）只要 ~12.8 s ⇒ 两种 `.timeout()` 语义（"整请求期限" vs
+/// "每次 `read` 重新起算的静默期限"）在那种节拍下给出**同一个结论**，断言是瞎的。
+/// 把节拍调到 260 ms：一个窗口要 ~16.6 s > 15 s 预算 ⇒
+///
+/// - 整请求期限：15 s 到点，只交回 ~3.7 MiB；
+/// - 静默期限：连续静默从没超过 260 ms ⇒ 根本不响，交回的是**正好一个窗口** 4 MiB。
+///
+/// 用例 `the_window_budget_is_a_whole_request_deadline_on_the_read_side_too` 断的就是这两个数之分
+/// （本轮实测落在这两条的第一种上，于是它同时推翻了上一轮模块文档里的那句"静默期限"）。
+///
+/// 响应是**诚实**的：按收到的 `Range` 截段、带 `Content-Range: bytes s-e/<total_len>`、
+/// `Content-Length` 与本次要写的字节数严格一致、`Accept-Ranges: bytes` ⇒ 走的是 `run_window`
+/// 正常分段那一支（206 且起点可核对），不是降级 200 那一支。`total_len` 是本对端承认的文件长度，
+/// 起点越过它按 Range 语义给 416。
+pub fn spawn_paced_partial_stub(total_len: u64, chunk: usize, pacing: Duration) -> Result<PacedPeer> {
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("节拍 206 对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到节拍 206 对端的端口")?.port();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let ranges: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_seen, thread_written, thread_ranges) =
+        (Arc::clone(&seen), Arc::clone(&written), Arc::clone(&ranges));
+    let blob = positioned_body(usize::try_from(total_len).context("body 长度超出 usize")?);
+
+    thread::Builder::new()
+        .name("dlm-paced-partial".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { break };
+                let Some(request) = read_request_with_body(&mut stream) else { break };
+                let range = request.header("range").unwrap_or("").to_string();
+                let (start, asked_end) = parse_range(&range).unwrap_or((0, None));
+                thread_seen.lock().expect("线程侧记录锁").push(request.target);
+                thread_ranges.lock().expect("线程侧 Range 记录锁").push(range);
+                let last = asked_end.unwrap_or(total_len - 1).min(total_len - 1);
+                if start >= total_len || start > last {
+                    let resp = format!(
+                        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total_len}\r\n\
+                         Content-Length: 0\r\n\r\n"
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                    continue;
+                }
+                let from = usize::try_from(start).expect("start 落在 usize 内");
+                let to = usize::try_from(last + 1).expect("end 落在 usize 内");
+                let body = blob[from..to].to_vec();
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: {}\r\nContent-Range: bytes {start}-{last}/{total_len}\r\n\
+                     Accept-Ranges: bytes\r\nETag: \"stub-paced-partial\"\r\n\r\n",
+                    body.len()
+                );
+                if stream.write_all(head.as_bytes()).is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+                for (n, piece) in body.chunks(chunk).enumerate() {
+                    if n > 0 && !pacing.is_zero() {
+                        thread::sleep(pacing);
+                    }
+                    if stream.write_all(piece).is_err() {
+                        break; // 客户端收手了：跟着停，`written` 就停在它读到的地方附近
+                    }
+                    let _ = stream.flush();
+                    thread_written.fetch_add(piece.len() as u64, Ordering::SeqCst);
+                }
+            }
+        })
+        .context("起节拍 206 对端线程失败")?;
+
+    Ok(PacedPeer { port, seen, written, ranges })
+}
+
+/// `bytes=1048576-1114111` / `bytes=1048576-` ⇒ `(start, end)`（开放终点 ⇒ `end` 为 `None`）。
+/// 看不懂的形状 ⇒ `None`（调用方按"没发 Range"处理，与 node 服务器同一读法）。
+fn parse_range(value: &str) -> Option<(u64, Option<u64>)> {
+    let spec = value.trim().strip_prefix("bytes=")?;
+    let (start, end) = spec.split_once('-')?;
+    let start = start.trim().parse::<u64>().ok()?;
+    let end = match end.trim() {
+        "" => None,
+        other => Some(other.parse::<u64>().ok()?),
+    };
+    Some((start, end))
+}
+
+#[test]
+fn the_harness_range_parser_reads_both_ending_shapes() {
+    // 夹具自己的解析件要在它自己这一层钉住：它错了，节拍 206 那条用例就会挑错 416/206 分支，
+    // 而红出来的原因看着像被测代码的问题（取证工具不许在被测代码之后红）。
+    assert_eq!(parse_range("bytes=0-16383"), Some((0, Some(16383))));
+    assert_eq!(parse_range("bytes=1048576-"), Some((1048576, None)));
+    assert_eq!(parse_range("bytes=-1024"), None, "后缀式 Range 本 harness 不发，也不许被读成起点 0");
+    assert_eq!(parse_range(""), None);
+    assert_eq!(parse_range("bytes=abc-"), None);
+}
+
+// ---------------------------------------------------------------- 修复轮：收得下**请求体**的对端
+
+/// 一条被对端**完整收下**的请求：请求行的两段 + 全部请求头（名字已小写）+ body 原文。
+///
+/// 存在的理由（F1）：`fetch` 里"发出去的方法是什么、体是什么"这件事**不能由我们自己拼的字符串自证**。
+/// 既有的两条取证通道都看不见 body：node 服务器只把头记进 JSONL（`probe-server.mjs` 不在本轮授权里，
+/// 且它从不读请求体），`spawn_stub` 那族的 `read_request_target` 只读请求行与头。
+/// 于是本夹具把 body 一起收下并交回来 —— 那才是"POST 确实带着那份体上线"的**对端侧**证据。
+#[derive(Debug, Clone)]
+pub struct ReceivedRequest {
+    pub method: String,
+    pub target: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl ReceivedRequest {
+    /// 某个请求头的值（名字大小写不敏感，与本 harness 所有头读取同一立场）。
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// 某个请求头**是否存在**（"不许出现 Range"这一侧的断言用它，别拿 `header().is_none()` 绕）。
+    pub fn has(&self, name: &str) -> bool {
+        self.header(name).is_some()
+    }
+
+    /// body 按 lossy UTF-8 读出来，只为把哨兵/凭据那种 ASCII 片段打进断言消息里。
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// 收下**请求体**、并对每一枪回一份调用方指定的 body 的对端。
+#[derive(Debug)]
+pub struct PostPeer {
+    port: u16,
+    requests: Arc<Mutex<Vec<ReceivedRequest>>>,
+}
+
+impl PostPeer {
+    pub fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// 服务过的全部请求（按到达顺序）。
+    pub fn requests(&self) -> Vec<ReceivedRequest> {
+        self.requests.lock().expect("POST 对端的记录锁没竞争者").clone()
+    }
+
+    /// 第一条请求；一条都没有就当场报错（"根本没打到对端"与"打到了但方法不对"是两种故障）。
+    pub fn first(&self) -> Result<ReceivedRequest> {
+        self.requests()
+            .into_iter()
+            .next()
+            .context("POST 对端一条请求都没收到（请求根本没上线？）")
+    }
+
+    pub fn saw(&self, prefix: &str) -> bool {
+        self.requests().iter().any(|r| r.target.starts_with(prefix))
+    }
+}
+
+/// 起一个收体的对端。路由 `/submit`（认不出的 target 回 404，好让拼错 URL 的用例当场红）。
+///
+/// `accept_ranges`：响应里 `Accept-Ranges` 那一条头的值，`None` 表示**压根不发**这个头。
+/// 之所以要它：`run_whole` 收割 `ProbeFacts.accept_ranges` 走的是与 `probe` **同一个读法**
+/// （`asked_for_range = false` ⇒ 只看头），要钉住那一味就必须能让对端说 `bytes` / 说 `none` / 闭嘴。
+///
+/// `response_body` 是每一枪的响应体（调用方给什么就回什么，`Content-Length` 与它严格一致 ⇒
+/// 读得满、body 干净收尾）。它与**请求体**刻意由调用方分成两份不同的字节，
+/// 这样"落盘的是响应体"才不是拿同一份内容自证。
+pub fn spawn_post_stub(accept_ranges: Option<&str>, response_body: Vec<u8>) -> Result<PostPeer> {
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("收体对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到收体对端的端口")?.port();
+    let requests: Arc<Mutex<Vec<ReceivedRequest>>> = Arc::new(Mutex::new(vec![]));
+    let thread_requests = Arc::clone(&requests);
+    let ranges = accept_ranges.map(str::to_string);
+
+    thread::Builder::new()
+        .name("dlm-post-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let Some(req) = read_request_with_body(&mut stream) else { break };
+                let recognized = req.target.starts_with("/submit");
+                thread_requests.lock().expect("线程侧记录锁").push(req);
+                let written = if recognized {
+                    let mut head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                         Content-Length: {}\r\nETag: \"stub-post-peer\"\r\n",
+                        response_body.len()
+                    );
+                    if let Some(value) = &ranges {
+                        head.push_str(&format!("Accept-Ranges: {value}\r\n"));
+                    }
+                    head.push_str("\r\n");
+                    stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(&response_body))
+                } else {
+                    stream
+                        .write_all("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".as_bytes())
+                };
+                if written.is_err() || stream.flush().is_err() {
+                    break;
+                }
+            }
+        })
+        .context("起收体对端线程失败")?;
+
+    Ok(PostPeer { port, requests })
+}
+
+/// 从一条连接上收下**一整条请求**（请求行 + 头 + body）。收不齐（或对端拆线）给 `None`。
+///
+/// body 只认 `Content-Length`：reqwest 的阻塞层对 `Vec<u8>` 与 `File` 两种体都会写出那一条头
+/// （`blocking/request.rs` 的 `into_async`：`if let Some(len) = len { insert(CONTENT_LENGTH, ..) }`，
+/// 而 `Body::from(File)` 的 `len` 取自 `metadata().len()`）。真出现 `Transfer-Encoding: chunked`
+/// 的请求体时本夹具**故意**不收（返回 `None` 并拆线）：那样用例会在"对端一条请求都没收到"上当场红，
+/// 比悄悄少读一截 body、把"体确实是那份字节"变成一条瞎断言好。
+fn read_request_with_body(stream: &mut TcpStream) -> Option<ReceivedRequest> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(req) = take_complete_request(&buf) {
+            return Some(req);
+        }
+        if buf.len() > 512 * 1024 {
+            return None; // 头 + body 超过这个数还拼不成一条请求 = 对端不对劲
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// 试着把缓冲区解释成**一条完整请求**；头没读全或 body 没读全 ⇒ `None`（继续读）。
+fn take_complete_request(buf: &[u8]) -> Option<ReceivedRequest> {
+    let head_end = find_head_end(buf)?;
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let mut lines = head.lines();
+    let mut request_line = lines.next()?.split_whitespace();
+    let method = request_line.next()?.to_string();
+    let target = request_line.next()?.to_string();
+    let mut headers: Vec<(String, String)> = vec![];
+    for line in lines {
+        let (name, value) = line.split_once(':')?;
+        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+    }
+    let value_of = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        headers
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.as_str().to_string())
+    };
+    // chunked 请求体：本夹具不收（理由见 `read_request_with_body`）。
+    if value_of("transfer-encoding").is_some() {
+        return None;
+    }
+    let body_area = &buf[head_end + 4..];
+    let want: usize = value_of("content-length")
+        .unwrap_or_else(|| "0".into())
+        .trim()
+        .parse()
+        .ok()?;
+    if body_area.len() < want {
+        return None; // body 还没收齐
+    }
+    Some(ReceivedRequest {
+        method,
+        target,
+        headers,
+        body: body_area[..want].to_vec(),
+    })
+}
+
+// ---------------------------------------------------------------- 修复轮：`--data-file` 的体文件
+
+/// 在 gitignored 的 `target/harness-scratch/` 里写一份**真的**请求体文件，返回路径。
+///
+/// 为什么要真文件：F1 那几条用例断的是"上线的 body 确实等于那份文件的字节"，
+/// 以及"错误/日志里一个字都不抄那份体"。拿一个不存在的路径断后者是**恒真**的
+/// （谁都抄不出没读过的东西）—— 与 `probe.rs` 里 `scratch_body` 同一条理由，只是落在集成侧。
+/// 名字带 `pid`（并行跑与同机多进程不互踩），**调用方负责删**。
+pub fn scratch_body(name: &str, content: &[u8]) -> Result<PathBuf> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("harness-scratch");
+    std::fs::create_dir_all(&dir).with_context(|| format!("建 harness-scratch 目录失败：{}", dir.display()))?;
+    let path = dir.join(format!("{}-{name}", std::process::id()));
+    std::fs::write(&path, content).with_context(|| format!("写请求体文件失败：{}", path.display()))?;
+    Ok(path)
 }

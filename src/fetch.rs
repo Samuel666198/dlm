@@ -66,49 +66,66 @@
 //!   本模块只往上加 `Range` 与窗口预算那一条 `timeout`。
 //!   用例 `fetch_carries_the_nine_item_contract_headers_on_the_wire`（服务端日志取证）。
 //!
-//! ## 与 reqwest blocking 的形状关系（两处实测过的事实）
+//! ## 与 reqwest blocking 的形状关系（实测过的事实，含**本轮推翻的一条**）
 //!
-//! - `.timeout()` 是**整请求**的超时，但 blocking 层把它**每次 `read()` 重新起算**
-//!   （`src/blocking/response.rs` 的 `impl Read for Response` → `wait::timeout(fut, self.timeout)`，
-//!   而 `wait::timeout` 在**调用时**算 deadline）。所以它在我们这里的效果是"连续静默超过预算 ⇒ 到点"，
-//!   正合 spec §3 那条 `STALL_TIMEOUT` 的本意；一个慢但一直在送的节拍打不中它
-//!   （用例 `a_live_but_paced_peer_is_advanced_rather_than_misread_as_stalled`）。
+//! - **窗口预算是"整请求期限"，body 也算在里面**（本轮实测，推翻上一轮的判断）：用例
+//!   `the_window_budget_is_a_whole_request_deadline_on_the_read_side_too`。形状：对端每 260 ms 交
+//!   64 KiB（连续静默从没超过 260 ms），预算 15 s ⇒ **15.02 s 到点**，此时只交了 3,801,088 字节，
+//!   而对端的 body 总长 6 MiB、`written()` 显示它还在写 ⇒ 掐掉这一枪的是我们自己的期限。
+//!   上一轮读 `src/blocking/wait.rs` 的 `timeout()` 在**调用时**算 deadline 那一行，写成"每次 `read`
+//!   重新起算的静默期限，慢但活着的节拍打不中它"—— 那条判断**没有**被分辨得出来的实验证过：
+//!   当时那条用例（`a_live_but_paced_peer_...`，`/sz/524288s`）的对端 1.6 s 就交完 body，
+//!   两种语义给出同一个结论，是一条瞎断言（它现在仍然留着，但只钉"活着 ≠ 卡死"那一件事）。
+//!   真正的机制在异步侧：请求级 `timeout` 也管 body。
+//! - **对 Task 8 的后果**（这就是派发要"钉住是哪一种语义"的理由）：一个窗口的墙钟时间**上界就是
+//!   预算**，与对端活不活着无关 ⇒ 填满一个窗口需要的速率是 `WINDOW_BYTES / window_budget(rate)`。
+//!   比这慢的对端会在窗口**没填满**时被我们自己的期限掐掉 ⇒ 交回 `Advanced{bytes}`（进度是真的），
+//!   **不是** `Stalled`（"预算到点且零字节落盘"才叫 `Stalled`，见上面那一节）。
+//!   于是"慢"在 Task 8 那里读起来是"每轮最多 15–120 s 的一轮一轮真进度"，既不算失败也不算卡死；
+//!   `rate_bps` 估高了 ⇒ 预算偏小 ⇒ 每轮被提前掐、总时长变长，但不丢字节、也不误报卡死。
 //! - **别假设"不配 timeout 就等于永不等"**（派发点名）：Task 0 实测一条没配 timeout 的 reqwest 请求
-//!   在 ~30.005 s 自己死掉，时长来源未查清。本模块**永远**显式配预算，正是为了不让那种未查清的
-//!   内部期限替我们决定语义。
-//! - `Response::read` 的超时**不是** `reqwest::Error`：blocking 层把它包成
-//!   `io::Error::new(ErrorKind::Other, reqwest::Error{Kind::Decode ← TimedOut})`。所以判"这是超时"
-//!   要把 payload 再 `downcast_ref::<reqwest::Error>()` 一次（`is_read_timeout`）。只按
-//!   `kind()` 分的话，读侧超时会被计成一次传输失败 —— 两条用例
+//!   在 ~30.005 s 自己死掉，时长来源未查清。本模块**永远**显式配预算（`run_window` 与 `run_whole`
+//!   都是），正是为了不让那种未查清的内部期限替我们决定语义。
+//! - `Response::read` 的超时**不是** `reqwest::Error` 而是被包了一层的 `io::Error`（本轮实测形状：
+//!   `io::Error{kinds: Other, payload: reqwest::Error{Kind::Body ← Kind::Body ← TimedOut}}`；
+//!   上一轮记的是 `Kind::Decode ← TimedOut`，同一次误判的一部分 —— 两条都只是描述，分类不依赖它）。
+//!   所以判"这是超时"要把 payload 再 `downcast_ref::<reqwest::Error>()` 一次（`is_read_timeout`），
+//!   而 `reqwest::Error::is_timeout()` 是**顺着 source 链**找 `TimedOut` 的，包裹深度变了也认。
+//!   只按 `kind()` 分的话，读侧超时会被计成一次传输失败 —— 两条用例
 //!   （`a_peer_that_never_answers_is_stalled` 走 `execute` 支、
 //!   `a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure` 走 `read` 支）
-//!   各钉一支。
+//!   各钉一支。`run_whole` 复用同一个 `is_read_timeout`，那一支的分类不必再测一遍。
+//!
+//! ## `Stalled` 的定义（控制方已批准为定义）
+//!
+//! **窗口预算到点，且这一枪一个字节都没落到盘上。** 正面陈述这件事是因为 `Outcome::Stalled` 装不下
+//! 字节数：它只能诚实地说"什么都没到"。活着但对端很慢 ⇒ 已经落盘的字节是真进度 ⇒ `Advanced{bytes}`，
+//! Task 8 重新起一个窗口、重新起一份预算。于是"卡住"永远是重试上限该数的那种次数，而"慢"永远带着进度。
 //!
 //! ## 本模块**没**做的事（照实登记，不是遗漏）
 //!
-//! - **不发 POST 体**。`run_window` 只发 `GET`（与 `probe::build_request` 同一形状）。带
-//!   `--data-file` 的任务在 spec §2.2 第一条下是"单段顺序下载"，`iv.start` 恒为 0，所以裁定 6 那条
-//!   跳字节在这种形状上是 0 字节的跳；**但**"下载那一枪应当发 POST"这件事简报与六条裁定都没写，
-//!   `Task` 里也没有 Content-Type 字段可用（表单还是裸体、怎么编码都未定），已作为**待裁事项**交回
-//!   控制方。这里不替它猜一个形状：猜错的 POST 会往别人的服务器上留下真副作用。
-//! - **不收割 `ProbeFacts`**：`probe::run` 对带 `data_file` 的任务硬拒（Task 6 评审 F1），于是那种
-//!   形状的长度/验证子必须取自**真发出去的那一枪**的响应头（`probe.rs` 模块文档"本模块没做的事"
-//!   第 1 条把这一项写给 Task 7 + Task 8）。派发的 `Produces` 与六条裁定都没有这条路（`Outcome`
-//!   装不下那份事实，而 `run_window` 的签名被裁定 1 钉死），所以同样是**待裁事项**：要么给
-//!   `Outcome` 加一个带事实的变体，要么在 `probe` 里抽一个 `pub(crate)` 的"响应头 → 事实"共用口。
 //! - 不重试、不退避、不落断点文件、不碰 `scheduler`：那些账都在 Task 8 的主循环里。
 //! - 不校验 `sha256`、不 `flush`：`Store::flush`（= `sync_all`）只许在任务收尾调一次（**E8**①）。
+//! - 不发 `Content-Type`（`run_whole` 那一条）：任务形状里没有供给它的字段，猜一个会悄悄改掉服务器
+//!   怎么处理这份请求。**这是留给 Task 9（CLI）的开放问题**，不是本模块能替他做的决定。
+//! - `write_at` 失败这条路径**没有测试**：仓库里没有能造出"句柄已打开、写失败"的注入口（`Store::file`
+//!   是 `pub(crate)`，Task 3 的 deferred 条目明确不许为此放宽可见性，Windows 上删文件也不影响已打开的
+//!   句柄）；钉它需要把 `Store` 换成 trait，那是 Task 3 的形状变更。两条入口都按同一个立场处理：
+//!   `?` 往上抛，不把半截写当进度。
 
+use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use reqwest::blocking::{Client, Request};
+use anyhow::{Context, Result, bail, ensure};
+use reqwest::blocking::{Body, Client, Request};
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 
 use crate::consts::{WINDOW_BYTES, WINDOW_MAX_TIMEOUT_SECS, WINDOW_MIN_TIMEOUT_SECS};
 use crate::probe;
+use crate::resume::ProbeFacts;
 use crate::scheduler::Interval;
 use crate::store::Store;
 use crate::task::{Task, authority_has_userinfo};
@@ -140,9 +157,21 @@ pub enum FailKind {
 /// 而不是"取到了 `iv.len()` 个字节"（后者由 `Advanced` 说）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// 这一枪**有**字节落到盘上了（哪怕随后被掐断、超时或读到比期望短的 body）。
     Advanced { bytes: u64 },
+    /// 这个区间不需要（再）取字节：区间是空的，或 body 按对端自己声明的长度**完完整整**交完了。
+    /// 短 body / 被掐断**绝不**给这一支（那会把段的尾巴永远封存）。
     Complete,
+    /// **定义（正面陈述，不是靠排除法）：窗口预算到点，且这一枪一个字节都没落到盘上。**
+    ///
+    /// 为什么必须带上"零字节"这半句：`Stalled` 这个变体装不下字节数，所以它只能说"什么都没到"。
+    /// "活着但慢"的对端在预算里已经写下去的字节是真进度，只能由 `Advanced{bytes}` 交回 ——
+    /// 那一支让 Task 8 重新起一个窗口、重新起一份预算（裁定 3(c) + 裁定 4 末句"失败路径不许丢字节账"
+    /// 的**唯一**自洽读法）。控制方已把这条批准为定义（修复轮裁定），用例
+    /// `a_live_but_paced_peer_is_advanced_rather_than_misread_as_stalled` 钉的就是"活着的节拍
+    /// 对端永远不该被判成卡住"。
     Stalled,
+    /// 零进制的失败（重试上限该计的数）。三个 `FailKind` 分别对应 Task 8 的三种账，见那里。
     Failed(FailKind),
 }
 
@@ -196,10 +225,13 @@ fn content_range_start(value: &str) -> Option<u64> {
 /// 这个 `io::Error` 是不是"窗口预算到点"。
 ///
 /// `Response::read` 的超时**不是** `reqwest::Error` 而是被包了一层的
-/// `io::Error::new(ErrorKind::Other, reqwest::Error{Kind::Decode ← TimedOut})`（见模块文档），
-/// 所以只问 `kind()` 一定读成"别的传输错误"。两支都问：`ErrorKind::TimedOut`（std 自己的形状）
-/// 与 payload 里的 `reqwest::Error::is_timeout()`（reqwest 的实际形状，集成用例
-/// `a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure` 钉的就是它）。
+/// `io::Error::new(ErrorKind::Other, reqwest::Error{Kind::Body ← Kind::Body ← TimedOut})`（本轮实测，
+/// 见模块文档），所以只问 `kind()` 一定读成"别的传输错误"。两支都问：`ErrorKind::TimedOut`
+/// （std 自己的形状）与 payload 里的 `reqwest::Error::is_timeout()`（reqwest 的实际形状；它顺着
+/// source 链找 `TimedOut`，所以包裹层数变了照样认）。集成用例
+/// `a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure` 钉的是 payload 那一支
+/// （变异 M4 摘掉下钻 ⇒ 那条红），单元用例
+/// `a_plain_io_error_is_not_a_timeout_and_stays_a_transport_failure` 钉负向与 std 那一支。
 fn is_read_timeout(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::TimedOut
         || err
@@ -209,11 +241,56 @@ fn is_read_timeout(err: &std::io::Error) -> bool {
 }
 
 /// 拼出这一枪（照 `probe::build_request` 的形状先建出 `Request`，单元层就看得见头与预算）。
+///
+/// **只服务可分段的形状**：`GET` + 一条 `Range`。带请求体的任务由 `build_body_request` 那一条负责，
+/// 而 `run_window` 在走到这里**之前**就把那种任务拒了（F1 的裁定）。
 fn build_request(agent: &Client, task: &Task, range: &str, budget: Duration) -> Result<Request> {
     let req = agent.get(&task.url).header(RANGE, range).timeout(budget);
     probe::with_contract_headers(req, task)?
         .build()
         .context("窗口请求拼不出来（URL 不合法？）")
+}
+
+/// 打开 `--data-file` 那份请求体，包成 reqwest 的**流式** body。
+///
+/// 取法（修复轮要我说清楚的那件事）：**流式**，不把体读进内存。`reqwest::blocking::Body` 内部是
+/// `Kind::Reader(Box<dyn Read>, Option<u64>)`（`src/blocking/body.rs:155-168` 与 `impl From<File>`），
+/// `Body::from(File)` 把 `len` 取成 `metadata().len()`；发送侧由 reqwest 的驱动线程一块一块从这条
+/// `File` 里读（`into_async` 交回一个 `Sender`），而那个 `len` 在**发送时**写进请求的
+/// `Content-Length`（`blocking/request.rs:139-152`：`if let Some(len) = len { insert(CONTENT_LENGTH, ..) }`），
+/// 所以**不需要**为了写出长度而 `read_to_end`。内存代价：本模块这一侧只有那一个 64 KiB 的响应缓冲；
+/// 一个 2 GiB 的体不会在这里变成 2 GiB 的 `Vec`。
+///
+/// 注意那条 `Content-Length` 不在 `build()` 出来的 `Request` 上（`build()` 只看头表，CL 是
+/// `into_async` 那一步补的），所以单元层断不了它 —— 归集成用例
+/// `a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_body`，
+/// 那里读的是**对端收到的**那一条头（并且那个取证对端只认 `Content-Length`、见到
+/// `Transfer-Encoding` 就当场红）。
+///
+/// 错误消息：**点名路径，一个体的字节都不抄**（spec §4 那条硬规约管的是凭据，而 POST 体里
+/// 常常就躺着一个表单口令）。
+fn open_request_body(path: &Path) -> Result<Body> {
+    let file = File::open(path)
+        .with_context(|| format!("读 --data-file 的请求体文件失败：{}", path.display()))?;
+    Ok(Body::from(file))
+}
+
+/// 拼出整份那一枪：`POST` + 文件当体 + **一条 `Range` 都不带**（F1 的裁定）。
+///
+/// - 方法：`POST`。带体的任务在 spec §2.2 第一条下**不可分段**（`Task::segmentable()` 为假就是这件事），
+///   而"下载的字节来自哪条请求"只能由发请求的这一层回答 —— 发 GET 就是把**另一条**请求的字节当成果子。
+/// - 没有 `Range`：`Range` 在 POST 上不成立（发出去只会得到一个自相矛盾的请求，或被对端忽略后
+///   把整份 body 当成"区间的第 0 字节"，正是裁定 6 那一支的错读法）。
+/// - **没有** `Content-Type`：见 `run_whole` 的文档（这是留给 Task 9 的开放问题，不许在这里猜）。
+/// - 头与口令闸与 `probe` **同源**（`with_contract_headers`），一枪里只有 `Range`/体/预算不同。
+///
+/// `budget` 照窗口那一支同一个式子（`window_budget(rate_bps)`），语义也同一个：**整请求期限**
+/// （本轮实测，见模块文档）—— 一份大或慢的整份下载会被它掐在 body 中间，后果见 `run_whole` 的文档。
+fn build_body_request(agent: &Client, task: &Task, body: Body, budget: Duration) -> Result<Request> {
+    let req = agent.post(&task.url).body(body).timeout(budget);
+    probe::with_contract_headers(req, task)?
+        .build()
+        .context("整份那一枪拼不出来（URL 不合法？）")
 }
 
 /// 已写进盘里的字节数（`cursor` 是本模块唯一的进度真相：它只被 `write_at` 的返回值推进）。
@@ -238,6 +315,20 @@ pub fn run_window(
     // 但**发请求**这一刻是第二个强制点。明文 HTTP + 口令的任务到不了网络（用例
     // `the_password_gate_is_enforced_before_fetch_touches_the_wire` 用服务端日志钉"拒在上网之前"）。
     task.validate()?;
+
+    // **F1**（修复轮的裁定）：带请求体的任务**不许**从窗口这条路走。
+    // 这一支发的是 `GET` + `Range`，而那种任务的字节**只有**在 POST 的响应里才有意义 —— 照今天这样
+    // 收下它，落盘的就是"一条我们从未发过的请求"的产物，与 Task 6 评审 F1 拒绝"对带体任务做 GET
+    // 试探"是同一条理由（RED 阶段的取证：对端收到 `method=GET range=bytes=0-16383 body=""`，
+    // 而盘上多出 25 个字节）。
+    // 修法**不是**在这里补一条 POST：那种形状不分段（spec §2.2 第一条），窗口跳的那一枪等于把同一份
+    // 表单**再交一次**（下单/投票/发信都是真副作用，Task 6 的裁定明确否决过）。所以当场拒，
+    // 把调用方指到 `run_whole`。错误点名参数与入口，一个体的字节都不抄（spec §4）。
+    ensure!(
+        task.segmentable(),
+        "带 --data-file 的任务不能走窗口那条路（`run_window` 只发 GET + Range）：\
+         那种形状请调 `fetch::run_whole`（POST、不带 Range、事实取自这一枪）"
+    );
 
     // 空区间 = 真的没活儿：不打任何一枪就交 `Complete`（Task 8 折成 `SegmentComplete` 是安全的）。
     if iv.is_empty() {
@@ -282,8 +373,12 @@ pub fn run_window(
             Outcome::Failed(FailKind::ValidatorChanged)
         });
     }
-    // 裁定 6 的触发条件：我们**发了** `Range`（本模块每一枪都发，见 `range_header`），而对端答 `200`
-    // ⇒ body 的第 0 字节对应文件偏移 0，不是 `iv.start` ⇒ 先流掉 `iv.start` 个字节。
+    // 裁定 6 的触发条件：我们**发了** `Range`，而对端答 `200` ⇒ body 的第 0 字节对应文件偏移 0，
+    // 不是 `iv.start` ⇒ 先流掉 `iv.start` 个字节。
+    // "本模块每一枪都发 Range"这个前提**现在由上面那道 F1 闸守着**（带体的任务进不了这条路，
+    // 而 `run_whole` 是这一模块里唯一不发 Range 的入口，它也没有 `iv.start` 可跳）。
+    // 前提一旦被拆掉（比如将来给这条路加上别的 body 形状），这一支必须改成 `sent_range && 200`，
+    // 否则会把"我们本来就该拿整个 body"的合法 200 也跳掉 `iv.start` 个字节。
     let degraded = status == StatusCode::OK;
     if !degraded {
         if status != StatusCode::PARTIAL_CONTENT {
@@ -365,6 +460,162 @@ pub fn run_window(
     } else {
         Outcome::Advanced { bytes }
     })
+}
+
+/// **整份那一枪**：`--data-file` 的形状（POST + 文件当体 + 不带 `Range`）—— 一发请求、流到 EOF、
+/// 顺带把 `ProbeFacts` 从**这一枪自己的响应头**里收割出来。
+///
+/// ## 为什么要有这一个入口（F1 + F2 两条裁定合成它）
+///
+/// 带请求体的任务**不能试探**：`probe::run` 在打出任何一枪之前硬拒（Task 6 评审 **F1**），理由是
+/// "GET 试探确认的是另一条（无体）请求的字节"，而"试探也发 POST"要把同一份表单交两次。于是那种
+/// 形状的长度/验证子/落地 URL 只能取自**真正下载的那一枪** —— 而那一枪是 `fetch` 发的。
+/// 所以本函数把两件事一次做完：发 POST（F1），并用 `probe::facts_from_response` 这**同一个**读法
+/// 收割事实（F2；不许有第二份"响应头 → 事实"的实现）。
+///
+/// ## Task 8 不许拿这一支去做的事：**续传这个形状**
+///
+/// 交回的那份 `ProbeFacts` 与这份字节是**同一条请求的两个产物**，不是一把能和旧事实比对的独立验证子。
+/// 任何"续传前先比对一下"的写法在这种形状上都意味着**再 POST 一次**：
+/// - 不许调 `probe::run`（它硬拒，Task 6 的 `ensure!`）；
+/// - 不许把旧断点里的 `total_len`/`ETag` 与这一支收割的比完之后只续尾巴：`resume` 的 ①–⑤ 判的是
+///   "另一条请求确认过的字节"与"这一条请求"是不是同一个，而这里两边是同一条；
+/// - 中途失败之后**重新调 `run_whole` 就是把表单重交一次**（`Outcome::Advanced` 那一支只能当成
+///   "这一份文档没拿全"来报，不能当成"从 `store.len()` 接着跳窗口"）；
+/// - 断点文件对这种形状唯一站得住的读法是"重来"（`--data-file` 的任务 `resume` 走 `Fresh`，
+///   并把原因说清楚）。
+///
+/// ## 与 `run_window` 的分工
+///
+/// | | `run_window` | `run_whole` |
+/// |---|---|---|
+/// | 方法 / `Range` | `GET` + 一条 `Range` | `POST` + 体，**没有** `Range` |
+/// | 一次领多少 | 至多 `WINDOW_BYTES`（读满就收手） | 到 EOF 为止（不分窗口） |
+/// | 落盘起点 | `iv.start` | `0` |
+/// | 事实 | 由调用方从 probe 拿来（`total_len` 是入参） | 由本函数交回 |
+/// | 能续吗 | 能（窗口是无副作用的 GET） | **不能**（见上面那一节） |
+///
+/// `Content-Type`：**不发**。任务形状里没有任何字段 supplying 它（`Task` 只有 `data_file` 这条路径，
+/// spec §5 的 `--data-file F` 说的是"裸体文件"，表单还是裸体、怎么编码都没定），而猜一个
+/// `application/octet-stream`（或 `application/x-www-form-urlencoded`）会**悄悄改掉服务器怎么处理这份请求**
+/// —— 那是用户看得见的行为差别，不是我们这层能替他做的决定。已登记为**留给 Task 9（CLI）的开放问题**：
+/// 要么加一个 `--content-type`，要么由 CLI 按文件后缀给一个并写进帮助文本。
+///
+/// 三处限制照实说：
+/// - `agent.execute(..)` 走的是**阻塞**层：它会等对端把响应头交出来，但**不等**请求体送完。一份比
+///   发送缓冲大得多的体（例如几 GiB）在这里仍然占着对端的读，直到我们收到响应头 —— 那是 reqwest 的
+///   形状（`into_async` 把 `File` 交给驱动线程分块读），不是本函数新加的阻塞，也不改变内存代价。
+/// - 对端**说不出长度**（chunked 且没有 `Content-Length`/`Content-Range`）时报错、不下：这一支与
+///   `probe` 同一立场（"不猜一个数出来"）。曾考虑的另一种读法是把请求体的长度当成 `total_len` ——
+///   那需要改 `facts_from_response`（本轮的授权是"只抽出、行为不变"），而且把一个**响应**事实的来源
+///   换成了请求，本文件不干。
+/// - **预算是整请求期限**（见模块文档那条本轮实测）：一份大或慢的整份下载**几乎必然**以
+///   `Advanced{bytes}` 收场而不是 `Complete`（15–120 s 到点，body 还没完）。那不是可以"再来一枪"
+///   的形状 —— 再来一枪就是把表单重交一次。Task 8 只能把它报成"这一份没拿全"并说明原因；
+///   想要真正拿全，需要一个比 `window_budget` 更宽的期限（登记给 Task 8/9 的开放问题）。
+pub fn run_whole(
+    agent: &Client,
+    task: &Task,
+    store: &Store,
+    rate_bps: u64,
+) -> Result<(Outcome, Option<ProbeFacts>)> {
+    // 与 `run_window` 同一个第二强制点：口令闸 + E9 的 userinfo 闸都住在 `Task::validate()`。
+    task.validate()?;
+
+    // 本入口**只**服务带请求体的形状。判据复用 `Task::segmentable()`（与 spec §2.2 第一条、
+    // 与 `run_window` 那道闸同一个函数）：反过来放行就等于让一条可分段的任务绕过窗口化那条路。
+    let body_path = task.data_file.as_deref().with_context(
+        || "fetch::run_whole 只服务带 --data-file 的形状（POST、不分段、事实取自这一枪）；\
+           其余形状请调 fetch::run_window".to_string(),
+    )?;
+    let body = open_request_body(body_path)?;
+
+    let req = build_body_request(agent, task, body, window_budget(rate_bps))?;
+    let mut resp = match agent.execute(req) {
+        Ok(resp) => resp,
+        Err(e) => {
+            // 重定向**中途**失败：带凭据的落地 URL 只出现在 reqwest 的错误里 ⇒ 同一个闸、同一句话
+            // （`probe::LANDED_CREDENTIALS`，Task 5 评审 C3）。这一支还没看到响应 ⇒ 没有事实可交。
+            if e.url().is_some_and(|u| authority_has_userinfo(u.as_str())) {
+                bail!("{}", probe::LANDED_CREDENTIALS);
+            }
+            return Ok((
+                if e.is_timeout() {
+                    Outcome::Stalled
+                } else {
+                    Outcome::Failed(FailKind::Transport)
+                },
+                None,
+            ));
+        }
+    };
+    // **E9 那道闸在这一支同样成立**：`run_whole` 交回的 `ProbeFacts.final_url` 就是这条落地 URL，
+    // 它会被 `state` 落盘、被 `resume` 的 ② 写进原因串。判据与措辞都不是第二个版本
+    // （`task::authority_has_userinfo` + `probe::LANDED_CREDENTIALS`，与 `probe::run`、`run_window` 同源）。
+    let final_url = resp.url().to_string();
+    if authority_has_userinfo(&final_url) {
+        bail!("{}", probe::LANDED_CREDENTIALS);
+    }
+
+    let status = resp.status();
+    if !status.is_success() {
+        // 非 2xx 是"服务器有说法"，折成 `Failed(Http)` 让 Task 8 记账；这一支**没有**长度/验证子
+        // 可交，所以事实是 `None` 而不是"拿 4xx 的头硬凑一份"。
+        return Ok((Outcome::Failed(FailKind::Http(status.as_u16())), None));
+    }
+    let headers = resp.headers().clone();
+    // F2 的落点：**与 `probe` 同一个函数**把这五个字段读出来（`asked_for_range = false` —— 这一支
+    // 一条 Range 都没发，所以 `accept_ranges` 只能看头说，这与 `prelude_max == 0` 时 probe 的读法一致）。
+    let facts = probe::facts_from_response(status, false, &headers, &final_url)?;
+
+    let mut cursor = 0u64;
+    let mut buf = vec![0u8; CHUNK_BYTES];
+    let mut read_err: Option<std::io::Error> = None;
+    loop {
+        match resp.read(&mut buf) {
+            Ok(0) => break, // 干净 EOF：框架长度用尽（见下面那条 `bytes != total_len`）
+            Ok(n) => {
+                // 偏移 0 起、按读到多少写多少：本函数没有 `iv`，也没有窗口上界。
+                // `write_at` 失败照 `run_window` 同一立场**往上抛**（半截写不许当进度）。
+                let wrote = store
+                    .write_at(cursor, &buf[..n])
+                    .with_context(|| format!("把整份的字节写到偏移 {cursor} 失败"))?;
+                cursor += wrote as u64;
+            }
+            Err(e) => {
+                read_err = Some(e);
+                break;
+            }
+        }
+    }
+    let bytes = cursor;
+    if let Some(err) = read_err {
+        // 与 `run_window` 同一支判法：写下去过的都是真进度，只有零进度才让重试上限去计。
+        return Ok((
+            match (bytes, is_read_timeout(&err)) {
+                (0, true) => Outcome::Stalled,
+                (0, false) => Outcome::Failed(FailKind::Transport),
+                _ => Outcome::Advanced { bytes },
+            },
+            Some(facts),
+        ));
+    }
+    // 走到这里 = 干净 EOF。
+    if bytes == 0 && facts.total_len > 0 {
+        // 对端声明了长度却一个字节都不给：零进度必须是**可数的失败**，不能是 `Advanced { bytes: 0 }`
+        // （Task 8 拿到 0 字节进度 ⇒ 快速/慢速封顶一个也数不到 ⇒ 无限循环）。变异 M9 的同一条纪律。
+        return Ok((Outcome::Failed(FailKind::Transport), Some(facts)));
+    }
+    if bytes != facts.total_len {
+        // 干净 EOF 却没读完对端自己声明的长度 ⇒ 这个结论**不许**叫 `Complete`
+        // （`Complete` 在 Task 8 那里折成"这段收尾了"，会把尾巴永远封存）。正常 HTTP/1.1 框架下走不到
+        // 这一支：`Content-Length` 用尽才给 EOF，body 比它短会被 reqwest 报成读错误（上面那一支）。
+        // 到得了这里的只有"200 带着一个比 body 大的 `Content-Range` 分母"那种骗子对端
+        // （`total_len` 优先读分母，与 `probe` 同一读法）。**这条防御分支与 `write_at` 的 `Err`
+        // 同一地位：代码检查成立、本仓库的夹具造不出那个形状**，没有用例，也不为它加注入口。
+        return Ok((Outcome::Advanced { bytes }, Some(facts)));
+    }
+    Ok((Outcome::Complete, Some(facts)))
 }
 
 #[cfg(test)]
@@ -476,7 +727,11 @@ mod tests {
         let budget = window_budget(131_072);
         let req = build_request(&agent, &t, "bytes=100-200", budget).unwrap();
 
-        assert_eq!(req.method(), &reqwest::Method::GET, "本轮 fetch 只发 GET（POST 那支是待裁事项）");
+        assert_eq!(
+            req.method(),
+            &reqwest::Method::GET,
+            "窗口这条路只发 GET：带体的任务在 `run_window` 门口就被拒了（F1），那一支归 `build_body_request`"
+        );
         assert_eq!(req.url().as_str(), "https://example.com/a.bin");
         assert_eq!(req.headers().get(RANGE).unwrap(), "bytes=100-200");
         assert_eq!(req.headers().get(ACCEPT_ENCODING).unwrap(), "identity");
@@ -535,5 +790,193 @@ mod tests {
         let iv = Interval { start: 10, end: 9 };
         assert!(iv.is_empty());
         assert_eq!(written(iv, iv.start), 0);
+    }
+
+    // ---- 修复轮 F1：带请求体的那一枪的形状（POST + 体 + 不带 Range） ----
+
+    /// 写一份**真的**体文件（`<仓库>/target/t7-scratch/`，`target/` 已在 `.gitignore` 里）。
+    ///
+    /// 为什么这一层也要真文件：本模块的 `open_request_body` 交出去的是 `Body::from(File)`，
+    /// 而 reqwest 的 `Body` 只在**字节已经在手里**时才写得出 `Content-Length`（`Kind::Reader(_, len)`，
+    /// `len` 取自 `metadata()`）。拿一个不存在的路径断"形状对不对"是**恒真**的（谁都建不出请求）。
+    /// 目录只由本模块的用例用，跑完显式删；与 `probe.rs` 的 `t6-scratch` 分开，免得互相扫掉对方的文件。
+    fn scratch_body(name: &str, content: &[u8]) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t7-scratch");
+        std::fs::create_dir_all(&dir).expect("建 t7-scratch 目录");
+        let p = dir.join(name);
+        std::fs::write(&p, content).expect("写体文件");
+        p
+    }
+
+    /// 体文件里那句哨兵：用来证明"错误消息一个字都不抄体的内容"（体的第 2 行就是一个表单口令）。
+    const BODY_SENTINEL: &str = "session=abc&cvv=999&password=hunter2";
+
+    #[test]
+    fn the_body_shaped_request_is_a_post_carrying_the_file_and_not_a_single_range() {
+        // F1 的裁定：**方法 = POST**、**体 = 文件字节**、**不带任何 Range**（spec §2.2 第一条：带请求体
+        // 的任务不可分段，而 `Range` 在 POST 上不成立）。这一支是构造层的证据，线上那半（对端实际
+        // 收到什么）归集成用例
+        // `a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_body`。
+        let file = scratch_body("f1-shape.bin", BODY_SENTINEL.as_bytes());
+        let agent = Client::builder().build().unwrap();
+        let mut t = task("https://example.com/submit");
+        t.data_file = Some(file.clone());
+        t.referer = Some("https://site.example/form".into());
+        t.cookies = Some("sid=1".into());
+        t.user = Some("alice".into());
+        t.password = Some("hunter2".into());
+        let budget = window_budget(131_072);
+
+        let body = open_request_body(&file).unwrap();
+        let req = build_body_request(&agent, &t, body, budget).unwrap();
+
+        assert_eq!(req.method(), &reqwest::Method::POST, "带体的那一枪必须是 POST：发 GET 就是把另一条请求的字节当成果子");
+        assert!(req.headers().get(RANGE).is_none(), "POST 上一条 Range 都不许出现（spec §2.2）：{:?}", req.headers());
+        // `Content-Length` **不在** `build()` 出来的头表上：它是 reqwest 在 `into_async` 那一步从
+        // `metadata().len()` 补写的（见 `open_request_body` 的文档），所以这一层断不了它。
+        // 线上那一条归集成用例
+        // `a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_body`
+        // —— 那里读的是**对端收到的**头与 body，而对端只认 `Content-Length`（见 harness 的
+        // `read_request_with_body`：见到 `Transfer-Encoding` 就当场红）。
+        // **不发 Content-Type**：任务形状里没有供给它的字段，猜一个会悄悄改掉服务器怎么处理这份请求。
+        // 这是登记给 Task 9（CLI）的开放问题，见 `run_whole` 的文档。
+        assert!(req.headers().get(reqwest::header::CONTENT_TYPE).is_none(), "不许凭空发明 Content-Type：{:?}", req.headers());
+        // 体的确实在请求上（`Body::from(File)` 之后 `as_bytes()` 读不出内容，只有"有没有体"看得出来；
+        // 逐字节对不对归集成用例的对端取证）。
+        assert!(req.body().is_some(), "POST 必须带着体");
+        // 契约头与 `probe` 同源，口令那半在 https 上放行。
+        assert_eq!(req.headers().get(ACCEPT_ENCODING).unwrap(), "identity");
+        assert_eq!(req.headers().get(ACCEPT).unwrap(), "*/*");
+        assert_eq!(req.headers().get("referer").unwrap(), "https://site.example/form");
+        assert_eq!(req.headers().get("cookie").unwrap(), "sid=1");
+        let auth = req.headers().get("authorization").expect("https 上口令要上线").to_str().unwrap();
+        assert!(auth.starts_with("Basic ") && !auth.contains("hunter2"), "只以 Basic 形态出去：{auth}");
+        assert_eq!(req.timeout().copied(), Some(budget), "窗口预算照同一个式子挂在整份那一枪上");
+        assert!(req.headers().get(reqwest::header::CONNECTION).is_none(), "不发 Connection: close（R5/E2）");
+        std::fs::remove_file(&file).expect("清体文件");
+    }
+
+    #[test]
+    fn the_body_shaped_request_over_plain_http_still_drops_the_authorization_header() {
+        // F2 那道 scheme 闸住在 `with_contract_headers`，`build_body_request` 不许"顺手补上"。
+        // POST 的体里往往就带着口令，而那条头是**另一条**外传通道 —— 明文 socket 上一条都不许多。
+        let file = scratch_body("f1-plain.bin", b"a=1");
+        let agent = Client::builder().build().unwrap();
+        let mut t = task("http://example.com/submit");
+        t.data_file = Some(file.clone());
+        t.user = Some("alice".into());
+        let body = open_request_body(&file).unwrap();
+        let req = build_body_request(&agent, &t, body, Duration::from_secs(15)).unwrap();
+        assert!(req.headers().get("authorization").is_none(), "明文 socket 上半副凭据也不许出去：{:?}", req.headers());
+        assert_eq!(req.method(), &reqwest::Method::POST, "闸只挡口令，不改方法");
+        std::fs::remove_file(&file).expect("清体文件");
+    }
+
+    #[test]
+    fn an_unreadable_body_file_is_named_but_nothing_of_its_bytes_reaches_the_message() {
+        // 裁定：路径读不出来 ⇒ 报错，且消息**不抄体的字节**。
+        // 这条断言的另一半（"字节确实在我们手里过"）由 `the_body_shaped_request_...` 那条负责：
+        // 同一个哨兵在那里真上过请求，所以这里"消息里没有它"不是拿一个从没读过的东西自证。
+        let missing = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t7-scratch")
+            .join("definitely-not-there.bin");
+        let Err(err) = open_request_body(&missing) else {
+            panic!("读不出来的体文件必须报错，不许悄悄发一条空体的 POST");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
+        assert!(msg.contains("definitely-not-there.bin"), "路径要点名（那是用户能给对的东西）：{msg}");
+        assert!(!msg.contains("cvv") && !msg.contains("session=abc") && !msg.contains("hunter2"), "错误里抄了体：{msg}");
+    }
+
+    // ---- 修复轮 F1：两条入口互斥（各拒对方那种形状） ----
+
+    #[test]
+    fn run_window_refuses_a_body_carrying_task_before_any_request_shape_exists() {
+        let agent = Client::builder().build().unwrap();
+        let mut t = task("https://example.com/submit");
+        t.data_file = Some("does-not-matter.bin".into());
+        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("t7-scratch");
+        std::fs::create_dir_all(&store_dir).expect("建 t7-scratch 目录");
+        let path = store_dir.join("f1-window-guard.bin");
+        let store = Store::open(&path, true).expect("开测试目标文件");
+        let Err(err) = run_window(
+            &agent,
+            &t,
+            Interval { start: 0, end: 4095 },
+            &store,
+            10_000_000,
+            48 * 1024 * 1024,
+        ) else {
+            panic!("带 --data-file 的任务不该被窗口那条路接受（发 GET 就是拿另一条请求的字节）");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("--data-file") && msg.contains("run_whole"), "错误要指路：{msg}");
+        assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
+        assert_eq!(store.len().expect("读长度"), 0, "被拒的任务不许动过盘");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn run_whole_refuses_a_task_that_has_no_body_file() {
+        // 两条入口的判据是**同一个函数**（`Task::segmentable()`）的两半：可分段 ⇒ `run_window`，
+        // 带体 ⇒ `run_whole`。谁都不许同时接两种形状 —— 否则"用哪条路"就变成一个调用方的自由。
+        let agent = Client::builder().build().unwrap();
+        let t = task("https://example.com/a.bin");
+        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("t7-scratch");
+        std::fs::create_dir_all(&store_dir).expect("建 t7-scratch 目录");
+        let path = store_dir.join("f1-whole-guard.bin");
+        let store = Store::open(&path, true).expect("开测试目标文件");
+        let Err(err) = run_whole(&agent, &t, &store, 10_000_000) else {
+            panic!("没有体的任务不该走 `run_whole`：那条路不分窗口，会把可分段的任务整份吸完");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("--data-file") && msg.contains("run_window"), "错误要指路：{msg}");
+        assert_eq!(store.len().expect("读长度"), 0, "被拒的任务不许动过盘");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn both_entries_validate_the_task_before_any_request_or_body_is_touched() {
+        // `Task::validate()`（口令闸 + E9 的 userinfo 闸）在**两条**入口上都是第一行。
+        // 顺序在这里有实质意义：那种任务连体文件都不该被打开（口令表单的体不该被读进我们的进程）。
+        let agent = Client::builder().build().unwrap();
+        let file = scratch_body("f1-order.bin", BODY_SENTINEL.as_bytes());
+        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("t7-scratch");
+        std::fs::create_dir_all(&store_dir).expect("建 t7-scratch 目录");
+        // 体文件与目标文件**必须不同名**（同名时 `Store::open(.., true)` 会把体一起截掉，
+        // 于是"被拒的任务没读过体"这一半就成了恒真断言）。
+        let path = store_dir.join("f1-order-store.bin");
+        let store = Store::open(&path, true).expect("开测试目标文件");
+
+        let mut plain = task("http://example.com/submit");
+        plain.password = Some("hunter2".into());
+        plain.data_file = Some(file.clone());
+        let Err(err) = run_whole(&agent, &plain, &store, 10_000_000) else {
+            panic!("明文 HTTP 带口令的任务必须被 `run_whole` 的 validate() 拒掉");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("口令"), "错误要说清是口令规则：{msg}");
+        assert!(!msg.contains("hunter2") && !msg.contains("cvv"), "两条都不许抄：{msg}");
+        assert!(!msg.contains("--data-file"), "看起来是先开了体文件才被口令闸挡住：{msg}");
+
+        // E9 那一支：URL 里带 userinfo 的任务在两条入口上都到不了网络（`probe::run` 同一个判据）。
+        let mut credentialed = task("https://alice:s3cret@example.com/a.bin");
+        credentialed.data_file = Some(file.clone());
+        let Err(err) = run_whole(&agent, &credentialed, &store, 10_000_000) else {
+            panic!("URL 里带 userinfo（E9）的任务必须被 `run_whole` 的 validate() 拒掉");
+        };
+        assert!(err.to_string().contains("--user"), "错误要指使用 --user/--password：{err}");
+        assert!(!err.to_string().contains("s3cret"), "错误里不许抄凭据：{err}");
+
+        assert_eq!(store.len().expect("读长度"), 0, "被拒的任务不许动过盘");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&file).expect("清体文件");
     }
 }
