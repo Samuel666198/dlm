@@ -15,10 +15,12 @@
 //!    （历史会话用过 8077/8100/8123/8161/8163）；固定 `sleep` 等就绪既慢又不稳。日志一律写在
 //!    `target/` 下（`.gitignore` 里有 `target/`），文件名带端口 + pid + 轮次，绝不复用。
 
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -576,6 +578,16 @@ pub fn spawn_416_stub() -> Result<Stub> {
             "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\n\
              Content-Length: 0\r\n\r\n"
         ),
+        // 416 但**没有** `Content-Range`（Task 7 裁定 2 要的那一支：分母取不到 ⇒ 不能当成"这活儿干完了"）。
+        None if target.starts_with("/no-content-range") => {
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n".to_string()
+        }
+        // 416 且分母不是数字（`bytes */nine`）：与"缺失"同一支读法，但形状不同，分开钉着。
+        None if target.starts_with("/garbage-total") => {
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */nine\r\n\
+             Content-Length: 0\r\n\r\n"
+                .to_string()
+        }
         None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string(),
     })
 }
@@ -675,4 +687,227 @@ fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut it = first.split_whitespace();
     let (_method, target) = (it.next()?, it.next()?);
     Some(target.to_string())
+}
+
+// ---------------------------------------------------------------- Task 7 的落盘夹具
+
+/// 建一个真的 `Store`（落在 gitignored 的 `target/harness-scratch/`），返回 `(Store, 路径)`。
+///
+/// 名字带 `pid`：`cargo test` 用多线程并行跑用例，同机并发跑多个测试进程时不能互相踩同一个文件。
+/// `truncate = true`：本夹具服务的每一条用例都从"空文件"起步，`store.len()` 才只由这条用例的写入
+/// 决定（Task 3 的自然延长语义）；残留文件会让长度断言读到上一轮的字节的。
+/// **调用方负责删**（返回的是裸 `PathBuf`，不是 guard）：留在 `target/` 下不进版本库，
+/// 但用例里会显式 `remove_file`，跑完整轮 `target/harness-scratch` 是干净的。
+pub fn store(name: &str) -> Result<(dlm::store::Store, PathBuf)> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("harness-scratch");
+    std::fs::create_dir_all(&dir).with_context(|| format!("建 harness-scratch 目录失败：{}", dir.display()))?;
+    let path = dir.join(format!("{}-{name}", std::process::id()));
+    let store = dlm::store::Store::open(&path, true)
+        .with_context(|| format!("开测试目标文件失败：{}", path.display()))?;
+    Ok((store, path))
+}
+
+/// 按**绝对偏移**从文件读 `len` 字节 —— 独立于被测代码的读者（`Store` 只有写入口，
+/// Task 3 的 deferred 条目明说"要读回就加 `read_at`，别放宽那句柄可见性"，所以取证走这条路）。
+/// 文件比 `offset + len` 短 ⇒ 当场报错，不静默给短切片（短切片会让"内容对不对"变成"读了几个字节"）。
+pub fn bytes_at(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>> {
+    let mut f = File::open(path).with_context(|| format!("打开取证文件失败：{}", path.display()))?;
+    let have = f.metadata().context("取取证文件长度失败")?.len();
+    let end = offset.checked_add(len as u64).context("取证区间溢出")?;
+    if end > have {
+        bail!("取证要读 [{offset}, {end})，文件只有 {have} 字节 —— 该写的字节没写够");
+    }
+    f.seek(SeekFrom::Start(offset)).with_context(|| format!("定位到 {offset} 失败"))?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf).context("读取证字节失败")?;
+    Ok(buf)
+}
+
+/// blob 的**内容**取证（文件侧）：读回 `[start, start+len)` 并要求每 4 KiB 块首的块号对得上。
+///
+/// 为什么要求 `start % 4096 == 0`（简报第 1 条用例给的是 `1_000_000`，那个数**不是**对齐的）：
+/// harness 的 blob 只在 4096 的整数倍处写了块号，块内其余字节是 `allocUnsafe` 的未初始化填充
+/// ⇒ `assert_blob_block_numbers` 的"切片第 0 字节起就是块号"这个读法，只有切片起点落在块首才成立。
+/// 拿一个不对齐的起点调它，断言会在**正确实现**上读出一堆填充字节（或在错误实现上碰巧不红）。
+/// 这里显式 `ensure!` 而不是悄悄容忍：宁可当场红，也不要一条瞎掉的 oracle（本项目已踩过三次）。
+pub fn require_block_alignment(path: &Path, start: u64, len: u64) -> Result<()> {
+    const BLOCK: u64 = 4096;
+    anyhow::ensure!(start.is_multiple_of(BLOCK), "块号取证要求 start 是 {BLOCK} 的整数倍（给了 {start}）");
+    anyhow::ensure!(len > 0, "块号取证的长度不能是 0");
+    let len = usize::try_from(len).context("取证长度超出 usize")?;
+    let bytes = bytes_at(path, start, len)?;
+    assert_blob_block_numbers(&bytes, start)
+}
+
+/// **位置可辨**的 body：与 harness 的 blob 同一约定（每 4096 块首写块号，小端 u32，其余留零）。
+///
+/// 存在的理由：`spawn_range_ignoring_stub` 的 body 是清一色 `'r'` —— 那种内容**分不清偏移**，
+/// 拿它证"降级 200 时前 `iv.start` 个字节被丢掉了、剩下的落在该落的位置"会是一条**瞎测试**
+/// （不丢的写法在那种 body 上写出的一模一样）。派发点名用那条对端，这里保留它的语义
+/// （`Accept-Ranges: bytes` + 回 `200`），只把 body 换成能定位的那一份。
+fn positioned_body(len: usize) -> Vec<u8> {
+    let mut body = vec![0u8; len];
+    for i in (0..len).step_by(4096) {
+        if i + 4 <= len {
+            body[i..i + 4].copy_from_slice(&u32::try_from(i / 4096).expect("块号超出 u32").to_le_bytes());
+        }
+    }
+    body
+}
+
+// ---------------------------------------------------------------- Task 7 的两种真形状对端
+
+/// 收了请求**永不回答**的对端：连上、读走请求行、然后挂着不动。
+///
+/// 为什么需要它（裁定 3(c) 的落点）：本仓库的 node 服务器每一枪都必然收尾（`res.end()`），
+/// `/sz/<n>s` 也只是**慢**、从不"停在中间不送"。而 `fetch` 要报 `Stalled` 的那一支是
+/// "预算之内一个字节都没等到"——那个形状在本 harness 的 node 侧**不存在**（E5 记的就是这件事）。
+/// 进程内线程对端：测试二进制一退它就没了，不构成残留监听。
+pub fn spawn_silent_stub() -> Result<Stub> {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .context("静默对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到静默对端的端口")?.port();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let thread_seen = Arc::clone(&seen);
+    thread::Builder::new()
+        .name("dlm-silent-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { break };
+                if let Some(target) = read_request_target(&mut stream) {
+                    thread_seen.lock().expect("静默对端的记录锁没竞争者").push(target);
+                }
+                // 永不回答：读着把连接吊住，直到客户端超时后自己断。
+                let mut sink = [0u8; 1024];
+                loop {
+                    match stream.read(&mut sink) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+        })
+        .context("起静默对端线程失败")?;
+    Ok(Stub { port, seen })
+}
+
+/// 把**响应头交出去、body 一个字节都不发**的对端（`200` + `Content-Length: <n>`，然后一直挂着）。
+///
+/// 与 `spawn_silent_stub` 的分工：那边测的是"连响应头都没有" ⇒ 超时发生在 `execute`，错误是
+/// `reqwest::Error`（`is_timeout()` 直接可用）；这一边超时发生在 `Response::read`，而 reqwest
+/// blocking 把读超时包成 `io::Error`（`src/blocking/response.rs` 的 `impl Read for Response`：
+/// `Waited::TimedOut ⇒ error::decode(e).into_io()`，`into_io` = `io::Error::new(Other, self)`）
+/// ⇒ 只按 `reqwest::Error::is_timeout()` 分类的代码在这一支会漏，必须把 payload 再 downcast 回去。
+/// 这一支形状 node 服务器也造不出来（每一条都必然 `res.end()` 收尾）。
+pub fn spawn_head_only_stub(content_length: u64) -> Result<Stub> {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .context("只回头的对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到只回头的对端的端口")?.port();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_seen, thread_len) = (Arc::clone(&seen), content_length);
+    thread::Builder::new()
+        .name("dlm-head-only-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { break };
+                let Some(target) = read_request_target(&mut stream) else { continue };
+                thread_seen.lock().expect("只回头的对端的记录锁没竞争者").push(target);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: {thread_len}\r\nAccept-Ranges: bytes\r\nETag: \"stub-head-only\"\r\n\r\n"
+                );
+                if stream.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                let _ = stream.flush();
+                // 头之后一个 body 字节都不发，把连接吊着（客户端的窗口预算就是在这里到点）。
+                let mut sink = [0u8; 1024];
+                loop {
+                    match stream.read(&mut sink) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+        })
+        .context("起只回头的对端线程失败")?;
+    Ok(Stub { port, seen })
+}
+
+/// 一个**按节拍**写 body 的降级对端（`200` + `Accept-Ranges: bytes` + 位置可辨的 body），
+/// 并记下"客户端挂断前我写出了多少字节"。
+#[derive(Debug)]
+pub struct PacedPeer {
+    port: u16,
+    seen: Arc<Mutex<Vec<String>>>,
+    written: Arc<AtomicU64>,
+}
+
+impl PacedPeer {
+    pub fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("节拍对端的记录锁没竞争者").clone()
+    }
+    pub fn saw(&self, prefix: &str) -> bool {
+        self.seen().iter().any(|t| t.starts_with(prefix))
+    }
+    /// 已经交给 socket 的 body 字节数（含内核缓冲里还没被读走的那一段）。
+    pub fn written(&self) -> u64 {
+        self.written.load(Ordering::SeqCst)
+    }
+}
+
+/// 起节拍降级对端。路由 `/ignores-range`（认不出的 target 直接断链，好让拼错 URL 的用例当场红）。
+///
+/// 它同时钉两件事：
+/// 1. **内容落对了偏移**：body 是 `positioned_body`，所以"没丢前 `iv.start` 字节"的写法会把
+///    块号 0 那份内容写到 `iv.start` 上去 ⇒ `require_block_alignment` 当场红。
+/// 2. **丢字节是流式的、不是把整个 body 读进内存**：`written()` 给的是"对端在客户端挂断前
+///    写到了哪儿"。正确实现读完 `iv.start + 本次要的字节` 就收手（远小于 `body_len`），
+///    而"先把整个 body 吸干净再切片"的写法必然把 `body_len` 都吸完 ⇒ 断言红。
+///    节拍（每块之间 `pacing`）就是为了让这个差别在字节数上看得出来，而不是被内核缓冲糊掉。
+pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Duration) -> Result<PacedPeer> {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .context("节拍降级对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到节拍降级对端的端口")?.port();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let (thread_seen, thread_written) = (Arc::clone(&seen), Arc::clone(&written));
+    let body = positioned_body(usize::try_from(body_len).context("body 长度超出 usize")?);
+
+    thread::Builder::new()
+        .name("dlm-paced-degraded".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { break };
+                let Some(target) = read_request_target(&mut stream) else { continue };
+                thread_seen.lock().expect("线程侧记录锁").push(target);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: {body_len}\r\nAccept-Ranges: bytes\r\n\
+                     ETag: \"stub-paced-ignores-range\"\r\n\r\n"
+                );
+                if stream.write_all(head.as_bytes()).is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+                for (n, piece) in body.chunks(chunk).enumerate() {
+                    if n > 0 && !pacing.is_zero() {
+                        thread::sleep(pacing);
+                    }
+                    if stream.write_all(piece).is_err() {
+                        break; // 客户端已经收手：本对端跟着停，`written` 就停在它读到的地方附近
+                    }
+                    let _ = stream.flush();
+                    thread_written.fetch_add(piece.len() as u64, Ordering::SeqCst);
+                }
+            }
+        })
+        .context("起节拍降级对端线程失败")?;
+
+    Ok(PacedPeer { port, seen, written })
 }

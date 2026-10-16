@@ -160,7 +160,10 @@ impl ProbeResult {
 /// `the_landing_gate_rejects_a_userinfo_authority_and_never_echoes_it` 钉的就是这件事：
 /// 这句会被 Task 8/9 打进终端与日志，而它旁边的信息（断点文件里的 `final_url`、② 的原因串）
 /// 正是我们不让它带凭据的那两处。指路用词（userinfo / 主机名前面）而不是抄地址。
-const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在主机名前面带着凭据（userinfo 那一段）：\
+///
+/// `pub(crate)` 是 Task 7 的可见性改动（逻辑一个字没动）：`fetch` 的每一枪也可能被重定向到一条
+/// 带凭据的落地 URL（spec §6.5 + Task 5 评审 C3），同一个闸必须用**同一句**话拒绝。
+pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在主机名前面带着凭据（userinfo 那一段）：\
                                   它会被写进断点文件、并出现在续传冲突的原因里，因此拒绝收下这份事实；\
                                   本消息不回显那条地址";
 
@@ -383,7 +386,11 @@ fn total_len(headers: &HeaderMap, status: StatusCode) -> Option<u64> {
 /// `bytes */4194304` ⇒ `Some(4194304)`；`bytes 0-9/*`（总数未知）或任何看不懂的形状 ⇒ `None`。
 ///
 /// 取**最后一个** `/` 之后：分段名本身不含 `/`，而这样写对 `bytes`/其他单位都成立。
-fn content_range_total(value: &str) -> Option<u64> {
+///
+/// `pub(crate)` 是 Task 7 的可见性改动（逻辑一个字没动）：`fetch` 判 416 时要读的就是
+/// `bytes */N` 里那个 `N`（勘误 **E7**：`N` 与我们的 `total_len` 不一致 ⇒ 对端的长度在我们脚下
+/// 变了，不许当成"这活儿干完了"）。两个模块各写一个 `Content-Range` 解析器，迟早读成两样。
+pub(crate) fn content_range_total(value: &str) -> Option<u64> {
     let tail = value.rsplit('/').next()?.trim();
     if tail == "*" || tail.is_empty() {
         return None;
