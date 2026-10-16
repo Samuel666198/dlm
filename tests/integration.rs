@@ -2053,3 +2053,50 @@ fn a_directory_handed_to_data_file_is_refused_before_the_wire_and_names_the_path
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
 }
+
+// ================================================================ Task 8：引擎主循环
+
+/// 简报 Task 8 Step 1 的第一条：8 MiB 走 node 对端、`workers = 4`、带 `verify_sha256`。
+///
+/// 简报给这条用例起的全名是 `full_download_is_byte_exact_and_ranges_match_scheduler`。
+/// **本轮只实现前半截**（"跑得完 + 字节级正确"）：后半截那道"派发的区间与线上 `Range`、与
+/// 回放给全新 `Scheduler` 的动作序列三方对齐"要用到 `Report::replay()` / `dispatched()` /
+/// `tightened()` 这三道链接，按派发归**阶段 5**，本轮只保证 `trace` 填得足够它写出来。
+///
+/// 为什么 `8 MiB × 4 worker` 这个形状顺手钉住了模块文档那条"派发公式差一字节"的更正：
+/// 第一条被派出去的区间是 `[236032, 8 MiB-1]`（7.75 MiB）**长过一个窗口**（`WINDOW_BYTES`
+/// = 4 MiB），所以这一路必然出现 `Advanced{bytes}` 那一支；写成 `iv.start + bytes`（不含端点）
+/// 会把**从没写过的那一个字节**报成已确认，于是文件里留一个洞。洞在 blob 上落到非块首的概率是
+/// 4095/4096 ⇒ **这条集成用例不是那个差一的可靠判据**，真正的判据是单元用例
+/// `the_advanced_mapping_is_inclusive_and_bounded_to_the_interval`；这条用例钉的是更大的面：
+/// 引擎真能把七个模块接成一次跑到底的下载，并且落盘的字节与服务器那份一字不差。
+#[test]
+fn full_download_is_byte_exact() -> anyhow::Result<()> {
+    // `_srv` 要活到断言跑完（`Server::Drop` 会杀进程并**删掉日志文件**）。
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng1")?;
+    let len = 8 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/sz/{len}"),
+        dir: dir.path().to_path_buf(),
+        ..harness::blank_task()
+    };
+
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
+    assert_eq!(rep.bytes_total, len, "服务器说的长度");
+    assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
+
+    // 独立读者（harness 自己那份 sha2）与引擎的判定分开：两边都说对，才算对。
+    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len));
+    Ok(())
+}
