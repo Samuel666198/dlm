@@ -11,6 +11,9 @@
 //!    `#[serde(skip)]` 同样能写出正确结果，但它要求"每个后来加字段的人都不忘 skip"，
 //!    而漏掉的后果是把用户口令明文落到用户磁盘上 —— 取前者。`needs_secret` 是这条硬规约的补偿：
 //!    文件里没口令，续传时就必须先问出口令，判据归 Task 5（spec §4 末段 + plan 第 705 行）。
+//!    **"少一个字段"挡不住别人写进自由文本里的凭据**（勘误 **E9**）：`--url https://alice:s3cret@x/a.bin`
+//!    会把口令原样带进 `task.url` 与 `validator.final_url`，而本模块删不掉 URL ⇒ 这一支由
+//!    `Task::validate()` 在唯一的校验闸口拒绝（规则只住在那一处，本模块不复述），`from_task` 已调它。
 //! 2. **`user`（用户名）照 spec §4 的示例落盘** —— v1 硬规约点名的是口令，不是用户名，示例里也写着
 //!    `"user": null`。`referer`/`cookies` 同理照抄 spec 的形状（cookie 也是凭据，这条风险登记在 Task 1
 //!    的遗留清单里、等 Task 9 议；本模块不擅自给它加规则）。用例 `username_is_persisted_by_ruling`
@@ -62,8 +65,8 @@ pub struct Snapshot {
     /// 续传时必须重新给口令，判据归 Task 5（spec §4 末段、plan 第 705 行的 ①）。
     pub needs_secret: bool,
     /// UTC 墙钟 `YYYY-MM-DDThh:mm:ssZ`，只给人看，不参与任何判定（不参与校验的是 `validator` 里的
-    /// `etag`/`last_modified`）。落盘前刷新它请调 `utc_timestamp()`（`save` 拿的是 `&Snapshot`，
-    /// 自己不能盖时间戳）。见 `format_utc`。
+    /// `etag`/`last_modified`）。落盘前刷新它请调 `utc_now()`（本模块导出的那口钟，`save` 拿的是
+    /// `&Snapshot`，自己盖不了时间戳）。见 `format_utc`。
     pub saved_at: String,
 }
 
@@ -182,9 +185,11 @@ impl Snapshot {
     /// `needs_secret = task.password.is_some()`、`saved_at` = 此刻的 UTC 墙钟。
     ///
     /// 两道闸（都只挡本模块自己的契约，不改 `Task`/`Scheduler` 的任何语义）：
-    /// 1. `task.validate()` —— 落盘点是 spec §4 口令硬规约的**第二个**强制点：`validate()` 现在只由
-    ///    引擎在跑之前调，但谁都可能直接调 `from_task`，口令规则不该只在"跑起来那一刻"生效。
-    ///    错误原样上抛（`Task::validate` 的文案已经说明是口令），不加 `context` —— anyhow 的
+    /// 1. `task.validate()` —— 落盘点是 spec §4 凭据硬规约的**第二个**强制点：`validate()` 现在只由
+    ///    引擎在跑之前调，但谁都可能直接调 `from_task`，凭据规则不该只在"跑起来那一刻"生效。
+    ///    规则本身（明文 HTTP 带口令、以及 **E9** 的 userinfo URL）**只住在 `Task::validate()` 里**，
+    ///    本模块不复述实现，只保证从这里出去的任务都过过它。
+    ///    错误原样上抛（`Task::validate` 的文案已经说明是口令/userinfo），不加 `context` —— anyhow 的
     ///    `to_string()` 只显示最外层，包一层会把"口令"三个字从消息里挤掉。
     /// 2. `check_segments` —— 供数必须是 E7 那个极小覆盖集，写坏的文件比不写更糟（下一轮照着它跳段）。
     pub fn from_task(task: &Task, validator: Validator, segments: Vec<SegView>) -> anyhow::Result<Snapshot> {
@@ -206,7 +211,16 @@ impl Snapshot {
 impl Snapshot {
     /// 计划第 682 行 Task 5 的表驱动用例用的构造器：不经 `Task`（它带口令）造一份最小快照。
     /// 只在 `cfg(test)` 下编译，不进发布 API；`task` 里的字段取"与 validator 自洽"的占位值。
+    ///
+    /// **段表走与 `save` 同一条闸（`check_segments`），违约直接 panic。** 少这道闸的失败模式是隐形的：
+    /// 夹具能造出 `[(0,9),(10,19)]` 这种相邻两行（Task 5 表驱动最容易写错的一支），而真实的 `save`
+    /// 永远拒写它 —— 于是续传断言是在对一个"盘上不可能存在"的形状成立，要拖到 Task 8 才看得见。
+    /// 取 panic 不取 `Result`：这是测试脚手架里的程序员错误（写夹具的人当场就该知道），
+    /// 返回 `Result` 只会让每个调用点为一个不该存在的失败模式多写一层 unwrap。
     pub fn stub_for_test(validator: Validator, segments: Vec<SegView>) -> Snapshot {
+        if let Err(e) = check_segments(&segments, validator.total_len) {
+            panic!("stub_for_test 收到了 `save` 会拒绝的段表，拒绝构造这份夹具：{e}");
+        }
         let task = TaskView {
             url: validator.final_url.clone(),
             referer: None,
@@ -658,13 +672,41 @@ mod tests {
 
     #[test]
     fn debug_output_carries_no_secret_either() -> anyhow::Result<()> {
-        // 另一个泄漏通道是日志：Task 8/9 会 `{:?}`/`{e:?}` 打东西。TaskView 没这个字段 ⇒ 打不出来。
+        // 另一个泄漏通道是日志：Task 8/9 会打 `{:?}`/`{e:?}`。TaskView 没这个字段 ⇒ 打不出来。
+        // （`Task` 本尊那条通道由 `src/task.rs` 的手写 `Debug` 掩码，用例
+        // `debug_prints_the_password_field_masked` 钉着；本模块从来不格式化 `Task`。）
         let target = target_of("t4_debug", "a.bin");
         let t = task_at(&target, Some("someone"), Some(SECRET));
         let snap = Snapshot::from_task(&t, validator(10), rows(&[(0, 9)]))?;
         assert!(snap.needs_secret);
         assert!(!format!("{snap:?}").contains(SECRET), "Debug 里也不能有口令");
         assert!(!format!("{:?}", snap.task).contains(SECRET));
+        Ok(())
+    }
+
+    #[test]
+    fn a_userinfo_url_never_reaches_the_disk() -> anyhow::Result<()> {
+        // 勘误 E9：口令写在 URL 的 userinfo 里时，"`TaskView` 少一个字段"那条防线挡不住（它是自由文本），
+        // 而本模块又删不掉 URL（续传要用）。规则住在 `Task::validate()`（`src/task.rs`）那一处，
+        // 本模块只保证一件事：**落盘口经过它**（`from_task` 调 `task.validate()`）。
+        let target = target_of("t4_userinfo", "a.bin");
+        let mut t = task_at(&target, Some("alice"), Some(SECRET));
+        t.url = format!("https://alice:{SECRET}@x/a.bin");
+        let err = Snapshot::from_task(&t, validator(10), rows(&[(0, 9)]))
+            .expect_err("authority 里带凭据的任务不能被写进断点文件");
+        let msg = err.to_string();
+        assert!(msg.contains("--user") && msg.contains("--password"), "错误要指使用哪两个参数：{msg}");
+        assert!(!msg.contains(SECRET), "错误消息自己不该把口令抄一遍：{msg}");
+        assert!(!path_for(&target).exists(), "拒了就不该顺手写盘");
+        // 把凭据改写成两个参数（我们期望用户走的形状）后，同一个任务写得动、读得回，且盘上没有口令。
+        t.url = "https://x/a.bin".into();
+        let snap = Snapshot::from_task(&t, validator(10), rows(&[(0, 9)]))?;
+        let p = path_for(&target);
+        save(&p, &snap)?;
+        let raw = std::fs::read_to_string(&p)?;
+        assert!(!raw.contains(SECRET), "断点文件里没有口令：{raw}");
+        assert_eq!(load(&p)?.as_ref(), Some(&snap));
+        std::fs::remove_file(&p)?;
         Ok(())
     }
 
@@ -1055,7 +1097,8 @@ mod tests {
 
     #[test]
     fn stats_start_at_zero_and_survive_a_roundtrip() -> anyhow::Result<()> {
-        // Task 8 靠这三个计数（plan 第 843 行：`stats.duplicated` 累加被丢弃的已收字节）。
+        // Task 8 靠这三个计数（plan 第 843 行写作 `stats.duplicated`，按勘误 **E9** 读作
+        // `bytes_duplicated` —— 落盘名以本文件为准）。
         let target = target_of("t4_stats", "a.bin");
         let mut snap = Snapshot::from_task(&task_at(&target, None, None), validator(1_000), rows(&[(0, 499)]))?;
         assert_eq!(snap.stats, Stats::default(), "新建快照的计数从 0 起");
@@ -1083,6 +1126,72 @@ mod tests {
         let p = path_for(&target);
         save(&p, &snap)?;
         assert_eq!(confirmed_bytes(&load(&p)?.unwrap()), 750);
+        std::fs::remove_file(&p)?;
+        Ok(())
+    }
+
+    // ---- Task 5 用的测试夹具：`stub_for_test` 必须与真实写盘口同一条闸 ----
+
+    /// 跑一段应当 panic 的夹具构造，把 panic 消息收回来（没 panic 就返回 `None`）。
+    /// `AssertUnwindSafe` 是因为闭包只读 `spec`（`(u64, u64)` 切片），没有任何"半途可变状态"要看。
+    fn stub_panic_message(total_len: u64, spec: &[(u64, u64)]) -> Option<String> {
+        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Snapshot::stub_for_test(validator(total_len), rows(spec));
+        }));
+        match got {
+            Ok(()) => None,
+            Err(payload) => Some(
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "(panic 载荷不是字符串)".to_string()),
+            ),
+        }
+    }
+
+    #[test]
+    fn the_test_stub_panics_on_a_table_that_save_would_refuse() {
+        // 评审 F2：`save` 拒写的段表不许被夹具喂给 Task 5 的续传判定 —— 那种断言对着一个"盘上永远
+        // 不可能存在"的形状成立，要等到 Task 8 才看得见。夹具是测试脚手架，所以是**大声的程序员
+        // panic**（不是 Result：那会让每个调用点为不存在的失败模式多一层 unwrap）。
+        // 第一支形状取自计划第 700 行 Task 5 的 branch 7（`snap_multi(val, 2)`，`total_len: 100`）
+        // 最容易写错的那一行：相邻两行。
+        // (段表内容, 违约原因, `check_segments` 消息里应当出现的词)
+        type BadCase = (Vec<(u64, u64)>, &'static str, &'static str);
+        let bad: [BadCase; 6] = [
+            (vec![(0, 9), (10, 19)], "相邻未合并（Task 5 表里最容易写错的那一支）", "相邻"),
+            (vec![(10, 19), (0, 9)], "乱序", "相邻"),
+            (vec![(0, 19), (10, 29)], "重叠", "相邻"),
+            (vec![(0, 19), (5, 6)], "被包含", "相邻"),
+            (vec![(0, 100)], "终点越界", "超出"),
+            (vec![(3, 1)], "起点晚于终点", "起点晚于终点"),
+        ];
+        for (spec, why, keyword) in bad {
+            let Some(msg) = stub_panic_message(100, &spec) else {
+                panic!("{why}：{spec:?} 必须让 stub_for_test panic —— 它与 save 共用同一条闸");
+            };
+            assert!(
+                msg.contains("段表") && msg.contains(keyword),
+                "{why} 的 panic 要说清违约的是哪一行：{msg}"
+            );
+        }
+        // 反面对照（同一条用例里，证明上面六条不是恒真）：Task 5 要的合法形状照样构造得出来。
+        assert_eq!(stub_panic_message(100, &[(0, 9), (20, 49)]), None, "合法多行夹具不该 panic");
+        assert_eq!(stub_panic_message(100, &[(0, 99)]), None, "整份一条不该 panic");
+        assert_eq!(stub_panic_message(100, &[]), None, "空段表不该 panic");
+    }
+
+    #[test]
+    fn the_stub_shape_is_a_file_save_can_actually_write() -> anyhow::Result<()> {
+        // F2 的另一半：过了闸的夹具必须真能落成断点文件（Task 5 的续传断言这才对着一个存在的形状）。
+        let target = target_of("t4_stub", "a.bin");
+        let p = path_for(&target);
+        let snap = Snapshot::stub_for_test(validator(100), rows(&[(0, 9), (20, 49)]));
+        save(&p, &snap).expect("夹具过了段表闸就必须写得出去");
+        assert_eq!(load(&p)?.as_ref(), Some(&snap), "夹具形状要能原样 round-trip");
+        assert_eq!(confirmed_bytes(&snap), 40, "夹具的覆盖集算法与真实快照同一条");
+        assert_eq!(snap.task.url, snap.validator.final_url, "夹具的 task/validator 自洽（url 取自 final_url）");
         std::fs::remove_file(&p)?;
         Ok(())
     }
