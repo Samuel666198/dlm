@@ -427,6 +427,19 @@ struct ShotPlan {
 ///
 /// 三件事全部在上网之前定：`Range`（对端还没答话，问多少就是授权它流多少）、预算（整请求期限）、
 /// 读上界。反过来（先拿响应、再定预算）就是派发点名的那个次序矛盾，见 [`BodyShape`] 的文档。
+///
+/// **预算的分子是"这一枪打算从网线上读多少字节"，不是打算写多少**（**F12**，修复轮 8F-3a）：
+/// 两支只在"要不要把注定要丢掉的前缀算进来"这一件事上分岔 ——
+/// - `Windowed`：对端认了 `Range`，body 的第 0 字节就是 `iv.start` ⇒ 读 `stop − iv.start`。
+/// - `ToEof`：对端不认 `Range`，那条 body 从**文件偏移 0** 开始，而读循环要先流掉 `iv.start` 个字节
+///   （`run_window` 里 `degraded` 那一支的 `skip`）才开始落盘 ⇒ 这一枪真要从网线上过 `stop` 个字节。
+///
+/// 取**较大**那一支是有意的保守方向：宁可预算宽一点，也**不许比这一枪打算读的字节还小**。旧写法
+/// 无条件用 `stop − iv.start`（打算**写**的量）正好犯了后半个错，而它不是"少给一点时间"那种小事：
+/// 前缀之内的每一次掐断都是**零落盘** ⇒ `written(iv, cursor) == 0` ⇒ 走 `read_err` 那一支的
+/// `(0, true) ⇒ Outcome::Stalled`（不是 `Advanced`）⇒ 引擎的 `run_delivered` 不涨 ⇒ 下一枪的
+/// `rate` 还是同一个读数 ⇒ 预算不变 ⇒ 只要 `iv.start / rate` 罩在预算之外就**永远零进度**，
+/// 最后 `ok = false`。可达形状就是上面那张表里 `degraded-tail-toeof` 那一格。
 fn plan_shot(iv: Interval, total_len: u64, rate_bps: u64, shape: BodyShape) -> ShotPlan {
     let stop = match shape {
         // 裁定 5 / E12⑥：区间终点与"至多 `WINDOW_BYTES` 个字节"里更近的那个。
@@ -434,7 +447,13 @@ fn plan_shot(iv: Interval, total_len: u64, rate_bps: u64, shape: BodyShape) -> S
         // **E16**：整条区间，不做窗口夹。退化那一支每多切一刀就多付一遍"从文件头到那里"的前缀。
         BodyShape::ToEof => iv.end.saturating_add(1),
     };
-    ShotPlan { range: range_header(iv, total_len, shape), budget: budget_for(stop.saturating_sub(iv.start), rate_bps), stop }
+    // 这一枪打算读上网线的字节数（`saturating_sub`：空区间在 `run_window` 进门处就交了 `Complete`，
+    // 这里不靠那个前提，加法/减法都不许回绕或下溢）。
+    let planned_bytes = match shape {
+        BodyShape::Windowed => stop.saturating_sub(iv.start),
+        BodyShape::ToEof => stop,
+    };
+    ShotPlan { range: range_header(iv, total_len, shape), budget: budget_for(planned_bytes, rate_bps), stop }
 }
 
 /// 这一枪发哪一条 `Range`（spec §2 表里"发 `Range: start-`"、§3 对 IDM 开放终点的观测）。
@@ -1107,9 +1126,13 @@ mod tests {
     /// **形状由调用方给**（`ProbeFacts.accept_ranges`）解掉的，不是靠猜 —— 见 [`BodyShape`] 文档。
     ///
     /// 每格各自抓什么：
-    /// - `degraded-tail-toeof` vs `degraded-tail-windowed`：同一个区间、同一个速率读数，
-    ///   `ToEof` 必须问**整条**（开放终点）、读**整条**、并且预算**更宽**（24 s 对 15 s）。
+    /// - `degraded-tail-toeof` vs `degraded-tail-windowed`：**同一个区间、同一个速率读数**，
+    ///   `ToEof` 必须问**整条**（开放终点）、读**整条**、并且预算**更宽**（96 s 对 15 s）。
     ///   把 `ToEof` 的 `stop` 又夹回窗口（8F-2 的反向变异）⇒ 这三列一起红。
+    ///   ⚠ **预算那一列还必须能分辨"分子该按哪个体量算"**（**F12/F13**，8F-3a）：`ToEof` 那一支
+    ///   的分子是**这一枪打算从网线上读的字节**（`stop`，含要丢掉的前缀），不是打算**写**的那一截
+    ///   （`stop − iv.start`）。原先那一行给的两个分子都算出 24 s ⇒ 修没修都绿，那一格**没有断言**；
+    ///   现在这一对的 96 s / 16 s 才把这一格钉住。
     /// - `mid-file-short-*`：区间在文件中间结束、比一个窗口窄 ⇒ 两种形状**逐字相同**
     ///   ⇒ 证明 `ToEof` 说的是"读到 `iv.end`"，不是"读到 `total_len`"（少问对端没被要的字节）。
     /// - `rate-unknown-*`：`rate_bps == 0`（"还没测出速率"）必须落在最宽的 120 s，两种形状都不许 panic
@@ -1129,26 +1152,34 @@ mod tests {
         let w = WINDOW_BYTES; // 4_194_304
         let rows = [
             Row {
-                // 8F-2 那条集成用例的形状：试探读过 236,032 个字节，剩下**三个窗口**。
+                // **修复轮 8F-3a（F12/F13）**：形状取自 F12 那条可达路径 —— 退化模式续传一个已确认到
+                // 40,000,000 字节的 48,000,000 字节任务（`scheduler::dispatch` 的 `no_ranges` 支按
+                // `first_pending` 派 `[40_000_000, 47_999_999]`）。**这一格是这根新针的刀刃**：
+                // 这一支要从网线上过的是**整条 body**（48,000,000 个字节，前 40,000,000 个是要流式丢掉
+                // 的前缀），不是打算**写**的那 8,000,000 个 ⇒ 48 / 1 × 2 = **96 s**。
+                // 旧分子（`stop − iv.start`）算出 8 / 1 × 2 = **16 s** ⇒ 两个分子落在**不同秒数**上，
+                // 这一格因此能分辨 F12 修没修（原先那一行的两个分子都算出 24 s，对这一格没有断言力）。
                 name: "degraded-tail-toeof",
-                iv: Interval { start: 236_032, end: 12_818_943 },
-                total: 12_818_944,
+                iv: Interval { start: 40_000_000, end: 47_999_999 },
+                total: 48_000_000,
                 rate: 1_000_000,
                 shape: BodyShape::ToEof,
-                range: "bytes=236032-",
-                // 12,582,912 / 1,000,000 = 12（整除）⇒ ×2 = 24 s ⇒ 落在 [15, 120] 里。
-                budget_secs: 24,
-                stop: 12_818_944,
+                range: "bytes=40000000-",
+                budget_secs: 96,
+                stop: 48_000_000,
             },
             Row {
+                // 与上一格**同一个区间、同一个速率读数**，只换形状 —— 这对比例是这一组格子的判据。
                 name: "degraded-tail-windowed",
-                iv: Interval { start: 236_032, end: 12_818_943 },
-                total: 12_818_944,
+                iv: Interval { start: 40_000_000, end: 47_999_999 },
+                total: 48_000_000,
                 rate: 1_000_000,
                 shape: BodyShape::Windowed,
-                range: "bytes=236032-4430335",
+                range: "bytes=40000000-44194303",
+                // 窗口那一支不丢前缀 ⇒ 分子 == `stop − iv.start` == `WINDOW_BYTES`：8 s ⇒ 夹到下界 15 s。
+                // F12 改不动这一格（两支只在"要不要把前缀算进分子"上分岔）。
                 budget_secs: 15,
-                stop: 236_032 + w,
+                stop: 40_000_000 + w,
             },
             Row {
                 name: "mid-file-short-toeof",
