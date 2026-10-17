@@ -247,7 +247,16 @@ pub enum TraceStep {
 ///   只有 `bytes_total` 与 `duplicated` 报不出这个区别（两者不等是常态，不是缺陷）。
 /// - `fresh_reason`：`Decision::Fresh{reason}` 的原因串必须活着走到用户眼前
 ///   （`src/resume.rs` 的文档明写"Task 9 会在中途重来时把这句直接打给用户"）。
-/// - `message`：`ok=false` 必须带着人话（退避封顶 / worker 崩了 / 校验不符 / POST 那一枪没拿全）。
+/// - `message`：契约是**双向**的，只读一半会把一次成功报成失败：
+///   ① `ok = false` 必须带着人话（退避封顶 / worker 崩了 / 校验不符 / POST 那一枪没拿全）；
+///   ② **反方向不成立** —— `ok = true` 时 `message` 也可以有值：收尾删断点删不掉那一支就是先
+///   把 `ok` 判成真的（`run` 里"删不掉不改写 `ok`，只留一句话"那条），语义是"下载已完成，但…"。
+///   ⇒ **退出码的判据只有 `!ok`**；`message.is_some()` 只是"有一句要打印"，不是失败信号，
+///   写成 `if report.message.is_some() { 非零退出 }` 会踩上面那一支。
+///   ⚠ `ok = true` + `message = Some(..)` 这一格**今天没有用例钉住**：要造它得让断点文件先被
+///   `save_state` 成功写出、随后 `fs::remove_file` 以一个不是 `NotFound` 的错误失败 —— 现成的形状
+///   只有"别的句柄占着那个文件"（Windows 共享冲突）这类竞态，没有确定形状可铺，宁可按实写"无判据"
+///   也不造只说服自己的夹具。
 ///   `FailKind::Transport` 的载荷在生产侧已是单行、≤200 字符、不含 body 字节 ⇒
 ///   这里**不再截断、不再拼接**（E12⑦：两处截断会互相吃掉信息）。
 #[derive(Debug, Clone)]
@@ -261,15 +270,33 @@ pub struct Report {
     pub confirmed: u64,
     /// **落在归属范围之外、可能被别人重下的字节**（不是"线上流量账单"，勘误 **E14**③；强度只有
     /// "可能"这一档，措辞按 E14③ 批准的那一句，不许写成"必然"。字段口径与
-    /// 它为什么不是账单都写在 `state::Stats::bytes_duplicated` 的文档里，两处是同一个数）。
-    /// 带 `--data-file` 的那一支恒 0（那一支根本没有归属账）。
+    /// 它为什么不是账单都写在 `state::Stats::bytes_duplicated` 的文档里，两处是同一个数，
+    /// 那边那句"**既不是账单的下界也不是上界**"在这里同样成立 —— 别把它打印成"本次多打了多少字节"）。
+    /// ⚠ **寿命：跨断点文件累积，不是本次运行的量**。`Decision::Resume` 那一支把快照里的 `stats`
+    /// 原样读回来接着加（`plan_from_decision`），所以这个数是"这个断点文件从建立起一共记下的量"；
+    /// `Fresh`（含 `--no-resume`）那一支才从 0 起。判据见
+    /// `engine::tests::fresh_resume_and_abort_route_to_their_own_plan`（同一夹具里 `retries`/`bytes_delivered`
+    /// 被断成"跨轮接着数"；`bytes_duplicated` 那一格由 `state::tests::stats_start_at_zero_and_survive_a_roundtrip`
+    /// 钉"存多少读回多少"）。
+    /// 例外：带 `--data-file` 的那一支恒 0（那一支既不读也不写断点，E13④，根本没有归属账）。
     pub duplicated: u64,
     /// 快速 + 慢速重试的总次数（spec §6.1/§6.2）。
+    /// ⚠ **寿命同上：跨断点文件累积**。续传时这一支从快照把 `stats` 读回来接着加
+    /// （`plan_from_decision`），所以报出来的是"这个断点文件一共重试过多少次"，**不是"本次运行"**；
+    /// Task 9 打印时要照后一句说，别写成这一轮的次数。已由
+    /// `engine::tests::fresh_resume_and_abort_route_to_their_own_plan` 钉住
+    /// （`assert_eq!(plan.stats.retries, 2)`，断言消息就是"重试计数是跨轮的账，不能从 0 重数"）。
+    /// 例外：带 `--data-file` 的那一支恒 0（E13④：那一支不落断点 ⇒ 没有跨轮的载体，
+    /// `run_whole_once` 里 `retries` 与 `duplicated` 都是硬编码的 0）。
     pub retries: u32,
     pub elapsed: Duration,
+    /// 本次运行有没有把活干完。**非零退出码的判据就是这个布尔取反（`!ok`）**，不是别的字段是不是 `Some`。
     pub ok: bool,
     pub trace: Vec<TraceStep>,
     pub fresh_reason: Option<String>,
+    /// 一句给人看的话。**它不是失败信号**：`ok = true` 时它也可以是 `Some`（"下载已完成，但…"），
+    /// 所以退出码只由 `!ok` 决定。双向契约、以及"这一格今天没有用例钉住"的实底，都写在结构体文档
+    /// 那条 `message` 上。
     pub message: Option<String>,
 }
 
@@ -420,6 +447,10 @@ struct Launch {
 /// **`Ok(Report{ok:false})` = 跑到一个结论但没下完**（退避封顶、worker 崩了、校验不符、
 /// POST 那一枪没拿全）。Task 9 把 `!ok` 折成非零退出码，这里不发明信号协议
 /// （spec §6.6 的 Ctrl-C 在本计划里已降级为"任意时刻被杀都能续"）。
+///
+/// ⚠ **本函数不看 `consts::FLAG_ADD_ONLY`（spec §5 的 bit0"只入队不下"）**：全树生产代码里那个位
+/// 没有任何读取点，它必须由**调用方在进入 `run` 之前**短路（打印任务摘要然后收工）。
+/// **一旦进了 `run` 就一定会上网取字节** —— 别以为引擎会替你留着不发那一枪。
 pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     task.validate()?;
     ensure!(cfg.workers >= 1, "workers 至少要是 1（给了 {}）：没有 worker 就下不动任何东西", cfg.workers);
