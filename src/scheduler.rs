@@ -1091,18 +1091,44 @@ mod tests {
             for (w, _) in std::mem::take(&mut held) {
                 earned.on(Event::WindowDone { worker: w });
             }
+            // **收口复审 B2 第 4 条（形状 a）**：上面循环里那句 `check_invariants` 断的一直是
+            // **"还在途"**的状态，而真正要拿去播种的是**在途全部交回之后**的这一格 —— 它原先**没人审**。
+            // 于是这一句先补上审计，再取种子。（这不是把 `cover` 那句搬个位置：见下面替换掉的注释。）
+            check_invariants(&earned, total, &format!("case {case} 参照物（在途全部交回之后）"));
             let seed = earned.snapshot_intervals();
             let covered = seed.iter().map(Interval::len).sum::<u64>();
             if covered == 0 || covered == total || seed.len() < 2 {
                 continue;   // 只要"至少两个互不相邻的空洞"这一格，那才是断点文件的常态
             }
             compared += 1;
+            // **原来这一句是** `assert_eq!(cover(&seed, total), seed, "播种的输入自己得先过独立参照")`，
+            // 删掉了（**收口复审 B2 第 4 条**）。它不对的地方有两层，写在这里免得下轮再把它当成"少了
+            // 一道参照"补回来：
+            // ① 右边那个 `seed` 出自被测自己的 `snapshot_intervals()`，而 `cover` 的输出形状与
+            //    `push_done` 维持的形状是同一条（升序、两两不重叠且不相邻）⇒ 这一句审的是**形状**，
+            //    审不到本条用例的正题（`resume` 怎么读这批区间），却在注释里被叫作"独立参照"，
+            //    把夹具与被测各自成立的同一件事说成了证据。
+            // ② 它也不是**字面上**永远绿（把 `push_done` 的合并弄坏、让它交出未归一化的形状才会红 ——
+            //    这是照 `cover` 与 `push_done` 两边的算式推出来的，本轮没有为它跑变异），
+            //    但那件事**上一句** `check_invariants` 在同一条状态上已经断过，而且断得更宽
+            //    （还查 `done + pending <= total` 与 `is_done` 的蕴含）。
+            //    ⇒ 按派发的 (a) 支：把状态审计补到**交回在途之后**，删掉这句复读。
+            //
+            // 补一句**手算**的独立期望（按派发的 (b) 支，用的是本用例自己已有的两个数）：场上已经
+            // 没有在途段 ⇒ `earned` 欠的字节只能等于"`total` - 种子里那些已确认字节"，右边只由
+            // `total` 与 `seed` 每条区间的长度相加得到，不读被测的任何一本账。
+            // 这一句红得起来，而且红在**被测的账 vs 手算**这一对上。变异自证（8F-4b 报告）：
+            // 把 `release` 回队列的尾巴**少算一格**（那一格既不在 done 也不在 queue），并把本用例
+            // 那两句 `check_invariants` 暂时关掉以隔离这一句 ⇒ 第一红落在这一句（`left: 0 / right: 1`）。
+            // 同一发变异在那两句审计没关时**先**红在 `check_invariants` 的 `is_done()` 分支
+            // ⇒ 这一句的独立价值是把那条 `<=` **收成 `==`**：尾巴少一格、而 `is_done()` 恰好仍然是假
+            // 的那一片形状，只有这一句看得见（这半句是按两条判据的算式推出来的，不是实测）。
+            assert_eq!(
+                earned.pending_bytes(),
+                total - covered,
+                "case {case}: 在途全部交回后，参照物欠的字节不等于「全长 - 种子已确认字节」（种子 {seed:?}）"
+            );
             let mut seeded = Scheduler::resume(total, min_seg, &seed);
-            // **复审 B-Minor 3**：`seed` 出自被测自己的 `snapshot_intervals()`，在这条用例里
-            // 原先只有"生产 vs 生产"的对照（下面那句覆盖集等式）。这里给它一个**独立参照**
-            // —— 隔壁前缀条在播种前就用 `cover` 验过一次种子（`resume_prefix_seed_is_indistinguishable_from_the_run_that_earned_it`
-            // 里那句 `assert_eq!(cover(&noisy, total), seed)`），这一格原先缺的就是那一句。
-            assert_eq!(cover(&seed, total), seed, "case {case}: 播种的输入自己得先过独立参照（夹具不许拿被测的账当公理）");
 
             // ② 记账必须一字不差。
             assert_eq!(seeded.snapshot_intervals(), seed, "case {case}: 覆盖集不同");
@@ -1291,7 +1317,8 @@ mod tests {
         let last = TOTAL - 1;
 
         // ① 单字节种子正好落在最后一个字节上 ⇒ 必须进覆盖集，一个字节都不许被当成越界丢掉。
-        let mut only_last = Scheduler::resume(TOTAL, 100, &[Interval { start: last, end: last }]);
+        let seed_exact = [Interval { start: last, end: last }];
+        let mut only_last = Scheduler::resume(TOTAL, 100, &seed_exact);
         assert_eq!(
             only_last.snapshot_intervals(),
             vec![Interval { start: last, end: last }],
@@ -1308,7 +1335,8 @@ mod tests {
 
         // ② 同一个字节换个写法：终点报得比 EOF 更远 ⇒ 夹完仍然算数（不许因为 `end` 越界
         //    就把合法的 `start` 一起丢掉 —— 那正是旧夹法与 `start >= last` 两种错法的分界）。
-        let clipped = Scheduler::resume(TOTAL, 100, &[Interval { start: last, end: last + 50 }]);
+        let seed_over_eof = [Interval { start: last, end: last + 50 }];
+        let clipped = Scheduler::resume(TOTAL, 100, &seed_over_eof);
         assert_eq!(
             clipped.snapshot_intervals(),
             vec![Interval { start: last, end: last }],
@@ -1316,11 +1344,29 @@ mod tests {
         );
         check_invariants(&clipped, TOTAL, "seed-last-byte-clipped");
 
-        // ③ 独立参照在这一格给同一个答案（`cover` 不共享 `clamp_to_file` 的写法）。
+        // ③ **独立参照比的是"被测报回来的覆盖集"**，不是夹具对一个字面量的自答
+        //    （**收口复审 B2 第 3 条**）。上一轮这里写的是
+        //    `cover(&[{last,last}], TOTAL) == {last,last}`，头顶注释叫"独立参照在这一格给同一个答案
+        //    （`cover` 不共享 `clamp_to_file` 的写法）"—— 那句把它说成了证据，其实它是**恒真**：
+        //    `cover` 按 `[0, total)` 逐字节扫命中，喂给它的又是一条**已在范围内、已归一化**的单区间，
+        //    它只能原样吐回来；右边那个字面量与左边同源 ⇒ `clamp_to_file` 怎么改这一句都绿。
+        //    现在左边仍是 `cover` 对**原始种子**扫出来的字节集合，右边换成**两台被测各自报回的覆盖集**
+        //    ⇒ 这一句红得起来，而且红的正是本条用例点名的那一格：把 `clamp_to_file` 的 `start > last`
+        //    写成 `start >= last`（丢掉最后一个字节那条合法种子），被测交回 `[]` 而参照交回
+        //    `{999, 999}` ⇒ 这里红（变异自证见 8F-4b 报告）。
+        //    `cover` 与被测的独立性只在**字节集合**这一条轴上（它不夹边界、不排序、不做插入合并，
+        //    见 `cover` 自己的文档与 **E15** 末尾的方法教训）；动作序列与队列粒度这两条轴不可比，
+        //    这一句也就不声称能看见它们。
         assert_eq!(
-            cover(&[Interval { start: last, end: last }], TOTAL),
-            vec![Interval { start: last, end: last }],
-            "字节集合这条轴上，最后一个字节的种子就是它自己"
+            cover(&seed_exact, TOTAL),
+            only_last.snapshot_intervals(),
+            "①那一格的字节集合：被测报回的覆盖集必须等于参照扫出来的那一个字节（种子 {seed_exact:?}）"
+        );
+        assert_eq!(
+            cover(&seed_over_eof, TOTAL),
+            clipped.snapshot_intervals(),
+            "②那一格的字节集合：参照只扫 `[0, TOTAL)`，所以越过 EOF 的终点在它眼里不存在，\
+             被测夹出来的也必须正好是第 {last} 个字节这一个（种子 {seed_over_eof:?}）"
         );
     }
 
@@ -1417,6 +1463,10 @@ mod tests {
             vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 199 } }],
             "退化期派发的判据是起点最低：最长优先会给出 [300,799]，那会把 body 中段写到文件中段"
         );
+        // 这一句**被上面那条等式全包**（等式已经钉死 `acts` 只有一条 `Assign` ⇒ 不可能有 `Retighten`）。
+        // 留着是有意的（收口复审 B2 第 8 条裁定"不删"）：它是判据 3 里"永不劈分"那一半**唯一有名有姓**的针。
+        // 上面那条等式日后若被放宽成 `acts.len()` 或 `any(matches!(Assign))` 这类形状，
+        // "退化期会不会劈分"就没人看守了 ⇒ **冗余而无害，但不许撤**；要撤它必须先把上面那条等式钉牢。
         assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })), "退化期永不劈分: {acts:?}");
         assert_eq!(sc.on(Event::Connected(1)), vec![Action::Idle], "退化期一次只允许一段在途");
         check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-1");

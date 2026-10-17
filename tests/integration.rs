@@ -2270,7 +2270,8 @@ fn an_end_cap_already_lowered_before_the_shot_starts_survives_the_shots_own_wind
 /// 而**只有窗口真够得着 EOF 的那一枪**才许写开放终点。
 ///
 /// 判据全部读 node 服务器自己记下的那条 `Range`（请求行里的 `range` 字段，经
-/// `Server::requests_at_least` **先守卫条数**再读 —— 见下面那段注释），不是我们拼出来的字符串。
+/// `Server::ranges_at_least` **先守卫条数**、再经 `Server::requests_quiet` **守满一段静置窗口**
+/// 再读 —— 两句各钉"不漏读"与"不多读"，见下面那段注释），不是我们拼出来的字符串。
 /// 两条规则合起来是**双向**的：
 /// - `bytes=s-`（开放）⇔ `s + WINDOW_BYTES >= total_len` —— 窗口够得着 EOF 才许省掉终点；
 ///   阶段4 的形状在这里红：它发过 `bytes=236032-`（区间终点 == EOF 但窗口只到 4430335），
@@ -2306,10 +2307,15 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
     // 恰好可能是唯一违规的那一枪，判据就会**碰巧**为真。守卫数由这条用例真实期望的条数推出：
     // 线上请求 = 引擎派出的枪数 + 试探那一枪（`Report::dispatched()` 与线上是一对一，T8-R2）。
     //
-    // **复审 B-I-4**：守卫数取自**被测自己的**账 ⇒ 光"等到那个数"只审了子集（引擎多打一枪
-    // 而没记进 trace 时，wait 在被测声称的条数上就满足了）。所以这里把等式也断上，
-    // 与 `every_engine_request_…` 下面那条一一对应（本文件里另一处同款等式）保持同一口径：
-    // **等到的条数必须正好是被测声称的条数**，多一条就红。
+    // **复审 B-I-4**：守卫数取自**被测自己的**账 ⇒ 光"等到那个数"只审了子集，所以等式要断。
+    // **收口复审 B2 第 5 条**：那句批评还得再往前一步 —— 旧注释吹的"多一条就红"当时**是假的**：
+    // `requests_at_least` 一到 `n` 就返回，第 `n+1` 条稍后才落盘就永远看不见 ⇒
+    // `assert_eq!(ranges.len(), n)` 只审得出"等到的是不是恰好 n 条"，审不出"后来有没有多"。
+    // 现在按 `Server::requests_quiet` 文档钦定的**成对用法**来，两句各钉一边：
+    // ① `ranges_at_least(k)` 之后先断"那一份快照正好 k 条"⇒ 下面那些逐条判据审的**不是子集**；
+    // ② 紧接 `requests_quiet(wait)` **守满**一段时间再断"窗结束仍是 k 条"⇒ 多打一枪当场红。
+    // 两句合起来才是"钉平"：①管**不漏读**、②管**不多读**（静置窗口之外的仍然看不见，那是量具的
+    // 窗口宽度；够用是因为 `engine::run` 已经交回、所有 worker 线程都已 `join` ⇒ 之后不会再有请求）。
     let expected_lines = rep.dispatched().len() + 1;
     let ranges = srv.ranges_at_least(expected_lines)?;
     assert_eq!(
@@ -2318,6 +2324,16 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
         "线上条数与引擎报的枪数不是一对一（T8-R2）：等到 {} 条，引擎报 {} 枪 + 试探那一枪 = {} \
          ⇒ 条数没钉平之前，上面那些逐条判据审的只是子集",
         ranges.len(),
+        rep.dispatched().len(),
+        expected_lines,
+    );
+    let quiet = srv.requests_quiet(Duration::from_millis(300))?;
+    assert_eq!(
+        quiet.len(),
+        expected_lines,
+        "静置窗口里冒出了多出来的请求：守满 300 ms 之后线上有 {} 条，引擎只报了 {} 枪 + 试探那一枪 = {} \
+         ⇒ ①那句等式审的是'等到的是不是恰好 n 条'，这一句才审得出'后来有没有多'（收口复审 B2 第 5 条）",
+        quiet.len(),
         rep.dispatched().len(),
         expected_lines,
     );
@@ -2357,8 +2373,9 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
 /// 把一份事件快照里 `conn_close_side` 的**行数**与 `sent` 之和折成一个二元组。
 ///
 /// 只为一件事存在：`the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window`
-/// 的"等账静置"谓词要看**跨采样**的同一对量（行数 + 和），而 `events_while` 的谓词每次只拿到
-/// 一份快照。抽取写在这里 ⇒ 谓词与用例后面的读数用的是**同一个函数**，不存在两套口径。
+/// 的等待谓词与它后面的读数都要看同一对量（close 的行数 + `sent` 和），而 `events_while` 的谓词
+/// 每次只拿到一份快照。抽取写在这里 ⇒ 谓词与用例后面的读数用的是**同一个函数**，不存在两套口径。
+/// （收口复审 B2 第 2 条之后谓词不再需要跨采样状态，这个二元组仍然两个调用点共用。）
 fn close_side_totals(evs: &[serde_json::Value]) -> (usize, u64) {
     let mut lines = 0usize;
     let mut sent = 0u64;
@@ -2390,15 +2407,24 @@ fn close_side_totals(evs: &[serde_json::Value]) -> (usize, u64) {
 /// 不经过主循环，所以那里的额度就是一块）。常数**不许**改小 —— 改小只会把这条用例变成摆设。
 ///
 /// 判据的形状（每一项都有出处，不是把常数放宽到通过为止）：
-/// - **量具活体针：等到账"静置"，再断两条对得上号的等式**（评审 C-I-1① 起了这根针，
+/// - **量具活体针：等到"该有这么多条 close"，再断两条对得上号的等式**（评审 C-I-1① 起了这根针，
 ///   **复审 B-I-1 修好它的形状**：原先的谓词是 `lines > 0 && sent >= len`，而下面那两条针
-///   是对**同一份快照**重算这两个量 ⇒ 数学上不可能红，真正承重的只有那个 wait）。
-///   现在等的是"连续两拍里 `conn_close_side` 的**行数与 sent 和都相同**、且 sent 已 `>= len`"，
+///   是对**同一份快照**重算这两个量 ⇒ 数学上不可能红，真正承重的只有那个 wait。
+///   **收口复审 B2 第 2 条再改一次**：等的不再是"连续两拍行数与 sent 和都相同"（启发式静置），
+///   而是 `conn_close_side` 的**行数到达本用例自己已经推得出、并且下面②要断的那个总数**
+///   （`Report::dispatched().len() + 1`，T8-R2 的一对一）且 `sent >= len`。
+///   ⚠ 这一发**不是**在修一条会红的用例（控制员在 `cced137` 连跑 5 次全绿）；改的是判据形状：
+///   两个相等采样在 200 ms 节拍 + `POLL = 20 ms` 下**可能出现在中途**（那时 `written` 还是下界 ⇒
+///   `excess <= bill` 能在真缺陷上碰巧为真），而一条迟到的 close 又能让条数等式假红。
+///   换成"等到那个总数"之后：假绿那截残留被去掉、对迟到 close 结构免疫、等待条件与②同源。
 ///   落全之后断两条**有牙**的等式：close 行数 == `request` 行数（两边都出自对端自己的日志，
 ///   不问引擎的嘴）、close 行数 == 引擎报的枪数 + 试探那一枪（T8-R2 的那对一对一）。
 ///   两条联立 ⇒ "线上条数 == 被测枪数"这一句也不再是恒真：引擎多打一枪而没记进 trace
 ///   （重试、或 trace 漏记）时，第二条当场红。
-///   **为什么要静置而不是"够到 len 就收"**：`conn_close_side` 记在 `res.on("close")` 上
+///   **为什么等待只管"不漏读"、上界仍归断言**：谓词是 `>=`，返回时只会**不少于**那个总数；
+///   "恰等于"由②钉。这与 `Server::requests_quiet` 文档里那条分工同形 —— 那里静置窗口当上界仪器，
+///   这里由等式当；两处都不许把上界塞进等待条件（塞进去就等于把缺陷等没了）。
+///   **为什么这条 close 会迟到**：`conn_close_side` 记在 `res.on("close")` 上
 ///   （`tests/harness/probe-server.mjs` 的收尾登记，本形状里每条响应恰好一条），而**被客户端
 ///   中途弃掉**的那些响应，其 close **可以晚于 `engine::run` 交回** ⇒ 单次采样的 `written`
 ///   只是**下界** ⇒ `excess` 少算 ⇒ 下面那条 `excess <= bill` 的额度会被"少记"白让掉。
@@ -2424,7 +2450,9 @@ fn close_side_totals(evs: &[serde_json::Value]) -> (usize, u64) {
 /// 没有任何断言在这个量级上钉它（原先那句"实测 3.1-3.5 MB"当时无出处，现在这句有：
 /// 8F-1 的变异 M5 那一发的红消息）。
 ///
-/// **修复轮 8F-3b 改成"等账静置"之后的四次复量**（同一形状、同一台对端）：
+/// **修复轮 8F-3b 改成"等账静置"之后的四次复量**（同一形状、同一台对端；⚠ 那四发用的是**已被换掉**
+/// 的"两次采样相等"谓词，收口复审 B2 第 2 条之后等待条件改成"close 行数到达那个已知总数"，
+/// 下面这组数不是新形状下的读数 —— 留着只因为它们是"额度不是靠少记让出来的"这句目前唯一的实测出处）：
 /// `written` 依次 12,085,786 / 11,345,952 / 11,095,488 / 11,325,488，
 /// `excess` 依次 3,697,178 / 2,957,344 / 2,706,880 / 2,936,880，
 /// `bill` 依次 7,077,888 / 6,291,456 / 5,505,024 / 6,291,456 ⇒ **最小余量 2,798,144 字节**。
@@ -2466,17 +2494,23 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
     // 裸读一次 `events()` 会在"一条 `conn_close_side` 都没记上"的时候给出 written = 0 ⇒
     // `excess = 0` ⇒ 下面那条 `excess <= bill` **当场恒真**。
     //
-    // 等的是**账目静置**而不是"够到 len 就收"：`conn_close_side` 记在 `res.on("close")`，
-    // 被客户端中途弃掉的那些响应的 close 可以晚于 `engine::run` 交回 ⇒ 只要行数与 sent 和还在动，
-    // 这一本账就还没落全，此刻求出来的 `written` 只是**下界**。
-    // 跨采样状态放在 `RefCell` 里 —— `events_while` 的谓词形状是 `Fn(&[Value]) -> bool`，
-    // 每次采样调一次，harness 的公共 API 不动。
-    let prev = std::cell::RefCell::new((0usize, 0u64));
+    // **收口复审 B2 第 2 条：等的东西换成"这个总数到了"，不再换"两次采样相等"。**
+    // 期望总数这条用例本来就推得出来，而且就写在下面那句等式里：每条响应恰好一条
+    // `conn_close_side` ⇒ close 行数 = 引擎报的枪数 + 试探那一枪（T8-R2）。原先的谓词是
+    // `*prev.borrow() == now`（两次采样相等）加 `sent >= len`，那是个**启发式静置**，两个方向都不牢：
+    // ① `POLL = 20 ms`（`tests/harness/mod.rs` 的 `POLL`）对 200 ms 的节奏型对端，两枪之间完全可能
+    //    撞到两个相等采样 ⇒ 账还没落全就返回，`written` 只是下界，`excess <= bill` 于是能在真缺陷上
+    //    碰巧为真（**假绿**）；② 一条迟到的 close 也能让下面那条条数等式红（**假红**）。
+    // ⚠ 措辞纪律（控制员在 `cced137` 连跑 5 次全绿）：**这一发不是在修一条会红的用例**，
+    // 它改的是判据的形状 —— 假绿那截残留被去掉（返回时每一枪的 close 都已经在账里）、
+    // 对迟到 close 结构免疫（谓词等的就是那个总数，不是"看起来不动了"）、
+    // 并且把一次没有对应断言的启发式等待换成"本用例自己已经断言的那个数字"。
+    // 谓词只保证**不漏读**（下界）；"不许多"那一半仍然由下面两条等式自己钉 ——
+    // 这正是 `Server::requests_quiet` 的文档定的分工，只不过这里"上界"是断言而不是等待条件。
+    let expected_closes = rep.dispatched().len() + 1;
     let evs = srv.events_while(|evs| {
-        let now = close_side_totals(evs);
-        let settled = now.0 > 0 && now.1 >= len && *prev.borrow() == now;
-        *prev.borrow_mut() = now;
-        settled
+        let (lines, sent) = close_side_totals(evs);
+        lines >= expected_closes && sent >= len
     })?;
     let (close_lines, written) = close_side_totals(&evs);
     let request_lines = evs.iter().filter(|e| e["ev"] == "request").count();
@@ -2493,9 +2527,11 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
     );
     // ② **close 行数 == 引擎报的枪数 + 试探那一枪**：与①联立 ⇒ 引擎多打一枪而没记进 trace
     //    （重试、或 trace 漏记）时这一条当场红，①那条只审子集的漏洞因此堵上了。
+    //    右边就是上面谓词等的那个 `expected_closes`（同一个数、两处各钉一次）：谓词负责"等到它"，
+    //    这一句负责"不多于它" ⇒ 等待条件与判据同源，不存在"等的是一个数、断的是另一个数"的缝。
     assert_eq!(
         close_lines,
-        rep.dispatched().len() + 1,
+        expected_closes,
         "每条响应恰好一条 `conn_close_side` ⇒ close 行数必须等于引擎报的枪数 + 试探那一枪（T8-R2）：\
          close {close_lines} 行 / 线上 {request_lines} 条请求 / 引擎报 {} 枪",
         rep.dispatched().len()
@@ -2625,16 +2661,22 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
     // 引擎派出的枪数 + 试探那一枪（T8-R2 钉死的一对一）。裸读 `requests()` 在日志落盘晚时
     // 会少几条，而"少一条"正好会让下面那条一一对应的判据往错误方向通过或往错误方向红。
     // **复审 B-I-4**：守卫数出自**被测自己的**账 ⇒ 只 wait 不断等式 = 只审子集。
-    // 这里补上那条等式，与本文件另一处（`every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open_ended`）
-    // 以及下面 `wire.len() == dispatched.len()` 那三条同一口径：三处都钉平，这个守卫数才可信。
+    // **收口复审 B2 第 5 条**：光有那条等式也**审不了"多读"** —— `requests_at_least` 一到 `n`
+    // 就返回，第 `n+1` 条若稍后才落盘就永远看不见（旧注释"三处都钉平，这个守卫数才可信"里
+    // 隐含的那句"多一条会红"当时是吹的）。所以这里也换成 `Server::requests_quiet` 文档钦定的
+    // 成对用法：`requests_at_least(k)` 钉**不漏读**，紧接 `requests_quiet(wait)` **守满**一段时间
+    // 钉**不多读**，下面那句等式断的是静置窗口结束时的全部请求行。
+    // ⚠ 观察窗仍是 `wait` 那么长，不是无穷长；这一格之所以够用，是因为 `engine::run` 已经交回、
+    // 所有 worker 线程都已 `join` ⇒ 交回之后不会再有新请求，剩下的只有 node 侧异步写日志的延迟。
     let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
     let expected_lines = rep.dispatched().len() + 1;
-    let requests = srv.requests_at_least(expected_lines)?;
+    srv.requests_at_least(expected_lines)?;
+    let requests = srv.requests_quiet(Duration::from_millis(300))?;
     assert_eq!(
         requests.len(),
         expected_lines,
-        "线上条数与引擎报的枪数不是一对一（T8-R2）：等到 {} 条，引擎报 {} 枪 + 试探那一枪 = {} \
-         ⇒ 条数没钉平之前，链接二审的只是子集",
+        "线上条数与引擎报的枪数不是一对一（T8-R2）：静置窗口结束时线上有 {} 条请求，\
+         引擎报 {} 枪 + 试探那一枪 = {} ⇒ 条数没钉平之前，链接二审的只是子集",
         requests.len(),
         rep.dispatched().len(),
         expected_lines,
@@ -2977,18 +3019,28 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
 ///
 /// 第 0 条是**形状守卫**（不是判据）：剩余体量必须 > 2 个窗口，否则这条用例退化成
 /// "1 MiB / 一个窗口"那种恒真形状（本项目已踩过三次恒绿夹具）。
-/// **复审 B-Minor 2**：这个 `3` 原先既写在构造那一句里、又写在守卫那一句里 ⇒ 守卫是同一式子的
-/// 两边、恒真且说不出任何东西。现在把 `3` 提成 `REMAINING_WINDOWS`，守卫断的是**那个常量的选择**
-/// （消息里把它打出来），构造句不再与守卫句同形。
+/// **复审 B-Minor 2 的更正（收口复审 B2 第 1 条）**：上一轮把 `3` 提成 `REMAINING_WINDOWS`，
+/// 但守卫句仍写成 `len - PROBE_READ_BYTES > 2 * WINDOW_BYTES` —— 把上一行的构造代进来就是
+/// `REMAINING_WINDOWS * WINDOW_BYTES > 2 * WINDOW_BYTES`，即 `3 > 2`：**它断的是构造句本身**，
+/// 恒真，且构造句与守卫句仍然同形（上一轮文档吹的那两句当时都是假的）。
+/// 现在守卫**只断那个常量**，而且收进 `const` ⇒ 有人把构造改窄（剩余体量 ≤ 2 个窗口 ⇒
+/// 按窗切最多两枪，那一支的平方项不再是这条用例能分辨的形状）时，**编译期就红**，
+/// 轮不到判据 1 去猜，也轮不到"跑哪个测试"来决定它有没有被走过。
 #[test]
 fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::Result<()> {
     // 试探那一截 + 整整三个窗口 ⇒ 退化支按窗切必然 ≥ 3 枪。
     const REMAINING_WINDOWS: u64 = 3;
-    let len = PROBE_READ_BYTES + REMAINING_WINDOWS * WINDOW_BYTES;
-    assert!(
-        len - PROBE_READ_BYTES > 2 * WINDOW_BYTES,
-        "形状守卫：剩余体量只有 {REMAINING_WINDOWS} 个窗口，不足两个窗口（总长 {len}）⇒ 这条用例测不出按窗重请求"
+    // 守卫断的是**那个常量**（不是由它算出的 `len`）—— 写成 `len - PROBE_READ_BYTES > 2 * WINDOW_BYTES`
+    // 就是把构造句代回自己，恒真。`clippy::assertions_on_constants` 不许运行时形状的这个断言
+    // （"常量断言该在编译期"），照它的建议收进 `const` ⇒ 改窄常量时**编译就红**，
+    // 比运行时红更早，而且没有任何 filter/跳过能让它不出声。
+    const _: () = assert!(
+        REMAINING_WINDOWS > 2,
+        "形状守卫：剩余体量只有这个窗口数 ⇒ 不满足「> 2 个窗口」这条前提，\
+         按窗重请求与一枪下完的差额会小到判据 1 分辨不出（本用例的期望枪数 2 也就不成立）。\
+         要改就同时改判据 1 与文档，别把这条守卫放宽成恒真。"
     );
+    let len = PROBE_READ_BYTES + REMAINING_WINDOWS * WINDOW_BYTES;
     let peer = harness::spawn_scripted_peer(len, vec![harness::Shot::IgnoresRange], harness::Shot::IgnoresRange)?;
     let dir = harness::tmp_dir("e16-degraded-one-shot")?;
     let (want, want_file) = sha_of_expected("e16-degraded-expected.bin", &harness::positioned_body(len as usize))?;
@@ -3467,8 +3519,12 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
     srv.requests_at_least(1)?;
     let requests = srv.requests_quiet(Duration::from_millis(300))?;
     assert_eq!(requests.len(), 1, "带体的形状全程只许有一发请求（试探 + POST = 2 条就是缺陷）：{requests:?}");
+    // **收口复审 B2 第 6 条**：这一句原先读的是 `Server::methods()` —— 那个入口裸读一次日志、
+    // 不带任何条数守卫，是 `ranges_at_least` 头顶那句"一律带条数守卫"当时**唯一**的反例。
+    // 守卫数取上面那条等式刚钉死的 `requests.len()`：等式先保证"至少这么多条已经落盘"，
+    // `methods_at_least` 再按同一个数守卫一次读盘 ⇒ 少读不可能，多读由下面那句等式接住。
     assert_eq!(
-        srv.methods()?,
+        srv.methods_at_least(requests.len())?,
         vec!["POST".to_string()],
         "那一条必须是 POST：GET 就是「试探」，E11① 硬拒的那个形状"
     );

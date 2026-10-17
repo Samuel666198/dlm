@@ -193,20 +193,30 @@ impl Server {
     /// **复审 B-Minor 4 之后一律带条数守卫**：本方法取代的那个**不等落盘的裸读版本**已删除 ——
     /// 少读几条正好会让"每条响应恰好一条记录"那类一一对应的判据往错误方向通过
     /// （评审 C-I-4 的同一纪律）。抽取本身收进 `ranges_of`，读日志这一侧只留带守卫的这一条。
+    /// **收口复审 B2 第 6 条**把同一条纪律也补到了方法那一侧（`methods_at_least`），
+    /// 所以这句"一律"现在覆盖**两个按字段抽取的入口**（`ranges_at_least` 与 `methods_at_least`）；
+    /// 当时它旁边还挂着一个没守卫的姊妹方法 `methods()`（裸读一次再抽方法），
+    /// 那是这句"一律"唯一的反例 ⇒ 已删除。
+    /// ⚠ 这句"一律"**只管抽取这一层**：更底下的 `requests()` 仍然是不等待的裸读，
+    /// 它是上面那些带守卫入口的公共底座，另有 `requests_within` / `requests_quiet` 各自文档着的用法纪律。
     pub fn ranges_at_least(&self, n: usize) -> Result<Vec<Option<String>>> {
         Ok(ranges_of(&self.requests_at_least(n)?))
     }
 
-    /// 服务端看到的每一条请求的**方法**（`GET` / `POST` / `HEAD`…），按到达顺序。
+    /// 服务端看到的每一条请求的**方法**（`GET` / `POST` / `HEAD`…），按到达顺序；**带条数守卫**。
     ///
     /// "引擎绝不试探 `--data-file` 那一枪"只能在这里证：`probe` 发的是 GET，`run_whole` 发的是 POST，
-    /// 两边的 URL 可以完全一样（`src/probe.rs:190` 的那道闸挡不挡住，看的是线上有没有多出一条 GET）。
-    pub fn methods(&self) -> Result<Vec<String>> {
-        Ok(self
-            .requests()?
-            .into_iter()
-            .map(|r| r.get("method").and_then(Value::as_str).unwrap_or_default().to_string())
-            .collect())
+    /// 两边的 URL 可以完全一样（`probe::run` 里 F1 那道拦 `task.data_file` 的 `ensure!` 挡不挡住，
+    /// 看的是线上有没有多出一条 GET）。
+    ///
+    /// 为什么这里也必须先守卫（**收口复审 B2 第 6 条**）：原先这一条是裸读一次的 `methods()`，
+    /// 而它唯一的调用者断的是"方法序列**恰好**等于 `["POST"]`"—— 裸读把两种完全不同的东西读成同一个形状：
+    /// "那一枪还没落盘"与"那一枪真没发过"都交出**空表**，于是判据要么在时序上假红、要么在它唯一该红的
+    /// 方向上（"多出一条 GET"那条线还没落盘时读）假绿。守卫数把前者挡在外面，"不许多"那一半
+    /// 仍然归调用者的条数等式 —— 与 `requests_quiet` 文档那条分工同一个口径。
+    /// 抽取本身收进 `methods_of`（与 `ranges_of` 同一分工，读日志这一侧只留带守卫的这一条）。
+    pub fn methods_at_least(&self, n: usize) -> Result<Vec<String>> {
+        Ok(methods_of(&self.requests_at_least(n)?))
     }
 
     /// 杀掉 node 进程（`Drop` 调它）。
@@ -1396,6 +1406,20 @@ pub fn ranges_of(requests: &[Value]) -> Vec<Option<String>> {
     requests
         .iter()
         .map(|r| r.get("range").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// 请求行 → 每一条请求的**方法**（`GET` / `POST` / `HEAD`…），按到达顺序；字段缺失 ⇒ 空串。
+///
+/// 与 `ranges_of` 同一分工（**收口复审 B2 第 6 条**补的这一半）：本文件里它只被
+/// `Server::methods_at_least` 用着（`ranges_of` 则另有用例直接调用）——
+/// "手上已经有请求行、想让方法序列与那份快照**同源**"的那种用法今天还不存在，
+/// 这份抽取是为它留的，不是第二条读日志的入口。
+/// 缺这一份抽取的话，"读日志"与"抽方法"就会重新粘在一起，那条不带守卫的裸读版本正是这样长出来的。
+pub fn methods_of(requests: &[Value]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|r| r.get("method").and_then(Value::as_str).unwrap_or_default().to_string())
         .collect()
 }
 
