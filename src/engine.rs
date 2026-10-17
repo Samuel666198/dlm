@@ -29,9 +29,9 @@
 //! ## 一条派发公式的更正（写在这里是因为它会咬人）
 //!
 //! 派发给本任务的说法是 `Advanced{bytes}` → `Progress{abs_end: iv.start + bytes}`，
-//! `src/fetch.rs:266` 的模块文档也这么写。**这个式子差一字节**：`Advanced` 的 `bytes` 是
-//! "经 `store.write_at` 确认落盘的字节数"（`fetch.rs:268-271` 自己定义，实现是
-//! `written(iv, cursor) = cursor - iv.start`，见 `fetch.rs:428-430`），而 `Event::Progress` 的
+//! `fetch` 模块文档里 `Outcome` 那一节也这么写。**这个式子差一字节**：`Advanced` 的 `bytes` 是
+//! "经 `store.write_at` 确认落盘的字节数"（`fetch::Outcome::Advanced` 自己定义，实现是
+//! `written(iv, cursor) = cursor - iv.start`，见 `fetch::written`），而 `Event::Progress` 的
 //! `abs_end` 是**含端点**的"已写到的绝对偏移"（`scheduler.rs:61-62`；用例
 //! `window_done_returns_remainder_and_reassigns_without_new_connection` 报 300 之后下一段起点是 301）。
 //! 所以正确的换算是 `abs_end = iv.start + bytes - 1`（见 `progress_abs_end`）。
@@ -54,7 +54,8 @@
 //! （起点是 `iv.start` ⇒ 把已写的前缀重下一遍），要么并发第二条连接（`workers` 的意义就变了）。
 //! 所以引擎的做法是：**不发新的一枪**。阶段 4 到这里就停了（只记 `Tightened`），于是那一枪照旧
 //! 把自己那个窗口（最多 `WINDOW_BYTES` = 4 MiB）读完，多出来的字节全进 `bytes_duplicated`
-//! —— 阶段4 实测线上多打（**唯一诚实的口径** `Σ conn_close_side.sent`）：8 MiB×4 worker 多打 8.47 MiB（**×2.009**）、
+//! —— 阶段4 实测线上多打（**唯一诚实的口径** `Σ conn_close_side.sent`，字节数照 **E14 附记**那张表）：
+//! 8 MiB×4 worker 多打 8,465,356 个字节（**×2.009**）、
 //! 8 MiB×8 是 ×2.618、48 MiB×4 是 ×1.418、48 MiB×8 是 ×1.694（四组表见计划勘误 **E14 附记**）。
 //! ⚠ 别用 `Σ response_done.bytes` 当线上量具：它**不含半路被丢弃的响应**（这一形状就漏 1 条，48 MiB 上漏 8 条），
 //! 而把 `response_done` 与 `conn_close_side` 相加又**重复计数**（正常收尾的响应两条都记）。
@@ -63,7 +64,9 @@
 //! （`AtomicU64`，装"这一枪最多还允许写到哪个**含端点**的偏移"）：
 //! - `dispatch` 在**发 Job 之前**把它重置成 `NO_END_CAP`（顺序是判据：反过来 worker 可能把上一枪的
 //!   旧帽读进这一枪）；
-//! - `run_window` 一进门把自己的窗口终点 `stop - 1` **降**进去（`lower_end_cap` ⇒ 只降不升）；
+//! - `run_window` 一进门把自己的**读上界** `stop - 1` **降**进去（`lower_end_cap` ⇒ 只降不升）：
+//!   `Windowed` 那一支那个上界就是窗口终点，`ToEof`（退化）那一支是 `iv.end` —— "窗口终点"那句
+//!   只对着认 `Range` 的那一支（**E16** 划的界，见 `fetch` 模块文档开头那条）；
 //! - 主线程处理 `Shot::Tighten{worker, iv}` 时把 `iv.end` 降进去（`ping_free_workers` 里，与
 //!   调度器做决定的那一刻同一次遍历 ⇒ 帽不会晚于决定本身）；
 //! - 那一枪在每块 64 KiB 之前查一次帽，越过帽就**停手**，交回的还是已有的 `Advanced { bytes }`。
@@ -78,8 +81,10 @@
 //! 代价要照实说，帽管不到的那一截还在：帽只能拦**它落下之后**还要读的那些字节（一块之内），
 //! 拦不到"调度器决定收紧时那一枪已经读过去的字节"—— 调度器只在一枪结束时才从 `Progress` 知道
 //! 它读到哪儿（`scheduler.rs` 的 `written` 是收枪才更新的），所以一刀可能落在 incumbent 早已写过的
-//! 偏移之下。阶段5A 实测同一形状（8 MiB / 4 worker，节拍对端）重复账从 8.2 MiB 降到 3.1–3.5 MiB，
-//! 每笔收紧的平均代价从 ~8.4 块降到 ~3 块；要到"每笔 ≤ 一块"得让**调度器**别反复劈同一条在途尾巴
+//! 偏移之下。同一形状（8 MiB / 4 worker）改帽前后各自的读数与**口径**都记在
+//! [`crate::state::Stats::bytes_duplicated`] 的字段文档里（那张表的线上量具是
+//! `Σ conn_close_side.sent`，字段读数与线上多打是两个不同的数，引的时候别混着写、也别把字节数
+//! 换成十进制的 "MiB"）；要到"每笔 ≤ 一块"得让**调度器**别反复劈同一条在途尾巴
 //! （派发明确禁止改那条规则），已登记给控制员。
 //!
 //! `TraceStep::Tightened` 与 `Dispatched` 仍然**分列**：前者说"调度器把谁的目标提前了"（以及帽降到了
@@ -138,7 +143,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// `consts` 里没有这个常量，而 **E2** 把常量表钉死在 12 条（不许加第 13 条），所以它住在引擎里。
 const LOOP_POLL: Duration = Duration::from_secs(1);
 /// `run_whole` 那一枪交回的速率：这一支**没有**任何测量可用（一发请求读完全部，读完才知道快慢），
-/// 交 0 给 `fetch::window_budget` 就是"速率未知 ⇒ 给最宽的预算"（`fetch.rs:294-297` 的裁定）。
+/// 交 0 给 `fetch::window_budget` 就是"速率未知 ⇒ 给最宽的预算"（`fetch::budget_for` 的除零裁定）。
 const RATE_UNKNOWN: u64 = 0;
 
 /// 一次重试要等多久（spec §6.1 的快速退避 + §6.2 的慢速无限重试 + `--max-retries` 封顶）。
@@ -242,7 +247,8 @@ pub struct Report {
     /// 归属已定的字节（覆盖集）。**与 `delivered` 不是一回事**，见模块文档那两本账。
     /// 带 `--data-file` 的那一支**没有覆盖账**（E13④：该形状不落断点），所以那一支恒 0。
     pub confirmed: u64,
-    /// **落在归属范围之外、由别人重下的字节**（不是"线上流量账单"，勘误 **E14**③；字段口径与
+    /// **落在归属范围之外、可能被别人重下的字节**（不是"线上流量账单"，勘误 **E14**③；强度只有
+    /// "可能"这一档，措辞按 E14③ 批准的那一句，不许写成"必然"。字段口径与
     /// 它为什么不是账单都写在 `state::Stats::bytes_duplicated` 的文档里，两处是同一个数）。
     /// 带 `--data-file` 的那一支恒 0（那一支根本没有归属账）。
     pub duplicated: u64,
@@ -333,7 +339,7 @@ enum Stop {
 enum Job {
     /// 打这一枪。`iv` 是**这一枪**要取的区间，起点已经绕开这一枪自己写过的前缀
     /// （所以"失败段的重下不会重下已写前缀"，见集成用例
-    /// `a_failed_segments_written_prefix_is_not_downloaded_twice`）。
+    /// `a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice`）。
     Fetch { iv: Interval, rate_bps: u64 },
     /// 收工。worker 只有在阻塞于 `recv` 时才收得到，所以在途的那一枪会跑完（有窗口预算封顶）。
     Stop,
@@ -556,7 +562,7 @@ fn progress_abs_end(shot_start: u64, bytes: u64) -> Option<u64> {
 }
 
 /// 这一枪**落到盘上**的字节数。`Complete` 不带字节，但它兑现的承诺是"`iv.end` 那个字节也写了"
-/// （`fetch.rs:599-611` 的 `cursor > iv.end` 判据），所以它就是区间全长；
+/// （`fetch::run_window` 末尾那条 `cursor > iv.end` 判据），所以它就是区间全长；
 /// 三条失败支在返回之前**一个字节都没写过**（状态码/偏移核对都在读 body 之前）。
 fn shot_bytes(outcome: &Outcome, shot: Interval) -> u64 {
     match outcome {
@@ -569,7 +575,8 @@ fn shot_bytes(outcome: &Outcome, shot: Interval) -> u64 {
 /// 这一枪写下的字节里，落在"调度器此刻认给这个 worker 的区间"之内的部分。
 /// 超出那一段（**E14**① 乙之后只剩帽追不回的那两类）：收紧落在这枪**结束之后**（字节已经写了），
 /// 或者调度器按上次上报的进度判出的新终点落在这枪**早已读过的位置之下** —— 帽只能往下压、不能往回退。
-/// 越过帽本身最多一个 64 KiB 分块。这些字节真在盘上、但永远不会进覆盖集 ⇒ 由另一枪重下
+/// 越过帽本身最多一个 64 KiB 分块。这些字节真在盘上、但永远不会进覆盖集 ⇒ **可能**由另一枪重下
+/// （"可能"这一档是 E14③ 批准的口径，不许写成"必然"）
 /// ⇒ 正是 `bytes_duplicated` 该计的账（口径见 `state::Stats::bytes_duplicated`）。
 fn in_scope_bytes(shot: Interval, bytes: u64, owned: Interval) -> u64 {
     if bytes == 0 {
@@ -584,7 +591,7 @@ fn in_scope_bytes(shot: Interval, bytes: u64, owned: Interval) -> u64 {
 
 /// 一条 `fetch` 结论折成"喂给调度器的事件 + 落盘量 + 重复量"。**引擎里唯一的事件翻译处**。
 ///
-/// 映射表（`src/fetch.rs:265-267` 与派发给的三条，加上那条差一字的更正）：
+/// 映射表（`fetch::Outcome` 的文档与派发给的三条，加上那条差一字的更正）：
 /// | 结论 | 事件（按序） | 落盘 | 重复 |
 /// |---|---|---|---|
 /// | `Advanced{bytes}` | `Progress{abs_end: start+bytes-1}` → `WindowDone` | `bytes` | 出界的那截 |
@@ -1432,7 +1439,7 @@ mod tests {
 
     /// `Advanced{bytes}` → `Progress{abs_end}` 的换算必须是**含端点**的，而且不许越过区间。
     ///
-    /// 这条钉的是派发里那句 `iv.start + bytes`（`src/fetch.rs:266` 的模块文档同样这么写）。
+    /// 这条钉的是派发里那句 `iv.start + bytes`（`fetch::Outcome` 的文档同样这么写）。
     /// 差一字节的具体后果见模块文档那一节：一个从没写过的字节被报成已确认，两本账都对得上、
     /// 文件却是坏的。三格各有分工：
     /// - `bytes = 1`（窗口只落了一个字节）⇒ `abs_end == start`，写成 `start + 1` 就跳过了那个字节；
@@ -1455,7 +1462,7 @@ mod tests {
         assert_eq!(progress_abs_end(iv.start, 100), Some(iv.end), "填满区间时报的必须是含端点的终点");
         assert_ne!(progress_abs_end(iv.start, 100), Some(iv.end + 1), "end+1 会把下一段的第一字节吞掉");
 
-        // `Complete` 不带字节，但它承诺的就是全长 ⇒ 同一个含端点终点（`fetch.rs:599-611` 的 `>` 判据）。
+        // `Complete` 不带字节，但它承诺的就是全长 ⇒ 同一个含端点终点（`fetch::run_window` 的 `>` 判据）。
         let (events, landed, _) = translate(&Outcome::Complete, iv, iv, 3);
         assert_eq!(landed, 100, "Complete 落的字节就是区间全长");
         assert_eq!(
@@ -1526,19 +1533,24 @@ mod tests {
         }
     }
 
-    /// **E14③（乙-label）的口径钉死**：这本账 = "落在归属范围之外、由别人重下的字节"，
+    /// **E14③（乙-label）的口径钉死**：这本账 = "落在归属范围之外、**可能**被别人重下的字节"
+    /// （E14③ 批准的就是这个强度，不是"必然重下"），
     /// 来源**只有这一处**（`translate` 算的那笔；**E17** 把 `run` 里那笔 kill+续传的账整笔撤掉了 ——
     /// "盘上有、覆盖集里没有"绝大多数是从没下载过的洞，拿它倒推就是 E14③ 禁止的第二本账），
     /// 而且**不是**流量账单。撤掉那笔之后"上一轮在途窗口已落盘、本轮会重下"的字节**不在任何账里**，
     /// 这条已知的少报写在 `state::Stats::bytes_duplicated` 的字段文档上。
     ///
-    /// 三条格子各自挡一种写法：
+    /// **五个断言块**（修复轮 8F-3a 数过：原先这里写"三条格子"，漏了 ④ 与 `Complete` 那一支）
+    /// 各自挡一种写法：
     /// - ① 读满自己那个窗口 ⇒ **零**。把 `duplicated` 写成"这一枪读了多少"（阶段4 那本就是这么读的：
-    ///   同一形状报 8.33 MiB，而线上多打 8.47 MiB，差 1.6%，看着几乎就是账单）在这一格当场红 ——
+    ///   同一形状报 8,334,284 个字节，而线上多打 8,465,356 个字节，差 1.6%，看着几乎就是账单）在这一格当场红 ——
     ///   那一枪读的字节本来就归它，一个字节都没被重下。
     /// - ② 帽之后多落的那一块才是账：`fetch::cap_allows` 在块首问 ⇒ 越帽的一块整块落，
     ///   这本账看到的就只有那一块。
     /// - ③ 起点落在归属之外（陈旧帽/别的形状）⇒ 整枪都算，不许只算"越出终点的右边"。
+    /// - ④ 这本账不许为负（`landed` 比归属短 ⇒ 0，不是 `usize` 下溢）。
+    /// - 外加一块**没编号**的：同一格在 `Complete` 那一支也要成立（归属没缩 ⇒ 零，`Complete`
+    ///   不许凭空造出重复账）。
     #[test]
     fn the_duplicate_book_counts_only_what_fell_outside_the_owned_range() {
         let window = crate::consts::WINDOW_BYTES;
@@ -1575,7 +1587,7 @@ mod tests {
     ///
     /// 这条是模块文档"`Retighten` 不是一枪"那节的判据，也是 `TraceStep` 分两支的理由。
     /// 写成 `Fire` 的后果具体可测：worker 阻塞在 `read()` 里，这条 `Job` 排在当前那枪之后，
-    /// 起点仍是 `iv.start` ⇒ 已确认落盘的前缀被重下一遍（`a_failed_segments_written_prefix_is_not_downloaded_twice`
+    /// 起点仍是 `iv.start` ⇒ 已确认落盘的前缀被重下一遍（`a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice`
     /// 那条集成用例的镜像面）。
     #[test]
     fn a_retighten_moves_the_target_end_but_never_fires_a_shot() {

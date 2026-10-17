@@ -8,10 +8,13 @@
 //!
 //! ## 为什么"窗口"能顶掉 `read_timeout`
 //!
-//! 一次请求只领 `WINDOW_BYTES` 个字节：读满就主动收手（把没读的尾巴留在连接上拆掉），交回
+//! 一条**窗口化**的请求（`BodyShape::Windowed`，也就是对端认 `Range` 那一支）只领 `WINDOW_BYTES`
+//! 个字节：读满就主动收手（把没读的尾巴留在连接上拆掉），交回
 //! `Advanced{bytes}`，让 `scheduler` 重新决定。于是一条**卡住**的连接最多占住一个窗口预算，
 //! 而不需要一个库级读超时 —— 也**不需要**抢占一个正阻塞在 `read()` 上的线程（R1 的副作用：
 //! 不泄漏线程，且这与 IDM 实测形状一致：那次 8 条连接里 6 条是被主动掐断的）。
+//! ⚠ **这句不是无条件的**：`BodyShape::ToEof`（退化那一支，**E16**）一枪领的是**整条区间**，
+//! 不是 `WINDOW_BYTES` —— 界限见下一节与下面"修复轮 8F-2"那一节。
 //!
 //! **这条推理的适用范围是"对端认 `Range`"那一支**（**E16** 划的界，不是推翻它）：对端不认 `Range` 时
 //! 窗口化换不来"卡住的连接最多占一个窗口"这个性质，反而要每个窗口重付一遍"从文件头到那里"的前缀
@@ -111,17 +114,28 @@
 //!    （选了这个，信号诚实），或让预算无条件按整条体量算（那会把认 `Range` 那一支的期限也放宽，
 //!    拆掉本节开头 R1 那条"卡住的连接最多占一个窗口预算"的性质）。
 //!    **"从 `total_len` 猜退化"是第三种写法，被派发明令禁止**，本模块也没这么写。
-//! 2. **`window_budget` 的分子从写死的 `WINDOW_BYTES` 变成"这一枪打算读多少"**：两者共用
+//! 2. **`window_budget` 的分子从写死的 `WINDOW_BYTES` 变成"这一枪打算从网线上读多少"**：两者共用
 //!    [`budget_for`]，`window_budget(rate)` == `budget_for(WINDOW_BYTES, rate)`（单元用例
-//!    `the_body_shape_decides_the_range_the_read_bound_and_the_budget_together` 里三格字面秒数钉着）。
-//!    慢到 120 s 上界之外的整条下载**照样会被自己的期限掐在半路** —— 那一支按 **E16**② 处理：
-//!    交回 `Advanced { bytes }`、由调度器重新决定尾巴，`Complete` 的判据（`cursor > iv.end`）一个字没改，
+//!    `the_body_shape_decides_the_range_the_read_bound_and_the_budget_together` 里四条字面秒数钉着）。
+//!    **分子按形状分支（F12，修复轮 8F-3a）**：`Windowed` 传 `stop − iv.start`（那一支打算写的就是
+//!    打算读的），`ToEof` 传 `stop` —— 那一支的 body 从**文件偏移 0** 开始，`iv.start` 个字节要先
+//!    流掉才落盘，所以打算读的比打算写的多整整一个前缀。按"打算写多少"给分子会让预算**比这一枪
+//!    打算读的字节还小**，后果链（零进度 ⇒ `Stalled` ⇒ `rate` 不涨 ⇒ 预算不变 ⇒ 永远零进度）见
+//!    [`plan_shot`] 的文档。
+//!    慢到 120 s 上界之外的整条下载**照样会被自己的期限掐在半路** —— 掐断点**按进度分两支**，
+//!    不许再写成一句"交回 `Advanced`"：写过字节的（前缀已走完）那一支按 **E16**② 交回
+//!    `Advanced { bytes }`、由调度器重新决定尾巴；**还卡在前缀里**那一支落盘量为 0，
+//!    交回的是 `Stalled`（读错误是超时）或 `Failed(Transport)`（别的读错误）—— 即**按 `Stalled`
+//!    处理：重试上限介入**，不是 `Advanced`（判据住在 `run_window` 的 `written(iv, cursor)` 与
+//!    那个 `(0, true)` 分支）。`Complete` 的判据（`cursor > iv.end`）一个字没改，
 //!    所以"没下完"永远报不成完成（`engine::completion_verdict` 那两本账的闸也原样有效）。
 //! 3. **E14②（戊）不作废，反而靠它**：`ToEof` 把 `planned_end` 抬到 `iv.end` 是因为那一截**真的会读**，
 //!    戊拦的是"问了我们注定不读的字节"。区间在文件中间结束、比窗口窄时两种形状**逐字相同**
 //!    （上面那条单元用例的 `mid-file-short-*` 两格钉的就是这个"没多问"）。
 //! 4. **代价没藏**：`ToEof` 仍然要丢掉 `iv.start` 之前那一段 body（裁定 6 那条 `skip`）。修好之后这一笔
-//!    每轮只付**一次**（以前是每个窗口付一次），但它**不在** `Stats::bytes_duplicated` 里 ——
+//!    每一**枪**只付**一次**（以前是每个窗口付一次；说"每轮一次"是错的 —— 退化模式下每次掐断都会
+//!    重派一条起点更靠后的区间，**每条区间各付自己那一份** `skip`，见下面 [`BodyShape`] 那条与
+//!    `state::Stats::bytes_duplicated` 字段文档第 ③ 条），但它**不在** `Stats::bytes_duplicated` 里 ——
 //!    口径与理由见 [`crate::state::Stats`] 那个字段文档的第 ③ 条（**E16**③ 选的是"如实写明没进账"那一支）。
 //!    同一份文档第 ① 条那个"少报的算术上界"也因为本发**重推过**了：`WINDOW_BYTES × workers` 只对
 //!    `Windowed` 那一支成立，退化那一支的上界是**整条剩余 body**（一次只一枪在途）。
@@ -363,9 +377,10 @@ pub enum Outcome {
 /// 取法：把 0 读成"慢到需要最长预算"，而不是 crash，也不是"速率未知就别超时"（后者会关掉整条
 /// `Stalled` 通道）。上下界照 plan：下界 `WINDOW_MIN_TIMEOUT_SECS`，上界 `WINDOW_MAX_TIMEOUT_SECS`。
 ///
-/// **E16 之后这一条只回答"窗口那一枪"**：预算的分子是**这一枪打算读的字节数**，不再是写死的
-/// `WINDOW_BYTES` —— 退化那一支（`BodyShape::ToEof`）读的是整条剩余 body，沿用这一份就会在半路把
-/// 自己掐断（`reqwest` 的 `.timeout()` 是**整请求**期限，**R7** / 模块文档"reqwest 形状"第 1 条实测）。
+/// **E16 之后这一条只回答"窗口那一枪"**：预算的分子是**这一枪打算从网线上读的字节数**，不再是写死的
+/// `WINDOW_BYTES` —— 退化那一支（`BodyShape::ToEof`）读的是整条 body（**含 `iv.start` 之前那段要
+/// 流式丢掉的前缀**，F12），沿用这一份就会在半路把自己掐断（`reqwest` 的 `.timeout()` 是**整请求**
+/// 期限，**R7** / 模块文档"reqwest 形状"第 1 条实测）。
 /// 两个入口共用 [`budget_for`]，所以式子与夹逼只有一份。
 pub fn window_budget(rate_bps: u64) -> Duration {
     budget_for(WINDOW_BYTES, rate_bps)
@@ -373,10 +388,14 @@ pub fn window_budget(rate_bps: u64) -> Duration {
 
 /// 一份期限该罩住多少字节：`max(WINDOW_MIN, min(WINDOW_MAX, bytes / rate * 2))`。
 ///
-/// 唯一比 `window_budget` 多出来的一个参数就是"这一枪打算读多少"（**E16①**）。窗口那一支传的
-/// 就是 `WINDOW_BYTES` ⇒ 与 `window_budget` 逐字节相同；退化那一支传的是整条剩余体量。
+/// 唯一比 `window_budget` 多出来的一个参数就是"这一枪打算从网线上读多少"（**E16①** + **F12**）。
+/// 窗口那一支传的就是 `WINDOW_BYTES` ⇒ 与 `window_budget` 逐字节相同；退化那一支传的是**整条 body**
+/// （`stop`）而不是"整条剩余体量"（`stop − iv.start`）—— 因为那一支的 body 从文件偏移 0 开始，
+/// 前 `iv.start` 个字节要先流掉（`run_window` 的 `skip`）才算开始落盘，那批字节同样要占这份期限。
 /// 上界 `WINDOW_MAX_TIMEOUT_SECS` 照旧生效：**慢到超过 120 s 的整条下载会被自己的期限掐在半路**，
-/// 后果按 E16② 处理（交回 `Advanced { bytes }`、由调度器重新决定尾巴），而不是把"没下完"报成完成。
+/// 后果按进度分两支（同 [`plan_shot`] 与模块文档第 2 条）：写过字节 ⇒ `Advanced { bytes }`、由调度器
+/// 重新决定尾巴；还卡在前缀里（零落盘）⇒ `Stalled`，**按 `Stalled` 处理：重试上限介入**。两支都
+/// 不是把"没下完"报成完成（`Complete` 的判据 `cursor > iv.end` 没动）。
 fn budget_for(bytes: u64, rate_bps: u64) -> Duration {
     let seconds = if rate_bps == 0 {
         WINDOW_MAX_TIMEOUT_SECS
@@ -1229,8 +1248,8 @@ mod tests {
             assert_eq!(plan.stop, row.stop, "[{}] 读上界（exclusive）", row.name);
         }
 
-        // `window_budget` 仍然等于"`WINDOW_BYTES` 那一格的 `budget_for`"：三条式子上的格子
-        // （下界夹住 / 式子本身 / 上界夹住）都必须是**算出来的字面秒数**。
+        // `window_budget` 仍然等于"`WINDOW_BYTES` 那一格的 `budget_for`"：**四条**断言（下界夹住 /
+        // 式子本身 / 上界夹住 / 速率未知），每条的期望值都必须是**算出来的字面秒数**。
         assert_eq!(window_budget(10_000_000), Duration::from_secs(15), "4 MiB / 10 MB/s × 2 = 0.8 s ⇒ 夹到下界");
         assert_eq!(window_budget(300_000), Duration::from_secs(26), "4_194_304 / 300_000 = 13（整除）× 2 = 26 s");
         assert_eq!(window_budget(1), Duration::from_secs(120), "速率 1 字节/秒 ⇒ 式子给出 8,388,608 s ⇒ 夹到上界");
