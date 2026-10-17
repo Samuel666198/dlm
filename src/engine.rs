@@ -453,12 +453,13 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     let on_disk = store.len()?;
     // 先夹种子：断点说"这些字节已经归我了"，而盘上可能根本没有（用户删了目标文件、
     // 或上一轮在 `save` 之后被杀）。不夹就会造出一个**永远续不上**的任务，理由见 `clamp_seed_to_disk`。
+    //
+    // 这里**不记**"盘上比覆盖集多出来的那一段"的账（**E17** 撤掉了那一笔）：那一段绝大多数是
+    // **从没下载过的洞**（`Store::write_at` 一延长文件，中间没写的洞读起来是零、照样算进 `len()`；
+    // 多 worker 的中点劈分天生造洞），拿它倒推重复字节正是 **E14③** 明令禁止的第二本账。
+    // 因此"上一轮在途窗口已落盘、没进段表、本轮会重下"那批字节**不在任何账里** ——
+    // 少报的口径与其算术上界写在 `state::Stats::bytes_duplicated` 的字段文档上。
     let seed = clamp_seed_to_disk(&seed, on_disk);
-    // **kill + 续传的重下账**（E13④ 点名的那个来源）：盘上比覆盖集多出来的那一段，
-    // 是上一轮在途窗口写过、却从没被确认进段表的字节 ⇒ 本轮必然重下一遍，现在就把这笔账记下。
-    stats.bytes_duplicated = stats
-        .bytes_duplicated
-        .saturating_add(on_disk.saturating_sub(overlap_with(&seed, on_disk)));
 
     // 播种门（E13①）：断点里那些已确认区间进调度器唯一的那本账。
     let mut sched = Scheduler::resume(facts.total_len, cfg.min_seg, &seed);
@@ -523,24 +524,6 @@ fn plan_from_decision(decision: Decision) -> Result<Plan> {
             stats: snap.stats,
         }),
     }
-}
-
-/// 已确认覆盖集与"盘上前 `len` 个字节"的交集体量（`run` 里那笔 kill+续传的重下账用）。
-///
-/// 种子来自 `snapshot_intervals()`（升序、两两不重叠不相邻）或就是一个预读区间，
-/// 所以逐条求和不会重复计数 —— 这也是为什么不写成"并集的测度"：这里不需要，多写一层反而
-/// 把"输入必须是不重叠覆盖集"这条前置条件藏起来。
-fn overlap_with(intervals: &[Interval], len: u64) -> u64 {
-    if len == 0 {
-        return 0;
-    }
-    let last = len - 1;
-    intervals.iter().fold(0u64, |acc, iv| {
-        if iv.start > last {
-            return acc;
-        }
-        acc + (iv.end.min(last) - iv.start + 1)
-    })
 }
 
 /// 完成判定：`is_done()` **且** 落盘量 == 全长。**签名里没有覆盖集那个量**（E7）。
@@ -1492,30 +1475,38 @@ mod tests {
     fn duplicate_bytes_count_only_what_fell_outside_the_owned_interval() {
         let shot = Interval { start: 0, end: 999 }; // 被派的是 1000 个字节
         let tightened = Interval { start: 0, end: 399 }; // 中途被收到 400 个字节
-        let table: &[(&str, Interval, u64, Interval, u64, u64)] = &[
-            // 名字, 这一枪的区间, 落盘字节, 调度器认给的区间, 期望落盘, 期望重复
-            ("没收紧过：全是真进度", shot, 400, shot, 400, 0),
-            ("收紧后读完窗口：越界那截算重复", shot, 1000, tightened, 1000, 600),
-            ("收紧后正好收到新终点", shot, 400, tightened, 400, 0),
-            ("收紧后还少于一新终点", shot, 250, tightened, 250, 0),
-            ("一个字节都没落地", shot, 0, tightened, 0, 0),
-            ("起点就在新区间之后（整枪都白读）", shot, 100, Interval { start: 500, end: 999 }, 100, 100),
+        // 期望列全是**写死的字面量**：原先这一格写的是 `s.start + n - 1` —— 拿被测公式现算期望值
+        // (T8 评审 B 的"测试诚实性"之一)，`progress_abs_end` 差一字节的变异会把期望跟着一起挪，
+        // 当场变成没断。现在两侧不共享任何算式。
+        // 一行 = (名字, 这一枪的区间, 落盘字节, 调度器认给的区间, 期望落盘, 期望重复, 期望 Progress 的含端点绝对偏移)。
+        // 抽成别名只为读得出来，不是为了省字符。
+        type Row = (&'static str, Interval, u64, Interval, u64, u64, Option<u64>);
+        let table: &[Row] = &[
+            ("没收紧过：全是真进度", shot, 400, shot, 400, 0, Some(399)),
+            ("收紧后读完窗口：越界那截算重复", shot, 1000, tightened, 1000, 600, Some(999)),
+            ("收紧后正好收到新终点", shot, 400, tightened, 400, 0, Some(399)),
+            ("收紧后还少于一新终点", shot, 250, tightened, 250, 0, Some(249)),
+            ("一个字节都没落地", shot, 0, tightened, 0, 0, None),
+            ("起点就在新区间之后（整枪都白读）", shot, 100, Interval { start: 500, end: 999 }, 100, 100, Some(99)),
         ];
-        for (case, s, bytes, owned, want_landed, want_duplicated) in table {
+        for (case, s, bytes, owned, want_landed, want_duplicated, want_abs_end) in table {
             let (events, landed, duplicated) = translate(&Outcome::Advanced { bytes: *bytes }, *s, *owned, 0);
             assert_eq!(landed, *want_landed, "{case}");
             assert_eq!(duplicated, *want_duplicated, "{case}");
             // 事件里报的是**真实**的含端点偏移，越界那一段由调度器自己夹住（`note_progress`）。
             // 零进度那一支没有偏移可报，只剩收尾那一条。
-            match *bytes {
-                0 => assert_eq!(events, vec![Event::WindowDone { worker: 0 }], "{case}"),
-                n => assert_eq!(events[0], Event::Progress { worker: 0, abs_end: s.start + n - 1 }, "{case}"),
+            match want_abs_end {
+                None => assert_eq!(events, vec![Event::WindowDone { worker: 0 }], "{case}"),
+                Some(abs_end) => assert_eq!(events[0], Event::Progress { worker: 0, abs_end: *abs_end }, "{case}"),
             }
         }
     }
 
     /// **E14③（乙-label）的口径钉死**：这本账 = "落在归属范围之外、由别人重下的字节"，
-    /// 来源只有两个（另一处是 `run` 里 `overlap_with` 那笔 kill+续传的账），而且**不是**流量账单。
+    /// 来源**只有这一处**（`translate` 算的那笔；**E17** 把 `run` 里那笔 kill+续传的账整笔撤掉了 ——
+    /// "盘上有、覆盖集里没有"绝大多数是从没下载过的洞，拿它倒推就是 E14③ 禁止的第二本账），
+    /// 而且**不是**流量账单。撤掉那笔之后"上一轮在途窗口已落盘、本轮会重下"的字节**不在任何账里**，
+    /// 这条已知的少报写在 `state::Stats::bytes_duplicated` 的字段文档上。
     ///
     /// 三条格子各自挡一种写法：
     /// - ① 读满自己那个窗口 ⇒ **零**。把 `duplicated` 写成"这一枪读了多少"（阶段4 那本就是这么读的：
@@ -1693,25 +1684,6 @@ mod tests {
         assert!(running_rate_bytes_per_sec(u64::MAX, Duration::from_micros(1)) >= running_rate_bytes_per_sec(1, Duration::from_micros(1)));
     }
 
-    /// kill 之后盘上比覆盖集多出来的那一段就是下一轮必然重下的字节（**E13④** 点名的来源）。
-    #[test]
-    fn overlap_with_counts_only_bytes_that_are_both_confirmed_and_on_disk() {
-        let seed = [Interval { start: 0, end: 39 }, Interval { start: 60, end: 99 }];
-        let table: &[(&str, u64, u64)] = &[
-            ("盘上什么都没有", 0, 0),
-            ("盘上正好是全部覆盖", 100, 80),  // 40 + 40
-            ("只写到第一条区间中间", 20, 20),
-            ("写进了两条区间的中间那段空洞", 50, 40),
-            ("盘上比覆盖集还长（在途窗口写过没确认的尾巴）", 140, 80),
-            ("起点在 EOF 之后的种子不算", 5, 5),
-        ];
-        for (case, len, want) in table {
-            assert_eq!(overlap_with(&seed, *len), *want, "{case}：len={len}");
-        }
-        // 空种子（Fresh 那一支在没有预读时）与整份重下的账：盘上有多少就算多少重复。
-        assert_eq!(overlap_with(&[], 1234), 0);
-    }
-
     /// `--sha256` 那道闸的比对：大小写与首尾空白不算不符，空期望**永不放行**。
     #[test]
     fn hash_matches_is_case_insensitive_but_never_passes_an_empty_expectation() {
@@ -1810,9 +1782,24 @@ mod tests {
         let (assigns, retightens) = sched_snapshot_pairs(&replayed);
         assert_eq!(assigns, report.dispatched(), "回放给出的 Assign 必须与引擎真打出去的一枪逐条相等");
         assert_eq!(retightens, report.tightened(), "回放的 Retighten 必须与记下的收紧逐条相等");
-        assert!(!report.dispatched().is_empty(), "两个 worker 的形状里至少该有一枪");
+        assert!(!report.tightened().is_empty(), "两个 worker 的形状里至少该有一次收紧");
+        // 条数写成**字面量**（T8 评审 B 的测试诚实性条目）：这一段形状是手工搭的，两次 `Connected`
+        // 各派出什么、劈在哪一格全都可知 ⇒ "至少有一条"那种读法会放过少派/多派一枪的变异。
+        assert_eq!(report.dispatched().len(), 2, "两枪：第一次 Connected 整段派出，第二次 Connected 领到劈出来的右半");
+        assert_eq!(report.tightened().len(), 1, "一次收紧：劈分时 incumbent 的在途区间被收到中点之前");
         assert_eq!(report.fed().len(), 4, "四条事件：两次 Connected、一次 Progress、一次 WindowDone");
-        assert_eq!(report.confirmed, 0, "`confirmed` 由引擎填的是覆盖集；这里手工搭的形状没人算它，不许被误读成落盘量");
+        // 这一格原先断的是 `report.confirmed` —— 上面几行自己刚写进去的字面量 0，等于没断
+        // （T8 评审 B）。改成断**被测代码 `Report::replay` 产出的完整动作序列**：带 worker 序号，
+        // 比 `assigns`/`retightens` 两列区间投影更严（区间对而序号错也红）。
+        assert_eq!(
+            replayed,
+            vec![
+                Action::Assign { worker: 0, iv: Interval { start: 0, end: 399 } },
+                Action::Retighten { worker: 0, iv: Interval { start: 0, end: 199 } },
+                Action::Assign { worker: 1, iv: Interval { start: 200, end: 399 } },
+            ],
+            "回放必须给出与这段真跑完全相同的动作序列（含 worker 序号与中点劈分的位置）"
+        );
     }
 
     /// 回放结果折成两组区间（`Assign` / `Retighten`），好与 trace 的两条分支一一对上。
