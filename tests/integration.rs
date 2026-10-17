@@ -2849,6 +2849,100 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
     Ok(())
 }
 
+/// **E16 / 裁定 R-B2 本体（退化模式不许按窗重请求）：对端不认 Range 时，剩余整条 body 必须一枪下完。**
+///
+/// ## 为什么这条今天会红
+/// `src/fetch.rs` 的读上界无条件夹成一个窗口（`stop = min(iv.end + 1, iv.start + WINDOW_BYTES)`），
+/// 而 `degraded`（发了 `Range` 却答 `200`）那一支先**流掉 `iv.start` 个字节**再落盘。两条叠起来：
+/// 区间每往前挪一个窗口，就重新要一遍"从文件头到那里"的 body，读完窗口就中途弃响应。
+/// 本用例把剩余体量放到**三个窗口宽**，于是那一支现状要打 **3 枪**（外加试探 = 4 条请求），
+/// 而裁定要的是 **1 枪**（共 2 条）。
+///
+/// ## 仪器为什么用进程内 `ScriptedPeer` 而不是 node
+/// node 唯一那条退化路由 `/noranges` 把 body 夹在 `min(sendLen, 1 MiB)`（`tests/harness/probe-server.mjs`），
+/// 1 MiB **装得进一个窗口** ⇒ 平方项根本不出现（8F-1 报的就是这件事）。`Shot::IgnoresRange` 是同一形状
+/// 但**没有那 1 MiB 封顶**：`200` + 诚实 `Content-Length` + 不发 `Accept-Ranges` ⇒
+/// `probe::peer_accepts_ranges` 读成 `accept_ranges = false`、`total_len` = 整条长度，
+/// 引擎于是走进退化支，而退化支今天按窗切 —— 这正是 E16 要点名的那一格。
+///
+/// ## 判据落在**对端自己记的东西**上（spec §7.2 / E13③：不许问引擎的嘴）
+/// 读数来自 `ScriptedPeer::shot_ranges()`。它**不是**裸读一次线上日志：那台对端把每一枪的记录
+/// `push` 在**写出响应之前**（`tests/harness/mod.rs` 的 `spawn_scripted_peer`，`arrival_gap` 的文档
+/// 就是据此说"不需要守株待兔"），而 `engine::run` 交回时所有 worker 线程已经 `join` ⇒ 记到的条数
+/// 就是**终局**，不存在"还没落盘的尾巴"。失败消息里把数到的 `Range` 原样打出来。
+///
+/// ## 三条判据各自抓什么
+/// 1. **枪数**：全程只许 2 条请求（试探 + 一枪 body）。⇒ 抓"按窗重请求"本身（现状红在这里：4 条）。
+/// 2. **线上区间**：那一枪问的必须是 `[试探之后的最低缝, EOF]`，而且是**开放终点**写法
+///    （`wire_spans` 把 `bytes=N-` 按 `total_len` 补齐成闭区间，见其文档）。⇒ 抓"问得比一枪窄"。
+/// 3. **内容**：整份文件的 sha256 与独立读者算出的期望相等，另加一段**块号取证**
+///    （`require_block_alignment`，起点 4096 对齐 —— 只由那一枪写的尾部区段）。
+///    ⇒ 抓"少丢前缀就写错位置"：一枪下完意味着偏移 `iv.start` 之前那批字节仍然要**流式丢掉**，
+///    把它写成"整个 body 从 0 落盘"会立刻红在这里，而不是红在枪数上。
+///
+/// 第 0 条是**形状守卫**（不是判据）：剩余体量必须 > 2 个窗口，否则这条用例退化成
+/// "1 MiB / 一个窗口"那种恒真形状（本项目已踩过三次恒绿夹具）。
+#[test]
+fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::Result<()> {
+    // 试探那一截 + 整整三个窗口 ⇒ 退化支按窗切必然 ≥ 3 枪。
+    let len = PROBE_READ_BYTES + 3 * WINDOW_BYTES;
+    assert!(
+        len - PROBE_READ_BYTES > 2 * WINDOW_BYTES,
+        "形状守卫：剩余体量不足两个窗口（{len}）⇒ 这条用例测不出按窗重请求"
+    );
+    let peer = harness::spawn_scripted_peer(len, vec![harness::Shot::IgnoresRange], harness::Shot::IgnoresRange)?;
+    let dir = harness::tmp_dir("e16-degraded-one-shot")?;
+    let (want, want_file) = sha_of_expected("e16-degraded-expected.bin", &harness::positioned_body(len as usize))?;
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        dir: dir.path().to_path_buf(),
+        name: Some("degraded-one-shot.bin".to_string()),
+        ..harness::blank_task()
+    };
+    // 四个 worker 都报就绪，但退化规则保证一次只有一枪在途（`no_ranges_falls_back_…` 钉的那条），
+    // 所以枪数 excess 只能来自"按窗重请求"，不能来自并发。
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(want.clone()),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "退化形状（三个窗口的整条 body）也该跑得完：{:?}", rep.message);
+
+    // —— 判据 1：枪数。对端记下的请求条数（试探 + body）。
+    let ranges = peer.shot_ranges();
+    assert_eq!(
+        ranges.len(),
+        2,
+        "E16：对端不认 Range 时剩余整条 body 必须**一枪**下完 ⇒ 全程只许 2 条请求（试探 + 1 枪），\
+         实际 {} 条：{ranges:?} —— 每多一枪就重新要一遍「从文件头到那里」的 body，那一支的流量是平方级的\
+         （推出来的算术，见 E16 正文）",
+        ranges.len()
+    );
+
+    // —— 判据 2：线上区间（含"那一枪问到 EOF、写法是开放终点"）。
+    let spans = harness::wire_spans(&ranges.iter().cloned().map(Some).collect::<Vec<_>>(), len)?;
+    assert_eq!(spans[0], (0, PROBE_READ_BYTES - 1), "第一条必须是试探那一枪：{spans:?}");
+    assert_eq!(
+        spans[1],
+        (PROBE_READ_BYTES, len - 1),
+        "body 那一枪必须从「试探已确认字节之后」一直问到 EOF：{spans:?}"
+    );
+
+    // —— 判据 3：内容。整份散列（独立读者算的期望）+ 块号取证（起点 4096 对齐的尾部区段）。
+    let path = t.target_path();
+    assert_eq!(harness::sha256_of(&path)?, want, "一枪下完的 body 也要一字不差");
+    // 尾部这 236,032 个字节只有"那一枪"写过：起点取 3 MiB 处（4096 的整数倍，取证工具的硬要求）。
+    let tail_start = 3 * 1024 * 1024u64;
+    harness::require_block_alignment(&path, tail_start, len - tail_start)?;
+    let _ = std::fs::remove_file(&want_file);
+    Ok(())
+}
+
 /// **P4 / E13④ 点名而阶段5A 跳过的那一条：退避真的接进了循环（真等第一个 1 s）。**
 ///
 /// 表驱动的 `next_retry_delay` 只证明"这张表算得对"；本用例证明"表上那一格**真的被等了**"。
