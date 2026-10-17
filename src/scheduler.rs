@@ -142,8 +142,16 @@ impl Scheduler {
     /// "还没归属的连续空位"就是这些缝。**这一步不是可选的** —— 少了它，队列里那条 `[0, total-1]`
     /// 会把已确认字节重新算成待下载（`done + pending <= total` 当场红），也就等于整份重下。
     ///
-    /// 与"真跑出来的进度"等价：参照物由公开 API 造出来（见
-    /// `resume_seed_is_indistinguishable_from_earned_progress`），同一事件流下动作序列逐条相同。
+    /// 与"真跑出来的进度"等价 —— 参照物完全由公开 API 造出来。**等价判据按勘误 E15 的三条钉**，
+    /// 缺一不算过（原句"同一事件流下动作序列逐条相同"按字面**做不到**，已作废）：
+    /// ① **洞的集合相等**（按字节集比，不是比条数、也不是比总长 —— 只比条数会同时放过"漏一个洞"
+    ///    与"多并一个洞"）；② **种子里的字节一次都不许被重新派出**（`dispatched ∩ seed = ∅`，
+    ///    这条才是"不重下已完成段"的正身）；③ 每一步的 `pending_bytes()` / `is_done()` /
+    ///    `snapshot_intervals()` 两边一致，且两臂各自跑 `check_invariants`。
+    /// 用例：前缀种子在 `resume_prefix_seed_is_indistinguishable_from_the_run_that_earned_it`
+    /// （那种种子的补集天然只有一条，所以①②③之外**还多**拿到动作逐条相同 —— 那是特例不是通则）；
+    /// 多段空洞种子在 `resume_multi_gap_seed_matches_the_earned_state_byte_for_byte`（只钉①②③，
+    /// 为什么动作分岔是**对的**，写在那条用例的文档里）。
     ///
     /// 输入允许是**任意形状**：乱序、重叠、相邻、越过 `total_len`、空区间都会先夹进文件再归一化
     /// （调用方不该被要求先整理 —— 落盘的本来就是 `snapshot_intervals()`，但这里的独立归一化让
@@ -391,14 +399,22 @@ impl Scheduler {
 }
 
 /// 把区间夹进 `[0, total-1]`；空区间（以及 `total == 0` 的任何区间）给 `None`。
-/// `end >= start` 时夹完仍非空（两侧取同一个 `min` ⇒ 顺序不会反过来）。
+/// **整条越过 EOF 的行也给 `None`**（T8 评审 A1 修的那一格）：起点已经不在文件里，这条种子
+/// 一个已确认字节都不许造出来。把 `start` 也跟着 `min(last)` 夹一次会凭空造出一个
+/// **从没被下载过的"幽灵已确认字节"**（`total = 1000` 上的 `[1500, 2000]` 变成 `{999, 999}`）——
+/// `is_done()` 会因此为真而那个字节谁都没派过，`check_invariants` 还看不见（done + pending 照样平）。
+/// 正确读法与 `engine::clamp_seed_to_disk` 同一句话：那里用 `.filter(|iv| iv.start <= last)`
+/// 把整条越界的种子**丢掉**，不是夹回来。
+/// 起点不挪 ⇒ 夹完必然仍非空（`end` 只会降到 `last`，而 `start <= last` 是上面那道闸）。
 fn clamp_to_file(iv: Interval, total: u64) -> Option<Interval> {
     if total == 0 || iv.is_empty() {
         return None;
     }
     let last = total - 1;
-    let clamped = Interval { start: iv.start.min(last), end: iv.end.min(last) };
-    (!clamped.is_empty()).then_some(clamped)
+    if iv.start > last {
+        return None;
+    }
+    Some(Interval { start: iv.start, end: iv.end.min(last) })
 }
 
 /// 覆盖集 `done` 在 `[0, total-1]` 里的**补集** —— 播种后队列该有的那些"还没归属的连续空位"。
@@ -895,30 +911,34 @@ mod tests {
 
     // ---- **E13①**：`Scheduler::resume` 的播种门（Task 8 的续传入口） ----
 
-    /// 独立实现的"夹进 `[0,total-1]` 之后求极小覆盖集"：先剪成 `(起点,终点)` 对、排序，
-    /// 再用**游标累加**合并。与 `push_done` 的"插入 + 整表重排"写法不同 —— 两条路给出同一个结果
-    /// 才叫归一化，只有一条路的话测试是在自证。
+    /// 独立实现的"这批种子的极小覆盖集"：**逐字节成员判定**再把命中串成游程 ——
+    /// 对 `[0, total)` 里每个字节问一句"有没有哪条种子含它"，连续的命中合成一条区间。
+    ///
+    /// 为什么长这样（**E15 末尾的方法教训**，T8 评审 A1 的成因）：这一版之前抄了被测的那条夹法
+    /// （`iv.start.min(total - 1)`）⇒ 参照与 `clamp_to_file` 在**正被检验的那条轴**上不独立，
+    /// "整条越过 EOF 的种子被夹成一个幽灵已确认字节"这一类缺陷当场看不见（两边一起错、一起绿）。
+    /// 现在这个参照**不共享**被测的任何一条规则：不夹边界（文件之外的字节根本不在扫描范围里）、
+    /// 不排序、不做"插入 + 相邻合并"，只回答"这个字节在不在种子里"。空区间与越界行因此自然消失。
+    ///
+    /// 可比轴只有一条：**字节集合**。动作序列、队列粒度、夹法规则一概不可比，也不许拿来当
+    /// E15 那三条性质里 ②③ 的参照（那两个函数测的是别的轴）。
+    /// 代价是 `O(total × seeds)`，测试用的 `total` 只有几千，慢一点没关系（刻意的笨换独立性）。
     fn cover(seeds: &[Interval], total: u64) -> Vec<Interval> {
-        if total == 0 {
-            return vec![];
-        }
-        let mut clipped: Vec<(u64, u64)> = vec![];
-        for iv in seeds {
-            if iv.is_empty() {
-                continue;
-            }
-            let (s, e) = (iv.start.min(total - 1), iv.end.min(total - 1));
-            if e >= s {
-                clipped.push((s, e));
-            }
-        }
-        clipped.sort_unstable();
+        let held = |b: u64| seeds.iter().any(|iv| iv.start <= b && b <= iv.end);
         let mut out: Vec<Interval> = vec![];
-        for (s, e) in clipped {
-            match out.last_mut() {
-                Some(last) if s <= last.end.saturating_add(1) => last.end = last.end.max(e),
-                _ => out.push(Interval { start: s, end: e }),
+        let mut run: Option<(u64, u64)> = None;   // 当前这段连续命中的 (起点, 含端点)
+        for b in 0..total {
+            if held(b) {
+                match run {
+                    Some((s, e)) => run = Some((s, e.max(b))),
+                    None => run = Some((b, b)),
+                }
+            } else if let Some((s, e)) = run.take() {
+                out.push(Interval { start: s, end: e });
             }
+        }
+        if let Some((s, e)) = run {
+            out.push(Interval { start: s, end: e });
         }
         out
     }
@@ -1180,6 +1200,55 @@ mod tests {
         sc.on(Event::WindowDone { worker: 0 });
         assert!(sc.is_done());
         assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "补完缝后整段覆盖，不重复计字节");
+    }
+
+    /// **T8 评审 A1（真缺陷）**：**整条越过 EOF 的种子必须整条丢掉，一个已确认字节都不许造出来**。
+    ///
+    /// 修之前的写法把 `start` 和 `end` **一起**夹到 `last`（`iv.start.min(last)`）⇒ `total = 1000`
+    /// 上的 `[1500, 2000]` 变成 `{999, 999}`：一个**从没被下载过**的"幽灵已确认字节"。它能骗过两样东西：
+    /// `is_done()` 会因为补集空了而为真，`check_invariants` 也看不见（done 与 pending 照样把文件分完，
+    /// 平的）。而隔壁 `engine::clamp_seed_to_disk` 早就给了正确读法（`.filter(|iv| iv.start <= last)`
+    /// 整条丢掉）—— 门的夹法与调用方的夹法各说各话，就是这一格。
+    ///
+    /// 期望值**全部写死**（不问被测函数要），`cover` 只作为"字节集合"这条轴上的第二意见
+    /// （它刻意不共享夹法，见它自己的文档）。
+    #[test]
+    fn a_seed_that_starts_past_eof_confirms_no_bytes_at_all() {
+        const TOTAL: u64 = 1_000;
+        let past = [Interval { start: 1_500, end: 2_000 }];
+
+        // ① 只有整条越界的种子 ⇒ 等价于"没有种子"：覆盖集空、全长还欠着、没收工。
+        let empty_handed = Scheduler::resume(TOTAL, 100, &past);
+        assert_eq!(empty_handed.snapshot_intervals(), vec![], "起点在文件之外的种子不许留下任何已确认字节");
+        assert_eq!(empty_handed.pending_bytes(), 1_000, "1000 个字节一个都没归属");
+        assert!(!empty_handed.is_done(), "幽灵已确认字节会把任务判成完成 —— 这一条就是那场事故的正面");
+        assert_eq!(empty_handed.snapshot_intervals(), cover(&past, TOTAL), "字节集合这条轴上与独立参照一致");
+        check_invariants(&empty_handed, TOTAL, "seed-past-eof-only");
+
+        // ② 混着给：夹回来的行（起点在文件内）算数，三条整条越界的一律丢掉。
+        let mixed = [
+            Interval { start: 900, end: 50_000 }, // 起点在内、终点越界 ⇒ 夹到 999（唯一的合法行）
+            Interval { start: 1_500, end: 2_000 }, // 整条越界
+            Interval { start: 1_000, end: 1_000 }, // 单字节，正好落在 EOF 之外第一格
+            Interval { start: 4_000, end: 9_999 }, // 整条越界，且很长
+        ];
+        let mut sc = Scheduler::resume(TOTAL, 100, &mixed);
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 900, end: 999 }], "只有 [900,999] 这一条进了覆盖集");
+        assert_eq!(sc.pending_bytes(), 900, "还欠 [0,899] 这 900 个字节");
+        assert!(!sc.is_done());
+        check_invariants(&sc, TOTAL, "seed-past-eof-mixed");
+        // 第一枪只能派没归属的那条缝，而且终点必须停在种子之前。
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 899 } }],
+            "派出去的区间只能是 [0,899]：不许从幽灵字节 999 之外凭空多出字节"
+        );
+
+        // ③ `total == 0` 那一支本来就什么都不接，与"整条越界"同一立场。
+        let nothing = Scheduler::resume(0, 100, &[Interval { start: 0, end: 9 }]);
+        assert_eq!(nothing.snapshot_intervals(), vec![], "空文件没有可确认的字节");
+        assert_eq!(nothing.pending_bytes(), 0);
+        assert!(nothing.is_done());
     }
 
     /// 种子在**中间**（两侧都有待下载的缝）时，补集必须是两条缝，且派发按正常的"最长优先"走。
