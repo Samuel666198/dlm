@@ -46,24 +46,41 @@
 //! 集成用例 `full_download_is_byte_exact` 顺手也走这一支（8 MiB 的第一条区间长过 4 MiB 的窗口），
 //! 但它**不是**这条差一的可靠判据 —— 洞落在 blob 的块首（非零）上的概率只有 4096 分之一。
 //!
-//! ## `Retighten` 不是一枪：本模块对 E13③ 的一处偏离
+//! ## `Retighten` 不是一枪，但它有一条通道（阶段 5A 按 **E14**① 改过这一节）
 //!
 //! `scheduler::Action::Retighten{worker, iv}` 的文档说"它必须改用带显式终点的新请求"。在
 //! `fetch::run_window` 的形状下这句话**执行不了**：那个 worker 此刻正阻塞在一次 `read()` 里
 //! （一发请求一个结论，中间没有任何通道能递话给它），而"再发一枪"要么排在当前这枪之后
-//! （起点是 `iv.start` ⇒ 把已经写过的前缀重下一遍），要么并发第二条连接（`workers` 的意义就变了）。
-//! 所以引擎的做法是：**把收紧记下来，不发新的一枪**（见 `action_for_worker`）。
+//! （起点是 `iv.start` ⇒ 把已写的前缀重下一遍），要么并发第二条连接（`workers` 的意义就变了）。
+//! 所以引擎的做法是：**不发新的一枪**。阶段 4 到这里就停了（只记 `Tightened`），于是那一枪照旧
+//! 把自己那个窗口（最多 `WINDOW_BYTES` = 4 MiB）读完，多出来的字节全进 `bytes_duplicated`
+//! —— 阶段4 实测 8 MiB 文件多打 4.27 MiB（`response_done` 口径）/ 8.2 MiB（`conn_close_side` 口径）。
 //!
-//! 这不是丢功能，是把调度器的意图按它能兑现的方式兑现：
-//! - 调度器自己会把 `Progress` **夹到收紧后的终点**（`scheduler.rs:218` 的
-//!   `abs_end.min(a.iv.end)`），所以在途那一枪多写的字节不会进覆盖集；
-//! - 那些多写的字节如实记进 `bytes_duplicated`（`translate` 返回值的第二项），账不骗人；
-//! - 那一枪交回之后 worker 重新领活，拿到的区间是调度器按真实剩余算出来的，不会重下前缀。
+//! **E14**①（乙）给的就是那条唯一存在的通道：**终点帽**。每个 worker 一格 `Arc<fetch::EndCap>`
+//! （`AtomicU64`，装"这一枪最多还允许写到哪个**含端点**的偏移"）：
+//! - `dispatch` 在**发 Job 之前**把它重置成 `NO_END_CAP`（顺序是判据：反过来 worker 可能把上一枪的
+//!   旧帽读进这一枪）；
+//! - `run_window` 一进门把自己的窗口终点 `stop - 1` **降**进去（`lower_end_cap` ⇒ 只降不升）；
+//! - 主线程处理 `Shot::Tighten{worker, iv}` 时把 `iv.end` 降进去（`ping_free_workers` 里，与
+//!   调度器做决定的那一刻同一次遍历 ⇒ 帽不会晚于决定本身）；
+//! - 那一枪在每块 64 KiB 之前查一次帽，越过帽就**停手**，交回的还是已有的 `Advanced { bytes }`。
+//!   没有 sleep、没有第二条读 socket 的线程、没有 `tokio`、没有轮询定时器（E14① 的形状约束）。
 //!
-//! 代价要说清：在途那一枪最多把**它自己那个窗口**（`WINDOW_BYTES`）读完，多读的那一截是真浪费。
-//! `TraceStep::Tightened` 因此与 `Dispatched` **分列**：前者说"调度器把谁的目标提前了"，
-//! 后者说"引擎真打出去的一枪"。阶段 5 那道"与线上 `Range` 对齐"的链接只能拿 `Dispatched` 比
-//! —— 把 `Tightened` 也算进线上区间会凭空多出一批不存在的请求。
+//! **一处对 E14 字面的偏离（必须说清）**：E14① 的括号里写的是 `fetch_max`，但同一条要求"帽**只降不升**
+//! （更大的陈旧值不许把已经收紧的枪放宽）"—— `fetch_max` 是单调**升**，按字面写正好把那条性质做反。
+//! 落地按**性质**走：`fetch_min`（等价写法是对 `u64::MAX - end` 用 `fetch_max`，读起来更绕，不取）。
+//! 钉它的用例：单元 `end_cap_lowering_is_monotonic_downward_only`（`src/fetch.rs`）与集成
+//! `an_end_cap_already_lowered_before_the_shot_starts_survives_the_shots_own_window`。
+//!
+//! 代价要照实说，帽管不到的那一截还在：帽只能拦**它落下之后**还要读的那些字节（一块之内），
+//! 拦不到"调度器决定收紧时那一枪已经读过去的字节"—— 调度器只在一枪结束时才从 `Progress` 知道
+//! 它读到哪儿（`scheduler.rs` 的 `written` 是收枪才更新的），所以一刀可能落在 incumbent 早已写过的
+//! 偏移之下。阶段5A 实测同一形状（8 MiB / 4 worker，节拍对端）重复账从 8.2 MiB 降到 3.1–3.5 MiB，
+//! 每笔收紧的平均代价从 ~8.4 块降到 ~3 块；要到"每笔 ≤ 一块"得让**调度器**别反复劈同一条在途尾巴
+//! （派发明确禁止改那条规则），已登记给控制员。
+//!
+//! `TraceStep::Tightened` 与 `Dispatched` 仍然**分列**：前者说"调度器把谁的目标提前了"（以及帽降到了
+//! 哪儿），后者说"引擎真打出去的一枪"。阶段 5 那道"与线上 `Range` 对齐"的链接只拿 `Dispatched` 比。
 //!
 //! ## 保存断点的节奏（brief 那句"`STATE_SAVE_MAX_INTERVAL_SECS` + 关键事件"的读法）
 //!
@@ -191,7 +208,8 @@ pub enum TraceStep {
     /// 调度器只有在这一步上交回动作，漏掉它回放就复现不出派发序列。
     Fed(Event),
     /// 引擎照某个 `Assign` **真打出去的一枪**（区间与线上那条 `Range` 一一对应：
-    /// `fetch::range_header` 发的就是 `[iv.start, iv.end]`，末段写成开放终点）。
+    /// `fetch::range_header` 发的是这一枪的**窗口** `[iv.start, min(iv.end, iv.start + WINDOW_BYTES - 1)]`，
+    /// 只有窗口够到文件尾才写成开放终点 —— 见 **E14**② 与 `src/fetch.rs` 模块文档）。
     Dispatched { worker: usize, iv: Interval },
     /// 调度器把某个在途 worker 的终点提前了。**引擎不为此发新的一枪**（理由见模块文档
     /// "`Retighten` 不是一枪"那节），所以它绝不能混进 `dispatched()` —— 那道链接要比的是线上真收到的 Range。
@@ -217,7 +235,9 @@ pub struct Report {
     /// 归属已定的字节（覆盖集）。**与 `delivered` 不是一回事**，见模块文档那两本账。
     /// 带 `--data-file` 的那一支**没有覆盖账**（E13④：该形状不落断点），所以那一支恒 0。
     pub confirmed: u64,
-    /// 重复下载被覆写/丢弃的字节。
+    /// **落在归属范围之外、由别人重下的字节**（不是"线上流量账单"，勘误 **E14**③；字段口径与
+    /// 它为什么不是账单都写在 `state::Stats::bytes_duplicated` 的文档里，两处是同一个数）。
+    /// 带 `--data-file` 的那一支恒 0（那一支根本没有归属账）。
     pub duplicated: u64,
     /// 快速 + 慢速重试的总次数（spec §6.1/§6.2）。
     pub retries: u32,
@@ -547,8 +567,10 @@ fn shot_bytes(outcome: &Outcome, shot: Interval) -> u64 {
 }
 
 /// 这一枪写下的字节里，落在"调度器此刻认给这个 worker 的区间"之内的部分。
-/// 超出那一段只有一种来源：`Retighten` 之后在途那一枪继续读了自己那个窗口（模块文档那节），
-/// 那些字节真在盘上、但永远不会进覆盖集 ⇒ 由另一枪重下 ⇒ 正是 `bytes_duplicated` 该计的账。
+/// 超出那一段（**E14**① 乙之后只剩帽追不回的那两类）：收紧落在这枪**结束之后**（字节已经写了），
+/// 或者调度器按上次上报的进度判出的新终点落在这枪**早已读过的位置之下** —— 帽只能往下压、不能往回退。
+/// 越过帽本身最多一个 64 KiB 分块。这些字节真在盘上、但永远不会进覆盖集 ⇒ 由另一枪重下
+/// ⇒ 正是 `bytes_duplicated` 该计的账（口径见 `state::Stats::bytes_duplicated`）。
 fn in_scope_bytes(shot: Interval, bytes: u64, owned: Interval) -> u64 {
     if bytes == 0 {
         return 0;
@@ -776,6 +798,9 @@ struct WorkerSpawn {
     jobs: Receiver<Job>,
     reports: Sender<WorkerReport>,
     alive: Arc<AtomicBool>,
+    /// 这一枪的**终点帽**（勘误 **E14**①）：每个 worker 一格，主线程在 `Retighten` 上往下调，
+    /// `fetch::run_window` 每读一块查一次。与 `alive` 同一地位（跨线程那一侧的东西都从这里出发）。
+    cap: Arc<fetch::EndCap>,
     client: Arc<Client>,
     task: Arc<Task>,
     store: Arc<Store>,
@@ -800,8 +825,13 @@ impl Drop for Heartbeat {
 }
 
 /// worker 的全部职责：`recv 一个区间 → 打那一枪 → 交回结论`。不认识调度器，不认识断点文件。
+///
+/// `cap` 是**这一枪**的终点帽（勘误 **E14**①）：主线程在 `Retighten` 上把它往下调，
+/// `run_window` 每读一块查一次。这一格与这个 worker 同生同死（`Engine::new` 建、随 `dispatch`
+/// 重置），所以收紧永远递得给"此刻在途的那一枪"—— 这是 `Retighten` 唯一能兑现的通道：
+/// 那个线程正阻塞在 `resp.read()` 里，除了它自己每块看一眼的格子，外面没有任何东西能插话。
 fn worker_loop(spawn: WorkerSpawn) {
-    let WorkerSpawn { worker, jobs, reports, alive, client, task, store, total_len } = spawn;
+    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len } = spawn;
     let _heartbeat = Heartbeat::new(alive);
     // `recv` Err = 主线程已经交回发送端（引擎退出）⇒ 收工。`Job::Stop` 是正常出口。
     while let Ok(job) = jobs.recv() {
@@ -810,7 +840,7 @@ fn worker_loop(spawn: WorkerSpawn) {
             Job::Fetch { iv, rate_bps } => {
                 // `run_window` 里的 `Err` 只有一种来源：`store.write_at` 失败（网络失败它自己折成
                 // `Outcome::Failed`）。所以上抛的就是"落盘坏了"这一件事，主线程据此停整个任务。
-                let outcome = fetch::run_window(&client, &task, iv, &store, rate_bps, total_len);
+                let outcome = fetch::run_window(&client, &task, iv, &store, rate_bps, total_len, &cap);
                 if reports.send(WorkerReport { worker, iv, outcome }).is_err() {
                     break; // 主线程不在了，交回给谁都没意义
                 }
@@ -840,6 +870,11 @@ struct Engine {
     handles: Vec<JoinHandle<()>>,
     workers: Vec<WorkerCtl>,
     alive: Vec<Arc<AtomicBool>>,
+    /// 每个 worker 一格**终点帽**（勘误 **E14**①）：主线程处理 `Action::Retighten{worker, iv}` 时
+    /// 把 `iv.end` **往下**调，那一枪的读循环每块查一次 ⇒ 收紧终于递得进正阻塞在 `read()` 里的那一枪。
+    /// 与 `alive` 同一地位（每 worker 一格、随 `Engine` 生灭）；`dispatch` 在发下一枪之前重置它，
+    /// 所以"帽只降不升"这条纪律的作用域是**一枪之内**（跨枪重置是主线程自己写的，不会与 worker 抢）。
+    caps: Vec<Arc<fetch::EndCap>>,
     /// 调度器此刻认给每个 worker 的区间（`Retighten` 会就地改它）。**不是第二本覆盖账**：
     /// 它只回答"这一枪的字节该不算作重复的那条边界在哪"，覆盖集永远只有 `snapshot_intervals()`。
     current: Vec<Option<Interval>>,
@@ -869,14 +904,18 @@ impl Engine {
         let mut jobs = Vec::with_capacity(count);
         let mut handles = Vec::with_capacity(count);
         let mut alive = Vec::with_capacity(count);
+        // 终点帽一格一个 worker（**E14**①）：初值就是"外面没有帽"，`dispatch` 每次发枪前重置。
+        let mut caps = Vec::with_capacity(count);
         for worker in 0..count {
             let (tx, rx) = channel::<Job>();
             let flag = Arc::new(AtomicBool::new(true));
+            let cap = Arc::new(fetch::EndCap::new(fetch::NO_END_CAP));
             let spawn = WorkerSpawn {
                 worker,
                 jobs: rx,
                 reports: reports_tx.clone(),
                 alive: Arc::clone(&flag),
+                cap: Arc::clone(&cap),
                 client: Arc::clone(&client),
                 task: Arc::clone(&task),
                 store: Arc::clone(&store),
@@ -887,6 +926,7 @@ impl Engine {
                     jobs.push(tx);
                     handles.push(handle);
                     alive.push(flag);
+                    caps.push(cap);
                 }
                 Err(e) => {
                     // 收回已起的线程：它们要么阻塞在 `recv`（`Stop` 立刻生效），要么在跑一枪（有窗口预算封顶）。
@@ -920,6 +960,7 @@ impl Engine {
             handles,
             workers: vec![idle; count],
             alive,
+            caps,
             current: vec![None; count],
             trace: Vec::new(),
             fresh_reason,
@@ -990,11 +1031,15 @@ impl Engine {
                             return Some(stop);
                         }
                     }
-                    // 收紧在途那一枪的目标：**不发新的一枪**（模块文档那节）。
+                    // 收紧在途那一枪的目标：**不发新的一枪**（模块文档那节），而是把终点帽递下去。
                     // 序号可能不是 `worker` 而是另一个正忙的 worker（`split_tail` 正是这样），
                     // 所以这里按动作里的那个序号记账。区间不可能为空：`split_tail` 只在两半截
                     // 都不低于 `min_seg` 时才收紧。
                     Shot::Tighten { worker: w, iv } => {
+                        // **E14**① 乙：这一句就是"Retighten 兑现不了"那笔账的还债处。
+                        // 只往下调（`fetch::lower_end_cap`），所以一个来路不明的更大值
+                        // 不会把已经收紧的枪重新放宽。
+                        fetch::lower_end_cap(&self.caps[w], iv.end);
                         self.current[w] = Some(iv);
                         self.record(TraceStep::Tightened { worker: w, iv });
                     }
@@ -1006,8 +1051,15 @@ impl Engine {
     }
 
     /// 把一枪交给 worker。发不出去 = 那个线程已经不在了。
+    ///
+    /// **顺序是判据的一部分**：先把终点帽重置成"外面没有帽"，再 `send`。
+    /// 反过来的话 worker 可能在重置之前就把上一枪的旧帽读进去 —— 那一枪会被一个不属于它的
+    /// 终点提前掐掉（少写不致错，但那是"上一段的账管到这一段"，正是 E7 禁的第二本账的形状）。
+    /// `mpsc::send` 与 worker 侧的 `recv` 之间的同步把这次重置带到那一枪眼前（原子格子自己
+    /// 用 `Release`/`Acquire` 这一对，不靠"大概看得见"）。
     fn dispatch(&mut self, worker: usize, iv: Interval) -> Option<Stop> {
         let rate = running_rate_bytes_per_sec(self.run_delivered, self.started.elapsed());
+        self.caps[worker].store(fetch::NO_END_CAP, Ordering::Release);
         if self.jobs[worker].send(Job::Fetch { iv, rate_bps: rate }).is_err() {
             return Some(Stop::WorkerGone { worker: Some(worker) });
         }
@@ -1428,8 +1480,11 @@ mod tests {
         assert_eq!(translate(&Outcome::Complete, empty, empty, 0).0, vec![Event::SegmentComplete { worker: 0 }]);
     }
 
-    /// **重复字节**只有一种来源：字节落在了调度器认给这个 worker 的区间之外
-    /// （`Retighten` 之后在途那一枪继续读完了自己那个窗口）。
+    /// **重复字节**只有一种来源：字节落在了调度器认给这个 worker 的区间之外。
+    /// （阶段5A 之前那节模块文档给的例子是"收紧后在途那一枪读完整个窗口"；**E14**① 的终点帽
+    /// 把这条砍到"最多越过帽一个 64 KiB 分块"，剩下的两条是帽追不回的位置——收紧落在这一枪
+    /// 结束之后、或新终点落在这枪早已读过的位置之下。`translate` 算的是**口径**，与帽怎么收紧无关，
+    /// 所以这里的夹具仍然直接给 `(这一枪的区间, 落盘字节, 此刻认给的区间)` 三元组。）
     #[test]
     fn duplicate_bytes_count_only_what_fell_outside_the_owned_interval() {
         let shot = Interval { start: 0, end: 999 }; // 被派的是 1000 个字节
@@ -1454,6 +1509,48 @@ mod tests {
                 n => assert_eq!(events[0], Event::Progress { worker: 0, abs_end: s.start + n - 1 }, "{case}"),
             }
         }
+    }
+
+    /// **E14③（乙-label）的口径钉死**：这本账 = "落在归属范围之外、由别人重下的字节"，
+    /// 来源只有两个（另一处是 `run` 里 `overlap_with` 那笔 kill+续传的账），而且**不是**流量账单。
+    ///
+    /// 三条格子各自挡一种写法：
+    /// - ① 读满自己那个窗口 ⇒ **零**。把 `duplicated` 写成 `landed`（阶段4 那本读起来像账单的账，
+    ///   同一形状报 8.4 MiB 而线上真实多打 4.3 MiB）在这一格当场红 —— 那一枪读的字节本来就归它，
+    ///   一个字节都没被重下。
+    /// - ② 帽之后多落的那一块才是账：`fetch::cap_allows` 在块首问 ⇒ 越帽的一块整块落，
+    ///   这本账看到的就只有那一块。
+    /// - ③ 起点落在归属之外（陈旧帽/别的形状）⇒ 整枪都算，不许只算"越出终点的右边"。
+    #[test]
+    fn the_duplicate_book_counts_only_what_fell_outside_the_owned_range() {
+        let window = crate::consts::WINDOW_BYTES;
+        let shot = Interval { start: 0, end: window - 1 };
+        let (_, landed, duplicated) = translate(&Outcome::Advanced { bytes: window }, shot, shot, 0);
+        assert_eq!(landed, window, "整窗都是落盘量");
+        assert_eq!(duplicated, 0, "①读满自己那个窗口不是重复：帽/归属没动，一个字节都不会被重下");
+
+        let owned = Interval { start: 0, end: 100_000 };
+        let crossed = 100_001 + 65_536;
+        let (_, landed, duplicated) = translate(&Outcome::Advanced { bytes: crossed }, shot, owned, 0);
+        assert_eq!(landed, crossed);
+        assert_eq!(duplicated, 65_536, "②越帽的那一块整块落 ⇒ 这本账的全部就是那一块（64 KiB）");
+
+        let all_mine = Interval { start: 500, end: 999 };
+        let (_, _, duplicated) = translate(
+            &Outcome::Advanced { bytes: 100 },
+            Interval { start: 0, end: 99 },
+            all_mine,
+            0,
+        );
+        assert_eq!(duplicated, 100, "③整枪都落在归属之外 ⇒ 全是账（不许只算越过右终点的那截）");
+
+        // 同一格在 `Complete` 那一支也要成立：`Complete` 交回的是区间全长，归属没缩就是零。
+        let (_, landed, duplicated) = translate(&Outcome::Complete, shot, shot, 0);
+        assert_eq!((landed, duplicated), (window, 0), "Complete 不该凭空造出重复账");
+
+        // ④ 这本账不许为负：`landed` 比归属短的时候是 0，不是 `usize` 下溢（debug 直接 panic）。
+        let short = translate(&Outcome::Advanced { bytes: 10 }, shot, owned, 0);
+        assert_eq!(short.2, 0, "落得比归属还短 ⇒ 没有重复");
     }
 
     /// `Retighten` **不是**一枪：它只把在途那一枪的目标提前。

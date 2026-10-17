@@ -60,6 +60,31 @@
 //!    真对端 + 块号取证）、`a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body`
 //!    （进程内节拍对端，另加一条"对端在客户端挂断前写出了多少字节"钉住不许缓冲整个 body）。
 //!
+//! ## 阶段5A：E14 的两条（终点帽 + 窗口终点）改了这个模块的对外形状
+//!
+//! 1. **`run_window` 又多一个参数：`cap: &EndCap`**（勘误 **E14**① 乙）。**E12① 那条
+//!    "签名多了 `total_len`"以 E14 为准再改一次** —— 现在七个参数。
+//!    `EndCap` 就是 `AtomicU64`，装的是"这一枪最多还允许写到哪个**含端点**的偏移"：
+//!    `run_window` 进门先把自己的窗口终点 `stop - 1` **降**进去（`lower_end_cap`），之后读循环
+//!    每块在块首问一次 `cap_allows`；越过帽就停手，交回的还是已有的 `Advanced { bytes }`
+//!    （不是新的结论形状）。调用方给 `&AtomicU64::new(NO_END_CAP)` 就等于"外面没人喊停"，
+//!    行为与这一条之前**逐字节相同** —— 集成用例里那二十多处 `&harness::uncapped()` 就是这个意思。
+//!    帽为什么只能**往下**（`fetch_min`；E14 括号里那个 `fetch_max` 做不到它同时要求的性质，
+//!    见 [`lower_end_cap`] 的文档），以及帽低于起点时为什么夹回起点（零字节的 `Advanced` 是
+//!    Task 8 数不到的那种进度），两条用例各钉一格。
+//! 2. **`Range` 的开放终点判据里的"终点"是窗口**（勘误 **E14**② 戊）：条件从 `iv.end + 1 >= total_len`
+//!    改成 `min(iv.end, iv.start + WINDOW_BYTES - 1) + 1 >= total_len`，而显式写法发的也是**那个**
+//!    终点（窗口那一格），不是 `iv.end`。文件真正那一尾仍然发 `bytes={start}-`（IDM 的观察，
+//!    spec §3，用例 `range_start_open_ended_but_respects_explicit_end` 的③那一格钉着），
+//!    变的只有一件事：**窗口够不着 EOF 的那一枪不许再问 EOF**（旧写法对 `[236032, 8 MiB-1]`
+//!    发 `bytes=236032-`，等于授权对端流 7.75 MiB，而我们最多读 4 MiB 就收手 ⇒ 阶段4 那笔
+//!    重复流量的起点）。判据的取法改动**只**影响"区间比一个窗口宽"的形状：区间比窗口窄时
+//!    `min` 取到的就是 `iv.end`，与 E14 之前逐字相同（用例 `only_the_interval_that_reaches_the_end...`
+//!    的其余格子因此一条没动）。
+//! 3. **`probe` 不受这两条影响**：试探那条 `bytes=0-<prelude_max-1>` 住在 `probe::prelude_range`，
+//!    与这里的 `range_header` 是两个函数（E11① 把试探与窗口分成两条入口之后本来就不共用终点判据），
+//!    所以 `/noranges` 的 1,048,576、"206 没有 `Content-Range` 就拒"、E11③ 那张真值表都原样活着。
+//!
 //! ## 另外四条钉住的性质
 //!
 //! - **`206` 却说不出它交的是哪一段**（没有 `Content-Range`，或它的起点不等于 `iv.start`）⇒
@@ -144,6 +169,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -306,14 +332,28 @@ pub fn window_budget(rate_bps: u64) -> Duration {
 
 /// 这一枪发哪一条 `Range`（spec §2 表里"发 `Range: start-`"、§3 对 IDM 开放终点的观测）。
 ///
-/// 末段（`iv.end` 就是文件的最后一个字节，或**越过**它）发 `bytes={start}-`：那条写法本来就在说
-/// "到文件末尾为止"，多写一个终点是对同一个意思的两种表述，而观测到 IDM 发的是前者。
-/// 其余一律带显式终点 —— 少了那个终点，对端就会把一个窗口的字节之外的东西也送过来。
+/// **E14②（戊）改过这一条规则**，判据里的"终点"是**这一枪的窗口**，不是区间的终点：
+/// `window_end = min(iv.end, iv.start + WINDOW_BYTES - 1)`，只有 `window_end + 1 >= total_len`
+/// 才发 `bytes={start}-`。
+///
+/// 为什么原来那条（`iv.end + 1 >= total_len`）不成立：它把"这个区间**伸到**文件末尾"读成
+/// "这一枪**会读到**文件末尾"，于是对一个比一个窗口宽的尾巴区间发出**无界**的请求 ——
+/// 对端有权把整条尾巴推过来，而 `run_window` 最多读 `WINDOW_BYTES` 就收手，多出来的那一截
+/// 全留在连接上（阶段4 实测 8 MiB 文件真多打 4.1 MiB 的机制起点，勘误 **E14**）。
+/// 窗口本来就填不满区间时，请求必须只问到窗口那一格：那一段我们注定不会读。
+///
+/// 保住的那半：**文件真正的那一尾**（窗口终点 == `total_len - 1`）仍然发开放终点 ——
+/// IDM 观测到的就是 `bytes={start}-`（spec §3），两种写法对端交的是同一批字节，多写一个终点
+/// 是对同一个意思的两种表述。
+/// 越过全长（`scheduler` 由 `total_len` 派区间，本不该出现）按"到文件末尾为止"读，同上一条。
 fn range_header(iv: Interval, total_len: u64) -> String {
-    if iv.end.saturating_add(1) >= total_len {
+    // `WINDOW_BYTES - 1`：`iv.start + WINDOW_BYTES` 是**不含**的窗口上界（下面 `stop` 用的就是它），
+    // 这里要的是含端点的最后一格，所以减一。`saturating_add`：起点贴近 `u64::MAX` 时不许回绕。
+    let window_end = iv.end.min(iv.start.saturating_add(WINDOW_BYTES - 1));
+    if window_end.saturating_add(1) >= total_len {
         format!("bytes={}-", iv.start)
     } else {
-        format!("bytes={}-{}", iv.start, iv.end)
+        format!("bytes={}-{}", iv.start, window_end)
     }
 }
 
@@ -429,11 +469,64 @@ fn written(iv: Interval, cursor: u64) -> u64 {
     cursor.saturating_sub(iv.start)
 }
 
+/// 这一枪的**终点帽**（勘误 **E14**① 乙）：把 `Action::Retighten` 递进正阻塞在 `read()` 里的那一枪。
+///
+/// 装的是"这一枪最多还允许写到哪个**含端点**的偏移"，初值 `u64::MAX` = "外面还没说话"，
+/// `run_window` 一进读循环前会把它自己的窗口终点也**降**进去（见 `lower_end_cap` 那条纪律）。
+/// 引擎每个 worker 一格 `Arc<AtomicU64>`：派这一枪之前重置成 `u64::MAX`，
+/// 主线程处理 `Action::Retighten{worker, iv}` 时把 `iv.end` 降进去，
+/// worker 手上那一枪在每块（64 KiB）之前查一次 ⇒ 收紧终于有了兑现的通道
+/// （阶段4 的记录是"收紧记下来但不发新的一枪，多写的字节全算重复"）。
+///
+/// 为什么是"帽"而不是"新请求"：在途那一枪正阻塞在 `resp.read()` 里，中间没有任何通道能递话给它，
+/// 除了它自己每读一块时看一眼的这一个格子。再发一枪要么排在当前这枪之后（起点还是 `iv.start`
+/// ⇒ 把已写的前缀重下一遍），要么并发第二条连接（`workers` 的意义就变了）。
+pub type EndCap = AtomicU64;
+
+/// "外面没有帽"的那个值：`run_window` 只会把自己的窗口终点降进去，读满一个窗口照旧。
+pub const NO_END_CAP: u64 = u64::MAX;
+
+/// 把终点帽**往下**调（勘误 **E14**① 的原话是 `fetch_max`；能让"只降不升"成立的原语是
+/// `fetch_min` —— `fetch_max` 是单调**升**，按字面写会把那条性质反过来，详见下面与模块文档）。
+///
+/// 要保住的那条性质：**一个来路不明的、更大的值，绝不允许把已经收紧的枪重新放宽**。
+/// 可达的形状是"上一枪的帽还挂在格子上的同时，主线程给这一枪写了个更大的终点"——
+/// 更直接的形状是并发：主线程刚把帽降到 `A`，另一个写入者（同一格子的另一方）写进 `B > A`。
+/// 用 `fetch_min` 时 `B` 等于没写；用 `fetch_max` 时 `B` 生效 ⇒ 那一枪又读回宽区间。
+/// 所以这里按**性质**落地，而不是按 E14 括号里那个原语名落地（等价写法是对
+/// `u64::MAX - end` 用 `fetch_max`，读起来更绕，不取）。
+/// 钉住的用例：`end_cap_lowering_is_monotonic_downward_only`（单元，两侧都钉）。
+pub fn lower_end_cap(cap: &EndCap, new_end: u64) {
+    cap.fetch_min(new_end, Ordering::AcqRel);
+}
+
+/// 读循环每一块只问一句：**这个终点帽还让不让继续写**（勘误 **E14**① 的收手判据）。
+///
+/// `cursor` 是"下一个要写的绝对偏移"（exclusive），`cap_end` 是"允许写的最后一个绝对偏移"（含端点）。
+/// 判据是 `cursor > cap_end` 才停 ⇒ 越过帽的那一块是**整块**落的（帽之外最多一块 `CHUNK_BYTES`），
+/// 这正是 `Report::duplicated` 那一笔的上界形状。刻意**不**把那一块切到帽为止：切法要新增一条
+/// "半块写了、半块丢弃"的账，而 `write_at` 的字节账会从"读了多少写多少"变成两种写法各说一遍。
+///
+/// 那个 `max(shot_start)`：一个**比这一枪起点还低**的帽（只能来自陈旧格子，引擎重置后不可达）
+/// 若照字面拦，会让这一枪一个字节都不写就交回 `Advanced { bytes: 0 }` —— 零字节的 `Advanced`
+/// 在 Task 8 那里谁也数不到（`Progress` 给不出、重试封顶又不计它），正是 M9 那条纪律要拦的形状。
+/// 所以起点以下不算话：**至少写一块，然后收手**。
+fn cap_allows(cap_end: u64, cursor: u64, shot_start: u64) -> bool {
+    cursor <= cap_end.max(shot_start)
+}
+
 /// 领一个字节区间，最多下**一个窗口**，把字节按绝对偏移交给 `store`。
 ///
 /// `agent` 由调用方持有并复用（连接池才有意义）；`rate_bps` 只用来定窗口预算；
 /// `total_len` 是 `ProbeFacts` 那份文件长度（裁定 1：末段要不要发开放终点必须由它决定，
 /// 也用来判 416 的分母）。
+///
+/// `cap` 是这一枪的**终点帽**（[`EndCap`]，勘误 **E14**①）：读循环每块查一次，
+/// `cursor` 一旦越过帽就**停手**，交回的还是已有的 `Advanced { bytes }`（不是新的结论形状）。
+/// 传 `&AtomicU64::new(NO_END_CAP)` 就是"没有外面的帽"，行为与 E14 之前逐字节相同
+/// —— `run_window` 自己那一格的窗口终点仍然会降进去，所以这一参数**不需要**调用方先填对。
+/// 为什么放在最后一位而不是包进某个 `Options`：签名已经有六个参数，而这一个是唯一会变的。
+/// **勘误 E12① 那条"签名多了 `total_len`"以 E14 为准再加一个。**
 pub fn run_window(
     agent: &Client,
     task: &Task,
@@ -441,6 +534,7 @@ pub fn run_window(
     store: &Store,
     rate_bps: u64,
     total_len: u64,
+    cap: &EndCap,
 ) -> Result<Outcome> {
     // 与 `probe::run` / `state::Snapshot::from_task` 同一个立场：规则只住在 `Task::validate()` 一处，
     // 但**发请求**这一刻是第二个强制点。明文 HTTP + 口令的任务到不了网络（用例
@@ -529,12 +623,21 @@ pub fn run_window(
     // 窗口上界（**exclusive**）：区间终点与"至多 `WINDOW_BYTES` 个字节"里更近的那个（裁定 5）。
     // `bytes` 与 `store.len()` 都由这一个 `stop` 算出来 ⇒ 任何一处差一字节，两条断言一起红。
     let stop = iv.end.saturating_add(1).min(iv.start.saturating_add(WINDOW_BYTES));
+    // **终点帽**（**E14**①）：先把这一枪自己的窗口终点降进去（`stop` 是 exclusive，帽是**含端点**的，
+    // 所以是 `stop - 1`；`stop > iv.start >= 0` 恒成立 ⇒ 这里不会下溢）。
+    // 之后读循环每块只看这一个格子：外面（引擎的 `Retighten`）降过就更早收手，没降过就照旧读满窗口。
+    lower_end_cap(cap, stop - 1);
     let mut cursor = iv.start;
     let mut skip = if degraded { iv.start } else { 0 };
     let mut buf = vec![0u8; CHUNK_BYTES];
     let mut eof = false;
     let mut read_err: Option<std::io::Error> = None;
     while cursor < stop {
+        // 每块**只查一次**帽：不 sleep、不另起线程读 socket、不引 `tokio`、不装轮询定时器（E14① 的形状约束）。
+        // 判据与它的两条边界都住在 `cap_allows`（单元层用表钉死，不必真打一条 socket）。
+        if !cap_allows(cap.load(Ordering::Acquire), cursor, iv.start) {
+            break; // 收紧赶上了这一枪：剩下的尾巴由调度器重新决定给谁（`Advanced{bytes}` 已落盘的那些算数）
+        }
         let n = match resp.read(&mut buf) {
             Ok(0) => {
                 eof = true;
@@ -798,12 +901,20 @@ mod tests {
         }
     }
 
-    // ---- 裁定 1 + spec §3：开放终点的判据 ----
+    // ---- 裁定 1 + spec §3 + **E14②（戊）**：开放终点的判据 ----
 
     #[test]
     fn only_the_interval_that_reaches_the_end_of_the_file_is_open_ended() {
-        // 末段（`iv.end == total_len - 1`）⇒ 开放终点。这是简报与 spec 唯一要求发 `bytes={start}-` 的形状。
-        assert_eq!(range_header(Interval { start: 1_048_576, end: 48 * 1024 * 1024 - 1 }, 48 * 1024 * 1024), "bytes=1048576-");
+        // 末段（`iv.end == total_len - 1`）**并且窗口够得着 EOF** ⇒ 开放终点。这是 spec §3 观测到
+        // IDM 在发的那一条。**E14②（戊）动的就是这一格的夹具**：原来这一格喂的是
+        // `start = 1_048_576`（区间伸到 EOF、但一个窗口填不满它），旧判据据此发 `bytes=1048576-`，
+        // 等于授权对端把 47 MiB 一路流过来；戊之后那一格改由
+        // `an_open_ended_request_is_for_the_window_that_reaches_eof_not_the_interval` 断"问窗口那一格"，
+        // 这里把夹具换成真正的那一尾（起点 = 全长 - 一个窗口），**判据方向一字未动**：末段仍是开放终点。
+        assert_eq!(
+            range_header(Interval { start: 48 * 1024 * 1024 - WINDOW_BYTES, end: 48 * 1024 * 1024 - 1 }, 48 * 1024 * 1024),
+            format!("bytes={}-", 48 * 1024 * 1024 - WINDOW_BYTES)
+        );
         // 整份文件（起点 0、终点是最后一个字节）也算末段 ⇒ 同样是开放终点，不是 `bytes=0-<全长-1>`。
         assert_eq!(range_header(Interval { start: 0, end: 9 }, 10), "bytes=0-");
         // 终点在文件中间 ⇒ 必须带显式终点（少带就是对端多送一整个窗口）。
@@ -816,6 +927,96 @@ mod tests {
         // 全长 0：`total_len - 1` 会下溢（debug 直接 panic），`saturating_add` 那一支把它读成开放终点。
         // 这条形状到不了网络（区间必是空的，`run_window` 先交 `Complete`），但判据不许靠下溢活着。
         assert_eq!(range_header(Interval { start: 0, end: 0 }, 0), "bytes=0-");
+    }
+
+    /// **E14②（戊）**：判据里的"终点"是**窗口**，不是区间。这条用例是本轮唯一被改掉判据值的既有形状
+    /// （原来断的是 `bytes=1048576-`）：区间 `[1 MiB, EOF]` 比一个窗口宽，`bytes=1048576-` 等于授权
+    /// 对端把 47 MiB 一路推过来，而我们最多读 `WINDOW_BYTES` 就收手 ⇒ 那一截是真浪费
+    /// （阶段4 实测 8 MiB 文件多打 4.1 MiB 的起点机制）。现在问的是**窗口那一格**。
+    /// 另一半（真尾巴仍发开放终点）由上面那条的第一格与下面这组守住 —— 两条合起来才叫"没丢 IDM 的观察"。
+    #[test]
+    fn an_open_ended_request_is_for_the_window_that_reaches_eof_not_the_interval() {
+        // 窗口正好落在 EOF：起点 = 全长 - WINDOW ⇒ `window_end == total_len - 1` ⇒ 开放终点。
+        let total = 48 * 1024 * 1024;
+        assert_eq!(
+            range_header(Interval { start: total - WINDOW_BYTES, end: total - 1 }, total),
+            format!("bytes={}-", total - WINDOW_BYTES)
+        );
+        // 窗口越过 EOF（剩下的比一个窗口少）⇒ 仍然开放终点，不许写成 `bytes=start-<全长-1>`。
+        assert_eq!(
+            range_header(Interval { start: total - 4096, end: total - 1 }, total),
+            format!("bytes={}-", total - 4096)
+        );
+        // 区间伸到 EOF、但**窗口填不满它** ⇒ 问的是窗口那一格，不是 EOF（这就是 E14② 改的那一格）。
+        assert_eq!(
+            range_header(Interval { start: 1_048_576, end: total - 1 }, total),
+            format!("bytes={}-{}", 1_048_576, 1_048_576 + WINDOW_BYTES - 1)
+        );
+        // 阶段4 那条惹祸的派单形状：8 MiB 文件的第一段 `[236032, 8388607]`。
+        // 旧判据（`iv.end + 1 >= total_len`）在这里发 `bytes=236032-` ⇒ 对端有权流 7.75 MiB，
+        // 而调度器同期把同一段收了四次 ⇒ 收手之后的每一字节都由别人重下。
+        assert_eq!(
+            range_header(Interval { start: 236_032, end: 8_388_607 }, 8_388_608),
+            format!("bytes=236032-{}", 236_032 + WINDOW_BYTES - 1)
+        );
+        // 区间比窗口窄 ⇒ 窗口终点就是区间终点 ⇒ 与 E14 之前一模一样（戊只动"比窗口宽"那一支）。
+        assert_eq!(
+            range_header(Interval { start: 236_032, end: 236_032 + 65_536 - 1 }, 8_388_608),
+            format!("bytes=236032-{}", 236_032 + 65_536 - 1)
+        );
+        // 起点与全长都贴着 `u64` 上界：加法不许回绕（回绕了就会把"问一个字节"发成开放终点）。
+        assert_eq!(
+            range_header(Interval { start: u64::MAX - 1, end: u64::MAX }, u64::MAX),
+            "bytes=18446744073709551614-"
+        );
+    }
+
+    // ---- 终点帽（E14① 乙）：只有往下才说话 ----
+
+    #[test]
+    fn end_cap_lowering_is_monotonic_downward_only() {
+        // 要钉的性质：一个**更大**的值绝不允许把已经收紧的枪重新放宽。
+        // 按 E14 括号里那个字面（`fetch_max`）写，第二行就会把帽抬回 4_000_000 ⇒ 这一格当场红
+        // （抬回去之后那一枪会一路读到原来的窗口终点，重复下载又回来了）。
+        let cap = AtomicU64::new(NO_END_CAP);
+        lower_end_cap(&cap, 1_000_000);
+        assert_eq!(cap.load(Ordering::Acquire), 1_000_000, "降下去的帽就是帽");
+        lower_end_cap(&cap, 4_000_000);
+        assert_eq!(cap.load(Ordering::Acquire), 1_000_000, "更大的值当没看见：帽只降不升");
+        lower_end_cap(&cap, 900_000);
+        assert_eq!(cap.load(Ordering::Acquire), 900_000, "再降还是算话：收紧是单调的，不是一次的");
+        // 降到 `u64::MAX`（"没有帽"那个值）当然也不算话 —— 引擎重置格子走 `store`，不走这条路，
+        // 这条断言钉的是"如果谁误把 NO_END_CAP 当成一次收紧，它不会把已经收紧的枪放宽"。
+        lower_end_cap(&cap, NO_END_CAP);
+        assert_eq!(cap.load(Ordering::Acquire), 900_000, "重置必须用 store：用这条路就是自相矛盾");
+        // 起点那一格：0 是合法的含端点终点（文件第一个字节），必须降得下去。
+        let first = AtomicU64::new(NO_END_CAP);
+        lower_end_cap(&first, 0);
+        assert_eq!(first.load(Ordering::Acquire), 0);
+    }
+
+    /// 收手判据本身（`cap_allows` 就是读循环里那句，不是它的复述）：
+    /// 帽之外**最多一块**、块首查一次、起点以下的陈旧帽不算话。
+    /// 真 socket 上"读到一半被帽掐住"归集成用例
+    /// `a_shot_stops_at_the_end_cap_lowered_mid_body_and_keeps_what_it_wrote`。
+    #[test]
+    fn the_end_cap_stops_the_shot_after_at_most_one_more_chunk() {
+        let chunk = CHUNK_BYTES as u64;
+        // ① 恰好落在帽上：`cursor == cap_end` 还要写（那一格是允许写的最后一格）。
+        assert!(cap_allows(9 * chunk, 9 * chunk, 0));
+        // ② 越过去一格就收手 ⇒ 落点最多 `cap_end + 1`，而 `cap_end + 1` 是"整块写完"才到的，
+        //    所以帽之外的字节数 ≤ 一块 —— 这一条就是 ③ 那笔账的上界形状。
+        assert!(!cap_allows(9 * chunk, 10 * chunk, 0));
+        // ③ 帽在两块之间：跨过它的那一块照样**整块**落（不切半块 ⇒ 少一个"半块算谁的"的账）。
+        let cap_mid = 3 * chunk + chunk / 2;
+        assert!(cap_allows(cap_mid, 3 * chunk + chunk / 2, 0), "块首查：正好到帽这一格还要读下一块");
+        assert!(!cap_allows(cap_mid, 4 * chunk + chunk / 2, 0), "过了帽半块就已经该收手");
+        // ④ 没有帽（初值那个 `u64::MAX`）：任何偏移都放行 ⇒ 读满窗口照旧。
+        assert!(cap_allows(NO_END_CAP, u64::MAX - 1, 0), "NO_END_CAP 必须是真·不拦");
+        // ⑤ 陈旧帽（低于这一枪的起点）：起点那一格仍然放行 ⇒ 至少写一块再收手，
+        //    绝不交回 `Advanced { bytes: 0 }`（M9 那条纪律：零字节的 Advanced 谁也数不到）。
+        assert!(cap_allows(100, 4_096, 4_096), "帽低于起点 ⇒ 拦不出零字节：起点这一格必须放行");
+        assert!(!cap_allows(100, 4_097, 4_096), "写过起点一格之后就轮到帽说话");
     }
 
     // ---- 窗口预算（plan 第 796 行的式子 + 简报没写的除零） ----
@@ -1212,6 +1413,7 @@ mod tests {
             &store,
             10_000_000,
             48 * 1024 * 1024,
+            &AtomicU64::new(NO_END_CAP),
         ) else {
             panic!("带 --data-file 的任务不该被窗口那条路接受（发 GET 就是拿另一条请求的字节）");
         };

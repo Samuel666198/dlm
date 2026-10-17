@@ -761,7 +761,7 @@ fn window_writes_at_offset_and_stops_at_window_edge() -> anyhow::Result<()> {
     // 区间比一个窗口**宽一倍**：收手的必须是窗口，不是区间终点。
     let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES * 2 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
     eprintln!("---- 裁定 5：窗口那一枪 ----\n{out:?}\nlen={}", store.len()?);
     assert_eq!(out, Outcome::Advanced { bytes: WINDOW_BYTES }, "{out:?}");
     assert_eq!(
@@ -781,6 +781,12 @@ fn window_writes_at_offset_and_stops_at_window_edge() -> anyhow::Result<()> {
 /// 简报第 2 条（原 `unimplemented!`）：末段发**开放终点** `bytes={start}-`（spec §2 表 / §3 对
 /// IDM 的观测），非末段必须带显式终点。取证读的是**服务器收到的那条头**（harness JSONL），
 /// 不是我们自己拼出来的串 —— 拼对了但没序列化出去，这里一样红。
+///
+/// **勘误 E14②（戊）在本条动了一格的判据值**（方向一律没动，三条各钉一件事）：
+/// - ① 区间**伸到** EOF 但一个窗口填不满它 ⇒ 现在问的是**窗口那一格**（旧写法发 `bytes=1048576-`，
+///   等于授权对端流 47 MiB，而我们最多读 4 MiB ⇒ 那一截全留在连接上，正是阶段4 那笔重复流量的起点）。
+/// - ③ 文件**真正那一尾**（窗口终点 == `total_len - 1`）⇒ 仍然发 `bytes={start}-`：IDM 的观察保住。
+/// - ② 终点在文件中间 ⇒ 与 E14 之前逐字相同（区间比窗口窄时窗口终点就是区间终点）。
 #[test]
 fn range_start_open_ended_but_respects_explicit_end() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
@@ -788,35 +794,51 @@ fn range_start_open_ended_but_respects_explicit_end() -> anyhow::Result<()> {
     let client = harness::client()?;
     let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
 
-    // ① 末段：`iv.end == total - 1` ⇒ 开放终点。窗口比区间窄，所以这一枪仍然只读一个窗口。
+    // ① 区间伸到 EOF、窗口填不满 ⇒ 问窗口那一格（E14②）。这一枪仍然只读一个窗口。
     let last = Interval { start: ALIGNED, end: total - 1 };
     let (store_open, path_open) = harness::store("t7-open.bin")?;
-    let out = fetch::run_window(&client, &t, last, &store_open, 10_000_000, total)?;
+    let out = fetch::run_window(&client, &t, last, &store_open, 10_000_000, total, &harness::uncapped())?;
     assert!(matches!(out, Outcome::Advanced { bytes } if bytes == WINDOW_BYTES), "{out:?}");
 
     // ② 非末段：终点在文件中间 ⇒ 必须带上显式终点（少带一个字节就是对端多送一整个窗口）。
     let mid = Interval { start: ALIGNED, end: ALIGNED + 65_536 - 1 };
     let (store, path) = harness::store("t7-closed.bin")?;
-    let out = fetch::run_window(&client, &t, mid, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&client, &t, mid, &store, 10_000_000, total, &harness::uncapped())?;
     assert_eq!(out, Outcome::Complete, "整段读完（区间比窗口窄）⇒ Complete：{out:?}");
     assert_eq!(store.len()?, ALIGNED + 65_536, "终点说了算：只写到 iv.end");
     harness::require_block_alignment(&path, ALIGNED, 65_536)?;
 
-    let reqs = srv.requests_at_least(2)?;
+    // ③ 文件真正那一尾：起点 = 全长 - 一个窗口 ⇒ 窗口终点正好是 `total_len - 1` ⇒ 开放终点。
+    let tail = Interval { start: total - WINDOW_BYTES, end: total - 1 };
+    let (store_tail, path_tail) = harness::store("t7-tail.bin")?;
+    let out = fetch::run_window(&client, &t, tail, &store_tail, 10_000_000, total, &harness::uncapped())?;
+    assert_eq!(out, Outcome::Complete, "整尾就是一次窗口：读完 ⇒ Complete：{out:?}");
+
+    let reqs = srv.requests_at_least(3)?;
     eprintln!("---- 开放终点/显式终点：服务端收到的 Range ----\n{}", serde_json::to_string_pretty(&reqs)?);
-    assert_eq!(reqs[0]["range"], format!("bytes={ALIGNED}-"), "末段要发开放终点那一条");
+    assert_eq!(
+        reqs[0]["range"],
+        format!("bytes={ALIGNED}-{}", ALIGNED + WINDOW_BYTES - 1),
+        "E14②：窗口够不着 EOF 的那一枪必须**只问窗口**（旧判据在这里发的是 `bytes={ALIGNED}-`）"
+    );
     assert_eq!(
         reqs[1]["range"],
         format!("bytes={ALIGNED}-{}", ALIGNED + 65_536 - 1),
-        "非末段要发带显式终点那一条（两条一模一样就是没按 total_len 分岔）"
+        "非末段要发带显式终点那一条（两条一模一样就是没按窗口/全长分岔）"
     );
-    assert_ne!(reqs[0]["range"], reqs[1]["range"], "两条形状必须不同");
+    assert_eq!(
+        reqs[2]["range"],
+        format!("bytes={}-", total - WINDOW_BYTES),
+        "文件真正那一尾仍然发开放终点：IDM 的观察（spec §3）不许被 E14② 一起改掉"
+    );
+    assert_ne!(reqs[0]["range"], reqs[2]["range"], "同样是伸到 EOF 的区间，窗口够得着与够不着必须分岔");
     for r in &reqs {
         assert!(r["connection"].is_null(), "不得发 Connection: close（spec §10 R5 / 计划 E2）：{r:?}");
     }
     drop((store, store_open));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&path_open);
+    let _ = std::fs::remove_file(&path_tail);
     Ok(())
 }
 
@@ -837,7 +859,7 @@ fn fetch_carries_the_nine_item_contract_headers_on_the_wire() -> anyhow::Result<
     };
     let iv = Interval { start: ALIGNED, end: ALIGNED + 4096 * 3 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
     assert!(matches!(out, Outcome::Complete), "{out:?}");
     let reqs = srv.requests_at_least(1)?;
     eprintln!("---- 契约头：服务端收到什么 ----\n{}", serde_json::to_string_pretty(&reqs)?);
@@ -870,7 +892,7 @@ fn the_password_gate_is_enforced_before_fetch_touches_the_wire() -> anyhow::Resu
         ..harness::blank_task()
     };
     let iv = Interval { start: ALIGNED, end: ALIGNED + 4096 - 1 };
-    let Err(err) = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)
+    let Err(err) = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())
     else {
         panic!("明文 HTTP 带口令的任务必须被 validate() 拒掉，不许发出请求");
     };
@@ -892,7 +914,7 @@ fn a_beyond_length_interval_on_a_shorter_server_is_validator_changed() -> anyhow
     let t = Task { url: format!("{base}/flaky"), ..harness::blank_task() };
     let iv = Interval { start: 5_000_000, end: 5_100_000 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     eprintln!("---- 裁定 3(a)/2：/flaky 越界那一枪 ----\n{out:?}");
     assert_eq!(out, Outcome::Failed(FailKind::ValidatorChanged), "{out:?}");
     assert_eq!(store.len()?, 0, "416 这一支一个字节都不该落盘");
@@ -924,7 +946,7 @@ fn a_416_whose_denominator_is_our_length_is_complete() -> anyhow::Result<()> {
     // 起点**越过**全长 4096 个字节（不是正好落在全长上）：`total_len` 与 `iv.start` 必须是两个数。
     let iv = Interval { start: total + 4_096, end: total * 3 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
     assert_eq!(
         out,
         Outcome::Complete,
@@ -968,7 +990,7 @@ fn a_416_that_answers_with_our_interval_start_is_validator_changed() -> anyhow::
         (String::from("/garbage-total"), "416 的分母读不出来"),
     ] {
         let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
-        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total)?;
+        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
         eprintln!("---- C 反支：我们的 total_len={total}、iv.start={} ----\n{route} ⇒ {out:?}", iv.start);
         assert_eq!(
             out,
@@ -1000,7 +1022,7 @@ fn a_416_with_a_disagreeing_or_missing_denominator_is_validator_changed() -> any
         (String::from("/no-content-range"), "压根没发 Content-Range"),
     ] {
         let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
-        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total)?;
+        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
         assert_eq!(
             out,
             Outcome::Failed(FailKind::ValidatorChanged),
@@ -1023,7 +1045,7 @@ fn a_body_cut_off_midway_keeps_the_bytes_it_actually_wrote() -> anyhow::Result<(
     let t = Task { url: format!("{base}/drop/65536"), ..harness::blank_task() };
     let iv = Interval { start: ALIGNED, end: ALIGNED + 2 * 1024 * 1024 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     eprintln!("---- 裁定 4：/drop/65536 那一枪 ----\n{out:?}\nlen={}", store.len()?);
     assert_eq!(out, Outcome::Advanced { bytes: 65_536 }, "被掐断前写下去的字节必须交回，不许折成 0：{out:?}");
     assert_eq!(store.len()?, ALIGNED + 65_536, "长度就是交回的那 65536 字节");
@@ -1046,7 +1068,7 @@ fn a_body_that_never_starts_is_a_countable_transport_failure() -> anyhow::Result
     let t = Task { url: format!("{base}/drop/0"), ..harness::blank_task() };
     let iv = Interval { start: ALIGNED, end: ALIGNED + 65_536 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     // 本轮 D：变体判断没有变松（`take_transport_note` 不是 Transport 就当场 panic），只是 additionally
     // 要求这一支**带着那句原因**回来 —— 这一支的 `err` 是 reqwest 包过一层的 `io::Error`（对端拆线，
     // 不是超时），所以那句话取自库的 message + `source()` 链首句。
@@ -1072,7 +1094,7 @@ fn an_empty_degraded_body_for_a_non_empty_interval_is_a_countable_failure() -> a
     let t = Task { url: format!("{}/claims-bytes-answers-200", stub.base()), ..harness::blank_task() };
     let iv = Interval { start: 0, end: 4096 * 4 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     // 本轮 D：这一支的 `read` 给的是 `Ok(0)`（**没有**错误对象），所以那句原因是我们自己写的
     // （`src/fetch.rs` 的 `WINDOW_EOF_WITHOUT_BYTES`），它要**说清是哪一种零进度**，
     // 而不是留给 Task 8 一句"网络错了"。M9 那条纪律（零进度必须是可数的失败）原样保留。
@@ -1099,7 +1121,7 @@ fn a_peer_that_never_answers_is_stalled() -> anyhow::Result<()> {
     let iv = Interval { start: 0, end: 65_536 - 1 };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     let took = started.elapsed();
     eprintln!("---- 裁定 3(c)：静默对端 ----\n{out:?} 用时 {took:?}");
     assert_eq!(out, Outcome::Stalled, "预算内一个字节都没等到 ⇒ Stalled：{out:?}");
@@ -1123,7 +1145,7 @@ fn a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure() ->
     let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 8 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 8 * 1024 * 1024, &harness::uncapped())?;
     let took = started.elapsed();
     eprintln!("---- 读侧超时（is_timeout 分类）----\n{out:?} 用时 {took:?}");
     assert_eq!(out, Outcome::Stalled, "头收了、body 一个字节没到 ⇒ 判 Stalled，不是 Transport：{out:?}");
@@ -1150,7 +1172,7 @@ fn a_live_but_paced_peer_is_advanced_rather_than_misread_as_stalled() -> anyhow:
     let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 327_680, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 327_680, 48 * 1024 * 1024, &harness::uncapped())?;
     let took = started.elapsed();
     eprintln!("---- 限速对端 ----\n{out:?} 用时 {took:?}");
     assert!(!matches!(out, Outcome::Stalled), "一直在送字节 ⇒ 不是卡死：{out:?}");
@@ -1172,7 +1194,7 @@ fn a_shorter_body_than_the_interval_is_never_reported_complete() -> anyhow::Resu
     let t = Task { url: format!("{base}/sz/4096"), ..harness::blank_task() };
     let iv = Interval { start: 0, end: 8191 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 8192)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 8192, &harness::uncapped())?;
     assert!(!matches!(out, Outcome::Complete), "只拿到 4096 字节却报 Complete ⇒ 尾巴会被封存：{out:?}");
     assert_eq!(out, Outcome::Advanced { bytes: 4096 }, "{out:?}");
     assert_eq!(store.len()?, 4096);
@@ -1193,7 +1215,7 @@ fn a_degraded_200_body_is_skipped_not_written_at_the_wrong_offset() -> anyhow::R
     let half: u64 = 512 * 1024; // 1 MiB 的后半段：起点是 4096 的整数倍，块号取证才成立
     let iv = Interval { start: half, end: 1_048_576 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 1_048_576)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 1_048_576, &harness::uncapped())?;
     assert_eq!(out, Outcome::Complete, "区间 = body 的后半段 ⇒ 丢掉前半后正好读完：{out:?}");
     assert_eq!(store.len()?, 1_048_576, "写到 iv.end 就该停：len={}", store.len()?);
     // 内容取证：**这是唯一分辨"丢没丢"的断言**。不丢的话 `iv.start` 处躺的是块 0 的字节。
@@ -1223,7 +1245,7 @@ fn a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body() -> anyhow::Resul
     let iv = Interval { start: 262_144, end: 262_144 + 131_072 - 1 };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     let took = started.elapsed();
     let written = peer.written();
     eprintln!("---- 裁定 6：流式跳字节 ----\n{out:?} 用时 {took:?} 对端写出 {written}");
@@ -1249,7 +1271,7 @@ fn a_206_that_cannot_show_its_offset_is_validator_changed() -> anyhow::Result<()
     let t = Task { url: format!("{}/no-content-range", stub.base()), ..harness::blank_task() };
     let iv = Interval { start: 0, end: 1023 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 1024, &harness::uncapped())?;
     assert_eq!(out, Outcome::Failed(FailKind::ValidatorChanged), "206 没带 Content-Range ⇒ 偏移不可核对：{out:?}");
     assert_eq!(store.len()?, 0, "核对不了偏移就一个字节都不许写");
     drop(store);
@@ -1265,7 +1287,7 @@ fn an_empty_interval_needs_no_request() -> anyhow::Result<()> {
     let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
     let iv = Interval { start: ALIGNED, end: ALIGNED - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     assert_eq!(out, Outcome::Complete, "{out:?}");
     assert_eq!(store.len()?, 0);
     assert!(srv.requests_within(Duration::from_millis(300))?.is_empty(), "空区间不许打出任何一枪");
@@ -1289,7 +1311,7 @@ fn a_drained_window_leaves_the_connection_reusable() -> anyhow::Result<()> {
     let (store, path) = harness::store("t7-reuse.bin")?;
     let iv = Interval { start: 0, end: 65_536 - 1 };
 
-    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
     assert_eq!(out, Outcome::Complete, "区间比窗口窄 ⇒ 读满整段：{out:?}");
     assert_eq!(store.len()?, 65_536);
 
@@ -1337,7 +1359,7 @@ fn a_data_file_task_never_reaches_the_wire_as_a_bodyless_get_through_the_window_
         ..harness::blank_task()
     };
     let iv = Interval { start: 0, end: 4096 * 4 - 1 };
-    let result = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024);
+    let result = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped());
     let reqs = peer.requests();
     eprintln!(
         "---- F1：窗口那条路对带体任务实际发出去什么 ----\n{}\n结论 {result:?}\nlen={}",
@@ -1730,7 +1752,7 @@ fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyho
     let started = Instant::now();
 
     // 速率取 `WINDOW_BYTES` ⇒ 式子给 2 s，被下界夹成 15 s —— 正是要让"填满一个窗口"比预算更久。
-    let out = fetch::run_window(&client, &t, iv, &store, WINDOW_BYTES, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&client, &t, iv, &store, WINDOW_BYTES, 48 * 1024 * 1024, &harness::uncapped())?;
     let took = started.elapsed();
     let Outcome::Advanced { bytes } = out else {
         panic!("被自己的期限掐在一个窗口中间 ⇒ 必须是 Advanced（带着已落盘的字节），实际 {out:?}");
@@ -1748,15 +1770,17 @@ fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyho
     assert!(peer.written() >= bytes, "对端至少写出了我们读到的那么多 ⇒ 它没停，停的是我们");
     assert_eq!(
         peer.ranges()[0],
-        format!("bytes=0-{}", WINDOW_BYTES * 2 - 1),
-        "这一枪发的确实是带显式终点的那一条（区间终点在文件中间），且对端按它答了 206"
+        format!("bytes=0-{}", WINDOW_BYTES - 1),
+        "这一枪发的确实是带显式终点的那一条，而且**终点是窗口那一格**（E14②：旧写法在这里发的是\
+         区间终点 `bytes=0-8388607`；区间终点在文件中间，两种写法都该带显式终点 ⇒ 判据方向没动，\
+         动的是那个终点的取法）。对端按它答了 206"
     );
 
     // 同一个节拍、总时长在预算内 ⇒ 必须完整读完（否则上一段红的原因就说不清是哪一种）。
     let small = Interval { start: 0, end: 512 * 1024 - 1 };
     let (store2, path2) = harness::store("t7-budget-ok.bin")?;
     let started2 = Instant::now();
-    let out2 = fetch::run_window(&client, &t, small, &store2, WINDOW_BYTES, 48 * 1024 * 1024)?;
+    let out2 = fetch::run_window(&client, &t, small, &store2, WINDOW_BYTES, 48 * 1024 * 1024, &harness::uncapped())?;
     let took2 = started2.elapsed();
     eprintln!("---- 同一台对端，只要总时长在预算内 ----\n{out2:?} 用时 {took2:?}");
     assert_eq!(out2, Outcome::Complete, "512 KiB 在 ~1.8 s 内读完 ⇒ 同一个期限没响，区间读完就是 Complete：{out2:?}");
@@ -1801,7 +1825,7 @@ fn a_206_that_claims_another_offset_than_the_one_we_asked_for_writes_nothing() -
 
     for (route, claimed) in [("/known-total", 0u64), ("/wrong-start", 1_024)] {
         let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
-        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
         eprintln!(
             "---- A：我们问 {}，{route} 声称 {claimed} ----\n{out:?} len={}",
             iv.start,
@@ -1842,7 +1866,7 @@ fn an_interval_of_exactly_one_window_is_complete() -> anyhow::Result<()> {
     let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES - 1 };
     assert_eq!(iv.len(), WINDOW_BYTES, "这一条要的就是「正好一个窗口」那个形状");
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
     eprintln!("---- B 左半边：len(iv) == WINDOW_BYTES ----\n{out:?} len={}", store.len()?);
     assert_eq!(out, Outcome::Complete, "区间正好一个窗口 ⇒ 最后一个字节落盘了，必须 Complete：{out:?}");
     assert_eq!(store.len()?, iv.end + 1, "含端点：写完 iv.len() 个字节 ⇒ 长度是 iv.end + 1");
@@ -1880,7 +1904,7 @@ fn an_interval_one_byte_wider_than_the_window_is_never_complete() -> anyhow::Res
     assert_eq!(iv.len(), WINDOW_BYTES + 1, "多一个字节 ⇒ 窗口填不满这个区间");
     let edge = iv.end; // 区间最后一个字节所在的**下标**（格式串里不支持字段访问，取个局部名）
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped())?;
     eprintln!("---- B 右半边：len(iv) == WINDOW_BYTES + 1 ----\n{out:?} len={}", store.len()?);
     assert_eq!(
         out,
@@ -1953,7 +1977,7 @@ fn a_transport_failure_from_the_execute_side_names_the_cause_without_repeating_t
 
     // ① 窗口那一支（GET + Range）
     let t = Task { url: format!("{dead}/blob"), ..harness::blank_task() };
-    let out = fetch::run_window(&client, &t, Interval { start: 0, end: 4_095 }, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&client, &t, Interval { start: 0, end: 4_095 }, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     let note = take_transport_note(&out, "窗口那一枪连响应头都没等到（端口没人听）");
     eprintln!("---- D：run_window 的 execute 支 ----\n{out:?}\n原因原文：{note}");
     assert!(!note.contains("http"), "原因里还有 URL 的成分：{note}");
@@ -1997,7 +2021,7 @@ fn a_transport_note_holds_no_byte_of_the_body_it_handed_back() -> anyhow::Result
     let t = Task { url: format!("{}/claims-bytes-answers-200", stub.base()), ..harness::blank_task() };
     let iv = Interval { start: BODY, end: BODY * 2 - 1 };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024)?;
+    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped())?;
     let note = take_transport_note(&out, "区间要 4096 字节、对端那 4096 字节全是要丢的前导 ⇒ 零进度");
     eprintln!("---- D：那句原因的原文（4096 个 'r' 一个字节都没进账）----\n{note}");
     assert!(
@@ -2098,5 +2122,267 @@ fn full_download_is_byte_exact() -> anyhow::Result<()> {
 
     // 独立读者（harness 自己那份 sha2）与引擎的判定分开：两边都说对，才算对。
     assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len));
+    Ok(())
+}
+
+// ================================================================ Task 8 阶段5A：E14（乙：终点帽 / 戊：窗口终点 / ③：重复账）
+//
+// 勘误 **E14** 裁定了两件事并要第三件事有个说法。这一节的五条用例按那三条分：
+// - **乙（终点帽）**：`a_shot_stops_at_the_end_cap_lowered_mid_body_...` 与
+//   `an_end_cap_already_lowered_before_the_shot_starts_...`（都走**进程内节拍对端** ⇒ 不是计时彩票），
+//   外加引擎层那条按 trace 算的 `no_shot_writes_more_than_one_chunk_past_the_first_cap_it_was_given`。
+// - **戊（开放终点的判据是窗口）**：`every_wire_request_asks_for_at_most_a_window_...`（取证在**线上**，
+//   即 node 服务器记下的 `Range`，不是我们自己拼的字符串）。
+// - **③（重复账）**：`the_paced_traffic_bill_is_priced_below_half_the_file` —— 判据是**线上流量**，
+//   对端有节拍（`/sz/<n>s`，每 64 KiB 之间 200 ms）⇒ 服务器写出去的字节跟着我们读的走，
+//   那本账才量得出东西（无节拍的环回对端会把整条 span 一次塞进 socket，见报告）。
+
+/// **E14① 乙（主用例）**：帽在一枪读到一半时降下去 ⇒ 那一枪**停手**，交回 `Advanced { bytes }`，
+/// 并且盘上没有任何"帽 + 一块"之外的字节。
+///
+/// 形状与为什么它是决定性的：对端是**诚实 206 的节拍对端**（每 15 ms 交一块 64 KiB），区间
+/// `[0, WINDOW_BYTES)` 正好一个窗口（64 块），帽降到第 12 块末。看盘的人（另一个线程）在写到第 8 块
+/// 之后把帽降下去 ⇒ 正确实现最多再写**一块**就收手（落点 ≤ 13 块），而把读循环改成"不查帽"的变异
+/// 会读满整个窗口（64 块 = 4 MiB）—— 两者差 5 倍，不是能碰巧通过的断言。
+/// 取证另加两条：`store.len()` 与交回的字节数同源（裁定 4/5 那条纪律在帽这一支同样成立），
+/// 以及块号对齐（那些字节确实来自这些偏移，帽没有把内容打乱）。
+#[test]
+fn a_shot_stops_at_the_end_cap_lowered_mid_body_and_keeps_what_it_wrote() -> anyhow::Result<()> {
+    const CHUNK: u64 = 64 * 1024;
+    const TRIGGER_BYTES: u64 = 8 * CHUNK; // 写到第 8 块之后，看盘的人把帽降下去
+    const CAP_BYTES: u64 = 20 * CHUNK; // 帽：允许写到偏移 `CAP_BYTES - 1`（含端点）
+    const WINDOW_CHUNKS: u64 = WINDOW_BYTES / CHUNK;
+
+    let peer = harness::spawn_paced_partial_stub(6 * 1024 * 1024, CHUNK as usize, Duration::from_millis(15))?;
+    let client = harness::client()?;
+    let t = Task { url: format!("{}/blob", peer.base()), ..harness::blank_task() };
+    let (store, path) = harness::store("t8a-cap-mid-body.bin")?;
+    let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
+    let cap = std::sync::Arc::new(dlm::fetch::EndCap::new(dlm::fetch::NO_END_CAP));
+
+    let (watch_cap, watch_path, lowered) = (
+        std::sync::Arc::clone(&cap),
+        path.clone(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let watch_flag = std::sync::Arc::clone(&lowered);
+    let watcher = std::thread::spawn(move || {
+        // 独立读者（不经 `Store`）：盘上长度就是这一枪写到哪儿了。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let len = std::fs::metadata(&watch_path).map(|m| m.len()).unwrap_or(0);
+            if len >= TRIGGER_BYTES {
+                dlm::fetch::lower_end_cap(&watch_cap, CAP_BYTES - 1);
+                watch_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &cap)?;
+    watcher.join().expect("看盘线程不该崩");
+
+    let Outcome::Advanced { bytes } = out else {
+        panic!("帽掐在 body 中间 ⇒ 必须是 Advanced（带着已落盘的字节），实际 {out:?}");
+    };
+    assert!(lowered.load(std::sync::atomic::Ordering::SeqCst), "夹具：看盘线程没在 30 s 内等到第 8 块 ⇒ 这一枪根本没读起来");
+    assert!(
+        bytes >= TRIGGER_BYTES,
+        "帽之前写下去的字节都是真进度（裁定 4）：{bytes}"
+    );
+    assert!(
+        bytes <= CAP_BYTES + CHUNK,
+        "帽之外最多再落**一块**（块首查帽的形状）：bytes={bytes} cap={CAP_BYTES} chunk={CHUNK}"
+    );
+    assert!(
+        bytes < WINDOW_BYTES,
+        "这一枪本该读满一个窗口（{WINDOW_CHUNKS} 块）才被帽掐住 ⇒ 帽没起作用（读循环忽略帽的变异就在这里红）：bytes={bytes}"
+    );
+    assert_eq!(store.len()?, bytes, "交回的字节数与盘上的量同源");
+    assert!(
+        std::fs::metadata(&path)?.len() <= CAP_BYTES + CHUNK,
+        "文件里不该有帽 + 一块之外的字节"
+    );
+    harness::require_block_alignment(&path, 0, bytes)?;
+    assert!(peer.written() >= bytes, "对端至少写出了我们读到的那么多：written={}", peer.written());
+
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+/// **E14① 乙（单调那一半，走真代码路径）**：帽在**开枪之前**就降好了 ⇒ 那一枪自己算出的窗口终点
+/// 不许把它放宽回来。
+///
+/// 这一条钉的是 `run_window` 进门那句 `lower_end_cap(cap, stop - 1)` 为什么必须是 `fetch_min`
+/// 而不是 `store`：`store` 会把已经收紧的帽抬回窗口终点 ⇒ 这一枪读满 64 块（4 MiB）。
+/// 与单元用例 `end_cap_lowering_is_monotonic_downward_only`（钉 `lower_end_cap` 那个原语本身）的分工：
+/// 那里证"写更大的值不算话"，这里证"那一枪真的不会因为自己的窗口而忘掉别人的帽"。
+#[test]
+fn an_end_cap_already_lowered_before_the_shot_starts_survives_the_shots_own_window() -> anyhow::Result<()> {
+    const CHUNK: u64 = 64 * 1024;
+    let peer = harness::spawn_paced_partial_stub(6 * 1024 * 1024, CHUNK as usize, Duration::from_millis(5))?;
+    let client = harness::client()?;
+    let t = Task { url: format!("{}/blob", peer.base()), ..harness::blank_task() };
+    let (store, path) = harness::store("t8a-cap-first.bin")?;
+    let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
+    // 帽先说话：只许写到第 4 块末（含端点 ⇒ `4 * CHUNK - 1`）。
+    let cap = dlm::fetch::EndCap::new(4 * CHUNK - 1);
+
+    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &cap)?;
+    let Outcome::Advanced { bytes } = out else {
+        panic!("区间比帽宽 ⇒ 只能 Advanced，实际 {out:?}");
+    };
+    assert!(
+        bytes >= 4 * CHUNK,
+        "收手条件是 `cursor > 帽` ⇒ 至少把第 4 块写满：bytes={bytes}"
+    );
+    assert!(
+        bytes <= 5 * CHUNK,
+        "这一枪自己的窗口终点（64 块）不许把帽放宽：bytes={bytes}（放宽的写法会读满 {}",
+        WINDOW_BYTES
+    );
+    assert_eq!(store.len()?, bytes);
+    harness::require_block_alignment(&path, 0, bytes)?;
+
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+/// **E14② 戊（线上取证）**：引擎派出去的每一枪，问的字节数**不超过一个窗口**，
+/// 而**只有窗口真够得着 EOF 的那一枪**才许写开放终点。
+///
+/// 判据全部读 node 服务器自己记下的那条 `Range`（`Server::ranges()`），不是我们拼出来的字符串。
+/// 两条规则合起来是**双向**的：
+/// - `bytes=s-`（开放）⇔ `s + WINDOW_BYTES >= total_len` —— 窗口够得着 EOF 才许省掉终点；
+///   阶段4 的形状在这里红：它发过 `bytes=236032-`（区间终点 == EOF 但窗口只到 4430335），
+///   等于授权对端流 7.75 MiB。
+/// - `bytes=s-e`（显式）⇒ `e - s + 1 <= WINDOW_BYTES` **且** `e + 1 < total_len`。
+///
+/// 顺带钉"两种形状都真的出现过"：一条都没有的话，上面两句就退化成恒真（本项目已经踩过三次恒绿夹具）。
+#[test]
+fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open_ended() -> anyhow::Result<()> {
+    // `_srv` 必须活到断言跑完：`Server::Drop` 会杀进程并**删掉日志**。
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-cap1")?;
+    let len = 8 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/sz/{len}"),
+        dir: dir.path().to_path_buf(),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
+
+    let ranges = srv.ranges()?;
+    let mut open_ended = 0usize;
+    let mut full_window_asks = 0usize;
+    for value in ranges.iter().flatten() {
+        let spec = value.strip_prefix("bytes=").unwrap_or(value);
+        let (raw_start, raw_end) = spec.split_once('-').unwrap_or((spec, ""));
+        let start = raw_start.parse::<u64>().unwrap_or(0);
+        if raw_end.trim().is_empty() {
+            open_ended += 1;
+            assert!(
+                start.saturating_add(WINDOW_BYTES) >= len,
+                "开放终点那一枪的窗口够不着 EOF（{start} + 一个窗口 < {len}）⇒ 按 E14② 必须发显式的窗口终点：{value}"
+            );
+        } else {
+            let end = raw_end.parse::<u64>().unwrap_or(0);
+            let span = end - start + 1;
+            assert!(
+                span <= WINDOW_BYTES,
+                "这一枪问了 {span} 字节，比一个窗口（{WINDOW_BYTES}）还宽 ⇒ 对端被授权流我们注定用不上的 body：{value}"
+            );
+            assert!(
+                end + 1 < len,
+                "窗口终点落在 EOF 或越过 EOF 时该发开放终点，不该发这一条：{value}"
+            );
+            if span == WINDOW_BYTES {
+                full_window_asks += 1;
+            }
+        }
+    }
+    assert!(open_ended > 0, "这一形状里一条开放终点都没有 ⇒ 两头都断不到，判据退化成恒真");
+    assert!(full_window_asks > 0, "没有一问就是整个窗口的枪 ⇒ 窗口终点那条分支没被走过（戊的正面形状没测到）");
+    Ok(())
+}
+
+/// **E14①＋③（有节拍对端上的线上账单）**：多打出去的字节按"每笔收紧几块"计价，而不是按窗口计价。
+///
+/// 为什么这条要挂在**节拍**对端（`/sz/<n>s`：每 64 KiB 之间睡 200 ms）上：无节拍的环回对端会在
+/// 我们收手之前把整条 span 一次性塞进 socket，`conn_close_side.sent` 读起来与"我们真需要多少"无关
+/// （那是本仪器上测不出一件事，不是它不存在）。有节拍时服务器写多少由我们读多少决定 ⇒ 这一格
+/// 才是**账单**。取 `conn_close_side.sent`（每条响应收尾时服务器自己写的字节数）求和，
+/// **不取** `response_done`：后者只在服务器写完整条 body 时才发，中途被丢的那些根本不入账。
+///
+/// 判据的形状（每一项都有出处，不是把常数放宽到通过为止）：
+/// - `excess = 写出总量 - bytes_total`，`excess ≤ tightened × 6 × CHUNK_BYTES`。
+///   那个 6 = **1**（跨过帽的那一块是整块落的，`cap_allows` 在块首问）+ **5**（帽只能等主循环醒一次，
+///   `LOOP_POLL = 1 s`，节拍是 200 ms 一块 ⇒ 在途那一枪在被叫停之前最多再读 5 块）。
+///   阶段4 在这一格是红的：实测 `excess = 8,206,900` 而 15 次收紧的额度是 `15 × 6 × 64 KiB = 5,898,240`。
+/// - `duplicated > 0`：账**不许**为了让用例好看而折掉（E14③ 末句）。
+/// - `duplicated ≤ excess + workers × CHUNK_BYTES`：引擎自己那本账不许比线上账单更凶（超出那一点
+///   只可能是收尾时还在途、被 `Stop` 掐掉的那几枪写了却没被对端记完）。
+#[test]
+fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> anyhow::Result<()> {
+    const CHUNK: u64 = 64 * 1024;
+    const WORKERS: usize = 4;
+    // 帽只能等主循环醒一次 ⇒ 每笔收紧的额度是一块 + LOOP_POLL 那 1 s 里的五块。
+    const CHUNKS_PER_TIGHTEN: u64 = 6;
+
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-cap2")?;
+    let len = 8 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/sz/{len}s"),
+        dir: dir.path().to_path_buf(),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: WORKERS,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
+    assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
+
+    let tightened = rep.tightened().len() as u64;
+    assert!(tightened > 0, "这个形状本来就要收紧好几次；一次都没有 ⇒ 账单这条用例什么都没测");
+    let evs = srv.events()?;
+    let mut written = 0u64;
+    for e in &evs {
+        if e["ev"] == "conn_close_side" {
+            written += e["sent"].as_u64().unwrap_or(0);
+        }
+    }
+    let excess = written.saturating_sub(len);
+    let bill = tightened * CHUNKS_PER_TIGHTEN * CHUNK;
+    assert!(
+        excess <= bill,
+        "线上多打了 {excess} 字节，超出 {tightened} 次收紧 × {CHUNKS_PER_TIGHTEN} 块 × {CHUNK} 字节 = {bill} 的额度：\
+         帽没赶上在途那一枪（阶段4 的形状：excess 8,206,900 / 额度 5,898,240）"
+    );
+    assert!(rep.duplicated > 0, "E14③：这笔账不许折成 0（实测它在 3.1-3.5 MB 量级）");
+    assert!(
+        rep.duplicated <= excess + (WORKERS as u64) * CHUNK,
+        "引擎报的重复账 {} 比线上真实多打的 {excess} 还多出一大块以上 ⇒ 那本账又在替另一件事说话",
+        rep.duplicated
+    );
     Ok(())
 }

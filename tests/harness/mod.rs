@@ -911,6 +911,15 @@ impl PacedPeer {
     }
 }
 
+/// 一个"外面没有终点帽"的帽子（勘误 **E14**① 给 `run_window` 新加的那一个参数）。
+///
+/// `fetch::run_window` 一进读循环就把自己那一枪的窗口终点 `fetch_min` 进去，所以 `u64::MAX`
+/// 读起来是"除了窗口自己，没人喊停" ⇒ 行为与 E14 之前逐字节相同。要给帽降值的用例自己建格子
+/// （`std::sync::atomic::AtomicU64`），不用这个帮手。
+pub fn uncapped() -> AtomicU64 {
+    AtomicU64::new(u64::MAX)
+}
+
 /// 起节拍降级对端。路由 `/ignores-range`（认不出的 target 直接断链，好让拼错 URL 的用例当场红）。
 ///
 /// 它同时钉两件事：
@@ -1361,7 +1370,9 @@ pub fn expected_sha(len: u64) -> String {
 
 /// `Range` 字符串 → `(start, 含端终点)`，开放终点（`bytes=N-`）按 `total_len` 补齐。
 ///
-/// 为什么要补：`fetch::range_header` 对**最后一段**（`iv.end + 1 >= total_len`）故意发开放写法
+/// 为什么要补：**E14**② 之后 `fetch::range_header` 发开放写法的条件改成
+/// "**这一枪的窗口**够到文件尾"（`min(iv.end, iv.start + WINDOW_BYTES - 1) + 1 >= total_len`），
+/// 不再是"区间够到文件尾"；真到尾部那一枪仍然发开放写法
 /// （spec §2 表里那一条，也是 IDM 实测的形状），而调度器交回的区间总有显式终点。两边不在同一个
 /// 形状上比较，就等于把"线上真是那个区间"这道链接写成假断言。
 /// 看不懂的形状 ⇒ `Err`（宁可是夹具当场红，也不要悄悄少算一枪）。
