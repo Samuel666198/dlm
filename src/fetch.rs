@@ -1,4 +1,5 @@
-//! 窗口化子请求：领一个字节区间，把 body 流进 `store` 的正确偏移，**最多读满一个窗口就收手**。
+//! 窗口化子请求：领一个字节区间，把 body 流进 `store` 的正确偏移。认 `Range` 的对端**最多读满一个
+//! 窗口就收手**；对端不认 `Range` 时（`BodyShape::ToEof`，**E16**）读的是**整条区间**，不按窗切。
 //!
 //! 依据：spec §2 模块表（`fetch` 行「领一个 `Action`，发 `Range: start-`，流式交给 `store`，
 //! 回报事件」）、spec §3 的 `STALL_TIMEOUT` 与 spec §10 勘误 **R1**（reqwest blocking 没有
@@ -11,6 +12,10 @@
 //! `Advanced{bytes}`，让 `scheduler` 重新决定。于是一条**卡住**的连接最多占住一个窗口预算，
 //! 而不需要一个库级读超时 —— 也**不需要**抢占一个正阻塞在 `read()` 上的线程（R1 的副作用：
 //! 不泄漏线程，且这与 IDM 实测形状一致：那次 8 条连接里 6 条是被主动掐断的）。
+//!
+//! **这条推理的适用范围是"对端认 `Range`"那一支**（**E16** 划的界，不是推翻它）：对端不认 `Range` 时
+//! 窗口化换不来"卡住的连接最多占一个窗口"这个性质，反而要每个窗口重付一遍"从文件头到那里"的前缀
+//! —— 见下面"修复轮 8F-2"那一节。
 //!
 //! ## 六条裁定分别落在哪儿（用例名见每条文档）
 //!
@@ -59,11 +64,18 @@
 //!    用例：`a_degraded_200_body_is_skipped_not_written_at_the_wrong_offset`（node 的 `/noranges`，
 //!    真对端 + 块号取证）、`a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body`
 //!    （进程内节拍对端，另加一条"对端在客户端挂断前写出了多少字节"钉住不许缓冲整个 body）。
+//!    **这一支丢掉的字节是真线上代价，而它没进 `Stats::bytes_duplicated`** —— 口径、量级与为什么不记账
+//!    见 [`crate::state::Stats`] 那个字段的文档第 ③ 条（**E16**③ 允许的两支里选的那一支）。
+//!    ⚠ 上面那两条用例**都只跑得到"一枪装得下"的退化形状**（node 的 `/noranges` 把 body 夹在 1 MiB）；
+//!    **跨多个窗口的退化形状**由 8F-2 新加的 `a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window`
+//!    钉（进程内 `Shot::IgnoresRange` 对端、剩余三个窗口）—— 那一格以前**没有任何用例跑得进**，
+//!    而它正是 E16 撤掉的那个平方形状。
 //!
 //! ## 阶段5A：E14 的两条（终点帽 + 窗口终点）改了这个模块的对外形状
 //!
 //! 1. **`run_window` 又多一个参数：`cap: &EndCap`**（勘误 **E14**① 乙）。**E12① 那条
-//!    "签名多了 `total_len`"以 E14 为准再改一次** —— 现在七个参数。
+//!    "签名多了 `total_len`"以 E14 为准再改一次** —— 那时七个参数；**E16** 之后是八个
+//!    （多出来的 `shape: BodyShape` 见下面那一节）。
 //!    `EndCap` 就是 `AtomicU64`，装的是"这一枪最多还允许写到哪个**含端点**的偏移"：
 //!    `run_window` 进门先把自己的窗口终点 `stop - 1` **降**进去（`lower_end_cap`），之后读循环
 //!    每块在块首问一次 `cap_allows`；越过帽就停手，交回的还是已有的 `Advanced { bytes }`
@@ -84,6 +96,35 @@
 //! 3. **`probe` 不受这两条影响**：试探那条 `bytes=0-<prelude_max-1>` 住在 `probe::prelude_range`，
 //!    与这里的 `range_header` 是两个函数（E11① 把试探与窗口分成两条入口之后本来就不共用终点判据），
 //!    所以 `/noranges` 的 1,048,576、"206 没有 `Content-Range` 就拒"、E11③ 那张真值表都原样活着。
+//!
+//! ## 修复轮 8F-2：**E16**（退化模式不许按窗重请求）又改了一次对外形状
+//!
+//! **改之前的事实**（读代码得到的形状，不是测出来的）：`stop` 无条件夹成一个窗口，而 `degraded`
+//! 那一支先流掉 `iv.start` 个字节再落盘 ⇒ 区间每往前挪一个窗口就重新要一遍"从文件头到那里"的 body，
+//! 读完窗口就中途弃响应。代价随窗口数**平方**增长：E16 正文那组 `4 MiB × (0+1+…+11) = 264 MiB`
+//! （`total_len` 48 MiB ⇒ 12 窗 ⇒ ≈312 MiB ≈ 6.5×）是**推出来的算术**，写进任何注释都不许换成"实测"。
+//!
+//! 1. **`run_window` 第八个参数 `shape: BodyShape`**（`Windowed` / `ToEof`），由调用方按
+//!    `ProbeFacts.accept_ranges` 给。**为什么不看完响应头再定**：形状决定 `Range` 与**预算**，
+//!    而 `.timeout()` 是**整请求**期限（**R7**，上面"reqwest 形状"第 1 条是实测）—— 预算必须在上网
+//!    之前定，`status` 却要到响应头到手才知道。派发点名的这个次序矛盾只有两种解法：把形状做成入参
+//!    （选了这个，信号诚实），或让预算无条件按整条体量算（那会把认 `Range` 那一支的期限也放宽，
+//!    拆掉本节开头 R1 那条"卡住的连接最多占一个窗口预算"的性质）。
+//!    **"从 `total_len` 猜退化"是第三种写法，被派发明令禁止**，本模块也没这么写。
+//! 2. **`window_budget` 的分子从写死的 `WINDOW_BYTES` 变成"这一枪打算读多少"**：两者共用
+//!    [`budget_for`]，`window_budget(rate)` == `budget_for(WINDOW_BYTES, rate)`（单元用例
+//!    `the_body_shape_decides_the_range_the_read_bound_and_the_budget_together` 里三格字面秒数钉着）。
+//!    慢到 120 s 上界之外的整条下载**照样会被自己的期限掐在半路** —— 那一支按 **E16**② 处理：
+//!    交回 `Advanced { bytes }`、由调度器重新决定尾巴，`Complete` 的判据（`cursor > iv.end`）一个字没改，
+//!    所以"没下完"永远报不成完成（`engine::completion_verdict` 那两本账的闸也原样有效）。
+//! 3. **E14②（戊）不作废，反而靠它**：`ToEof` 把 `planned_end` 抬到 `iv.end` 是因为那一截**真的会读**，
+//!    戊拦的是"问了我们注定不读的字节"。区间在文件中间结束、比窗口窄时两种形状**逐字相同**
+//!    （上面那条单元用例的 `mid-file-short-*` 两格钉的就是这个"没多问"）。
+//! 4. **代价没藏**：`ToEof` 仍然要丢掉 `iv.start` 之前那一段 body（裁定 6 那条 `skip`）。修好之后这一笔
+//!    每轮只付**一次**（以前是每个窗口付一次），但它**不在** `Stats::bytes_duplicated` 里 ——
+//!    口径与理由见 [`crate::state::Stats`] 那个字段文档的第 ③ 条（**E16**③ 选的是"如实写明没进账"那一支）。
+//!    同一份文档第 ① 条那个"少报的算术上界"也因为本发**重推过**了：`WINDOW_BYTES × workers` 只对
+//!    `Windowed` 那一支成立，退化那一支的上界是**整条剩余 body**（一次只一枪在途）。
 //!
 //! ## 另外四条钉住的性质
 //!
@@ -321,20 +362,87 @@ pub enum Outcome {
 /// 调用方给 0 是最自然的写法 —— 照字面 `WINDOW_BYTES / 0` 就是一次 panic（debug 直接炸）。
 /// 取法：把 0 读成"慢到需要最长预算"，而不是 crash，也不是"速率未知就别超时"（后者会关掉整条
 /// `Stalled` 通道）。上下界照 plan：下界 `WINDOW_MIN_TIMEOUT_SECS`，上界 `WINDOW_MAX_TIMEOUT_SECS`。
+///
+/// **E16 之后这一条只回答"窗口那一枪"**：预算的分子是**这一枪打算读的字节数**，不再是写死的
+/// `WINDOW_BYTES` —— 退化那一支（`BodyShape::ToEof`）读的是整条剩余 body，沿用这一份就会在半路把
+/// 自己掐断（`reqwest` 的 `.timeout()` 是**整请求**期限，**R7** / 模块文档"reqwest 形状"第 1 条实测）。
+/// 两个入口共用 [`budget_for`]，所以式子与夹逼只有一份。
 pub fn window_budget(rate_bps: u64) -> Duration {
+    budget_for(WINDOW_BYTES, rate_bps)
+}
+
+/// 一份期限该罩住多少字节：`max(WINDOW_MIN, min(WINDOW_MAX, bytes / rate * 2))`。
+///
+/// 唯一比 `window_budget` 多出来的一个参数就是"这一枪打算读多少"（**E16①**）。窗口那一支传的
+/// 就是 `WINDOW_BYTES` ⇒ 与 `window_budget` 逐字节相同；退化那一支传的是整条剩余体量。
+/// 上界 `WINDOW_MAX_TIMEOUT_SECS` 照旧生效：**慢到超过 120 s 的整条下载会被自己的期限掐在半路**，
+/// 后果按 E16② 处理（交回 `Advanced { bytes }`、由调度器重新决定尾巴），而不是把"没下完"报成完成。
+fn budget_for(bytes: u64, rate_bps: u64) -> Duration {
     let seconds = if rate_bps == 0 {
         WINDOW_MAX_TIMEOUT_SECS
     } else {
-        WINDOW_BYTES.saturating_div(rate_bps).saturating_mul(2)
+        bytes.saturating_div(rate_bps).saturating_mul(2)
     };
     Duration::from_secs(seconds.clamp(WINDOW_MIN_TIMEOUT_SECS, WINDOW_MAX_TIMEOUT_SECS))
 }
 
+/// 一枪打算从对端取多少 body（**E16** / 裁定 R-B2 带来的形状）。
+///
+/// 为什么这个形状必须由**调用方**在发请求之前给（而不是让 `run_window` 看完响应头自己定）：
+/// 形状决定两件必须在**上网之前**定下来的事 —— 发哪一条 `Range`，以及给多长的预算
+/// （`.timeout()` 是整请求期限，R7）。`degraded` 要到响应头到手才知道，那时候预算已经发出去了。
+/// 调用方手上唯一的诚实信号是 `ProbeFacts.accept_ranges`（**E11③**：行为加权，不是抄头），
+/// 引擎据此给 `ToEof`，其余一律 `Windowed`。
+///
+/// 为什么不叫 `Body`：本模块已经 `use reqwest::blocking::Body`，那是**请求**体（`--data-file` 那一支），
+/// 而这个枚举说的是**响应**体读多少 —— 两者同名会把 F1 那条"GET/POST 分界"读糊。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyShape {
+    /// 窗口化：至多读 `WINDOW_BYTES` 个字节，读满就主动收手（模块文档开头那条：R1 用这一形状
+    /// 顶掉 reqwest blocking 没有的 `read_timeout`）。对端认 `Range` 时的唯一形状。
+    Windowed,
+    /// 整条剩余：从 `iv.start` 一路读到 `iv.end + 1`，**不按窗切**（**E16** R-B2）。
+    ///
+    /// 代价要说清（这一句是**推出来的**，不是实测）：这一支的 body 从文件偏移 0 开始，
+    /// 所以 `iv.start` 之前那一段仍然要**流式丢掉**（裁定 6 那条 `skip`）—— 一枪只丢**一次**前缀，
+    /// 而按窗切时每个窗口都丢一次"从头到那里"。后者随窗口数平方增长（E16 正文那组
+    /// `4 MiB × (0+1+…+11) = 264 MiB` 就是这么推出来的），前者是一次性的、量级 `≤ iv.start`。
+    /// 那批被丢的字节**没进** `Stats::bytes_duplicated`（口径与出处见该字段文档，E16③ 选的是
+    /// "如实标注没进账"那一支 —— 引擎手里没有它的线上证据，编一个数就是 E14③ 禁的第二本账）。
+    ToEof,
+}
+
+/// 一枪在**发出请求之前**就要定下来的三件事（[`BodyShape`] 是唯一输入）。
+struct ShotPlan {
+    /// 发出去的那条 `Range` 值。
+    range: String,
+    /// 挂在这一枪上的**整请求期限**（R7）。
+    budget: Duration,
+    /// 读上界（**exclusive**）：`stop` 由形状给出 ⇒ `bytes` 与 `store.len()` 都从它派生，
+    /// 差一字节两处一起红（裁定 5）。
+    stop: u64,
+}
+
+/// 把形状折成 [`ShotPlan`]。**这一处是 E16 的落点**：窗口夹只许作用在"对端认了 Range"那一支。
+///
+/// 三件事全部在上网之前定：`Range`（对端还没答话，问多少就是授权它流多少）、预算（整请求期限）、
+/// 读上界。反过来（先拿响应、再定预算）就是派发点名的那个次序矛盾，见 [`BodyShape`] 的文档。
+fn plan_shot(iv: Interval, total_len: u64, rate_bps: u64, shape: BodyShape) -> ShotPlan {
+    let stop = match shape {
+        // 裁定 5 / E12⑥：区间终点与"至多 `WINDOW_BYTES` 个字节"里更近的那个。
+        BodyShape::Windowed => iv.end.saturating_add(1).min(iv.start.saturating_add(WINDOW_BYTES)),
+        // **E16**：整条区间，不做窗口夹。退化那一支每多切一刀就多付一遍"从文件头到那里"的前缀。
+        BodyShape::ToEof => iv.end.saturating_add(1),
+    };
+    ShotPlan { range: range_header(iv, total_len, shape), budget: budget_for(stop.saturating_sub(iv.start), rate_bps), stop }
+}
+
 /// 这一枪发哪一条 `Range`（spec §2 表里"发 `Range: start-`"、§3 对 IDM 开放终点的观测）。
 ///
-/// **E14②（戊）改过这一条规则**，判据里的"终点"是**这一枪的窗口**，不是区间的终点：
-/// `window_end = min(iv.end, iv.start + WINDOW_BYTES - 1)`，只有 `window_end + 1 >= total_len`
-/// 才发 `bytes={start}-`。
+/// **E14②（戊）改过这一条规则**，判据里的"终点"是**这一枪打算读到哪**，不是区间的终点
+/// （**E16** 之后"读到哪"由 [`BodyShape`] 给出，所以这一句在退化那一支读作"区间终点"）：
+/// `planned_end = min(iv.end, iv.start + WINDOW_BYTES - 1)`（窗口那一支）或 `iv.end`（整条那一支），
+/// 只有 `planned_end + 1 >= total_len` 才发 `bytes={start}-`。
 ///
 /// 为什么原来那条（`iv.end + 1 >= total_len`）不成立：它把"这个区间**伸到**文件末尾"读成
 /// "这一枪**会读到**文件末尾"，于是对一个比一个窗口宽的尾巴区间发出**无界**的请求 ——
@@ -342,18 +450,24 @@ pub fn window_budget(rate_bps: u64) -> Duration {
 /// 全留在连接上（阶段4 实测 8 MiB 文件真多打 4.1 MiB 的机制起点，勘误 **E14**）。
 /// 窗口本来就填不满区间时，请求必须只问到窗口那一格：那一段我们注定不会读。
 ///
+/// **E16 不推翻这一条，反而靠它**：`ToEof` 那一支把 `planned_end` 抬到 `iv.end`，是因为那一截
+/// **真的会读** —— 戊拦的是"问了我们注定不读的字节"，不是"问得少"。
+///
 /// 保住的那半：**文件真正的那一尾**（窗口终点 == `total_len - 1`）仍然发开放终点 ——
 /// IDM 观测到的就是 `bytes={start}-`（spec §3），两种写法对端交的是同一批字节，多写一个终点
 /// 是对同一个意思的两种表述。
 /// 越过全长（`scheduler` 由 `total_len` 派区间，本不该出现）按"到文件末尾为止"读，同上一条。
-fn range_header(iv: Interval, total_len: u64) -> String {
-    // `WINDOW_BYTES - 1`：`iv.start + WINDOW_BYTES` 是**不含**的窗口上界（下面 `stop` 用的就是它），
+fn range_header(iv: Interval, total_len: u64, shape: BodyShape) -> String {
+    // `WINDOW_BYTES - 1`：`iv.start + WINDOW_BYTES` 是**不含**的窗口上界（上面 `stop` 用的就是它），
     // 这里要的是含端点的最后一格，所以减一。`saturating_add`：起点贴近 `u64::MAX` 时不许回绕。
-    let window_end = iv.end.min(iv.start.saturating_add(WINDOW_BYTES - 1));
-    if window_end.saturating_add(1) >= total_len {
+    let planned_end = match shape {
+        BodyShape::Windowed => iv.end.min(iv.start.saturating_add(WINDOW_BYTES - 1)),
+        BodyShape::ToEof => iv.end,
+    };
+    if planned_end.saturating_add(1) >= total_len {
         format!("bytes={}-", iv.start)
     } else {
-        format!("bytes={}-{}", iv.start, window_end)
+        format!("bytes={}-{}", iv.start, planned_end)
     }
 }
 
@@ -515,18 +629,25 @@ fn cap_allows(cap_end: u64, cursor: u64, shot_start: u64) -> bool {
     cursor <= cap_end.max(shot_start)
 }
 
-/// 领一个字节区间，最多下**一个窗口**，把字节按绝对偏移交给 `store`。
+/// 领一个字节区间，按 [`BodyShape`] 把字节按绝对偏移交给 `store`：窗口那一支**至多读满一个窗口就
+/// 收手**，整条那一支（`ToEof`，退化模式唯一该走的形状，**E16**）读满**整条区间**。
 ///
-/// `agent` 由调用方持有并复用（连接池才有意义）；`rate_bps` 只用来定窗口预算；
+/// `agent` 由调用方持有并复用（连接池才有意义）；`rate_bps` 只用来定预算；
 /// `total_len` 是 `ProbeFacts` 那份文件长度（裁定 1：末段要不要发开放终点必须由它决定，
 /// 也用来判 416 的分母）。
 ///
 /// `cap` 是这一枪的**终点帽**（[`EndCap`]，勘误 **E14**①）：读循环每块查一次，
 /// `cursor` 一旦越过帽就**停手**，交回的还是已有的 `Advanced { bytes }`（不是新的结论形状）。
 /// 传 `&AtomicU64::new(NO_END_CAP)` 就是"没有外面的帽"，行为与 E14 之前逐字节相同
-/// —— `run_window` 自己那一格的窗口终点仍然会降进去，所以这一参数**不需要**调用方先填对。
+/// —— `run_window` 自己那一格的上界仍然会降进去，所以这一参数**不需要**调用方先填对。
 /// 为什么放在最后一位而不是包进某个 `Options`：签名已经有六个参数，而这一个是唯一会变的。
 /// **勘误 E12① 那条"签名多了 `total_len`"以 E14 为准再加一个。**
+///
+/// `shape`（**E16**，本轮第八个参数）：由调用方按 `ProbeFacts.accept_ranges` 给 —— 为什么不能由本
+/// 函数看完响应头自己定，见 [`BodyShape`] 的文档（预算是**整请求**期限，必须在上网之前定）。
+/// 第八个参数踩了 clippy 的 `too_many_arguments` 门槛（>7）：`#[allow]` 在这里比把七个参数打散成
+/// 一个 `Options` 更诚实 —— 那会重写三十多处既有用例的调用形状，而派发点名"既有判据方向一条不许动"。
+#[allow(clippy::too_many_arguments)]
 pub fn run_window(
     agent: &Client,
     task: &Task,
@@ -535,6 +656,7 @@ pub fn run_window(
     rate_bps: u64,
     total_len: u64,
     cap: &EndCap,
+    shape: BodyShape,
 ) -> Result<Outcome> {
     // 与 `probe::run` / `state::Snapshot::from_task` 同一个立场：规则只住在 `Task::validate()` 一处，
     // 但**发请求**这一刻是第二个强制点。明文 HTTP + 口令的任务到不了网络（用例
@@ -560,8 +682,9 @@ pub fn run_window(
         return Ok(Outcome::Complete);
     }
 
-    let range = range_header(iv, total_len);
-    let req = build_request(agent, task, &range, window_budget(rate_bps))?;
+    // 这一枪的形状在**上网之前**就定完：`Range`、整请求期限、读上界（[`plan_shot`]）。
+    let plan = plan_shot(iv, total_len, rate_bps, shape);
+    let req = build_request(agent, task, &plan.range, plan.budget)?;
     let mut resp = match agent.execute(req) {
         Ok(resp) => resp,
         Err(e) => {
@@ -620,12 +743,15 @@ pub fn run_window(
         }
     }
 
-    // 窗口上界（**exclusive**）：区间终点与"至多 `WINDOW_BYTES` 个字节"里更近的那个（裁定 5）。
-    // `bytes` 与 `store.len()` 都由这一个 `stop` 算出来 ⇒ 任何一处差一字节，两条断言一起红。
-    let stop = iv.end.saturating_add(1).min(iv.start.saturating_add(WINDOW_BYTES));
-    // **终点帽**（**E14**①）：先把这一枪自己的窗口终点降进去（`stop` 是 exclusive，帽是**含端点**的，
-    // 所以是 `stop - 1`；`stop > iv.start >= 0` 恒成立 ⇒ 这里不会下溢）。
-    // 之后读循环每块只看这一个格子：外面（引擎的 `Retighten`）降过就更早收手，没降过就照旧读满窗口。
+    // 读上界（**exclusive**）来自 [`plan_shot`]：窗口那一支是"区间终点与至多 `WINDOW_BYTES` 里更近的
+    // 那个"（裁定 5），整条那一支是 `iv.end + 1`（**E16** —— 这里**不许**再夹窗口，否则每往前一窗
+    // 都要重付一遍"从文件头到那里"的前缀）。`bytes` 与 `store.len()` 都由这一个 `stop` 算出来
+    // ⇒ 任何一处差一字节，两条断言一起红。
+    let stop = plan.stop;
+    // **终点帽**（**E14**①）：先把这一枪自己的上界降进去（`stop` 是 exclusive，帽是**含端点**的，
+    // 所以是 `stop - 1`；`stop > iv.start >= 0` 恒成立（空区间在进门处就已经交 `Complete`）
+    // ⇒ 这里不会下溢）。
+    // 之后读循环每块只看这一个格子：外面（引擎的 `Retighten`）降过就更早收手，没降过就照旧读满。
     lower_end_cap(cap, stop - 1);
     let mut cursor = iv.start;
     let mut skip = if degraded { iv.start } else { 0 };
@@ -912,21 +1038,21 @@ mod tests {
         // `an_open_ended_request_is_for_the_window_that_reaches_eof_not_the_interval` 断"问窗口那一格"，
         // 这里把夹具换成真正的那一尾（起点 = 全长 - 一个窗口），**判据方向一字未动**：末段仍是开放终点。
         assert_eq!(
-            range_header(Interval { start: 48 * 1024 * 1024 - WINDOW_BYTES, end: 48 * 1024 * 1024 - 1 }, 48 * 1024 * 1024),
+            range_header(Interval { start: 48 * 1024 * 1024 - WINDOW_BYTES, end: 48 * 1024 * 1024 - 1 }, 48 * 1024 * 1024, BodyShape::Windowed),
             format!("bytes={}-", 48 * 1024 * 1024 - WINDOW_BYTES)
         );
         // 整份文件（起点 0、终点是最后一个字节）也算末段 ⇒ 同样是开放终点，不是 `bytes=0-<全长-1>`。
-        assert_eq!(range_header(Interval { start: 0, end: 9 }, 10), "bytes=0-");
+        assert_eq!(range_header(Interval { start: 0, end: 9 }, 10, BodyShape::Windowed), "bytes=0-");
         // 终点在文件中间 ⇒ 必须带显式终点（少带就是对端多送一整个窗口）。
-        assert_eq!(range_header(Interval { start: 0, end: 8 }, 10), "bytes=0-8");
-        assert_eq!(range_header(Interval { start: 4, end: 8 }, 10), "bytes=4-8");
+        assert_eq!(range_header(Interval { start: 0, end: 8 }, 10, BodyShape::Windowed), "bytes=0-8");
+        assert_eq!(range_header(Interval { start: 4, end: 8 }, 10, BodyShape::Windowed), "bytes=4-8");
         // 单字节区间不是末段（终点不是最后一个字节）。
-        assert_eq!(range_header(Interval { start: 4, end: 4 }, 10), "bytes=4-4");
+        assert_eq!(range_header(Interval { start: 4, end: 4 }, 10, BodyShape::Windowed), "bytes=4-4");
         // 越过全长（`scheduler` 由 `total_len` 派区间，本不该出现；出现时按"到文件末尾为止"读）。
-        assert_eq!(range_header(Interval { start: 4, end: 20 }, 10), "bytes=4-");
+        assert_eq!(range_header(Interval { start: 4, end: 20 }, 10, BodyShape::Windowed), "bytes=4-");
         // 全长 0：`total_len - 1` 会下溢（debug 直接 panic），`saturating_add` 那一支把它读成开放终点。
         // 这条形状到不了网络（区间必是空的，`run_window` 先交 `Complete`），但判据不许靠下溢活着。
-        assert_eq!(range_header(Interval { start: 0, end: 0 }, 0), "bytes=0-");
+        assert_eq!(range_header(Interval { start: 0, end: 0 }, 0, BodyShape::Windowed), "bytes=0-");
     }
 
     /// **E14②（戊）**：判据里的"终点"是**窗口**，不是区间。这条用例是本轮唯一被改掉判据值的既有形状
@@ -939,40 +1065,148 @@ mod tests {
         // 窗口正好落在 EOF：起点 = 全长 - WINDOW ⇒ `window_end == total_len - 1` ⇒ 开放终点。
         let total = 48 * 1024 * 1024;
         assert_eq!(
-            range_header(Interval { start: total - WINDOW_BYTES, end: total - 1 }, total),
+            range_header(Interval { start: total - WINDOW_BYTES, end: total - 1 }, total, BodyShape::Windowed),
             format!("bytes={}-", total - WINDOW_BYTES)
         );
         // 窗口越过 EOF（剩下的比一个窗口少）⇒ 仍然开放终点，不许写成 `bytes=start-<全长-1>`。
         assert_eq!(
-            range_header(Interval { start: total - 4096, end: total - 1 }, total),
+            range_header(Interval { start: total - 4096, end: total - 1 }, total, BodyShape::Windowed),
             format!("bytes={}-", total - 4096)
         );
         // 区间伸到 EOF、但**窗口填不满它** ⇒ 问的是窗口那一格，不是 EOF（这就是 E14② 改的那一格）。
         assert_eq!(
-            range_header(Interval { start: 1_048_576, end: total - 1 }, total),
+            range_header(Interval { start: 1_048_576, end: total - 1 }, total, BodyShape::Windowed),
             format!("bytes={}-{}", 1_048_576, 1_048_576 + WINDOW_BYTES - 1)
         );
         // 阶段4 那条惹祸的派单形状：8 MiB 文件的第一段 `[236032, 8388607]`。
         // 旧判据（`iv.end + 1 >= total_len`）在这里发 `bytes=236032-` ⇒ 对端有权流 7.75 MiB，
         // 而调度器同期把同一段收了四次 ⇒ 收手之后的每一字节都由别人重下。
         assert_eq!(
-            range_header(Interval { start: 236_032, end: 8_388_607 }, 8_388_608),
+            range_header(Interval { start: 236_032, end: 8_388_607 }, 8_388_608, BodyShape::Windowed),
             format!("bytes=236032-{}", 236_032 + WINDOW_BYTES - 1)
         );
         // 区间比窗口窄 ⇒ 窗口终点就是区间终点 ⇒ 与 E14 之前一模一样（戊只动"比窗口宽"那一支）。
         assert_eq!(
-            range_header(Interval { start: 236_032, end: 236_032 + 65_536 - 1 }, 8_388_608),
+            range_header(Interval { start: 236_032, end: 236_032 + 65_536 - 1 }, 8_388_608, BodyShape::Windowed),
             format!("bytes=236032-{}", 236_032 + 65_536 - 1)
         );
         // 起点与全长都贴着 `u64` 上界：加法不许回绕（回绕了就会把"问一个字节"发成开放终点）。
         assert_eq!(
-            range_header(Interval { start: u64::MAX - 1, end: u64::MAX }, u64::MAX),
+            range_header(Interval { start: u64::MAX - 1, end: u64::MAX }, u64::MAX, BodyShape::Windowed),
             "bytes=18446744073709551614-"
         );
     }
 
-    // ---- 终点帽（E14① 乙）：只有往下才说话 ----
+    /// **E16 / 裁定 R-B2：`BodyShape` 一次定三件事 —— 问多少（`Range`）、读到哪儿（`stop`）、
+    /// 预算罩多少（`budget`）。** 这一组格子的期望值全是**算出来的字面量**，不从被测函数要。
+    ///
+    /// 为什么要三件事一起钉（它们住在同一个 [`plan_shot`] 里不是巧合，是**次序**要求）：
+    /// `.timeout()` 是**整请求**期限（**R7**，模块文档"reqwest 形状"第 1 条实测），所以预算必须在
+    /// 上网**之前**定，而"这一枪打算读多少"也只有在上网之前定得下来才配当分子的体量。
+    /// 派发点名的那个矛盾（"`status` 在发请求之后才知道，预算却在发请求之前就要定"）就是靠
+    /// **形状由调用方给**（`ProbeFacts.accept_ranges`）解掉的，不是靠猜 —— 见 [`BodyShape`] 文档。
+    ///
+    /// 每格各自抓什么：
+    /// - `degraded-tail-toeof` vs `degraded-tail-windowed`：同一个区间、同一个速率读数，
+    ///   `ToEof` 必须问**整条**（开放终点）、读**整条**、并且预算**更宽**（24 s 对 15 s）。
+    ///   把 `ToEof` 的 `stop` 又夹回窗口（8F-2 的反向变异）⇒ 这三列一起红。
+    /// - `mid-file-short-*`：区间在文件中间结束、比一个窗口窄 ⇒ 两种形状**逐字相同**
+    ///   ⇒ 证明 `ToEof` 说的是"读到 `iv.end`"，不是"读到 `total_len`"（少问对端没被要的字节）。
+    /// - `rate-unknown-*`：`rate_bps == 0`（"还没测出速率"）必须落在最宽的 120 s，两种形状都不许 panic
+    ///   —— 这一格守的是 `window_budget` 把式子交给 `budget_for` 之后**没有丢掉**除零那一条。
+    #[test]
+    fn the_body_shape_decides_the_range_the_read_bound_and_the_budget_together() {
+        struct Row {
+            name: &'static str,
+            iv: Interval,
+            total: u64,
+            rate: u64,
+            shape: BodyShape,
+            range: &'static str,
+            budget_secs: u64,
+            stop: u64,
+        }
+        let w = WINDOW_BYTES; // 4_194_304
+        let rows = [
+            Row {
+                // 8F-2 那条集成用例的形状：试探读过 236,032 个字节，剩下**三个窗口**。
+                name: "degraded-tail-toeof",
+                iv: Interval { start: 236_032, end: 12_818_943 },
+                total: 12_818_944,
+                rate: 1_000_000,
+                shape: BodyShape::ToEof,
+                range: "bytes=236032-",
+                // 12,582,912 / 1,000,000 = 12（整除）⇒ ×2 = 24 s ⇒ 落在 [15, 120] 里。
+                budget_secs: 24,
+                stop: 12_818_944,
+            },
+            Row {
+                name: "degraded-tail-windowed",
+                iv: Interval { start: 236_032, end: 12_818_943 },
+                total: 12_818_944,
+                rate: 1_000_000,
+                shape: BodyShape::Windowed,
+                range: "bytes=236032-4430335",
+                budget_secs: 15,
+                stop: 236_032 + w,
+            },
+            Row {
+                name: "mid-file-short-toeof",
+                iv: Interval { start: 1_000_000, end: 1_000_999 },
+                total: 48 * 1024 * 1024,
+                rate: 1_000_000,
+                shape: BodyShape::ToEof,
+                range: "bytes=1000000-1000999",
+                budget_secs: 15,
+                stop: 1_001_000,
+            },
+            Row {
+                name: "mid-file-short-windowed",
+                iv: Interval { start: 1_000_000, end: 1_000_999 },
+                total: 48 * 1024 * 1024,
+                rate: 1_000_000,
+                shape: BodyShape::Windowed,
+                range: "bytes=1000000-1000999",
+                budget_secs: 15,
+                stop: 1_001_000,
+            },
+            Row {
+                name: "rate-unknown-toeof",
+                iv: Interval { start: 0, end: 48 * 1024 * 1024 - 1 },
+                total: 48 * 1024 * 1024,
+                rate: 0,
+                shape: BodyShape::ToEof,
+                range: "bytes=0-",
+                budget_secs: WINDOW_MAX_TIMEOUT_SECS,
+                stop: 48 * 1024 * 1024,
+            },
+            Row {
+                name: "rate-unknown-windowed",
+                iv: Interval { start: 0, end: 48 * 1024 * 1024 - 1 },
+                total: 48 * 1024 * 1024,
+                rate: 0,
+                shape: BodyShape::Windowed,
+                range: "bytes=0-4194303",
+                budget_secs: WINDOW_MAX_TIMEOUT_SECS,
+                stop: w,
+            },
+        ];
+        for row in rows {
+            let plan = plan_shot(row.iv, row.total, row.rate, row.shape);
+            assert_eq!(plan.range, row.range.to_string(), "[{}] 发出去的 Range", row.name);
+            assert_eq!(plan.budget, Duration::from_secs(row.budget_secs), "[{}] 整请求期限", row.name);
+            assert_eq!(plan.stop, row.stop, "[{}] 读上界（exclusive）", row.name);
+        }
 
+        // `window_budget` 仍然等于"`WINDOW_BYTES` 那一格的 `budget_for`"：三条式子上的格子
+        // （下界夹住 / 式子本身 / 上界夹住）都必须是**算出来的字面秒数**。
+        assert_eq!(window_budget(10_000_000), Duration::from_secs(15), "4 MiB / 10 MB/s × 2 = 0.8 s ⇒ 夹到下界");
+        assert_eq!(window_budget(300_000), Duration::from_secs(26), "4_194_304 / 300_000 = 13（整除）× 2 = 26 s");
+        assert_eq!(window_budget(1), Duration::from_secs(120), "速率 1 字节/秒 ⇒ 式子给出 8,388,608 s ⇒ 夹到上界");
+        assert_eq!(window_budget(0), Duration::from_secs(120), "速率未知 ⇒ 最宽，且**不许**除零 panic");
+    }
+
+    // ---- 终点帽（E14① 乙）：只有往下才说话 ----
     #[test]
     fn end_cap_lowering_is_monotonic_downward_only() {
         // 要钉的性质：一个**更大**的值绝不允许把已经收紧的枪重新放宽。
@@ -1414,6 +1648,7 @@ mod tests {
             10_000_000,
             48 * 1024 * 1024,
             &AtomicU64::new(NO_END_CAP),
+            BodyShape::Windowed,
         ) else {
             panic!("带 --data-file 的任务不该被窗口那条路接受（发 GET 就是拿另一条请求的字节）");
         };

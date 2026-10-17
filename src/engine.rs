@@ -210,9 +210,13 @@ pub enum TraceStep {
     /// 引擎喂给调度器的那一步事件。全部按顺序录，包括每条 `Connected` ——
     /// 调度器只有在这一步上交回动作，漏掉它回放就复现不出派发序列。
     Fed(Event),
-    /// 引擎照某个 `Assign` **真打出去的一枪**（区间与线上那条 `Range` 一一对应：
-    /// `fetch::range_header` 发的是这一枪的**窗口** `[iv.start, min(iv.end, iv.start + WINDOW_BYTES - 1)]`，
-    /// 只有窗口够到文件尾才写成开放终点 —— 见 **E14**② 与 `src/fetch.rs` 模块文档）。
+    /// 引擎照某个 `Assign` **真打出去的一枪**（区间与线上那条 `Range` 一一对应，但**发的是哪一段
+    /// 由 `fetch::BodyShape` 决定**（**E16** 之后这一句有两个读法，别再当成只有一条）：
+    /// - 对端认 `Range`（`Windowed`）⇒ 发的是这一枪的**窗口** `[iv.start, min(iv.end, iv.start + WINDOW_BYTES - 1)]`，
+    ///   只有窗口够到文件尾才写成开放终点 —— 见 **E14**② 与 `src/fetch.rs` 模块文档；
+    /// - 对端不认（`ToEof`）⇒ 发的是**整条区间** `[iv.start, iv.end]`，退化模式下就是问到 EOF。
+    ///
+    /// 按字面只写第一条是**说谎**：那正是 E16 撤掉的那个形状。）
     Dispatched { worker: usize, iv: Interval },
     /// 调度器把某个在途 worker 的终点提前了。**引擎不为此发新的一枪**（理由见模块文档
     /// "`Retighten` 不是一枪"那节），所以它绝不能混进 `dispatched()` —— 那道链接要比的是线上真收到的 Range。
@@ -437,8 +441,18 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     let store = Arc::new(Store::open(&target, plan.truncate)?);
 
     // 预读的字节：`ProbeResult::prelude` 的文档把"engine 把它写在偏移 0"这条义务交给本模块。
-    // 只在新建那一支写 —— 续传那一支的段表已经说明了文件头部该有什么，再覆写一遍只是给
-    // `bytes_duplicated` 记一笔没必要的账，而且省不下任何下载（那批字节本来就在覆盖集里）。
+    // 只在**新建**那一支写。续传那一支不写（段表已经说明了文件头部该有什么，再覆写一遍是把
+    // 本来就在覆盖集里的字节又记一笔重复账），代价要照实说：**`probe` 已经把那批字节从线上取回来了，
+    // 这一支既不落盘也不进任何账** ⇒ 它是**真线上代价却没被报出**的第二处已知少报
+    // （第一处 = 在途窗口已落盘却没进段表的那批，两处都写在 `state::Stats::bytes_duplicated` 的字段文档上）。
+    //
+    // 为什么不给它开一笔账（**E14③ / E17** 的口径，不是偷懒）：引擎手里只有"覆盖集 + `store.len()`"
+    // 两个量，从它们倒推"这 `min(prelude_max, total_len)` 个字节是白取的"正是 E14③ 明令禁止的第二本账
+    // —— 唯一诚实的量具是对端日志（裁定 16：`Σ conn_close_side.sent`），引擎在运行时拿不到。
+    // 也不许为它新增状态字段或第三本账（**E7** 的两本账裁定）。
+    // 量级是**推出来的**（不是实测）：每一轮 `Resume` 至多 `min(prelude_max, total_len)` 个字节，
+    // 其中 `prelude_max = task.limits().0 = PROBE_READ_BYTES`；反复续传会按轮累积，
+    // 而 `stats` 本身也跨轮读回来接着加（见字段文档末段）。
     if plan.truncate && !probed.prelude.is_empty() {
         let take = probed.prelude.len().min(facts.total_len as usize);
         if take > 0 {
@@ -791,6 +805,10 @@ struct WorkerSpawn {
     task: Arc<Task>,
     store: Arc<Store>,
     total_len: u64,
+    /// 这一台 worker 的每一枪取多少 body（勘误 **E16** R-B2）：对端认 `Range` ⇒ `Windowed`，
+    /// 不认 ⇒ `ToEof`。**整个 worker 生命周期里恒定** —— 它由 `ProbeFacts.accept_ranges` 决定，
+    /// 而那个事实一次运行之内不变（变了就是 `ValidatorChanged`，走的是另一条路）。
+    body: fetch::BodyShape,
 }
 
 /// 线程心跳：`Drop` 时置假，**包括 panic 展开时**（std 保证 unwind 期间析构）。
@@ -817,7 +835,7 @@ impl Drop for Heartbeat {
 /// 重置），所以收紧永远递得给"此刻在途的那一枪"—— 这是 `Retighten` 唯一能兑现的通道：
 /// 那个线程正阻塞在 `resp.read()` 里，除了它自己每块看一眼的格子，外面没有任何东西能插话。
 fn worker_loop(spawn: WorkerSpawn) {
-    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len } = spawn;
+    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body } = spawn;
     let _heartbeat = Heartbeat::new(alive);
     // `recv` Err = 主线程已经交回发送端（引擎退出）⇒ 收工。`Job::Stop` 是正常出口。
     while let Ok(job) = jobs.recv() {
@@ -826,7 +844,7 @@ fn worker_loop(spawn: WorkerSpawn) {
             Job::Fetch { iv, rate_bps } => {
                 // `run_window` 里的 `Err` 只有一种来源：`store.write_at` 失败（网络失败它自己折成
                 // `Outcome::Failed`）。所以上抛的就是"落盘坏了"这一件事，主线程据此停整个任务。
-                let outcome = fetch::run_window(&client, &task, iv, &store, rate_bps, total_len, &cap);
+                let outcome = fetch::run_window(&client, &task, iv, &store, rate_bps, total_len, &cap, body);
                 if reports.send(WorkerReport { worker, iv, outcome }).is_err() {
                     break; // 主线程不在了，交回给谁都没意义
                 }
@@ -886,6 +904,11 @@ impl Engine {
         } = launch;
         let count = cfg.workers;
 
+        // **E16** R-B2：对端不认 `Range` ⇒ 每一枪取整条剩余 body（`ToEof`），**不许**按窗重请求。
+        // 信号只有这一处（`ProbeFacts.accept_ranges`，**E11③** 的行为加权读法）；`run_window` 自己
+        // 要到响应头到手才看得见退化，而预算（整请求期限，R7）必须在那之前定 —— 次序见 `fetch::BodyShape`。
+        let body = if accept_ranges { fetch::BodyShape::Windowed } else { fetch::BodyShape::ToEof };
+
         let (reports_tx, reports) = channel::<WorkerReport>();
         let mut jobs = Vec::with_capacity(count);
         let mut handles = Vec::with_capacity(count);
@@ -906,6 +929,7 @@ impl Engine {
                 task: Arc::clone(&task),
                 store: Arc::clone(&store),
                 total_len,
+                body,
             };
             match thread::Builder::new().name(format!("dlm-worker-{worker}")).spawn(move || worker_loop(spawn)) {
                 Ok(handle) => {
