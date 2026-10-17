@@ -758,7 +758,10 @@ fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started:
     // 恒 truncate：这一支没有可读的断点，残留的半截文件不属于本轮任何账。
     let store = Store::open(&target, true)?;
     let (outcome, facts) = fetch::run_whole(client, task, &store, RATE_UNKNOWN)?;
-    // 收尾一次 flush（E8①：全场只有这一处；此刻没有任何 writer 活着 —— 本函数不开线程）。
+    // 收尾一次 flush。**E8① 的判据是"收尾调一次、绝不进 `run_window` 的每块循环"，不是"全二进制只有一个调用点"**
+    // —— 本文件有两条互斥的出口路线（`data_file` 走这里，多 worker 走 `Engine::run` 收尾那一处），
+    // 所以 flush 有两个调用点，每条路线上至多一次（T8 评审 E 第 2 条：原先这两句各写"全场只有这一处"，互为反例）。
+    // 此刻没有任何 writer 活着 —— 本函数不开线程（E8②）。
     store.flush()?;
     let delivered = store.len()?;
     let bytes_total = facts.as_ref().map_or(0, |f| f.total_len);
@@ -1246,7 +1249,8 @@ impl Engine {
             _ => None,
         };
 
-        // **E8①**：全场只有这一处 `flush`，此刻 writer 已全部 join。
+        // **E8① 的判据是"收尾调一次、绝不进每块循环"**，不是"全二进制只有一个调用点"：
+        // 另一处在 `run_whole_once`（`data_file` 那条路线，与本函数互斥）。这里此刻 writer 已全部 join（E8②）。
         if let Err(e) = self.store.flush() {
             fatal = fatal.or(Some(format!("收尾同步目标文件失败：{e:#}")));
         }

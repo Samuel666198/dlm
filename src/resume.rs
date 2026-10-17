@@ -133,7 +133,11 @@ use crate::task::Task;
 ///   在这里是两个不同的值。要放宽请在 probe 那侧决定并写进它的文档，别在这里悄悄改。
 /// - `total_len`：`Content-Range` 的总长或 `Content-Length`（退化路径）。
 /// - `final_url`：跟随重定向之后的落地 URL（spec §6.5：续传按它比对）。
-/// - `accept_ranges`：服务器是否认 `Range`（`Accept-Ranges: bytes`）。
+/// - `accept_ranges`：服务器**认不认 `Range`** —— ⚠ **不是**"`Accept-Ranges` 头写了 `bytes` 吗"。
+///   **E11③/T6 评审 I1** 把它定成**行为加权的合取**：头说 `bytes` **且**这一次真按我们发的 `Range` 答了 206
+///   才算真（判据住在 `probe::peer_accepts_ranges`，读法住在 `probe` 那份唯一的"响应头 → `ProbeFacts`"里）。
+///   只看头会把"头说支持、实际发整条 200"的对端误判成支持 ⇒ 引擎会开着窗口化形状去打一条不认 Range 的线。
+///   ⇒ **Task 9 与任何后来读者都不许把这行读成"抄一个响应头"**；E11 把这条转派给 Task 8 时漏的就是这一句（评审 E 第 3 条）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeFacts {
     pub etag: Option<String>,
