@@ -132,8 +132,11 @@
 //!    那个 `(0, true)` 分支）。`Complete` 的判据（`cursor > iv.end`）一个字没改，
 //!    所以"没下完"永远报不成完成（`engine::completion_verdict` 那两本账的闸也原样有效）。
 //! 3. **E14②（戊）不作废，反而靠它**：`ToEof` 把 `planned_end` 抬到 `iv.end` 是因为那一截**真的会读**，
-//!    戊拦的是"问了我们注定不读的字节"。区间在文件中间结束、比窗口窄时两种形状**逐字相同**
-//!    （上面那条单元用例的 `mid-file-short-*` 两格钉的就是这个"没多问"）。
+//!    戊拦的是"问了我们注定不读的字节"。区间在文件中间结束、比窗口窄时 `Range` 与 `stop` 两列**确实**
+//!    相同；**预算那一列并不逐字相同**（分子按形状分支：`ToEof` 传 `stop` = 1_001_000 个字节、
+//!    `Windowed` 传 `stop − iv.start` = 1_000 个），只是两个式子都夹到 15 s 那个
+//!    `WINDOW_MIN_TIMEOUT_SECS` 下界 ⇒ 上面那条单元用例的 `mid-file-short-*` 两格**读起来**像
+//!    "逐字相同"，而它对预算这一列**没有分辨力**（"没多问"这件事钉在 `Range` 那一列上，仍然成立）。
 //! 4. **代价没藏**：`ToEof` 仍然要丢掉 `iv.start` 之前那一段 body（裁定 6 那条 `skip`）。修好之后这一笔
 //!    每一**枪**只付**一次**（以前是每个窗口付一次；说"每轮一次"是错的 —— 退化模式下每次掐断都会
 //!    重派一条起点更靠后的区间，**每条区间各付自己那一份** `skip`，见下面 [`BodyShape`] 那条与
@@ -1167,7 +1170,10 @@ mod tests {
         );
         // 阶段4 那条惹祸的派单形状：8 MiB 文件的第一段 `[236032, 8388607]`。
         // 旧判据（`iv.end + 1 >= total_len`）在这里发 `bytes=236032-` ⇒ 对端有权流 7.75 MiB，
-        // 而调度器同期把同一段收了四次 ⇒ 收手之后的每一字节都由别人重下。
+        // 而调度器同期把同一段收了四次 ⇒ 收手之后读到的那些字节**可能**由别人重下（**E14③** 批准的
+        // 就是这个强度：`bytes_duplicated` 是"落在归属范围之外"的上界式记账，不是线上流量账单，
+        // 口径与它为什么不是账单见 `state::Stats::bytes_duplicated`；原先这里写的是"每一字节都由
+        // 别人重下"，那是这张断言表**没钉**的强度）。这一格的判据是"不再问 EOF 那一截"，与字节数无关。
         assert_eq!(
             range_header(Interval { start: 236_032, end: 8_388_607 }, 8_388_608, BodyShape::Windowed),
             format!("bytes=236032-{}", 236_032 + WINDOW_BYTES - 1)
@@ -1201,8 +1207,12 @@ mod tests {
     ///   的分子是**这一枪打算从网线上读的字节**（`stop`，含要丢掉的前缀），不是打算**写**的那一截
     ///   （`stop − iv.start`）。原先那一行给的两个分子都算出 24 s ⇒ 修没修都绿，那一格**没有断言**；
     ///   现在这一对的 96 s / 16 s 才把这一格钉住。
-    /// - `mid-file-short-*`：区间在文件中间结束、比一个窗口窄 ⇒ 两种形状**逐字相同**
+    /// - `mid-file-short-*`：区间在文件中间结束、比一个窗口窄 ⇒ `Range` 与 `stop` 两列两种形状**相同**
     ///   ⇒ 证明 `ToEof` 说的是"读到 `iv.end`"，不是"读到 `total_len`"（少问对端没被要的字节）。
+    ///   ⚠ **`budget` 那一列并不是"相同"，只是看起来相同**：分子按形状分支（`ToEof` = `stop` =
+    ///   1_001_000，`Windowed` = `stop − iv.start` = 1_000），两个式子都夹到 15 s 下界 ⇒ 这一对格子
+    ///   对预算这一列**没有分辨力**（修复轮 8F-4a 把"逐字相同"这个说法改掉，8F-3a 的分子分支改的是
+    ///   这一列，而这一格看不出来）。能分辨分子的是上面 `degraded-tail-*` 那一对（96 s / 15 s）。
     /// - `rate-unknown-*`：`rate_bps == 0`（"还没测出速率"）必须落在最宽的 120 s，两种形状都不许 panic
     ///   —— 这一格守的是 `window_budget` 把式子交给 `budget_for` 之后**没有丢掉**除零那一条。
     #[test]
@@ -1276,7 +1286,7 @@ mod tests {
                 rate: 0,
                 shape: BodyShape::ToEof,
                 range: "bytes=0-",
-                budget_secs: WINDOW_MAX_TIMEOUT_SECS,
+                budget_secs: 120,
                 stop: 48 * 1024 * 1024,
             },
             Row {
@@ -1286,7 +1296,7 @@ mod tests {
                 rate: 0,
                 shape: BodyShape::Windowed,
                 range: "bytes=0-4194303",
-                budget_secs: WINDOW_MAX_TIMEOUT_SECS,
+                budget_secs: 120,
                 stop: w,
             },
         ];
@@ -1300,7 +1310,7 @@ mod tests {
         // `window_budget` 仍然等于"`WINDOW_BYTES` 那一格的 `budget_for`"：**四条**断言（下界夹住 /
         // 式子本身 / 上界夹住 / 速率未知），每条的期望值都必须是**算出来的字面秒数**。
         assert_eq!(window_budget(10_000_000), Duration::from_secs(15), "4 MiB / 10 MB/s × 2 = 0.8 s ⇒ 夹到下界");
-        assert_eq!(window_budget(300_000), Duration::from_secs(26), "4_194_304 / 300_000 = 13（整除）× 2 = 26 s");
+        assert_eq!(window_budget(300_000), Duration::from_secs(26), "4_194_304 / 300_000 = 13.98 ⇒ 整数除法向下取整到 13，× 2 = 26 s（**不是整除**）");
         assert_eq!(window_budget(1), Duration::from_secs(120), "速率 1 字节/秒 ⇒ 式子给出 8,388,608 s ⇒ 夹到上界");
         assert_eq!(window_budget(0), Duration::from_secs(120), "速率未知 ⇒ 最宽，且**不许**除零 panic");
     }

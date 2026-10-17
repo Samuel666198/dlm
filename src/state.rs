@@ -192,7 +192,7 @@ pub struct Stats {
     /// - **②③ 根本不在这两个量里** —— 那两批字节只上过网线、一个字节都没落到盘上，而覆盖集与
     ///   `store.len()` 都只看盘。
     ///
-    /// 唯一的诚实线上量具是对端日志（裁定 16：`Σ conn_close_side.sent`），引擎运行时拿不到。
+    /// 唯一的诚实线上量具是对端日志（计划勘误 **E14 附记**：`Σ conn_close_side.sent`），引擎运行时拿不到。
     /// 宁可少报，不记假账（**E14③**），也不许为它们开第三本账（**E7**）。
     ///
     /// ① **被杀时的在途半段**。任务在**任意时刻**被杀时，上一轮那些在途枪**已经落盘、却没来得及进段表**
@@ -243,7 +243,10 @@ pub struct Stats {
     /// 上界，只是"归属之外**可能**由别人重下的字节"这一个问题的答案；线上流量要问对端日志，不许问这个字段。
     ///
     /// 这一格**真实被钉到的强度**（修复轮 8F-3a 重新逐条 `grep -n duplicated` 过全树，照实写；
-    /// 原先这一节漏了两处断言、还把三处数量数错了）：
+    /// 原先这一节漏了两处断言、还把三处数量数错了。⚠ **8F-4a 补上那把量具自己的洞**：按字段名
+    /// `grep duplicated` **看不见整条结构体的相等断言** —— `assert_eq!(plan.stats, Stats::default())`
+    /// 这种写法里字段名根本不出现，于是上一轮把两条"其实钉住了 0"的用例读成了"填了数却没断"。
+    /// 下一轮扫这本账时必须连着 `Stats::default()` / 整结构体比较一起扫，不能只按字段名 grep）：
     /// - 单元层钉**口径**，用字面值：
     ///   `engine::tests::the_duplicate_book_counts_only_what_fell_outside_the_owned_range`
     ///   （**五个断言块**：读满自己那个窗口 ⇒ 恰好 **0**；越帽那一笔 ⇒ 恰好 **65,536 = 一个
@@ -254,15 +257,19 @@ pub struct Stats {
     /// - 单元层钉**别的模块不许动这本账**：`resume::tests::resume_hands_the_snapshot_back_untouched`
     ///   断 `Resume` 交回的 `stats.bytes_duplicated == 0`。
     /// - 落盘 schema：`state::tests::json_keys_match_the_spec_example_shape` 断 `stats` 里就是那三个键。
-    /// - 跨轮：`state::tests::stats_start_at_zero_and_survive_a_roundtrip` 只钉"存多少读回多少"
-    ///   （400 进 400 出）。**注意这一格会随断点文件跨续传累积**（`engine::run` 从 `snap.stats`
-    ///   读回来接着加），所以它不是"这一轮"的量。
+    /// - 跨轮 **+ 起零**：`state::tests::stats_start_at_zero_and_survive_a_roundtrip` 钉的是两件事，
+    ///   原先这里只写了后一件 —— ① `assert_eq!(snap.stats, Stats::default())`：**新建快照的整条
+    ///   `Stats` 从 0 起**，这一格因此也被钉成 0；② "存多少读回多少"（400 进 400 出）。
+    ///   **注意②里那个数会随断点文件跨续传累积**（`engine::run` 从 `snap.stats` 读回来接着加），
+    ///   所以它不是"这一轮"的量。
     /// - 集成层只有**两条**，都在 `the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window`：
     ///   `duplicated > 0`（这笔账不许折成 0，E14③ 末句）与一侧界 `duplicated ≤ excess + workers × CHUNK_BYTES`
     ///   （引擎的账不许比线上账单更凶；那个加数**故意放宽**）。
-    /// - **填了数却没断**的那两处（写明，免得下一发把它们当判据）：`engine::tests` 的
-    ///   `fresh_resume_and_abort_route_to_their_own_plan` 往夹具里塞 `bytes_duplicated: 6`，但只断
-    ///   `retries` 与 `bytes_delivered`；`tests/integration.rs` 铺断点文件的那处夹具塞的是 0。
+    /// - `engine::tests::fresh_resume_and_abort_route_to_their_own_plan` **两格都有份**（原先这一节把
+    ///   它整条列进"填了数却没断"，那是错的）：`Fresh` 那一支的 `assert_eq!(plan.stats, Stats::default())`
+    ///   把这一格钉成 0；而 `Resume` 那一支往夹具里塞的 `bytes_duplicated: 6` **确实仍然没断**
+    ///   （那一支只断 `retries` 与 `bytes_delivered`）⇒ "6 原样带过去"这件事没有判据。
+    /// - **填了数却没断**的只剩一处：`tests/integration.rs` 铺断点文件的那处夹具塞的是 0。
     ///
     /// 一句话总结强度：上面这些断言钉的全是"**口径怎么算**"（给定归属与落盘量 ⇒ 期望值）与
     /// "**不许折成 0**"；**没有任何**断言把这一格与"真被重下的字节数"钉在一起。

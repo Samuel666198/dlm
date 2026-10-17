@@ -24,8 +24,10 @@
 //!    `read_bounded` 停在上限、剩下的字节留在连接里 ⇒ 那条连接是被**拆掉**的，不回池复用。拆连接本身
 //!    安全（我们拿到的前缀是完整的、body 从偏移 0 起没错位），但 **Task 8/10 不许把"试探之后连接可
 //!    复用"当成退化路径的性质**：E3 的**三条**守卫用例跑的都是非退化那一支（`/blob` 答 206、读满预读）
-//!    —— 本模块两条 `same_connection_drained_206_then_416_both_complete` 与
-//!    `probe_own_drained_prelude_then_a_416_on_the_same_client`，外加 `fetch` 版
+//!    —— 两条 probe 版用例 `same_connection_drained_206_then_416_both_complete` 与
+//!    `probe_own_drained_prelude_then_a_416_on_the_same_client`（**位置：这两条住在
+//!    `tests/integration.rs`，不在本模块** —— 修复轮 8F-4a 把原先那句"本模块两条"改掉；本模块
+//!    `src/probe.rs` 的单元用例按上面那句注释自己就写明"不碰网络"，造不出连接复用这件事），外加 `fetch` 版
 //!    `a_drained_window_leaves_the_connection_reusable`（修复轮 8F-3a 数过：原先写"那两条"漏了第三条），
 //!    退化那一支不在它们的覆盖里。**"不在覆盖里"这件事到今天仍然只对着 E3 那三条用例成立** ——
 //!    8F-2 之后退化形状多了一台仪器（`tests/harness/mod.rs` 的 `spawn_scripted_peer` + `Shot::IgnoresRange`
