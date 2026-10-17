@@ -1258,6 +1258,16 @@ fn a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body() -> anyhow::Resul
     );
     assert!(peer.saw("/ignores-range"), "必须真打到对端：{:?}", peer.seen());
     drop(store);
+    // **复审 B-Minor 5**：上面那次读数发生在对端**还在写**的时候（节拍 64 KiB / 20 ms，
+    // 内核缓冲里还有一截没出手）⇒ 那是一条对增长量读一次就断的上界，与本轮修的恒真窗口同一形状
+    // （只是余量 4 倍，实践上稳，但形状不对）。落盘句柄与客户端都放下之后再读一次，
+    // 断**同一个**上界：那时对端要么已经写完收手、要么已经撞上断链错误，`written` 不再增长。
+    let written_after_teardown = peer.written();
+    assert!(
+        written_after_teardown < 4 * 1024 * 1024,
+        "客户端断开之后对端写出 {written_after_teardown} 字节（整份 body 是 8 MiB）⇒ \
+         收手的时机不是由我们决定的，这一格量的是'吸完整个 body'那一支：{written} → {written_after_teardown}"
+    );
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
 }
@@ -2295,12 +2305,22 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
     // 引擎返回的那一刻日志未必已经落盘，裸读一次会把"最后那一两条 Range"漏掉 —— 而漏掉的
     // 恰好可能是唯一违规的那一枪，判据就会**碰巧**为真。守卫数由这条用例真实期望的条数推出：
     // 线上请求 = 引擎派出的枪数 + 试探那一枪（`Report::dispatched()` 与线上是一对一，T8-R2）。
+    //
+    // **复审 B-I-4**：守卫数取自**被测自己的**账 ⇒ 光"等到那个数"只审了子集（引擎多打一枪
+    // 而没记进 trace 时，wait 在被测声称的条数上就满足了）。所以这里把等式也断上，
+    // 与 `every_engine_request_…` 下面那条一一对应（本文件里另一处同款等式）保持同一口径：
+    // **等到的条数必须正好是被测声称的条数**，多一条就红。
     let expected_lines = rep.dispatched().len() + 1;
-    let requests = srv.requests_at_least(expected_lines)?;
-    let ranges: Vec<Option<String>> = requests
-        .iter()
-        .map(|r| r.get("range").and_then(|v| v.as_str()).map(str::to_string))
-        .collect();
+    let ranges = srv.ranges_at_least(expected_lines)?;
+    assert_eq!(
+        ranges.len(),
+        expected_lines,
+        "线上条数与引擎报的枪数不是一对一（T8-R2）：等到 {} 条，引擎报 {} 枪 + 试探那一枪 = {} \
+         ⇒ 条数没钉平之前，上面那些逐条判据审的只是子集",
+        ranges.len(),
+        rep.dispatched().len(),
+        expected_lines,
+    );
     let mut open_ended = 0usize;
     let mut full_window_asks = 0usize;
     for value in ranges.iter().flatten() {
@@ -2334,6 +2354,23 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
     Ok(())
 }
 
+/// 把一份事件快照里 `conn_close_side` 的**行数**与 `sent` 之和折成一个二元组。
+///
+/// 只为一件事存在：`the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window`
+/// 的"等账静置"谓词要看**跨采样**的同一对量（行数 + 和），而 `events_while` 的谓词每次只拿到
+/// 一份快照。抽取写在这里 ⇒ 谓词与用例后面的读数用的是**同一个函数**，不存在两套口径。
+fn close_side_totals(evs: &[serde_json::Value]) -> (usize, u64) {
+    let mut lines = 0usize;
+    let mut sent = 0u64;
+    for e in evs {
+        if e["ev"] == "conn_close_side" {
+            lines += 1;
+            sent += e["sent"].as_u64().unwrap_or(0);
+        }
+    }
+    (lines, sent)
+}
+
 /// **E14①＋③（有节拍对端上的线上账单）**：多打出去的字节按"每笔收紧几块"计价，而不是按窗口计价。
 ///
 /// 为什么这条要挂在**节拍**对端（`/sz/<n>s`：每 64 KiB 之间睡 200 ms）上：无节拍的环回对端会在
@@ -2353,10 +2390,20 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
 /// 不经过主循环，所以那里的额度就是一块）。常数**不许**改小 —— 改小只会把这条用例变成摆设。
 ///
 /// 判据的形状（每一项都有出处，不是把常数放宽到通过为止）：
-/// - **量具活体针两条**（评审 C-I-1①：本项目第四次"账没落盘就先求和 ⇒ 判据当场恒真"）：
-///   `conn_close_side` 的**条数 > 0**，且 `written >= len`（对端至少写出了整条文件那么多字节）。
-///   两条都由 `events_while` **等**到位才读，不许裸读一次 `events()` 就求和。
-///   （本条已有的 `tightened > 0` 钉的是**引擎自己的计数**，不算量具活体针。）
+/// - **量具活体针：等到账"静置"，再断两条对得上号的等式**（评审 C-I-1① 起了这根针，
+///   **复审 B-I-1 修好它的形状**：原先的谓词是 `lines > 0 && sent >= len`，而下面那两条针
+///   是对**同一份快照**重算这两个量 ⇒ 数学上不可能红，真正承重的只有那个 wait）。
+///   现在等的是"连续两拍里 `conn_close_side` 的**行数与 sent 和都相同**、且 sent 已 `>= len`"，
+///   落全之后断两条**有牙**的等式：close 行数 == `request` 行数（两边都出自对端自己的日志，
+///   不问引擎的嘴）、close 行数 == 引擎报的枪数 + 试探那一枪（T8-R2 的那对一对一）。
+///   两条联立 ⇒ "线上条数 == 被测枪数"这一句也不再是恒真：引擎多打一枪而没记进 trace
+///   （重试、或 trace 漏记）时，第二条当场红。
+///   **为什么要静置而不是"够到 len 就收"**：`conn_close_side` 记在 `res.on("close")` 上
+///   （`tests/harness/probe-server.mjs` 的收尾登记，本形状里每条响应恰好一条），而**被客户端
+///   中途弃掉**的那些响应，其 close **可以晚于 `engine::run` 交回** ⇒ 单次采样的 `written`
+///   只是**下界** ⇒ `excess` 少算 ⇒ 下面那条 `excess <= bill` 的额度会被"少记"白让掉。
+///   不许裸读一次 `events()` 就求和。（本条已有的 `tightened > 0` 钉的是**引擎自己的计数**，
+///   不算量具活体针。）
 /// - `excess = 写出总量 - bytes_total`，`excess ≤ tightened × 6 × CHUNK_BYTES`。
 /// - `duplicated > 0`：账**不许**为了让用例好看而折掉（E14③ 末句）。
 /// - `duplicated ≤ excess + workers × CHUNK_BYTES`：引擎自己那本账不许比线上账单更凶（超出那一点
@@ -2376,6 +2423,14 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
 /// ⚠ 这是**会随时序漂的一次读数，不是判据**：本用例对 `duplicated` 只断 `> 0` 与那条一侧界，
 /// 没有任何断言在这个量级上钉它（原先那句"实测 3.1-3.5 MB"当时无出处，现在这句有：
 /// 8F-1 的变异 M5 那一发的红消息）。
+///
+/// **修复轮 8F-3b 改成"等账静置"之后的四次复量**（同一形状、同一台对端）：
+/// `written` 依次 12,085,786 / 11,345,952 / 11,095,488 / 11,325,488，
+/// `excess` 依次 3,697,178 / 2,957,344 / 2,706,880 / 2,936,880，
+/// `bill` 依次 7,077,888 / 6,291,456 / 5,505,024 / 6,291,456 ⇒ **最小余量 2,798,144 字节**。
+/// 复审 B-I-1 估的"被少记白让掉的额度约 2.6 MiB"落在这一格上 ⇒ 静置之后那条 `excess <= bill`
+/// 仍然过，额度不是靠少记让出来的。四次里 `Report.duplicated` 与 `excess` 都**逐字节相等**
+/// （8F-1 记的那一次两者差 326）—— 这只是一次观察，本用例**不断**它。
 #[test]
 fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> anyhow::Result<()> {
     const CHUNK: u64 = 64 * 1024;
@@ -2407,34 +2462,43 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
     let tightened = rep.tightened().len() as u64;
     assert!(tightened > 0, "这个形状本来就要收紧好几次；一次都没有 ⇒ 账单这条用例什么都没测（这一条钉的是**引擎自己的计数**，不是量具活体针）");
 
-    // **量具活体针**（评审 C-I-1①，本项目第四次同一形状）：日志落盘晚于响应收尾，
+    // **量具活体针**（评审 C-I-1① 起手，**复审 B-I-1 把它的形状修对**）：日志落盘晚于响应收尾，
     // 裸读一次 `events()` 会在"一条 `conn_close_side` 都没记上"的时候给出 written = 0 ⇒
-    // `excess = 0` ⇒ 下面那条 `excess <= bill` **当场恒真**。所以先**等**到
-    // "有 conn_close_side 行、且累计写出量 >= 整条文件"，再去求和。
+    // `excess = 0` ⇒ 下面那条 `excess <= bill` **当场恒真**。
+    //
+    // 等的是**账目静置**而不是"够到 len 就收"：`conn_close_side` 记在 `res.on("close")`，
+    // 被客户端中途弃掉的那些响应的 close 可以晚于 `engine::run` 交回 ⇒ 只要行数与 sent 和还在动，
+    // 这一本账就还没落全，此刻求出来的 `written` 只是**下界**。
+    // 跨采样状态放在 `RefCell` 里 —— `events_while` 的谓词形状是 `Fn(&[Value]) -> bool`，
+    // 每次采样调一次，harness 的公共 API 不动。
+    let prev = std::cell::RefCell::new((0usize, 0u64));
     let evs = srv.events_while(|evs| {
-        let mut lines = 0usize;
-        let mut sent = 0u64;
-        for e in evs {
-            if e["ev"] == "conn_close_side" {
-                lines += 1;
-                sent += e["sent"].as_u64().unwrap_or(0);
-            }
-        }
-        lines > 0 && sent >= len
+        let now = close_side_totals(evs);
+        let settled = now.0 > 0 && now.1 >= len && *prev.borrow() == now;
+        *prev.borrow_mut() = now;
+        settled
     })?;
-    let mut close_lines = 0usize;
-    let mut written = 0u64;
-    for e in &evs {
-        if e["ev"] == "conn_close_side" {
-            close_lines += 1;
-            written += e["sent"].as_u64().unwrap_or(0);
-        }
-    }
-    assert!(close_lines > 0, "量具一条 `conn_close_side` 都没记 ⇒ excess 会是 0，那条判据就恒真了");
-    assert!(
-        written >= len,
-        "量具没活着：对端只推了 {written} 字节上网线，比整条文件（{len}）还少 ⇒ \
-         excess = written - len 量的不是'多打'，而是'少记'"
+    let (close_lines, written) = close_side_totals(&evs);
+    let request_lines = evs.iter().filter(|e| e["ev"] == "request").count();
+    // ① **close 行数 == request 行数**：两边都是对端自己日志里的行数，不问引擎的嘴 ⇒ 这一条
+    //    红得起来（复审 B-I-1②：原先这里断的是 `close_lines > 0`，是谓词里那个量的复读，恒真）。
+    //    `/sz/<n>s` 上的 GET + Range 每一条响应都走到 `probe-server.mjs` 的收尾登记那一路
+    //    （`/noranges`、416、HEAD 三支在登记之前就 `return` 了 ⇒ 等式只在**本形状**上成立，
+    //    这条用例用的正是本形状）。
+    assert_eq!(
+        close_lines, request_lines,
+        "量具没活着：`conn_close_side` 记了 {close_lines} 行而 `request` 有 {request_lines} 行 ⇒ \
+         有响应到交回这一刻还没收尾，written = {written} 只是下界，\
+         excess = written - len 量的就不是'多打'而是'少记'"
+    );
+    // ② **close 行数 == 引擎报的枪数 + 试探那一枪**：与①联立 ⇒ 引擎多打一枪而没记进 trace
+    //    （重试、或 trace 漏记）时这一条当场红，①那条只审子集的漏洞因此堵上了。
+    assert_eq!(
+        close_lines,
+        rep.dispatched().len() + 1,
+        "每条响应恰好一条 `conn_close_side` ⇒ close 行数必须等于引擎报的枪数 + 试探那一枪（T8-R2）：\
+         close {close_lines} 行 / 线上 {request_lines} 条请求 / 引擎报 {} 枪",
+        rep.dispatched().len()
     );
     let excess = written.saturating_sub(len);
     let bill = tightened * CHUNKS_PER_TIGHTEN * CHUNK;
@@ -2457,7 +2521,9 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
 //
 // 这一节的九条用例按派发的 P1–P5 排。两条纪律贯穿全部：
 // - **取证一律先问线上或对端，再问引擎的嘴**：`Report` 的计数只能当旁证，判据落在
-//   `Server::requests()/ranges()`、`ScriptedPeer::shot_ranges()`、盘上文件与断点文件这些
+//   `Server::requests_at_least()/ranges_at_least()`（复审 B-Minor 4：裸读一次的那条因为没有调用者
+//   已被删掉，抽取本身收进 `harness::ranges_of`；"不该有更多条"那一方向走
+//   `Server::requests_within()/requests_quiet()`）、`ScriptedPeer::shot_ranges()`、盘上文件与断点文件这些
 //   **不是被测代码自己写的**东西上（spec §7.2、E13③）。
 // - **三道链接各断各的**，一条红就说出是哪一环断了：回放↔派单（引擎有没有照调度器办事）、
 //   派单↔线上（引擎说派了，线上真是那个 Range 吗）、线上↔字节（下下来的东西对不对）。
@@ -2558,11 +2624,22 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
     // **先守卫条数再读**（评审 C-I-4）：这条用例期望的线上条数**可知** ——
     // 引擎派出的枪数 + 试探那一枪（T8-R2 钉死的一对一）。裸读 `requests()` 在日志落盘晚时
     // 会少几条，而"少一条"正好会让下面那条一一对应的判据往错误方向通过或往错误方向红。
+    // **复审 B-I-4**：守卫数出自**被测自己的**账 ⇒ 只 wait 不断等式 = 只审子集。
+    // 这里补上那条等式，与本文件另一处（`every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open_ended`）
+    // 以及下面 `wire.len() == dispatched.len()` 那三条同一口径：三处都钉平，这个守卫数才可信。
     let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
     let expected_lines = rep.dispatched().len() + 1;
     let requests = srv.requests_at_least(expected_lines)?;
-    let ranges: Vec<Option<String>> =
-        requests.iter().map(|r| r.get("range").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    assert_eq!(
+        requests.len(),
+        expected_lines,
+        "线上条数与引擎报的枪数不是一对一（T8-R2）：等到 {} 条，引擎报 {} 枪 + 试探那一枪 = {} \
+         ⇒ 条数没钉平之前，链接二审的只是子集",
+        requests.len(),
+        rep.dispatched().len(),
+        expected_lines,
+    );
+    let ranges = harness::ranges_of(&requests);
     let probe_lines: Vec<usize> =
         ranges.iter().enumerate().filter(|(_, r)| r.as_deref() == Some(probe_range.as_str())).map(|(i, _)| i).collect();
     assert_eq!(
@@ -2813,7 +2890,7 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
     // 更容易通过；`a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window` 是同一件事的
     // 三窗口版本（带形状守卫），两条一起钉住"退化 = 一枪"。
     //
-    // 原来这一格还能顺带比出"多枪时按起点升序"（` Shot::IgnoresRange` 的 body 会一枪读完 ⇒ 修好后
+    // 原来这一格还能顺带比出"多枪时按起点升序"（`Shot::IgnoresRange` 的 body 会一枪读完 ⇒ 修好后
     // 线上不再出现第二枪）。**那个观测量随缺陷一起消失了**，它的归属现在在两处（都在，没有漏）：
     // ① 本用例 A 段那条"第一枪必须是起点最低的那段缝"（线上取证）；
     // ② `src/scheduler.rs` 的 `degraded_dispatch_is_start_ascending`（单元层，派发表本身）。
@@ -2888,8 +2965,11 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
 ///
 /// ## 三条判据各自抓什么
 /// 1. **枪数**：全程只许 2 条请求（试探 + 一枪 body）。⇒ 抓"按窗重请求"本身（现状红在这里：4 条）。
-/// 2. **线上区间**：那一枪问的必须是 `[试探之后的最低缝, EOF]`，而且是**开放终点**写法
-///    （`wire_spans` 把 `bytes=N-` 按 `total_len` 补齐成闭区间，见其文档）。⇒ 抓"问得比一枪窄"。
+/// 2. **线上区间**：那一枪问的必须是 `[试探之后的最低缝, EOF]`，而且是**开放终点**写法。
+///    两半各自有针（**复审 B-Minor 3 / B-I-5**：原先只有 `wire_spans` 那条闭区间等式，而它把
+///    `bytes=236032-` 与 `bytes=236032-12818943` **补成同一个闭区间** ⇒ 闭写法同样绿 ⇒
+///    "开放终点"那一轴当时**没有针**）。现在先断**原文串**（`bytes=<起点>-`，没有终点数字），
+///    再断补齐后的闭区间等式。⇒ 抓"问得比一枪窄"与"写到 EOF 还发显式终点"两种退化。
 /// 3. **内容**：整份文件的 sha256 与独立读者算出的期望相等，另加一段**块号取证**
 ///    （`require_block_alignment`，起点 4096 对齐 —— 只由那一枪写的尾部区段）。
 ///    ⇒ 抓"少丢前缀就写错位置"：一枪下完意味着偏移 `iv.start` 之前那批字节仍然要**流式丢掉**，
@@ -2897,13 +2977,17 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
 ///
 /// 第 0 条是**形状守卫**（不是判据）：剩余体量必须 > 2 个窗口，否则这条用例退化成
 /// "1 MiB / 一个窗口"那种恒真形状（本项目已踩过三次恒绿夹具）。
+/// **复审 B-Minor 2**：这个 `3` 原先既写在构造那一句里、又写在守卫那一句里 ⇒ 守卫是同一式子的
+/// 两边、恒真且说不出任何东西。现在把 `3` 提成 `REMAINING_WINDOWS`，守卫断的是**那个常量的选择**
+/// （消息里把它打出来），构造句不再与守卫句同形。
 #[test]
 fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::Result<()> {
     // 试探那一截 + 整整三个窗口 ⇒ 退化支按窗切必然 ≥ 3 枪。
-    let len = PROBE_READ_BYTES + 3 * WINDOW_BYTES;
+    const REMAINING_WINDOWS: u64 = 3;
+    let len = PROBE_READ_BYTES + REMAINING_WINDOWS * WINDOW_BYTES;
     assert!(
         len - PROBE_READ_BYTES > 2 * WINDOW_BYTES,
-        "形状守卫：剩余体量不足两个窗口（{len}）⇒ 这条用例测不出按窗重请求"
+        "形状守卫：剩余体量只有 {REMAINING_WINDOWS} 个窗口，不足两个窗口（总长 {len}）⇒ 这条用例测不出按窗重请求"
     );
     let peer = harness::spawn_scripted_peer(len, vec![harness::Shot::IgnoresRange], harness::Shot::IgnoresRange)?;
     let dir = harness::tmp_dir("e16-degraded-one-shot")?;
@@ -2942,6 +3026,16 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
     // —— 判据 2：线上区间（含"那一枪问到 EOF、写法是开放终点"）。
     let spans = harness::wire_spans(&ranges.iter().cloned().map(Some).collect::<Vec<_>>(), len)?;
     assert_eq!(spans[0], (0, PROBE_READ_BYTES - 1), "第一条必须是试探那一枪：{spans:?}");
+    // **原文串**那一半（复审 B-I-5：`wire_spans` 把开放终点按 `total_len` 补齐 ⇒ 只看补齐后的
+    // 闭区间，`bytes=236032-12818943` 这种显式终点写法**同样绿** ⇒ "开放终点"那一轴没有针）：
+    // 这里比的是对端记下来的那串字符本身，不经过任何补齐。
+    assert_eq!(
+        ranges[1],
+        format!("bytes={PROBE_READ_BYTES}-"),
+        "E14② 那一轴：窗口够到 EOF 时那一枪必须写成**开放终点**（`bytes=<起点>-`，不带终点数字）；\
+         等式左边就是对端记到的那一条 —— 写成显式终点在闭区间读法上与开放写法一模一样，\
+         所以这一句是那条形状等式唯一的牙"
+    );
     assert_eq!(
         spans[1],
         (PROBE_READ_BYTES, len - 1),
@@ -2951,7 +3045,10 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
     // —— 判据 3：内容。整份散列（独立读者算的期望）+ 块号取证（起点 4096 对齐的尾部区段）。
     let path = t.target_path();
     assert_eq!(harness::sha256_of(&path)?, want, "一枪下完的 body 也要一字不差");
-    // 尾部这 236,032 个字节只有"那一枪"写过：起点取 3 MiB 处（4096 的整数倍，取证工具的硬要求）。
+    // 从 3 MiB 到文件尾这一段（`len - tail_start` = 9,673,216 个字节）只有"那一枪"写过：
+    // 起点取 3 MiB 处（4096 的整数倍，取证工具的硬要求）。
+    // 复审 B-Minor 1：这一句原先写"尾部这 236,032 个字节"，那是 `PROBE_READ_BYTES`（试探那一枪的量），
+    // 与这里检查的区段无关 ⇒ 数错了。
     let tail_start = 3 * 1024 * 1024u64;
     harness::require_block_alignment(&path, tail_start, len - tail_start)?;
     let _ = std::fs::remove_file(&want_file);
@@ -3362,8 +3459,13 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
     )?;
     assert!(rep.ok, "POST 那一枪该把这份文档整份拿回来：{:?}", rep.message);
 
+    // **复审 B-Minor 6**：这一格原先的形状是"守 1 条落盘 → 裸读一次 → 断 `== 1`"——
+    // 那条纪律（`Server::requests_within` 的文档）只管"有没有**任何**一条"，管不到"**不许更多**"
+    // 那一方向：第二条枪若在路上，裸读一次看不见它，上界断言就会碰巧为真。
+    // 现在两步各钉一边：`requests_at_least(1)` 保证不漏读（否则上界会在"还没落盘"上红成假故障），
+    // `requests_quiet` **守满**一段时间保证不多读。
     srv.requests_at_least(1)?;
-    let requests = srv.requests()?;
+    let requests = srv.requests_quiet(Duration::from_millis(300))?;
     assert_eq!(requests.len(), 1, "带体的形状全程只许有一发请求（试探 + POST = 2 条就是缺陷）：{requests:?}");
     assert_eq!(
         srv.methods()?,
@@ -3451,10 +3553,12 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
         PROBE_READ_BYTES / 2,
         "目标文件被动过（截断/覆写）：`Store::open` 本该排在这个判定之后"
     );
-    // 先等到"至少有一条请求落了盘"再数总数：`requests()` 不等日志，缺行会让"恰好一条"这种
-    // 上限断言读起来像成立（本项目的老规矩：负向/计数判据都要先守一次落盘时机）。
+    // 先等到"至少有一条请求落了盘"再数总数：不等日志的那次裸读会让"恰好一条"这种
+    // 上限断言在缺行时读起来像成立（本项目的老规矩：负向/计数判据都要先守一次落盘时机）。
+    // **复审 B-Minor 6**：反过来，"不许有第二条"那一方向裸读一次也看不见在路上的那条枪 ⇒
+    // 上面那一步只保证不漏读，下面这一步 `requests_quiet` **守满**一段时间保证不多读。
     srv.requests_at_least(1)?;
-    let requests = srv.requests()?;
+    let requests = srv.requests_quiet(Duration::from_millis(300))?;
     assert_eq!(requests.len(), 1, "只许有试探那一枪（判完就拒）：{requests:?}");
     assert_eq!(requests[0]["method"], "GET", "那一枪是试探：{requests:?}");
     assert_eq!(

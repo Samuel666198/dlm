@@ -166,17 +166,35 @@ impl Server {
         }
     }
 
+    /// **守满** `wait` 这段时间，交回结束时看到的全部请求行（一条都没有就给空表）。
+    ///
+    /// 与 `requests_within` 的分工（复审 B-Minor 6）：`requests_within` 一见到请求就**立刻返回**，
+    /// 所以它只答得出"这一段时间里有没有**任何**请求"（负向判据）；而"只许有 1 条、不许更多"
+    /// 这种**上界**判据要的是一段**静置窗口** —— 先让第 1 条落进账里（否则上界断言会在'还没落盘'
+    /// 上碰巧为真，本项目的老账），再守满 `wait` 看有没有第 2 条混进来。
+    /// 用法固定为 `requests_at_least(k)?` 之后再 `requests_quiet(wait)`：前者保证不漏读，
+    /// 后者保证不多读，两边各钉一次。
+    pub fn requests_quiet(&self, wait: Duration) -> Result<Vec<Value>> {
+        let deadline = Instant::now() + wait;
+        loop {
+            thread::sleep(POLL);
+            if Instant::now() >= deadline {
+                return self.requests();
+            }
+        }
+    }
+
     /// 服务端看到的每一条请求的 `Range` 头，按到达顺序；那一枪没发 `Range` ⇒ `None`。
     ///
     /// 存在的理由（**E13③** 的第二道链接）：引擎"说我派了这个区间"证明不了线上真是那个 Range
     /// —— 只有对端记下来的这条才是"发出去过什么头"的唯一权威证据。
     /// 必须在 `Server` 的 guard 还活着时读（`Drop` 会删掉日志）。
-    pub fn ranges(&self) -> Result<Vec<Option<String>>> {
-        Ok(self
-            .requests()?
-            .into_iter()
-            .map(|r| r.get("range").and_then(Value::as_str).map(str::to_string))
-            .collect())
+    ///
+    /// **复审 B-I-1 之后一律带条数守卫**：裸读一次的 `ranges()` 在日志落盘晚时会少几条，
+    /// 而"少一条"正好让"每条响应恰好一条记录"那类一一对应的判据往错误方向通过 ⇒ 本方法删除，
+    /// 抽取本身收进 `ranges_of`，读法只留 `ranges_at_least(n)` 这一条（评审 C-I-4 的同一纪律）。
+    pub fn ranges_at_least(&self, n: usize) -> Result<Vec<Option<String>>> {
+        Ok(ranges_of(&self.requests_at_least(n)?))
     }
 
     /// 服务端看到的每一条请求的**方法**（`GET` / `POST` / `HEAD`…），按到达顺序。
@@ -1368,6 +1386,19 @@ pub fn expected_sha(len: u64) -> String {
     hex(&hasher.finalize())
 }
 
+/// 请求行 → 每一条请求的 `Range` 头，按到达顺序；那一枪没发 `Range` ⇒ `None`。
+///
+/// **复审 B-Minor 4 提出的理由**：同一段抽取原先复制在两处用例里（各自手写的 `.map(...)`），
+/// 而 `Server::ranges()` 因为"裸读一次不等落盘"被删掉后没有一个调用者，成了死夹具
+/// （⚠ 本文件顶部有文件级 `#[allow(dead_code)]` ⇒ 死夹具**不会**警告，只能靠人查）。
+/// 现在抽取只有这一份：`Server::ranges_at_least` 用它，手上已经有请求行的用例也用它。
+pub fn ranges_of(requests: &[Value]) -> Vec<Option<String>> {
+    requests
+        .iter()
+        .map(|r| r.get("range").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
 /// `Range` 字符串 → `(start, 含端终点)`，开放终点（`bytes=N-`）按 `total_len` 补齐。
 ///
 /// 为什么要补：**E14**② 之后 `fetch::range_header` 发开放写法的条件改成
@@ -1386,7 +1417,7 @@ pub fn wire_span(value: &str, total_len: u64) -> Result<(u64, u64)> {
     Ok((start, end))
 }
 
-/// `Server::ranges()` 的结果折成闭区间表（**每一条都必须带着 Range**，否则当场 `Err`）。
+/// `ranges_of` 的结果折成闭区间表（**每一条都必须带着 Range**，否则当场 `Err`）。
 ///
 /// 引擎在可分段的形状上每一枪都发 `Range`（`src/fetch.rs` 里那道 F1 闸保证带体的任务进不了
 /// 窗口这条路），所以"有一条没发"只能是被测代码的问题，不是夹具的分支。
