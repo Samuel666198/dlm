@@ -1510,6 +1510,27 @@ pub type OnTick = Arc<dyn Fn(&RunSnapshot) + Send + Sync>;
 6. **摘要不许拿 `{:?}` 当渲染器**：`Task` 的手写 `Debug` 只把口令掩成 `[redacted]`（E9），那是**日志防线**，不是产品文案；`--no-start` 那条摘要要逐字段打，且**口令一格都不许出现**（连 `[redacted]` 也不要——摘要里没有口令这个话题）。
 7. **`Cli` 交回两件东西**：`into_task() -> Task`（九项契约 + `flags`）与 `into_config() -> Config`（`workers` / `max_retries` / `verify_sha256` / `force_fresh`；`min_seg` 留默认，`on_tick` 由 9B-2 挂）。**`--quiet` 那位住 `Cli` 不住 `Task.flags`**（E20③）。
 
+### E23 附记（控制员，2026-10-17，9B-1 回来之后）：更正我那条前提 + 六条裁定
+
+① **E23⑤ 那句"引擎侧对 `workers` 无下限闸"是过时的，我错了**（实测：`engine::run` 里 `ensure!(cfg.workers >= 1, "workers 至少要是 1（给了 {}）…"` 在 `src/engine.rs:580`，由 `32140a0`＝T8 阶段4 带进来的；我写 E23 时抄的是收口复审 A 那条登记，**没当场复量**）。⇒ 事实分两半：**`workers` 有闸**（引擎那一层拦得住），**`min_seg` 没有闸**（全树只有 `scheduler.rs:878` 那一处**测试里**的守卫），而 `min_seg` **在 §5 里根本没有 CLI 入口** ⇒ 从 CLI 走不到那格，它是**库面**的缺口，不是 v1 的 CLI 义务。
+⇒ **CLI 拦 `--connections 0` 这一条照留**，但立论改成正确的那一句：**边界上要以"参数写错了"的措辞当场失败**，而不是建完客户端、`ensure_parent_dir` 都跑过之后，再听引擎说"跑不起来"。这是本项目**第七次**"文档/勘误写的现状与代码不符"，而且这次是**我自己写的勘误**、由执行者读代码顶回来 ⇒ 规矩补严：**勘误里每一条"引擎有没有闸 / 实现是什么形状"的断言，落笔前必须当场 `grep`，不许抄既有登记。**
+② **重复别名照"每个 token 就地替换、后者覆盖"**（`dlm /d A /d B` ⇒ `--url A --url B` ⇒ `url == "B"`，不报错）。理由：别名层的**唯一判据**就是"与长选项写法等价"（`assert_eq!(posix, idm)`），让重复那一支在别名层报错、在长选项层不报错，等于自己拆自己的等价性。⇒ 9B-2 补一格钉它（E24④）。
+③ **`--out-dir` 缺省＝当前目录**（`"."`）追认：spec §5 没写这一格；IDM 的"默认下载目录"属于它的 GUI 配置面，v1 内核没有配置面 ⇒ "下到用户站着的地方"是 POSIX 工具（curl/wget）的通行默认，最不意外。已用 `url_is_required_and_out_dir_defaults_to_the_cwd` 钉住 ⇒ 9B-2 与 T10 可以依赖它。
+④ **执行者自发加的"值位感知展开"追认保留**（`VALUE_TAKING_LONGS` 那 11 条后面那一格视为值、`--opt=值` 不吃下一参数、`--` 之后不展开）。理由真实：POSIX 上 `/f`、`/d` 是合法的路径/文件名片段，无脑替换会把用户参数吃掉。**控制员复量**：把 `if value_slot {` 改成 `if false && value_slot {` ⇒ 实测**恰好一格红**（`a_slash_token_in_value_position_stays_a_value`）；另把未知别名的 `ensure!` 谓词改成恒真 ⇒ 也**恰好一格红**（`an_unknown_slash_alias_errors_instead_of_being_swallowed`）。⇒ 这两根针都有牙，且都只有它们自己红（没有连带砸面）。
+⑤ **未知别名的错误消息照旧把那个 token 原文打回去，不掩**。不打印就没法告诉用户哪格拼错了；口令的**值位**走 `value_slot` 直接通过、永远不会进这条消息（用例 `a_slash_token_in_value_position_stays_a_value` 覆盖的正是这一支）。残余风险只有"用户把口令**误当成旗标**写成 `/hunter2`"这一格，那本来就是要报错的内容。
+⑥ **`the_alias_table_is_the_c3_attestation_and_nothing_more` 那一格在 RED 阶段是绿的**（它钉的是数据表，对桩表也成立）——执行者如实登记了。可接受：它的价值在"表本身不许漂移"，不在 TDD 的第一发红；但**这一格不算 RED-阶段的证据**，别记进"七条用例先红"那种账。
+
+## E24：9B-2（`report.rs` + `main.rs`）的简报必抄清单
+
+**E22 那七条全部照抄**（进度行渲染规则），再加下面六条：
+
+1. **`--quiet` 的语义定为"关掉每一拍那一发进度行"**（`\r` 那条），**最终摘要与错误照打**：脚本仍然要看结果；spec §5 那句"静默"在 IDM 那里指的是不弹界面，本内核没有弹窗可关 ⇒ 唯一可关的就是刷新的那一行。落点：`Cli::quiet()` 为真 ⇒ **一次都不挂 sink**（不是"挂了但里面不打印"）。
+2. **`--help` / 版本那一支的退出码必须是 0**：`parse_from` 把 `clap::Error` 折进 `anyhow::Error` 但**没丢类型**（`err.downcast_ref::<clap::Error>()` 拿得回来）⇒ `main` 要 `downcast` 后调 `Error::exit()`（帮助给 0，用法错误给 clap 自己的 2）。E20⑦ 那"两档"说的是**下载结果**，不覆盖参数层；照 `Err ⇒ 1` 一刀切会让 `dlm --help` 以 1 退出。
+3. **`--no-start` / `/a` 必须在 `engine::run` 之前短路**（E20④：引擎明写不看 bit0），摘要**逐字段打**，且**口令那一格连 `[redacted]` 都不许出现**（E23⑥：`Task`/`Cli` 的手写 `Debug` 是日志防线，不是产品文案；摘要里"口令"这个话题整个不出现）。
+4. **重复别名那一支补一格判据**（E23 附记②）：`dlm /d A /d B` ⇒ `url == "B"`，**且与 `--url A --url B` 逐字段相等**。
+5. **E22 第 5 条仍未交**（9B-1 如实登记：它被禁止建 `report.rs`）⇒ 9B-2 **必须**交那一发"经真 `engine::run` + node 对端、断言挂上 sink 后确实收到过 tick 且八格可读"的集成用例。这一格是 9A 那批手搭 `Engine` 覆盖不到的装配路径。
+6. **验收下限**：**190 lib / 76 integration / clippy `-D warnings` 退出码 0**（9B-1 之后 lib 从 173 涨到 190），既有断言一条不许改；集成测试若因新增 `main` 而需要动 `Config` 字面量，按 E21 附记 C3 的办法**只补入参**。
+
 
 
 
