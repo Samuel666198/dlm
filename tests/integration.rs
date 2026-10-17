@@ -2124,6 +2124,9 @@ fn full_download_is_byte_exact() -> anyhow::Result<()> {
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
@@ -2298,6 +2301,9 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
@@ -2482,6 +2488,9 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
@@ -2635,6 +2644,9 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "引擎没跑完，三道链接都无从谈起：{:?}", rep.message);
@@ -2802,6 +2814,8 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         max_retries: Some(0),
         verify_sha256: None,
         force_fresh: false,
+        // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
+        on_tick: None,
     };
     let first = dlm::engine::run(&t, cfg.clone())?;
     assert!(!first.ok, "这一轮的脚本就是要它停在半路，`ok` 却给了真：{:?}", first.message);
@@ -2818,6 +2832,8 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         max_retries: None,
         verify_sha256: Some(want.clone()),
         force_fresh: false,
+        // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
+        on_tick: None,
     };
     let second = dlm::engine::run(&t, cfg_ok)?;
     assert!(second.ok, "第二轮该把剩下的下完：{:?}", second.message);
@@ -2903,6 +2919,9 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "退化形状也该跑得完：{:?}", rep.message);
@@ -2954,6 +2973,9 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             max_retries: None,
             verify_sha256: Some(want.clone()),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep2.ok, "退化形状（进程内对端）也该跑得完：{:?}", rep2.message);
@@ -3060,6 +3082,9 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
             max_retries: None,
             verify_sha256: Some(want.clone()),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "退化形状（三个窗口的整条 body）也该跑得完：{:?}", rep.message);
@@ -3223,6 +3248,9 @@ fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<
             max_retries: None,
             verify_sha256: Some(want.clone()),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "退避之后该把这一轮跑完：{:?}", rep.message);
@@ -3290,6 +3318,9 @@ fn a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice() -> an
             max_retries: Some(0),
             verify_sha256: None,
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(!rep.ok, "封顶的重试该让这一轮停住：{:?}", rep.message);
@@ -3345,6 +3376,9 @@ fn exhausted_retries_report_failure_with_a_message_and_keep_the_state_file() -> 
             max_retries: Some(0),
             verify_sha256: None,
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(!rep.ok, "--max-retries=0 而第一枪就失败，居然报成功：{rep:?}");
@@ -3402,6 +3436,8 @@ fn a_corrupt_state_file_is_an_error_while_an_absent_one_is_not() -> anyhow::Resu
         max_retries: None,
         verify_sha256: None,
         force_fresh: false,
+        // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
+        on_tick: None,
     };
     let Err(e) = dlm::engine::run(&t, cfg.clone()) else {
         panic!("断点文件是坏的，`engine::run` 却跑成功了 —— 把损坏读成\"没有断点\"就是这句话的后果");
@@ -3451,6 +3487,8 @@ fn the_fresh_reason_reaches_the_report_for_the_cli_to_print() -> anyhow::Result<
         max_retries: None,
         verify_sha256: Some(harness::expected_sha(len)),
         force_fresh: false,
+        // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
+        on_tick: None,
     };
     let first = dlm::engine::run(&t, cfg.clone())?;
     assert!(first.ok, "第一轮（根本没有断点）该成功：{:?}", first.message);
@@ -3507,6 +3545,9 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     )?;
     assert!(rep.ok, "POST 那一枪该把这份文档整份拿回来：{:?}", rep.message);
@@ -3595,6 +3636,9 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
             max_retries: None,
             verify_sha256: None,
             force_fresh: false,
+            // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
+            // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
+            on_tick: None,
         },
     );
     let Err(e) = outcome else { panic!("断点要口令而本次没给，`engine::run` 却跑下去了：{outcome:?}") };

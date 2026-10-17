@@ -118,6 +118,33 @@
 //!   `JoinHandle::join()` 报错同样进结论（`finish` 里那条判据兑现）：
 //!   **worker 崩了绝不许交回 `ok = true`**。
 //! - `recv_timeout` 的期限取 `min(最近的退避到点, 上一拍 + LOOP_POLL)`：没有忙等，也没有第二个计时线程。
+//!
+//! ## 进度行的数据面：`RunSnapshot` + `Config.on_tick`（勘误 **E21** 甲，9A 的全部内容）
+//!
+//! spec §5 那一行 `\r 45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4 dup 5.5%` 与 §6.2 的 `slow-retry xN`
+//! 在 9A 之前**没有数据来源**：`run` 一直阻塞到结束才交回 `Report`。E21 裁的是"给引擎加运行态
+//! 只读快照 + 回调出口"（走甲），落点就是 [`RunSnapshot`] 那八格与 [`Config::on_tick`]。
+//! 渲染不在这里（9B：`cli.rs`/`report.rs`/`main.rs`），本模块只负责**交得出、按拍交、不乱交**。
+//!
+//! 三条形状约束各自挡住一种 tempting 的写法：
+//! - **零新计时器、零新线程、零新依赖**（判据⑦）：快照挂在主循环已有的那一拍上，
+//!   每拍至多一次 + 收尾一次。调用点只有两处（`tick_if_due` 与 `drive` 的出口），
+//!   **绝不进 `translate`/结论处理那一圈** —— 那里一块 64 KiB 走一次，挂上去就是每块打一行
+//!   （与 **E8①** 给 `flush` 立的那条"绝不进每块循环"同族）。钉它的是
+//!   `a_sink_gets_one_tick_per_beat_and_never_one_per_block`。
+//! - **速率那一格是两拍之差，不是全程平均**（判据④）：[`running_rate_bytes_per_sec`] 那个数
+//!   服务的是 `fetch::window_budget` 的分子，两个数不许共用、不许并成一条式子。钉它的是
+//!   `the_rate_cell_is_the_difference_between_two_beats_not_the_whole_run_average`。
+//! - **`--data-file` 那一支一次都不交**（判据⑧）：[`run_whole_once`] 整程阻塞在一发 POST 里、
+//!   按 **E8②** 不开线程，中途没有任何引擎侧读得到的量（为它造一个正是 **E21③** 裁"不做"的
+//!   那件事）。⇒ `on_tick` 不是"必然存在的进度源"，那条路的权威只有 `Report`。钉它的是
+//!   `the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some`。
+//!
+//! 快照**不是第三本账**（**E7**）：八格全部由 `sched` / `stats` / `run_delivered` / `workers` / `cfg`
+//! 现读现算，引擎不为它另记任何进度；覆盖那一格也只是 `total_len − pending_bytes()` 一次减法，
+//! 调度器一个新 API 都没加（判据①）。`covered` 与 `run_delivered`/`run_bytes_duplicated` 的寿命
+//! **故意不同**（前者含上一轮续传来的字节，后两格只看本轮），与 **E20⑧** 那两本跨轮账也不许
+//! 互相"对齐" —— 三处各自的口径写在字段文档上。
 
 use std::fs;
 use std::io::Read;
@@ -187,7 +214,7 @@ pub fn next_retry_delay(attempt: u32, max_retries: Option<u32>) -> Option<Durati
 /// `FLAG_KEEP_STATE`，而 `flags` 会随 `TaskView` 进断点文件 ⇒ 两处都能读就是两本账。
 /// `force_fresh` 反过来**刻意不进** `flags`：`--no-resume` 说的是"这一次怎么办"，
 /// 不是"这个任务是什么"，写进断点文件会污染下一轮的比对（`resume` 的 ①b 明写不比 `flags`）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// worker 线程数（每个 worker 一条阻塞连接，spec §1）。
     pub workers: usize,
@@ -199,6 +226,40 @@ pub struct Config {
     pub verify_sha256: Option<String>,
     /// `--no-resume`（spec §4）：无视已存在的断点文件，从 0 开始并覆盖它。
     pub force_fresh: bool,
+    /// 运行态快照的出口（勘误 **E21** 甲，spec §5 那一行进度缺的就是这个数据面）。
+    ///
+    /// **默认 `None`** ⇒ 一个观察者都不挂，默认路径与 9A 之前逐字节相同（这是 9A 的验收下限）。
+    /// 类型是 `Arc` 而不是 `Box`：`Config` 派生 `Clone`，每条任务复制一份配置时不能把观察者
+    /// 复制成两个所有者（判据⑨）。快照本身是 `Copy`、按引用交，**不跨线程**。
+    ///
+    /// ## 哪些路有 tick、哪些没有（判据⑧要求写明）
+    /// - **可分段那一条**（`probe` ⇒ `resume` ⇒ `Engine` ⇒ 主循环）：每拍至多一次
+    ///   （`LOOP_POLL = 1 s`）+ 收尾那一拍一次终值。
+    /// - **`--data-file` 那一条**（`run_whole_once`）：**一次都没有**。那一支整程阻塞在一发 POST 里，
+    ///   本函数按 **E8②** 不开线程 ⇒ 中途没有任何引擎侧读得到的量；为它造一个观测量正是 **E21③**
+    ///   刚裁"不做"的那件事（`T8-R6`：收紧过程不打开每块上报）。
+    ///   ⇒ **CLI 不许把 `on_tick` 当"必然存在的进度源"**：那条路的权威只有 `Report`。
+    ///
+    /// ## 实现者的义务（判据⑨）
+    /// 回调在**引擎线程里同步执行**：它慢了，`recv_timeout` 的期限、退避到点、保存节奏全都跟着慢
+    /// ⇒ 不许在回调里做长阻塞 I/O（网络、读大文件、等人），**打印一行是预期用法**。
+    pub on_tick: Option<OnTick>,
+}
+
+/// 手写 `Debug`（立场与 `task.rs` 里那条 **E9** 给 `Task` 的那一份一致：某个字段不可打印
+/// 不是把整条 `Debug` 摘掉的理由）。`on_tick` 只打印"有没有挂观察者"：闭包本体没有可读的表示，
+/// 而"这一份 `Config` 挂了观察者"这件事本身正是调试时要看的那一格。
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("workers", &self.workers)
+            .field("min_seg", &self.min_seg)
+            .field("max_retries", &self.max_retries)
+            .field("verify_sha256", &self.verify_sha256)
+            .field("force_fresh", &self.force_fresh)
+            .field("on_tick", &self.on_tick.as_ref().map(|_| "«观察者»"))
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -209,9 +270,66 @@ impl Default for Config {
             max_retries: None,
             verify_sha256: None,
             force_fresh: false,
+            on_tick: None,
         }
     }
 }
+
+/// 一次运行的**只读快照**：渲染 spec §5 那一行进度（`\r 45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4
+/// dup 5.5%`）与 §6.2 那个 `slow-retry xN` 所需的**最小闭包**（勘误 **E21** 甲）。
+///
+/// 命名说明（判据⑩）：spec §2 模块表那行 `report | tick(&Snapshot)` 里的 `Snapshot` 与已实现的
+/// [`crate::state::Snapshot`]（磁盘断点体）撞名 ⇒ 实现叫 `RunSnapshot`、`report::tick(&RunSnapshot)`。
+/// 这是命名落地选择，不改 spec 承诺的形状。
+///
+/// ## 它不是什么
+/// - **不是**第二本账（**E7**）：八格里没有任何"覆盖账之外另记的进度"，覆盖集那两格只是
+///   `total_len − sched.pending_bytes()` 这一个既有量的另一种读法。
+/// - **不是**跨线程对象：`Copy`、按引用交，回调之后这份值就没了（判据⑨）。
+/// - **不是**"本次运行一共多少字节落盘"的最终答案：那是 [`Report`]，收尾那一拍只是同一批量的
+///   中途读数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunSnapshot {
+    /// 全长（`ProbeFacts::total_len`）。判据②：**不是 `Option`，也不许拿 0 当"未知"哨兵** ——
+    /// `probe` 那侧拒绝"206 说不出可用总长"，所以多 worker 那一支恒已知；`total_len == 0` 是
+    /// **真的空文件**。⇒ 渲染侧唯一的义务是不许除零、不许印 `NaN%`，那是活分支不是防御性代码。
+    pub total_len: u64,
+    /// 已确认进覆盖集的字节。判据①：`total_len.saturating_sub(sched.pending_bytes())`，
+    /// **不给调度器加新 API**（`pending_bytes()` 的定义已经是"没进覆盖集的字节"，
+    /// `scheduler.rs` 里那条 `pending_bytes() == total − covered` 的等式已经把它钉住了）。
+    /// 寿命：**含上一轮续传来的字节**（文件级百分比本来就该按整文件算）。
+    pub covered_bytes: u64,
+    /// **本次运行**交出去落盘的字节：就是引擎已有的那一格 `Engine::run_delivered`（判据③）。
+    /// 与 `Report::duplicated`/`Report::retries` 那两本**跨断点文件**的账**故意不同寿命**（**E20⑧**），
+    /// 两处不许互相"对齐"。
+    pub run_delivered: u64,
+    /// **本次运行**的 dup 增量 = `stats.bytes_duplicated − 起点`，起点是 `plan_from_decision`
+    /// 交回的那份跨轮账（判据③）。与上一格**同一拍取** —— 分子分母不同源就是假数。
+    /// 口径照 [`crate::state::Stats::bytes_duplicated`]：它是"落在归属范围之外、**可能**被别人
+    /// 重下的字节"，**不是流量账单**，`dup %` 的分子只能按这个强度说。
+    pub run_bytes_duplicated: u64,
+    /// **本次运行**这一拍的瞬时速率。判据④：`(run_delivered − 上一拍的 run_delivered) × 1e6 ÷
+    /// 两拍间隔微秒`，间隔下限 1 ms。⚠ **不是**全程平均
+    /// （`running_rate_bytes_per_sec` 那个数服务的是 `fetch::window_budget` 的分子，两个数不许共用）。
+    /// 第一拍没有"上一拍"，锚点取**主循环开工的那一刻**（不是 `run` 的 `started`：那里面还夹着
+    /// 试探与写预读的时间，把它算进分母正是判据④点名的"慢启动把速率算低"）。
+    pub instant_bytes_per_sec: u64,
+    /// 这一拍 `WorkerState::Busy` 的条数（真在途）。判据⑤：**不是** `any_in_flight()` —— 那个把
+    /// `Backoff` 也算进去，它回答的是"还有没有活没干完"。慢重试期间这一格是 0 而
+    /// [`RunSnapshot::slow_retry_rounds`] ≥ 1，这一对组合是诚实的，不许为好看把 Backoff 算进来。
+    pub active_workers: usize,
+    /// `cfg.workers`（进度行里那个 `x4` 的分母）。
+    pub workers_total: usize,
+    /// 判据⑥：`workers.map(|w| w.attempt.saturating_sub(FAST_RETRY_MAX)).max()`。
+    /// ⚠ 取的是**跨 worker 最大值**：既不是"全场总轮数"，也不是"每条链各几轮"。
+    /// 0 ⇒ 还没排下慢重试；≥1 ⇒ 已排下第 N 次 30 s 慢重试。每 worker 各自的 attempt 不在 v1
+    /// 的交付面里（§6.2 只承诺一个 `slow-retry xN`，YAGNI）。
+    pub slow_retry_rounds: u32,
+}
+
+/// 快照出口的类型别名。`Send + Sync` 只加在**闭包**上（判据⑨）：`Config` 要能被克隆、要跟着
+/// 任务走，而快照只在引擎线程里活一瞬间，不需要跨线程。
+pub type OnTick = Arc<dyn Fn(&RunSnapshot) + Send + Sync>;
 
 /// 本次运行"喂给调度器的事件"与"引擎真打出去的那一枪"，按发生的顺序录下来（**E13③**）。
 ///
@@ -360,6 +478,8 @@ impl Report {
 }
 
 /// 主循环为什么停下来。只有 `Done` 有可能是成功，而且要等收尾那两本账才算数。
+/// `Debug` 只为 9A 的用例服务（断言消息里要摆出"循环是从哪一条出口停的"），不参与任何判据。
+#[derive(Debug)]
 enum Stop {
     /// 调度器说没活可派了、也没有任何一枪在途或退避中。
     Done,
@@ -451,6 +571,10 @@ struct Launch {
 /// ⚠ **本函数不看 `consts::FLAG_ADD_ONLY`（spec §5 的 bit0"只入队不下"）**：全树生产代码里那个位
 /// 没有任何读取点，它必须由**调用方在进入 `run` 之前**短路（打印任务摘要然后收工）。
 /// **一旦进了 `run` 就一定会上网取字节** —— 别以为引擎会替你留着不发那一枪。
+///
+/// 进度快照（**E21** 甲）在这两条分岔上给得不一样，别把它当成两条路共用的进度源：
+/// 可分段那一条每拍至多一发、收尾再发一发终值；带 `--data-file` 的那一条（`run_whole_once`）
+/// **一发都没有**，那条路的权威只有这里交回的 [`Report`]。
 pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     task.validate()?;
     ensure!(cfg.workers >= 1, "workers 至少要是 1（给了 {}）：没有 worker 就下不动任何东西", cfg.workers);
@@ -716,6 +840,47 @@ fn running_rate_bytes_per_sec(delivered: u64, elapsed: Duration) -> u64 {
     delivered.saturating_mul(1_000_000) / micros
 }
 
+/// 快照里那一格"瞬时速率"的式子（勘误 **E21** 判据④）。
+///
+/// 与上面那条 [`running_rate_bytes_per_sec`] 是**两条式子、两个用途**，不许并成一条：
+/// - 这条的分子是**两拍之差**（`delta`），问的是"这一拍在动多快" ⇒ 进度行 `3.1 MiB/s`；
+/// - 那条的分子是**累计字节 / 累计墙钟**，问的是"这轮平均交得出多少" ⇒ `fetch::window_budget`
+///   的分子（那里要的是"别把预算定得比实际吞吐还小"，平均值才是它要的稳）。
+///
+/// 判据④点名的是坑：拿平均去显示，慢启动段会把它算低（一整段 15 s 的爬坡把后面稳定的一秒
+/// 也一起摊平）。用例 `the_rate_cell_is_the_difference_between_two_beats_not_the_whole_run_average`
+/// 就是这一条的活体针（把 `run_delivered / started.elapsed()` 交出去当显示速率，它当场红）。
+///
+/// 间隔下限 **1 ms**：`LOOP_POLL` 之下两次取时钟可能落在同一微秒里，不设下限就是除以 0
+/// （debug 构建 panic）或报出一个 5e8 字节的假高速。`saturating_mul` 与那条同一个立场：
+/// 速率这一格绝不能在加法上回绕。
+fn instant_rate_bytes_per_sec(delta_bytes: u64, gap: Duration) -> u64 {
+    let micros = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX).max(1_000);
+    delta_bytes.saturating_mul(1_000_000) / micros
+}
+
+/// 快照里那一格"在途 worker 数"（判据⑤）：**只数 `Busy`**。
+///
+/// 与 [`Engine::any_in_flight`] 的区别是判据本身：那一条回答"还有没有活没干完"（退避中的人手里
+/// 还有一段没交回的区间，算活），这一条回答"此刻真有几条连接在收字节"（进度行的 `x4`）。
+/// 慢重试那一档最见区别：全场都在 30 s 退避 ⇒ 这一格是 **0**，而 `slow_retry_rounds ≥ 1`；
+/// 把 Backoff 算进来就是让进度行说谎（"4 条连接在跑"，实际一条都没有）。
+fn busy_worker_count(workers: &[WorkerCtl]) -> usize {
+    workers.iter().filter(|ctl| ctl.state == WorkerState::Busy).count()
+}
+
+/// 快照里那一格"慢重试轮数"（判据⑥）：跨 worker 取**最大值**。
+///
+/// `WorkerCtl::attempt` 的语义是"这条失败链已经排下来几次重试、一次成功就归零"，
+/// 减去快速那一档的 `FAST_RETRY_MAX = 5` 就是"已经排下的 30 s 慢重试有几次"：
+/// attempt 5 ⇒ 0（第 6 次才排下头一发），attempt 9 ⇒ 4。
+/// 为什么是 max 而不是求和或逐条报：§6.2 只承诺一个 `slow-retry xN`，而求和会把
+/// "四条链各排下 1 次"印成 `x4`（读起来像同一条链重试了四轮，那是假象）；
+/// 逐 worker 报不在 v1 的交付面里。
+fn slow_retry_rounds(workers: &[WorkerCtl]) -> u32 {
+    workers.iter().map(|ctl| ctl.attempt.saturating_sub(FAST_RETRY_MAX)).max().unwrap_or(0)
+}
+
 /// `FailKind` → 一句能给人看的话。**不截断、不拼接**（E12⑦：载荷已经是单行 ≤200 字符）。
 fn failure_note(kind: &FailKind) -> String {
     match kind {
@@ -784,6 +949,11 @@ fn ensure_parent_dir(target: &Path) -> Result<()> {
 /// 不试探、不读断点、不写断点、不开 worker 线程（该形状不可分段，spec §2.2 第一条）。
 /// 事实取自这一枪**自己的**响应头（`fetch::run_whole` 的 F2 那半）。
 /// 被窗口预算掐在 body 中间 ⇒ 如实报"未完成"。**绝不重发** —— 重发就是把用户的表单交第二次。
+///
+/// ⚠ **这一支一发 `on_tick` 都不交**（勘误 **E21** 判据⑧）：整程阻塞在一发请求里、按 **E8②**
+/// 不开线程，中途没有任何引擎侧读得到的量 —— 这里连 `Engine` 都没有构造。
+/// 所以 `cfg.on_tick` 在本函数里**一次都不被读**，那条路的进度权威只有下面这份 [`Report`]。用例
+/// `the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some` 钉这一格。
 fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started: Instant) -> Result<Report> {
     let target = task.target_path();
     ensure_parent_dir(&target)?;
@@ -943,6 +1113,17 @@ struct Engine {
     run_delivered: u64,
     last_save: Instant,
     last_tick: Instant,
+    /// 上一**拍**交快照的时刻（勘误 **E21** 判据④的分母来源）。
+    ///
+    /// 为什么不复用隔壁那格 `last_tick`：那一记的是"上一次循环迭代结束"，报告来得勤时它每来一条
+    /// 就被往前挪一次，用它算间隔会把"两拍之差"读成"两块之差"。锚点初值取主循环开工的那一刻
+    /// （不是 `run` 的 `started`，理由写在 [`RunSnapshot::instant_bytes_per_sec`] 上）。
+    tick_at: Instant,
+    /// 上一拍交快照时的 `run_delivered`（判据④的分子来源；与 `tick_at` **同一拍取**）。
+    tick_delivered: u64,
+    /// 本轮开工时从断点读回的那份 `bytes_duplicated`（判据③：快照交的是**本次运行**的增量，
+    /// 要减的就是这个起点）。`run_delivered` 不需要对应的起点 —— 它本来就是从零起的本轮量。
+    dup_base: u64,
     /// 上次落盘时的 `pending_bytes()`。它只可能因为覆盖集增长而**变小**，是"关键事件发生过"的记号。
     saved_pending: u64,
     started: Instant,
@@ -958,6 +1139,8 @@ impl Engine {
             fresh_reason, started,
         } = launch;
         let count = cfg.workers;
+        // 交快照时要减掉的那个起点必须在 `stats` 被搬进结构体**之前**取（判据③）。
+        let dup_base_from_stats = stats.bytes_duplicated;
 
         // **E16** R-B2：对端不认 `Range` ⇒ 每一枪取整条剩余 body（`ToEof`），**不许**按窗重请求。
         // 信号只有这一处（`ProbeFacts.accept_ranges`，**E11③** 的行为加权读法）；`run_window` 自己
@@ -1032,6 +1215,11 @@ impl Engine {
             run_delivered: 0,
             last_save: now,
             last_tick: now,
+            // 快照的两个锚点都从"主循环开工"起算（判据④的第一拍没有上一拍，就用这个锚点），
+            // dup 的起点是断点带回来的那份跨轮账（判据③）。
+            tick_at: now,
+            tick_delivered: 0,
+            dup_base: dup_base_from_stats,
             saved_pending: 0,
             started,
             last_note: None,
@@ -1172,8 +1360,70 @@ impl Engine {
         None
     }
 
+    /// 交出一拍快照（勘误 **E21** 甲）。**本模块与 [`Engine::tick_if_due`] 是 `on_tick` 仅有的
+    /// 两处调用点**，而它们分别就是判据⑦说的那两处：主循环那一拍、收尾那一拍。
+    ///
+    /// 三条次序都是判据，不是风格：
+    /// 1. **先读账、后挪锚点、最后才调闭包**。锚点如果在取快照之前就挪了，下一拍的分子分母
+    ///    会少算同一截（"两拍之差"变成"两拍之差减一次回调时间"）；而闭包看到的快照与
+    ///    下一拍的锚点因此**不可能来自同一个时刻** —— 这正是判据③那句"同一拍取"的可执行版本。
+    /// 2. **观察者不在场时一个字都不动**（早退）。不是为了省几纳秒：那种"没挂观察者也要把锚点
+    ///    往前挪"的写法会让 `tick_if_due` 的闸每拍都重新成立，等于在默认路径上多跑一条循环。
+    /// 3. 八格里没有任何东西来自 `store.len()`（E7 的两本账）：进度行的百分比只看覆盖集，
+    ///    完成判定仍然只在 `completion_verdict` 那一处。
+    fn emit_tick(&mut self) {
+        if self.cfg.on_tick.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let gap = now.saturating_duration_since(self.tick_at);
+        let snap = RunSnapshot {
+            total_len: self.total_len,
+            // 判据①：覆盖集这一格只做一次减法，不给调度器开新 API。
+            covered_bytes: self.total_len.saturating_sub(self.sched.pending_bytes()),
+            run_delivered: self.run_delivered,
+            // 判据③：与上一格同一拍取，减掉断点带回来的起点。
+            run_bytes_duplicated: self.stats.bytes_duplicated.saturating_sub(self.dup_base),
+            // 判据④：两拍之差，不是全程平均。
+            instant_bytes_per_sec: instant_rate_bytes_per_sec(
+                self.run_delivered.saturating_sub(self.tick_delivered),
+                gap,
+            ),
+            active_workers: busy_worker_count(&self.workers),
+            workers_total: self.cfg.workers,
+            slow_retry_rounds: slow_retry_rounds(&self.workers),
+        };
+        self.tick_at = now;
+        self.tick_delivered = self.run_delivered;
+        if let Some(on_tick) = &self.cfg.on_tick {
+            on_tick(&snap);
+        }
+    }
+
+    /// 主循环那一拍的出口：**距上一发快照不小于 `LOOP_POLL` 才交**（判据⑦的"每拍至多一次"）。
+    ///
+    /// 为什么这一句必须留在循环里、而不是把 `emit_tick` 直接写进 `on_report`：主循环醒来的次数
+    /// 由"有没有结论回来"决定，一块 64 KiB 就是一次 ⇒ 挂在结论上就是每块一条进度行（与 **E8①**
+    /// 那条"flush 绝不进每块循环"同族）。为什么也不为它加第二个计时器：`recv_timeout` 的期限
+    /// 本来就是 `last_tick + LOOP_POLL`，循环最迟一秒醒一次，闸自己会到期。
+    fn tick_if_due(&mut self) {
+        if self.cfg.on_tick.is_some() && self.tick_at.elapsed() >= LOOP_POLL {
+            self.emit_tick();
+        }
+    }
+
     /// 主循环。
     fn drive(&mut self) -> Stop {
+        let stop = self.pump();
+        // 判据⑦的第二处、也是最后一处：**收尾那一拍再交一次终值**。
+        // 放在这里而不是 `finish` 里：`finish` 有两支直接 `bail`（落盘/断点坏了），那种时候
+        // 观察者照样该看到"停在哪一格"；而此刻所有结论都已经记完账，这一发就是本轮的终值。
+        self.emit_tick();
+        stop
+    }
+
+    /// 循环本体（`drive` 是它的包装，只为在出口处补那一发终值快照）。
+    fn pump(&mut self) -> Stop {
         loop {
             if let Some(worker) = self.dead_busy_worker() {
                 return Stop::WorkerGone { worker: Some(worker) };
@@ -1201,6 +1451,7 @@ impl Engine {
                 Err(RecvTimeoutError::Disconnected) => return Stop::WorkerGone { worker: None },
             }
             self.last_tick = Instant::now();
+            self.tick_if_due();
         }
     }
 
@@ -1385,6 +1636,10 @@ mod tests {
     use super::*;
     use crate::consts::WINDOW_MAX_TIMEOUT_SECS;
     use crate::state::Snapshot;
+    // 9A 的夹具要的三样：进程内计数器、带时间戳的快照流水、一个"刚释放的空闲端口"。
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     /// **E13④ 要求的表驱动用例**：退避表逐格钉死，零睡眠。
     ///
@@ -1901,5 +2156,460 @@ mod tests {
                 _ => None,
             }).collect(),
         )
+    }
+
+    // ==================== 9A（勘误 **E21** 甲）：运行态快照的数据面 ====================
+    //
+    // 这一节的夹具**不起线程、不碰网络**（只有 (d) 那一发 POST 真要去敲一个端口）。理由不是省事：
+    // 快照那八格全部来自引擎脚下的量（`sched` / `stats` / `run_delivered` / `workers` / `cfg`），
+    // 而它们的**变化**在真引擎里由"一条 worker 结论"驱动 —— 那结论正好是 `reports` 通道里的
+    // 一个 `WorkerReport`，测试可以直接把它投进去，于是节拍、速率、计数三格都钉得住。
+    //
+    // 不经 `engine::run` 的代价要照实说：试探与断点那两段没走过。E21 甲的十条判据里**没有一条**
+    // 依赖试探内容或断点内容（②说的是"不许拿 0 当未知哨兵"、⑧说的是"`--data-file` 那一支 0 次"），
+    // 而判据⑧那一条**必须**经 `run` 走一遍（它问的正是 `run` 的分岔），(d) 就是这么写的。
+    //
+    // ⚠ 派发说"用本文件既有的 stub/夹具助手"：`mod tests` 里**没有**任何对端夹具（既有的用例全是
+    // 纯函数与手工 trace），而 `tests/harness` 的 `Stub`/node 对端在 lib 单元测试面上够不着
+    // —— 它住在集成测试的编译单元里。所以这里的夹具是新搭的，不冒充"复用了既有夹具"。
+
+    /// **E21 验收下限点名的证据形状**：一个计数器 + 一份带时间戳的快照流水。
+    ///
+    /// 为什么不许拿打印当证据：`cargo test` 会把 stdout 吞进"捕获的输出"，"一行也没打"证明不了
+    /// "一次也没调"；`AtomicUsize` 记的是**被测代码真的调过那个闭包**这件事。
+    /// 时间戳与快照同拍取：(c) 那条"两拍之差"要用它反推间隔。
+    #[derive(Clone)]
+    struct TickSink {
+        hits: Arc<AtomicUsize>,
+        log: Arc<Mutex<Vec<(Instant, RunSnapshot)>>>,
+    }
+
+    impl TickSink {
+        fn new() -> TickSink {
+            TickSink { hits: Arc::new(AtomicUsize::new(0)), log: Arc::new(Mutex::new(vec![])) }
+        }
+
+        fn count(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+
+        /// 清账：(d) 要用**同一个**观察者在两条路线之间对账，先清零才比得出"这一支一次都没有"。
+        fn reset(&self) {
+            self.hits.store(0, Ordering::SeqCst);
+            self.log.lock().expect("快照流水没有竞争者").clear();
+        }
+
+        fn taken(&self) -> Vec<(Instant, RunSnapshot)> {
+            self.log.lock().expect("快照流水没有竞争者").clone()
+        }
+
+        /// 交给 `Config` 的那只手。刻意**只**做两件事：加一计数、记一条时间戳 + 快照 ——
+        /// E21⑨ 给实现者的纪律（不许在回调里做长阻塞 I/O）在这里同样成立，否则节拍被夹具自己拖歪。
+        fn handle(&self) -> OnTick {
+            let hits = Arc::clone(&self.hits);
+            let log = Arc::clone(&self.log);
+            Arc::new(move |snap: &RunSnapshot| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                log.lock().expect("快照流水没有竞争者").push((Instant::now(), *snap));
+            })
+        }
+    }
+
+    /// 9A 夹具：一台**手搭、不起线程**的引擎 + 一个留在测试手里的结论发送端。
+    struct TickFixture {
+        engine: Engine,
+        /// 测试往这里投一条结论，主循环就走一遍**真实的** `on_report` 记账路径。
+        reports: Sender<WorkerReport>,
+        /// 主循环发给 worker 的 `Job` 必须有人**接着**（发送端还活着才不会被判 `WorkerGone`）⇒
+        /// 接收端由夹具自己留着，不交给任何线程（这里一个 worker 线程都没起）。
+        _jobs: Vec<Receiver<Job>>,
+        target: PathBuf,
+        state_path: PathBuf,
+    }
+
+    impl TickFixture {
+        fn cleanup(self) {
+            let _ = fs::remove_file(&self.target);
+            let _ = fs::remove_file(&self.state_path);
+        }
+    }
+
+    /// 手搭一台与 `Engine::new` 同副样子的引擎，只差两件事：**没有 worker 线程**、结论通道留在测试手里。
+    ///
+    /// `total_len` 同时进调度器与快照；`tag` 只用来把临时文件分名（lib 用例是并行跑的）。
+    fn hand_engine(tag: &str, cfg: Config, total_len: u64) -> TickFixture {
+        let dir = std::env::temp_dir();
+        let target = dir.join(format!("dlm-9a-{tag}.bin"));
+        let state_path = dir.join(format!("dlm-9a-{tag}.dlm.json"));
+        let url = format!("http://127.0.0.1:9/dlm-9a-{tag}.bin");
+        let task = Arc::new(Task {
+            url: url.clone(),
+            referer: None,
+            cookies: None,
+            data_file: None,
+            user: None,
+            password: None,
+            dir: dir.clone(),
+            name: Some(format!("dlm-9a-{tag}.bin")),
+            flags: 0,
+        });
+        let store = Arc::new(Store::open(&target, true).expect("夹具要能建目标文件"));
+        let (reports_tx, reports_rx) = channel::<WorkerReport>();
+        let (job_tx, job_rx) = channel::<Job>();
+        let started = Instant::now();
+        let sched = Scheduler::new(total_len, cfg.min_seg);
+        let saved_pending = sched.pending_bytes();
+        let engine = Engine {
+            task,
+            cfg,
+            store,
+            sched,
+            total_len,
+            accept_ranges: true,
+            validator: Validator {
+                etag: None,
+                last_modified: None,
+                total_len,
+                final_url: url,
+                ignore_mtime: false,
+            },
+            state_path: state_path.clone(),
+            stats: Stats::default(),
+            jobs: vec![job_tx],
+            reports: reports_rx,
+            handles: vec![],
+            workers: vec![WorkerCtl { state: WorkerState::Idle, attempt: 0 }],
+            alive: vec![Arc::new(AtomicBool::new(true))],
+            caps: vec![Arc::new(fetch::EndCap::new(fetch::NO_END_CAP))],
+            current: vec![None],
+            trace: vec![TraceStep::Seeded(vec![])],
+            fresh_reason: None,
+            run_delivered: 0,
+            last_save: started,
+            last_tick: started,
+            saved_pending,
+            started,
+            last_note: None,
+            tick_at: started,
+            tick_delivered: 0,
+            dup_base: 0,
+        };
+        TickFixture { engine, reports: reports_tx, _jobs: vec![job_rx], target, state_path }
+    }
+
+    /// 一条"这一枪落了这么多字节 / 这一枪坏了"的结论。
+    ///
+    /// `iv` 给什么都行：`run_delivered` 只看这条结论交回的字节，调度器认不认这一段只影响覆盖集
+    /// （而覆盖集这一格由 (e) 直接钉，不必绕主循环）。
+    fn report(worker: usize, iv: Interval, outcome: Outcome) -> WorkerReport {
+        WorkerReport { worker, iv, outcome: Ok(outcome) }
+    }
+
+    /// 节拍上界：`运行秒数上取整 + 2`（**E21** 的验收下限 (b) 原文，`+2` 是留给"收尾那一拍"与
+    /// 时钟粒度的余量）。写在这里而不是抄在断言里，是为了让 (b) 与 (d) 用同一个数。
+    fn beat_bound(elapsed: Duration) -> usize {
+        elapsed.as_secs() as usize + usize::from(elapsed.subsec_nanos() > 0) + 2
+    }
+
+    /// (a)：**默认没有观察者，而"没有观察者"不改变引擎脚下的任何一笔账**。
+    ///
+    /// 判据分两层，各挡一种写法：
+    /// - `Config::default().on_tick.is_none()` 挡的是"默认塞一只 no-op 闭包"（变异 m4）。
+    ///   这一句才是真针：字段是 `Option<Arc<dyn Fn..>>`，没交出去的闭包**根本没有调用点**，
+    ///   所以"None 时一次都不调"这件事在类型上就成立，拿计数器去证它等于证一句空话 ——
+    ///   下面那个计数器保留下来只为了"没有第二条暗渠道"这一句（引擎不许绕开 `Config` 自己找观察者）。
+    /// - 三笔账的字面量（`run_delivered` / `bytes_duplicated` / 结论）挡的是"挂观察者与不挂走了两条路"。
+    #[test]
+    fn the_default_config_carries_no_observer_and_none_changes_no_book() {
+        assert!(Config::default().on_tick.is_none(), "E21⑨ 的默认必须是 `None`：默认路径一个新字段都不挂");
+        let by_update = Config { workers: 3, ..Config::default() };
+        assert!(by_update.on_tick.is_none(), "结构体更新语法也不该凭空长出观察者");
+        assert!(by_update.clone().on_tick.is_none(), "`Config` 派生 `Clone` ⇒ 字段是 `Arc`，克隆不许把它变成 `Some`");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let cfg = Config { workers: 1, max_retries: Some(0), ..Config::default() };
+        let mut fx = hand_engine("none", cfg, 1_000_000);
+        // 三条结论照投：两条进度 + 一条收工的失败（`max_retries = Some(0)` ⇒ 失败即封顶，见 `Stop`）。
+        fx.reports.send(report(0, Interval { start: 0, end: 999 }, Outcome::Advanced { bytes: 1_000 })).expect("投结论");
+        fx.reports.send(report(0, Interval { start: 1_000, end: 1_999 }, Outcome::Advanced { bytes: 2_000 })).expect("投结论");
+        fx.reports.send(report(0, Interval { start: 2_000, end: 2_999 }, Outcome::Failed(FailKind::Http(503)))).expect("投结论");
+        let stop = fx.engine.drive();
+
+        assert!(matches!(stop, Stop::RetriesExhausted { worker: 0, attempted: 0 }), "主循环要照常走到收工结论：{stop:?}");
+        assert_eq!(fx.engine.run_delivered, 3_000, "没有观察者也要照常记账（3_000 = 上面两条结论的字面量）");
+        assert_eq!(fx.engine.stats.bytes_duplicated, 0, "没有观察者也不该凭空多出重复账");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "引擎不许绕开 `Config` 自己找观察者");
+        assert!(!fx.state_path.exists(), "观察者缺席时不许多出任何落盘产物");
+        fx.cleanup();
+    }
+
+    /// (b)：有观察者时**每拍至多一次**，而且**绝不是一块一条**（判据⑦，变异 m1 的针）。
+    ///
+    /// 夹具的形状：六条"块级"结论每 250 ms 投一条（全部挤在两拍之内），再让一条失败结论收工。
+    /// 于是"每块都打"那种写法会在 1.7 秒的运行里交回 6 发以上，而上界算出来只有 4；
+    /// 正常写法交回 2 发（越过 `LOOP_POLL` 的那一拍 + 收尾那一拍）。
+    /// ⚠ 结论之间隔 250 ms 而不是零间隔：真时钟下 `recv_timeout` 可能差几毫秒早醒，
+    /// 把两条结论挤进同一次迭代就没有"跨拍"可言（这条夹具的节拍实测在 1.5–1.9 s 之间浮动）。
+    #[test]
+    fn a_sink_gets_one_tick_per_beat_and_never_one_per_block() {
+        let sink = TickSink::new();
+        let cfg = Config { workers: 1, max_retries: Some(0), on_tick: Some(sink.handle()), ..Config::default() };
+        let mut fx = hand_engine("beat", cfg, 100_000_000);
+
+        let pacer = {
+            let reports = fx.reports.clone();
+            thread::spawn(move || {
+                for k in 0..6u64 {
+                    thread::sleep(Duration::from_millis(250));
+                    let iv = Interval { start: k * 1_000, end: k * 1_000 + 999 };
+                    if reports.send(report(0, iv, Outcome::Advanced { bytes: 1_000 })).is_err() {
+                        return;
+                    }
+                }
+                thread::sleep(Duration::from_millis(200));
+                let _ = reports.send(report(0, Interval { start: 6_000, end: 6_999 }, Outcome::Failed(FailKind::Http(503))));
+            })
+        };
+
+        let started = Instant::now();
+        let stop = fx.engine.drive();
+        let elapsed = started.elapsed();
+        pacer.join().expect("节拍线程要收得回来");
+        assert!(matches!(stop, Stop::RetriesExhausted { .. }), "夹具该由那条失败结论收工：{stop:?}");
+        assert_eq!(fx.engine.run_delivered, 6_000, "六条结论**都真落了盘**（不然次数上限就是在比一个空夹具）");
+
+        let n = sink.count();
+        let cap = beat_bound(elapsed);
+        assert!(n >= 2, "运行 {elapsed:?} 至少该有两发（越过 `LOOP_POLL` 的一拍 + 收尾那一拍），实测 {n}");
+        assert!(n <= cap, "每拍至多一次 + 收尾一发 ⇒ 上界 {cap}（运行 {elapsed:?}），实测 {n}：多出来就是打进每块那条循环里了");
+        fx.cleanup();
+    }
+
+    /// (c)：速率那一格是**两拍之差**，不是全程平均（判据④，变异 m2 的针）。
+    ///
+    /// 夹具故意把一次运行拉成"先慢后快"：第一拍之前只交 1_000 个字节，之后一次交 900_000 个字节。
+    /// 于是"Δ法"与"平均法"给出的数差近两倍 ⇒ 两种写法**分得开**（分不开就是恒真夹具，
+    /// 本项目已经栽过四次，所以这里先把这句话写成一条断言再写判据）。
+    ///
+    /// 期望值全部由**可观测量**现算：Δ 由两格 `run_delivered` 相减（并断言它恰等于夹具写死的
+    /// 900_000，证明落在两拍之间的就是那一发），间隔由观察者的时间戳相减。被测的那一格
+    /// 必须站在 Δ 这一边（3% 以内：引擎量间隔的那一刻与闭包进门的那一刻只差微秒），
+    /// 而且必须离平均法那一侧足够远。
+    #[test]
+    fn the_rate_cell_is_the_difference_between_two_beats_not_the_whole_run_average() {
+        let sink = TickSink::new();
+        let cfg = Config { workers: 1, max_retries: Some(0), on_tick: Some(sink.handle()), ..Config::default() };
+        let mut fx = hand_engine("rate", cfg, 100_000_000);
+        let anchor = fx.engine.started;
+
+        let pacer = {
+            let reports = fx.reports.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                if reports.send(report(0, Interval { start: 0, end: 999 }, Outcome::Advanced { bytes: 1_000 })).is_err() {
+                    return;
+                }
+                // 1.45 s：稳稳落在第一拍**之后**（第一拍在 ~1.0 s），又快于第二拍（~2.0–2.4 s）。
+                thread::sleep(Duration::from_millis(1_400));
+                if reports.send(report(0, Interval { start: 1_000, end: 900_999 }, Outcome::Advanced { bytes: 900_000 })).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1_550));
+                let _ = reports.send(report(0, Interval { start: 901_000, end: 901_999 }, Outcome::Failed(FailKind::Http(503))));
+            })
+        };
+
+        let stop = fx.engine.drive();
+        pacer.join().expect("节拍线程要收得回来");
+        assert!(matches!(stop, Stop::RetriesExhausted { .. }), "夹具该由那条失败结论收工：{stop:?}");
+
+        let log = sink.taken();
+        let pair = log
+            .windows(2)
+            .rev()
+            .find(|w| w[1].1.run_delivered > w[0].1.run_delivered)
+            .unwrap_or_else(|| panic!("要有一对相邻快照之间真有字节增量，夹具的节拍塌了：{log:?}"));
+        let (ta, snap_a) = pair[0];
+        let (tb, snap_b) = pair[1];
+
+        let delta = snap_b.run_delivered - snap_a.run_delivered;
+        assert_eq!(delta, 900_000, "落在两拍之间的那一发必须是上面写死的 900_000，实测 {delta}");
+        let gap_us = u64::try_from(tb.duration_since(ta).as_micros()).expect("快照流水按时间升序");
+        assert!(gap_us >= 50_000, "两拍之间至少隔开 50 ms，否则 1 ms 下限会让这一格变成除法噪声：{gap_us} µs");
+        let by_difference = delta.saturating_mul(1_000_000) / gap_us;
+        let run_us = u64::try_from(tb.duration_since(anchor).as_micros()).expect("收尾在开工之后");
+        let by_whole_run_average = snap_b.run_delivered.saturating_mul(1_000_000) / run_us;
+
+        assert!(
+            by_difference >= by_whole_run_average * 6 / 5,
+            "这一格得先**分得开**两种写法才有资格当判据：Δ法 {by_difference} vs 平均法 {by_whole_run_average}"
+        );
+        let drift = snap_b.instant_bytes_per_sec.abs_diff(by_difference);
+        assert!(
+            drift <= by_difference / 30 + 1,
+            "E21④：速率那一格要等于两拍之差 {by_difference}，实测 {}（偏差 {drift}）",
+            snap_b.instant_bytes_per_sec
+        );
+        assert!(
+            snap_b.instant_bytes_per_sec.abs_diff(by_whole_run_average) * 5 >= by_whole_run_average,
+            "E21④ 点名的那个坑：把全程平均 {by_whole_run_average} 交出去当显示速率（实测 {}）。慢启动段会把它算低",
+            snap_b.instant_bytes_per_sec
+        );
+        assert_eq!(snap_a.run_delivered, 1_000, "第一拍只该看到那一发 1_000 字节的结论");
+        fx.cleanup();
+    }
+
+    /// (d)：`--data-file` 那一支**一次都不交**（判据⑧，变异 m3 的针）。
+    ///
+    /// 与 (b) 配成一对写在**同一条用例**里：先让**同一个观察者**在可分段那条路上收到若干发
+    /// （证明这套接线真的通），清零，再走 `run` 的 `--data-file` 分岔，要求它是 0。
+    /// 单写一条"0 次"的负断言不叫证据 —— 它同样能被一个"根本没接上"的实现满足。
+    ///
+    /// 那一支这轮走的是**真** `engine::run`：URL 指向一个刚释放的空闲端口（bind 之后 drop ⇒
+    /// 连接被拒），POST 那一枪自己得出"没成"的结论。网络失败不是夹具的替身，是那条路的正常出口
+    /// （`run_whole_once` 不重发，spec R7 / E12⑧）；这一格断的只有"tick 次数"，不是那条结论的内容。
+    #[test]
+    fn the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some() -> anyhow::Result<()> {
+        let sink = TickSink::new();
+        let cfg = Config { workers: 1, max_retries: Some(0), on_tick: Some(sink.handle()), ..Config::default() };
+
+        // ① 可分段那一支：先把接线跑通。
+        let mut fx = hand_engine("pair", cfg, 100_000_000);
+        fx.reports.send(report(0, Interval { start: 0, end: 999 }, Outcome::Advanced { bytes: 1_000 })).expect("投结论");
+        fx.reports.send(report(0, Interval { start: 1_000, end: 1_999 }, Outcome::Failed(FailKind::Http(503)))).expect("投结论");
+        let stop = fx.engine.drive();
+        assert!(matches!(stop, Stop::RetriesExhausted { .. }), "夹具该收工：{stop:?}");
+        let segment_ticks = sink.count();
+        assert!(segment_ticks >= 1, "对照那一发要真收到过 tick，否则下面的 0 只是在比一个没接上的观察者：{stop:?}");
+        fx.cleanup();
+
+        // ② `--data-file` 那一支：同一个观察者，清零之后必须还是 0。
+        sink.reset();
+        assert_eq!(sink.count(), 0, "清零本身");
+        let dir = std::env::temp_dir();
+        let body = dir.join("dlm-9a-datafile-body.bin");
+        let target = dir.join("dlm-9a-datafile.bin");
+        fs::write(&body, b"q=hello").expect("写 POST 体文件");
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let port = listener.local_addr()?.port();
+        drop(listener); // 让这一发 POST 撞在"没人听"上：那条路自己会得出"没成"的结论
+        let task = Task {
+            url: format!("http://127.0.0.1:{port}/post"),
+            referer: None,
+            cookies: None,
+            data_file: Some(body.clone()),
+            user: None,
+            password: None,
+            dir: dir.clone(),
+            name: Some("dlm-9a-datafile.bin".to_string()),
+            flags: 0,
+        };
+        let report_of_whole_route = run(&task, Config { workers: 1, on_tick: Some(sink.handle()), ..Config::default() })?;
+        assert!(!report_of_whole_route.ok, "指向已关闭端口的 POST 不该被报成成功");
+        assert_eq!(report_of_whole_route.trace.len(), 0, "那一支没有调度器，一条事件都不该被喂出去");
+        assert_eq!(sink.count(), 0, "E21⑧：`--data-file` 那一支 0 次 tick（对照上面可分段那一支收到过 {segment_ticks} 发）");
+
+        let _ = fs::remove_file(&body);
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(state::path_for(&target));
+        Ok(())
+    }
+
+    /// (e)：八格各自的**出处**逐格钉死（判据①②③⑤⑥）。
+    ///
+    /// 这一格不走主循环、不等节拍：直接把引擎脚下的量摆成已知的样子，再交**一发**快照。
+    /// 摆状态而不是猜时序，是因为这里要比的是"这一格读的是哪一本账"，不是"什么时候读"
+    /// （节拍与次数归 (b)，速率出处归 (c)）。
+    #[test]
+    fn every_snapshot_cell_comes_from_the_documented_source() {
+        let sink = TickSink::new();
+        let cfg = Config { workers: 1, on_tick: Some(sink.handle()), ..Config::default() };
+        let mut fx = hand_engine("cells", cfg, 1_000);
+
+        // 覆盖集：`0..=399` 已确认 ⇒ 按判据① `covered = total_len − pending_bytes()` = 1000 − 600。
+        fx.engine.sched = Scheduler::resume(1_000, 16, &[Interval { start: 0, end: 399 }]);
+        assert_eq!(fx.engine.sched.pending_bytes(), 600, "先自证那本账：调度器说还差 600 字节");
+        // 跨轮账（判据③）：断点带回来的 dup 是 40，本轮加到 150 ⇒ 快照只能交出差值 110。
+        fx.engine.dup_base = 40;
+        fx.engine.stats.bytes_duplicated = 150;
+        fx.engine.run_delivered = 1_000_000;
+        fx.engine.tick_delivered = 0;
+        // 锚点放在**未来** ⇒ `saturating_duration_since` 给 0 ⇒ 间隔被判据④的下限夹成 1 ms
+        // ⇒ 速率那一格可以写成字面量（公式本体由 (f) 那张表钉，不靠这里）。
+        fx.engine.tick_at = Instant::now() + Duration::from_secs(5);
+        fx.engine.cfg.workers = 3;
+        fx.engine.workers = vec![
+            WorkerCtl { state: WorkerState::Busy, attempt: 7 },
+            WorkerCtl { state: WorkerState::Backoff { until: Instant::now() + Duration::from_secs(30) }, attempt: 3 },
+            WorkerCtl { state: WorkerState::Idle, attempt: 0 },
+        ];
+
+        fx.engine.emit_tick();
+        let log = sink.taken();
+        assert_eq!(log.len(), 1, "直接交快照：一发");
+        let snap = log[0].1;
+        assert_eq!(snap.total_len, 1_000, "判据②：`total_len` 不是 Option，也不许拿 0 当未知哨兵");
+        assert_eq!(snap.covered_bytes, 400, "判据①：covered = total_len − pending_bytes()，**不是** store.len()");
+        assert_eq!(snap.run_delivered, 1_000_000, "判据③：用的就是引擎已有的那一格 `run_delivered`");
+        assert_eq!(snap.run_bytes_duplicated, 110, "判据③：本次 dup 增量 = 150 − 40，跨轮那份起点要减掉");
+        assert_eq!(snap.instant_bytes_per_sec, 1_000_000_000, "判据④：Δ=1e6 字节 ÷ 1 ms 下限 = 1e9 字节/秒");
+        assert_eq!(snap.active_workers, 1, "判据⑤：只数 Busy");
+        assert_eq!(snap.workers_total, 3, "`workers_total` = `cfg.workers`");
+        assert_eq!(snap.slow_retry_rounds, 2, "判据⑥：跨 worker **最大值** = 7 − FAST_RETRY_MAX(5)，不是各链相加");
+        assert!(fx.engine.any_in_flight(), "同一副状态下 `any_in_flight()` 是真的（Busy + Backoff 都算）");
+        assert_ne!(snap.active_workers, 2, "两处判据不许互换：`active_workers` 不能把退避中那一条也算成在途");
+        fx.cleanup();
+    }
+
+    /// (f)：判据④那条式子本体（表驱动，零时钟依赖）。
+    ///
+    /// 最后一行不是装饰：它把"Δ 法"与"全程平均法"在**同一副输入**上摆成两个不同的数，
+    /// 于是"谁将来把两者并成一条式子"会当场红 —— (c) 用的是真节拍，这一格用的是字面量。
+    #[test]
+    fn the_instant_rate_formula_is_the_microsecond_quotient_with_a_one_ms_floor() {
+        let table: &[(u64, Duration, u64)] = &[
+            (0, Duration::ZERO, 0),                                        // 没字节 + 同一瞬间：不许 panic
+            (1_000, Duration::from_secs(1), 1_000),                         // 1 秒 1000 字节
+            (65_536, Duration::from_millis(500), 131_072),                  // 半秒一满块
+            (1_000_000, Duration::from_millis(1), 1_000_000_000),           // 下限那一格：1 ms
+            (500, Duration::from_micros(1), 500_000),                       // 1 µs 也要夹到 1 ms（不夹就是 5e8 的假高速）
+            (900_000, Duration::from_millis(1_200), 750_000),               // (c) 那一格的同形状对照
+        ];
+        for (delta, gap, want) in table {
+            assert_eq!(instant_rate_bytes_per_sec(*delta, *gap), *want, "Δ={delta} gap={gap:?}");
+        }
+        // 两条式子必须**是**两条式子：同一时刻、同一笔账，给出的数不一样。
+        assert_eq!(running_rate_bytes_per_sec(901_000, Duration::from_millis(2_500)), 360_400);
+        assert_ne!(
+            instant_rate_bytes_per_sec(900_000, Duration::from_millis(1_200)),
+            running_rate_bytes_per_sec(901_000, Duration::from_millis(2_500)),
+            "E21④：显示速率与 `window_budget` 的分子是两个数，不许共用"
+        );
+        // 上界那一格不许在加法上回绕。
+        assert!(instant_rate_bytes_per_sec(u64::MAX, Duration::from_micros(1)) >= instant_rate_bytes_per_sec(1, Duration::from_micros(1)));
+    }
+
+    /// (g)：`active_workers` 与 `slow_retry_rounds` 的规则各自钉死（判据⑤⑥）。
+    #[test]
+    fn the_busy_count_and_the_slow_retry_rounds_follow_their_own_rules() {
+        let later = Instant::now() + Duration::from_secs(30);
+        let busy = |attempt| WorkerCtl { state: WorkerState::Busy, attempt };
+        let idle = |attempt| WorkerCtl { state: WorkerState::Idle, attempt };
+        let back = |attempt| WorkerCtl { state: WorkerState::Backoff { until: later }, attempt };
+        // 一行 = (名字, 这条那几条 worker 状态, 期望 Busy 条数, 期望慢重试轮数)
+        let rows: &[(&str, &[WorkerCtl], usize, u32)] = &[
+            ("全场空闲", &[idle(0), idle(0)], 0, 0),
+            ("Busy 才算在途", &[busy(0), idle(0)], 1, 0),
+            ("退避中不算在途，但它的 attempt 照样进慢重试那一格", &[back(9)], 0, 4),
+            ("两条 Busy 加一条退避", &[busy(0), busy(0), back(9)], 2, 4),
+            ("取最大值而不是相加", &[idle(7), idle(2)], 0, 2),
+            ("刚好用满快速那一档 ⇒ 0（第 6 次才排下头一发 30 s）", &[busy(5)], 1, 0),
+            ("一个 worker 都没起来 ⇒ 两格都是 0", &[], 0, 0),
+            ("u32 上界不许绕回", &[back(u32::MAX)], 0, u32::MAX - FAST_RETRY_MAX),
+        ];
+        for (case, workers, want_active, want_rounds) in rows {
+            assert_eq!(busy_worker_count(workers), *want_active, "{case}");
+            assert_eq!(slow_retry_rounds(workers), *want_rounds, "{case}");
+        }
     }
 }
