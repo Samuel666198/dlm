@@ -3182,6 +3182,9 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
         PROBE_READ_BYTES / 2,
         "目标文件被动过（截断/覆写）：`Store::open` 本该排在这个判定之后"
     );
+    // 先等到"至少有一条请求落了盘"再数总数：`requests()` 不等日志，缺行会让"恰好一条"这种
+    // 上限断言读起来像成立（本项目的老规矩：负向/计数判据都要先守一次落盘时机）。
+    srv.requests_at_least(1)?;
     let requests = srv.requests()?;
     assert_eq!(requests.len(), 1, "只许有试探那一枪（判完就拒）：{requests:?}");
     assert_eq!(requests[0]["method"], "GET", "那一枪是试探：{requests:?}");
