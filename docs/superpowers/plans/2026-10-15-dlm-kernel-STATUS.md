@@ -1,8 +1,8 @@
 # dlm 内核 v1 — 执行状态与恢复说明
 
-计划：[`2026-10-15-dlm-kernel.md`](./2026-10-15-dlm-kernel.md)（末尾 `## 勘误` E1–E13 为权威，与正文冲突时以勘误为准）
+计划：[`2026-10-15-dlm-kernel.md`](./2026-10-15-dlm-kernel.md)（末尾 `## 勘误` E1–**E17** 为权威，与正文冲突时以勘误为准）
 设计：[`../specs/2026-10-15-dlm-kernel-design.md`](../specs/2026-10-15-dlm-kernel-design.md)（§10 勘误 R1–R7，R5 已作废 R4）
-分支 `sdd/dlm-kernel`，未 push、无远程。**2026-10-16 更新。**
+分支 `sdd/dlm-kernel`，未 push、无远程。**2026-10-17 更新。**
 
 ## 进度
 
@@ -16,19 +16,37 @@
 | **T5 resume 判定** | ✅ 评审通过（1 轮修复：补 ①b「请求本身变了」闸；另修两条**恒真假绿夹具**——关键词 `"URL"` 被两条路的串同时满足） | `23e39fd..8b2921f`（含 `ec78d25`/`4353719` docs E10） |
 | **T6 probe 试探** | ✅ 评审通过（1 轮修复 + **补发**的 scoped 复审全绿：`accept_ranges` 改带否决的合取、206 不许回落 `Content-Length`） | `4353719..840b0e5` |
 | **T7 fetch 窗口化子请求** | ✅ 评审通过（1 轮修复 + scoped 复审：钉住 206 起点 / `Complete` 边界 / 416 分母三格存活变异，`FailKind::Transport(String)`） | `840b0e5..1c140e8`（含 `ba906f4` docs R7/E11/E12） |
-| **T8 engine 主循环** | 🟡 **进行中**：阶段1–4 已提交（`4a105e4`/`5a785ab`/`8f108d7`/`32140a0`），**任务级评审还没发**；阶段5（简报另两条测试 + `trace` 回放三道链接 + 附加用例）未做 | `1c140e8..32140a0` |
-| T9 CLI · T10 验收 | 未开始 | — |
+| **T8 engine 主循环** | 🟡 **阶段1–5 全部已提交，任务级评审三发全回来、全判 Needs fixes ⇒ 修复轮 1 待发**（A `scheduler+state` 0C/3I、B `engine` 0C/2I、C `fetch+tests` 0C/4I） | `1c140e8..1e209a2`（实现）+ `bc8646d`/`b10ec51`/`7b368d2`/`acb3166`（阶段5B 与文档） |
+| T9 CLI · T10 验收 | 未开始（T8 收口后按顺序走） | — |
 
-计划文末 `## 勘误` 现有 **E1–E13**（E7–E13 都是执行期实测后才写进计划的，正文不回改）；设计稿 §10 现有 **R1–R7**。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
+计划文末 `## 勘误` 现有 **E1–E17**（E7–E17 都是执行期实测后才写进计划的，正文不回改）；设计稿 §10 现有 **R1–R7**。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
 
-**当前基线（2026-10-16 收工实测于 `32140a0`）**：`cargo test --lib` **158 passed / 0 failed**、`cargo test --test integration` **60 passed / 0 failed**（约 17.7 s）、`cargo clippy --all-targets -- -D warnings` **退出码 0**。下一任务的验收下限就是这个数：**只许增、不许删、不许改判据方向**。
+**当前基线（2026-10-17 控制员实测于 `105fbf1`，撤销变异复原后复跑）**：`cargo test --lib` **162 passed / 0 failed**、`cargo test --test integration` **74 passed / 0 failed**（约 18 s）、`cargo clippy --all-targets -- -D warnings` **退出码 0**。下一任务的验收下限就是这个数：**只许增、不许删、不许改判据方向**。
 
-## 下一个动作（2026-10-16 收工断点，照此顺序）
+## 下一个动作（2026-10-17 断点，照此顺序）
 
-1. **先裁 `T8-R1`**（账本 `## Task 8` 末段，三条选项都写全了）：`Action::Retighten` 现在**没法当成一枪打出去** —— 收紧只作用于下一枪，在途那一枪照旧读满窗口，实测 **8 MiB 的文件重复下载 8.2 MiB（≈2× 流量）**。我倾向**乙**（把"当前终点"做成 worker 可观察的 `Arc<AtomicU64>`，`run_window` 的 64 KiB 循环每块查一次、提前 `break`），但这条要连改 `fetch` 契约 ⇒ **要和实现者一起定**，不许在派发里当既成事实。**这条不定，阶段5 的测试形状就没法定。**
-2. 派 **T8 阶段5**：简报 Step 1 的另外两条测试（kill 后续传不重下已完成段／`/noranges` 退化且并发=1）、`Report.trace` 的**三道链接**回放（录事件 → 真 `Scheduler` → 动作 vs 实际派发 vs 线上 Range），外加那批附加用例。**记得剔掉 probe 自己那一枪**（`T8-R2`：实测 17 条线上 vs 16 条真开）。
-3. 发 **T8 的任务级评审**（diff `1c140e8..阶段5 head`，评审包 `review-package PLAN 1c140e8 HEAD`）→ 需要则修复轮 → scoped 复审 → 记账 complete。
-4. **T9 CLI**、**T10 四场景验收**（`/drop/<n>` 与 `/sz/<n>s`，证据落 `docs/evidence/`），最后**全分支最终评审** + `.superpowers/sdd/` 清理 + 交一份"我替你做过的全部裁定"清单。
+**T8 的修复轮按"能否独立交付"切两发，同任务任何时刻只允许一发在飞。**
+
+1. **8F-1（不发新夹具、不动 `fetch` 契约）** —— 账本 `## Task 8` 评审 A/C 与裁定 **E17** 的落点：
+   - **E17**：删 `engine.rs:457-461` 那笔 kill+续传重下账 + `overlap_with`（`:533`）+ 它的算术用例（`:1698`）；
+     `state.rs::bytes_duplicated` 文档改写成"已知少报，上界 `WINDOW_BYTES × workers`（算术推论，写明出处）"。
+   - **A1**：`scheduler.rs:395-402` `clamp_to_file` 会把**整条越过 EOF 的种子**夹成 `{999,999}` 这种幽灵已确认字节 ⇒
+     照 `engine.rs:651` 那句 `.filter(|iv| iv.start <= last)` 修，并补字面用例；
+     ⚠ **参照实现 `cover()` 不许再抄这条夹法**（E15 末尾的方法教训就是它）。
+   - **A3**：`state.rs:194-195` 那句"与线上多打实测差 ≤ 7 KiB"**没有任何断言在这个量级上** ⇒ 改成实际断言强度。
+   - **C-I-1…C-I-4**：账单用例补**量具活体针**（`conn_close_side` 条数 > 0 且 `written ≥ len`）并按它仪器的真实分辨率改写文档；
+     `:2333` 那个 `8,206,900` 的**出处标错**（是实现者的 `duplicated`，不是线上 `excess`）与 `:2381` 那句没断言支撑的"3.1-3.5 MB"；
+     `:2133`/`:2136` **两条不存在的用例名**（要么补用例要么改名）；`:2287`/`:2493` 两处**无守卫的线上读数**改用 `requests_at_least(n)`。
+   - B 的 Minor 里**同源那三条**一并修：`engine.rs:1813` 用 `!is_empty()` 而精确条数可知、`:1815` 断的是自己两行前设的字面量（＝没断）、
+     `:1512` 拿被测公式现算期望值。
+2. **8F-2（这条要动 `fetch` 契约 + 新夹具，单独一发）** —— **E16** 退化模式：一枪下完剩余整条 body、预算按整条体量算（R7）、
+   被掐如实 `Advanced`／未入账的前缀要么进账要么写明。**先写今天会红的用例**（需要能服务 > 一个窗口的"不认 Range"对端）。
+3. 两发落地后发**一发 scoped 复审**（覆盖 8F-1 + 8F-2 的合并 diff）→ 记账 `Task 8: complete`。
+4. **T9 CLI**（`FLAG_ADD_ONLY` 要在 `engine::run` 之前生效；`fresh_reason`/`message` 渲染时**不许再截断**，见裁定 9）、
+   **T10 四场景验收**（`/drop/<n>` 与 `/sz/<n>s`，证据落 `docs/evidence/`；**多 worker 的真"杀了再续"用 spawn `dlm` 二进制 + kill 子进程**，
+   评审 C 认可的就是这条路：断言 `fresh_reason.is_none()`、续传后每一枪线上起点 ≥ 覆盖集终点 + 1、最终 sha）。
+5. 最后**全分支最终评审** + `.superpowers/sdd/` 清理 + 交一份"我替你做过的全部裁定"清单。
+6. **仍等用户点头的一条**：`T8-R5`（残余 1.25×–1.74× 重复流量的唯一解法是改 spec §2.1 的劈分规则 —— 见下"待裁定"）。
 
 
 ## 恢复步骤（照做即可，别凭记忆）
@@ -37,10 +55,11 @@
 cd /e/WorkSpace/projects/tool/dlm
 SDD="C:/Users/ROG/.qoder-cn/plugins/cache/qoder-marketplace/superpowers/6.3.0/skills/subagent-driven-development/scripts"
 git rev-parse --abbrev-ref HEAD          # 应为 sdd/dlm-kernel
-git log --oneline -4                     # 应为 32140a0 / 8f108d7 / 5a785ab / 4a105e4
+git log --oneline -6                     # 顶端应是 docs（E16/E17）+ 105fbf1(E15) + acb3166 + 7b368d2 + b10ec51
 git status --porcelain                   # 应为空（不空就是树里有在制品，先按 md5 备份再动）
-cargo test --lib 2>&1 | tail -2          # 应为 158 passed
-tail -40 .superpowers/sdd/2026-10-15-dlm-kernel/progress.md   # 末段是 T8-R1 那条待裁项与三个选项
+cargo test --lib 2>&1 | tail -2          # 应为 162 passed
+cargo test --test integration 2>&1 | tail -2   # 应为 74 passed
+tail -40 .superpowers/sdd/2026-10-15-dlm-kernel/progress.md   # 末段是评审 C 的四条 Important 与 E16/E17 两条裁定
 bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 ```
 
@@ -60,6 +79,12 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 10. **`probe::run` 对带 `data_file` 的任务在上网前硬拒**（E11①）⇒ 引擎必须跳过 probe、用 `fetch::run_whole`，且**这一枪只发一次**（重发＝二次提交表单，spec R7 已封顶）；该形状**既不读也不写断点文件**（E13④：存一份段表等于造一条永远执行不了的假 `Resume`）。
 11. **完成判定分两本账**（E7 追加段 + E13④）：`sched.is_done()` **且** `store.len() == total_len` 才算完；`snapshot_intervals()`/`confirmed_bytes()` 是"归属已定的字节"，**永远不许**当"已写字节数"去过 spec §6.7 的闸。给了 `--sha256` 就读真文件算（`sha2` 早在依赖里，不是新增），不匹配则**保留文件与断点**并报错退出。
 12. **进程内窄桩的天花板是 `MAX_CONNECTIONS = 8` × `PER_CONNECTION = 4`** ⇒ 多 worker 的引擎用例一律用 node 对端（无上限）；已**授权把 `PER_CONNECTION` 抬到 64**（E13⑤），抬完既有断言一条不许改。
+13. **终点帽的形状（E14① 乙 + 附记）**：每 worker 一格 `Arc<AtomicU64>`，**只降不升** ⇒ 原语是 `fetch_min`（我在派发里写 `fetch_max` 是**反的**，实现者纠正，单调性已钉两条用例）。`run_window` 的 64 KiB 循环**每块只查一次**帽：不 sleep、不自起轮询线程、不引 `tokio`。
+14. **开放终点的判据是"窗口够不够得着 EOF"**（E14② 戊）：`min(iv.end, iv.start + WINDOW_BYTES - 1) + 1 >= total_len` 才许发 `bytes=start-`，不是看 `iv.end`。
+15. **`bytes_duplicated` 的口径只许两种存在方式**（E14③ + **E17**）：要么有**线上证据**的真账单，要么**如实标注**成上界/少报。**禁止拿覆盖集倒推** —— "盘上有、覆盖集里没有"绝大多数是**从没下载过的洞**（多 worker 中点劈分天生制造洞），不是重复。
+16. **线上字节量具只有一个诚实口径**：`Σ conn_close_side.sent`。`Σ response_done.bytes` **漏**半路被丢弃的响应；两者相加**重复计数**（一条正常响应两条都记）。我用两代坏尺子写过 E14 正文，附记已更正 ⇒ 任何"多打多少字节"的断言都要写明口径。
+17. **退化模式一枪下完剩余整条 body**（**E16**）：不许按窗重请求（那是平方级流量），预算按整条体量算（R7 的整请求期限语义），丢弃的前缀要么进账要么写明没进账。
+18. **续传播种只走既有的 `seal()`**（E15/E13①）：`Scheduler::resume` 不许开第二本覆盖账；等价性判据钉"**洞的集合相等 + 种子字节一次不重派 + `pending_bytes`/`is_done`/`snapshot_intervals` 逐步一致**"，**不许**钉"动作序列逐条相同"（按字面做不到，多洞种子的队列粒度天然不同）。
 
 ## 实测才知道的坑
 
@@ -74,6 +99,11 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 - **一发子代理撑不住一个整任务**：T8 第一发跑了 43 分钟 / 117 次工具调用后被 "Model response interrupted" 打断，且**没写报告文件** ⇒ 现场只能靠 `git log` + `git diff --numstat` 重建。按阶段拆发之后（第 2 发只做阶段4）同样 115 次调用走完并留下了报告。**判据：任务里有 2 个以上"可独立评审"的落点，就先拆发。**
 - **被打断时"保 WIP"必须先于"量基线"**：那份 WIP（`src/engine.rs` +339/−74，编译不过）唯一的存在处就是工作树 ⇒ 先 `cp` 进 `.superpowers/sdd/<plan>/` 并**两侧 md5 复验**，再临时换成 HEAD 版本跑 `cargo test --lib` 取真实下限（这次量出 144），最后放回并复验 md5 与 numstat 未变。全程没碰 `git restore`/`checkout --`。
 - 派发里引用的基线数字要**当场重测**：我给阶段4 的 dispatch 写 integration 下限 57，实际是 59（阶段3 自己加了两条 harness 测试）—— 实现者纠正了我。
+- **量具错一代，结论就整个反掉**（2026-10-17，本轮最贵的一课）：我用 `Σ response_done.bytes` 就敢写"实际只有 1.51×，实现者报的 2× 是错的"，换成唯一诚实的 `Σ conn_close_side.sent` 之后是 **2.009×** ⇒ **实现者原本是对的，被我的坏尺子判成了错**。两条纪律：① 任何"字节数/比率"进文档之前先证明这把尺子**能看见它声称看见的东西**（漏计、重复计、跨组求和这三种错法我都犯过）；② **拿自己的量具去推翻别人的实测时，先复量自己的**。
+- **变异结论不许过夜**：账本记的"M3 存活、集成层看不见 1 字节的洞"是实现者在**它那一发当时的树**上量的；5B 又往同一棵树加了 10 条用例 ⇒ 我到 HEAD 复量，两个方向（多报/少报一字节）各有 **3 条单测 + 3 条集成用例**红 ⇒ 结论作废。**规矩：任何"某变异存活／某层看不见"的登记，都必须在将要评审的那棵树上重跑一次才落账。**
+- **子代理的原始输出不在盘上，压缩上下文后会丢**（评审 C 的 Minor 逐条就这么没了）⇒ **评审一发回来，第一件事就是把 Important/Minor 逐条原文抄进账本或一个文件**，不要只抄我消化过的结论。
+- **`requests_at_least(n)` 存在的理由会被忘**：凡是"读线上日志再断言"的用例，先守卫条数再读（5B 已在 Abort 用例修过一发，C-I-4 又抓到两处）。裸 `srv.requests()?`/`ranges()?`/`events()?` 在引擎返回后立刻读，会因为日志落盘晚于响应而**碰巧为真**。
+- **中文路径 + 一次性取证文件**：临时 `tests/tmp_probe.rs` 这类探针跑完即删、**不许进提交**（本轮两次都做到了）；提交信息里写明"实现来自被打断的那一发、控制员只改了哪几行"。
 
 ## 挂账的 minor（评审判"不阻塞"，最终评审 triage）
 
@@ -94,7 +124,18 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 - 越界观察（评审判非阻塞）：`content_range_total`（`src/probe.rs:386-392`）**不核对 206 的窗口与我们请求的 Range 是否一致**；窄桩 `read_request_target` 只记 target、丢头 ⇒ 没有任何 probe 用例在**线上**断言 Range 真到了对端；`tests/harness/mod.rs` 顶部仍是文件级 `#[allow(dead_code)]`（下一个未用 helper 不会警告）。
 - `FailKind::ValidatorChanged` 不带消息 ⇒ 引擎/T9 只能说"验证子不符"，说不出是四格里哪一格（长度变了／起点不对／416 分母不对／…）。是未来的候选裁定，不是本轮缺陷。
 
-## 等用户点头的两件跨项目事（不动 dlm 之外任何文件）
+### T8 评审 A/B/C 新挂的 minor（2026-10-17；除已并入 8F-1 的三条，其余进最终评审 triage）
+
+- `scheduler.rs:145-146` 公共文档指向一个**不存在的测试名**，且无条件承诺"逐条相同"（E15 已把这条承诺收窄）⇒ 随 A1 一起修（在 8F-1）。
+- `scheduler.rs` 的 `resume` 面缺两行字面用例（`start > total_len`、`[0, total_len]`），`resume` + `NoRanges` 的组合没钉。
+- 调度器测试开始读 `consts::MIN_SEGMENT_BYTES` ⇒ 破了它自己文档里"本模块不读 consts"的边界。
+- `state.rs:1124` 残留旧的"账单"措辞；`:176` 说"上界"而 `:192` 说"既不是上界也不是下界"（自相矛盾），且"必然被别人再下"强于 E14 批准的"可能被重下"；跨续传累积那一格没写。
+- `engine.rs`：`last_note` 是**全局一格**而失败按 worker 计 ⇒ 可能把甲的 transport 原因接到乙的"退避封顶"消息上；成功且不留断点时**先 save 再删**（白花一次 tmp+rename）；`StoreFailed`/`StateFailed` 直接 `Err` 把整个 `Report` 丢了（E13② 只规定 `Abort` 走 `Err`）；`stop_and_join` 最坏可阻塞 120 s 而文档没写；`min_seg = 0` 与 `workers` 无上限**没有下限闸**（`min_seg = 0` ⇒ 逐字节劈段 + 请求风暴）；`STATE_SAVE_MAX_INTERVAL_SECS` 那个读法让它实际成了**最小**间隔（名字会说谎）。
+- `engine.rs:1512` 用被测公式现算期望值、`:1813` 用 `!is_empty()` 而精确条数可知、`:1815` 断的是自己两行前设的字面量（＝没断）⇒ 这三条**并入 8F-1**（与 C 那批"测试面"同源）。
+- 评审 C 的 Minor 逐条**未随上下文保留**（那一发的原始输出没落盘）⇒ 上面 C 的部分只记了我自己复量到的四条 Important；最终评审时按 HEAD 的用例集重新扫一遍悬空引用与无守卫读数，别依赖这条账。
+
+## 等用户点头的事（第 1、2 件跨项目、不动 dlm 之外任何文件；第 3 件是 dlm 自己的核心算法）
 
 1. `idm-recon/tmp/probe-server.mjs` 原件带着同一个"不 `res.end()`"缺陷，且 `/flaky` 一样从不中断 body ⇒ `idm-recon/docs/25-blackbox-probe.md` 里基于它得到的时序/并发观测、以及"`/flaky` 中途断"这条取证说法，可能被污染。要不要我去复测并更正那份文档？
 2. `IDMan.exe`（PID 6180）仍在后台运行 —— 上一会话经你批准启动的那次实测留下的，与 dlm 无关。要不要我关掉？
+3. **`T8-R5`（v1 不自作主张）**：终点帽（E14）之后仍有 **1.25×–1.74×** 的残余重复流量，成因已量清：帽只能拦"帽落下之后还要读的字节"，拦不到"调度器决定收紧时那一枪早已读过去的字节"（调度器只在一枪**结束时**才从 `Progress` 知道它读到哪儿），同一条在途尾巴被反复劈（实测一段被收紧 4 次）就把这一截乘了出来。要压到"每笔 ≤ 一块"必须改 **spec §2.1 的劈分规则**（候选：已被收紧过的在途段不再作为劈分候选）。**这是 IDM 的观察行为，改不改由你点。** 我手上的对照证据：idm-recon 实测 IDM 自己的丢弃重取只有 **+5.5%** ⇒ 更好的策略存在，但不属于 v1 该偷的懒。
