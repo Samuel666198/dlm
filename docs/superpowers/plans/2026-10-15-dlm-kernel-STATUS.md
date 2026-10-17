@@ -48,7 +48,7 @@
 cd /e/WorkSpace/projects/tool/dlm
 SDD="C:/Users/ROG/.qoder-cn/plugins/cache/qoder-marketplace/superpowers/6.3.0/skills/subagent-driven-development/scripts"
 git rev-parse --abbrev-ref HEAD          # 应为 sdd/dlm-kernel
-git log --oneline -6                     # 顶端应是 c433995 + 5f69db3 + 0d847f0 + 02e73a6 + 923b743 + cced137
+git log --oneline -6                     # 顶端是本文件的新 docs 提交；其下依次 c433995 → 5f69db3 → 0d847f0 → 02e73a6 → 923b743
 git status --porcelain                   # 应为空（不空就是树里有在制品，先按 md5 备份再动）
 cargo test --lib 2>&1 | tail -2          # 应为 166 passed
 cargo test --test integration 2>&1 | tail -2   # 应为 76 passed
