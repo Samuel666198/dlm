@@ -2958,6 +2958,85 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
     Ok(())
 }
 
+/// **E16②（义务二）在新形状上的那一格 + "整条那一支真的读得过窗口边界"**。
+///
+/// 两件事，各由一臂钉：
+/// - **`ToEof` 被干净 EOF 收线时不许报 `Complete`**：body 比区间短 ⇒ 只能 `Advanced { bytes }`
+///   （`SegmentComplete` 不看盘 ⇒ 报成完成就是把尾巴**永远封存**，E12③ / E7）。
+///   变异 **M6**（把 `fetch.rs` 的 `eof` 那一支折成 `Complete`）红在这一臂 —— 这一发**实测过**：
+///   红的是本条与 `a_shorter_body_than_the_interval_is_never_reported_complete`、
+///   `a_live_but_paced_peer_is_advanced_rather_than_misread_as_stalled` 三条。
+/// - **同一台对端、同一个区间，两种形状交回的字节数不同**：`/sz/<5 MiB>` 只肯给 5 MiB，
+///   `Windowed` 拿到 4 MiB（一个窗口）而 `ToEof` 拿到 5 MiB（读到对端收线）。
+///   ⚠ **这一臂能看见的分辨率要说清**（M7 实测）：把 `plan_shot` 里 `Windowed` 那一支的**窗口夹**
+///   摘掉，这一臂**不红** —— 因为 `range_header` 问的还是窗口那一格，诚实的对端**不会多发我们没问的
+///   字节**，于是"读到哪儿"的上界被"问到哪儿"遮住了，线上交回的还是 4 MiB。
+///   ⇒ 真正能看见 `stop` 那条夹法的只有 `src/fetch.rs` 的单元表
+///   （`the_body_shape_decides_the_range_the_read_bound_and_the_budget_together`，M7 在全树**只**红它一条）。
+///   这一臂的价值因此不在"拦夹法被摘"，而在**两形状的对照**：`ToEof` 必须真的比 `Windowed` 多拿到
+///   那 1 MiB（M1 把 `ToEof` 夹回窗口时红在臂一，不在臂二）。
+///
+/// **为什么挂 node 的 `/sz/<n>` 而不是退化对端**：本发要单独拎出"形状"这一个变量。
+/// `degraded`（我们发了 Range 而它答 200）与 `ToEof`（读到 `iv.end + 1`）在 `fetch` 里是两处**独立**
+/// 判据，用一台**认 Range** 的对端配 `ToEof` 正好只动形状。而"退化 + 中途收线"这个组合在进程内
+/// 那台对端上造不出来（`Shot::IgnoresRange` 总把整条 blob 写完），要它得给它加一个新的 `Shot` 变体
+/// —— 夹具活，登记在 8F-2 报告的"没做的那一格"里。
+/// ⚠ 原先这一格打算用 `/drop/<n>`，实测**不对**：那一支把连接**拆掉** ⇒ 走的是 `read_err` 分支而不是
+/// `eof` 分支，M6 在它上面**不红**（`/drop/65536` 那一枪交回的 65,536 字节由
+/// `a_body_cut_off_midway_keeps_the_bytes_it_actually_wrote` 钉，两条分工不同）。
+#[test]
+fn a_whole_body_shot_that_ends_at_a_clean_eof_is_advanced_and_reads_past_the_window() -> anyhow::Result<()> {
+    let (_srv, base) = harness::spawn()?;
+    let give = 5 * 1024 * 1024u64; // 对端只肯交 5 MiB：比一个窗口宽、比三个窗口窄
+    let iv = Interval { start: 0, end: 3 * WINDOW_BYTES - 1 };
+    let total = 48 * 1024 * 1024;
+
+    // —— 臂一：`ToEof` 读到对端收线为止 ⇒ 交回**整条 body**，且绝不报 `Complete`。
+    let (store, path) = harness::store("e16-toeof-eof.bin")?;
+    let t = Task { url: format!("{base}/sz/{give}"), ..harness::blank_task() };
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::ToEof,
+    )?;
+    assert_eq!(
+        out,
+        Outcome::Advanced { bytes: give },
+        "E16②：body 比整条区间短 ⇒ 交回真落盘的字节数，**不许**报成 `Complete`（那会把尾巴永远封存）：{out:?}"
+    );
+    assert_eq!(store.len()?, give, "`ToEof` 该一路读到对端收线：交回的就是那 {give} 个字节");
+    harness::require_block_alignment(&path, 0, WINDOW_BYTES)?;
+    drop(store);
+    std::fs::remove_file(&path).context("清测试文件")?;
+
+    // —— 臂二：同一区间、同一对端，`Windowed` 只能拿到**一个窗口**（形状真作用在 `stop` 上）。
+    let (store_w, path_w) = harness::store("e16-windowed-eof.bin")?;
+    let out_w = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store_w,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert_eq!(
+        out_w,
+        Outcome::Advanced { bytes: WINDOW_BYTES },
+        "窗口那一支必须**在窗口处自己收手**（对端还有 1 MiB 没交完也不读）：{out_w:?}"
+    );
+    assert_eq!(store_w.len()?, WINDOW_BYTES);
+    drop(store_w);
+    std::fs::remove_file(&path_w).context("清测试文件")?;
+    Ok(())
+}
+
 /// **P4 / E13④ 点名而阶段5A 跳过的那一条：退避真的接进了循环（真等第一个 1 s）。**
 ///
 /// 表驱动的 `next_retry_delay` 只证明"这张表算得对"；本用例证明"表上那一格**真的被等了**"。
