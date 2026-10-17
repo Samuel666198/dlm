@@ -132,7 +132,7 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
-use crate::consts::{FAST_RETRY_MAX, FLAG_KEEP_STATE, SLOW_RETRY_INTERVAL_SECS, STATE_SAVE_MAX_INTERVAL_SECS};
+use crate::consts::{FAST_RETRY_MAX, FLAG_KEEP_STATE, PROBE_READ_BYTES, SLOW_RETRY_INTERVAL_SECS, STATE_SAVE_MAX_INTERVAL_SECS};
 use crate::fetch::{self, FailKind, Outcome};
 use crate::probe;
 use crate::resume::{self, Decision};
@@ -478,7 +478,7 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
 
     // ② 试探。`total_len` / `accept_ranges` / 验证子只有这里拿得到 —— **E13②** 正是因此判定
     //    简报那个 `Config{resume: Decision}` 站不住：`Fresh` 里一个事实都没有。
-    let prelude_max = task.probe_prelude_bytes();
+    let prelude_max = PROBE_READ_BYTES;
     let probed = probe::run(&task, &client, prelude_max)?;
     let facts = probed.facts();
 
@@ -500,7 +500,8 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     // —— 唯一诚实的量具是对端日志（计划勘误 **E14 附记**：`Σ conn_close_side.sent`），引擎在运行时拿不到。
     // 也不许为它新增状态字段或第三本账（**E7** 的两本账裁定）。
     // 量级是**推出来的**（不是实测）：每一轮 `Resume` 至多 `min(prelude_max, total_len)` 个字节，
-    // 其中 `prelude_max = task.probe_prelude_bytes() = PROBE_READ_BYTES`；反复续传会按轮累积，
+    // 其中 `prelude_max = consts::PROBE_READ_BYTES`（引擎直接取常数，`Task` 上没有这个旋钮）；
+    // 反复续传会按轮累积，
     // 而 `stats` 本身也跨轮读回来接着加（见字段文档末段）。
     if plan.truncate && !probed.prelude.is_empty() {
         let take = probed.prelude.len().min(facts.total_len as usize);

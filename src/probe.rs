@@ -182,7 +182,12 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
 /// 发**一发**试探请求，取回事实与预读。
 ///
 /// `agent` 由调用方持有并复用（Task 8 的整轮都用同一个客户端，这样连接池才有意义）；
-/// `prelude_max` 是预读上限（`consts::PROBE_READ_BYTES` 是它的默认值，Task 9 允许覆盖）。
+/// `prelude_max` 是预读上限。**今天它只有一个来源：`engine::run` 直接传 `consts::PROBE_READ_BYTES`**。
+/// ⚠ 原先这句写的是"`consts::PROBE_READ_BYTES` 是它的默认值，Task 9 允许覆盖" —— 那句是**假功能**：
+/// spec §5 那十二个长选项里**没有任何一个**能改这个数（`--connections`／`--min-seg` 之外没有旋钮），
+/// 而 `Config` 里也没有对应字段 ⇒ "允许覆盖"落不了地，读者还会以为 CLI 该暴露它。
+/// ⇒ **作废那句**。真要给覆盖口子，得先往 `Config` 加字段（契约变更）并补一条 spec §5 的选项，
+/// 那是独立裁定，不在 v1，也不许由 Task 9 顺手发明。
 pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult> {
     // 请求边界上的第二道闸：`Task::validate()` 管着"明文 HTTP 不送口令"与 E9 的 userinfo URL。
     // 与 `state::Snapshot::from_task` 同一个立场（落盘点是第二个强制点，这里是**发请求**这个第二强制点），

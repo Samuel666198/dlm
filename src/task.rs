@@ -1,6 +1,6 @@
 use std::fmt;
 use std::path::PathBuf;
-use crate::consts::{FLAG_IGNORE_MTIME, PROBE_READ_BYTES};
+use crate::consts::FLAG_IGNORE_MTIME;
 
 /// 任务模型。`Clone`/`PartialEq`/`Eq` 走派生（Task 9 的用例直接 `assert_eq!` 两个 `Task`）；
 /// **只有 `Debug` 是手写的** —— 见下面那个 `impl` 的说明。
@@ -120,15 +120,12 @@ impl Task {
         });
         self.dir.join(name)
     }
-    /// 本次试探的**预读上限**（`consts::PROBE_READ_BYTES`），由 `engine::run` 取走交给 `probe::run`。
-    ///
-    /// 这是引擎从 `Task` 读的**唯一**一个常数。**调度器的两个旋钮都不从这里取**：段大小下限取
-    /// `Config::min_seg`、worker 条数取 `Config::workers`（`Config::default()` 再把它俩接到
-    /// `consts::MIN_SEGMENT_BYTES` / `consts::DEFAULT_CONNECTIONS`）。以前这个访问器返回
-    /// `(预读, 段下限, 连接数)` 三元组、还写着"供 scheduler 初始化用"，而 `scheduler` 初始化读的是
-    /// `Config` —— 照那个三元组去填 `Config` 会把 `--connections` / `--min-seg` 悄悄吞成默认值，
-    /// 所以那两个引擎不读的数已经删掉：`Task` 上不留任何"引擎忽略的每任务取值"访问器。
-    pub fn probe_prelude_bytes(&self) -> u64 { PROBE_READ_BYTES }
+    // 这里**不留任何常数访问器**：`Task` 只带每条任务真不一样的东西（URL、目录、名字、flags、
+    // 凭据、验证子、body 文件）。以前有个 `limits() -> (预读, 段下限, 连接数)`，文档写着
+    // "供 scheduler 初始化用"，而引擎只读 `.0`、调度器初始化读的是 `Config` ——
+    // **文档正好说反**，照它填 `Config` 会把 `--connections` / `--min-seg` 静默吞成默认值。
+    // 那两个引擎不读的数已删（8F-5 的 C1），剩下的那一个（`PROBE_READ_BYTES`）是全局常数，
+    // 由 `engine::run` 直接读 `consts::PROBE_READ_BYTES` —— 它不属于某条任务，所以不住在 `Task` 上。
 }
 
 #[cfg(test)]
