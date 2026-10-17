@@ -8,7 +8,10 @@
 //!    交给新 worker（`Assign`），下半截把 incumbent 收紧（`Retighten`，携带该 worker 新的**完整**区间，
 //!    worker 后续要按它改发**带显式终点**的请求）。
 //! 2. 绝对下限：劈完任半截 < `min_seg` 就**不劈**。`min_seg` 由构造方注入（Task 8 传
-//!    `consts::MIN_SEGMENT_BYTES`），本模块不读 `consts`，为的是边界能在任意尺寸上用表钉死。
+//!    `consts::MIN_SEGMENT_BYTES`），**本模块的产品代码**不读 `consts`，为的是边界能在任意尺寸上
+//!    用表钉死；只有本文件的测试模块读它（**复审 B-Minor 8** 把措辞改成事实：
+//!    `consts_default_splits_exactly_one_round` 与 `resume_accepts_the_state_segment_shape_verbatim`
+//!    各读一次 `crate::consts::MIN_SEGMENT_BYTES`，为的是把简报那条 `Consumes` 钉在真常数上）。
 //!    劈不动时不空等：退回去派无人认领的区间；没有 ⇒ `Idle`。
 //! 3. `NoRanges`（spec §2.2：对端不认 Range，或首响应是 200）之后退化为单段顺序下载：
 //!    到达那一刻就把**无人认领的区间表合并成一段**（`collapse_pending`，只合并相邻/重叠的区间；
@@ -149,9 +152,12 @@ impl Scheduler {
     ///    这条才是"不重下已完成段"的正身）；③ 每一步的 `pending_bytes()` / `is_done()` /
     ///    `snapshot_intervals()` 两边一致，且两臂各自跑 `check_invariants`。
     /// 用例：前缀种子在 `resume_prefix_seed_is_indistinguishable_from_the_run_that_earned_it`
-    /// （那种种子的补集天然只有一条，所以①②③之外**还多**拿到动作逐条相同 —— 那是特例不是通则）；
-    /// 多段空洞种子在 `resume_multi_gap_seed_matches_the_earned_state_byte_for_byte`（只钉①②③，
-    /// 为什么动作分岔是**对的**，写在那条用例的文档里）。
+    /// （那种种子的补集天然只有一条，所以①②③之外**还多**拿到动作逐条相同 —— 那是特例不是通则；
+    /// **逐步**的③ —— 每一步两臂一致且两臂各跑 `check_invariants` —— **也只有这一条覆盖**）；
+    /// 多段空洞种子在 `resume_multi_gap_seed_matches_the_earned_state_byte_for_byte`
+    /// （**复审 B-Minor 3 把措辞收成实话**：那条钉的是①、②，加上**播种那一步**的③
+    /// 与"剩下要下的字节集合"，它的 drain 段按单 worker 干完、只在收尾跑一次 `check_invariants`，
+    /// 不逐步比 ③ —— 为什么动作分岔是**对的**，写在那条用例的文档里）。
     ///
     /// 输入允许是**任意形状**：乱序、重叠、相邻、越过 `total_len`、空区间都会先夹进文件再归一化
     /// （调用方不该被要求先整理 —— 落盘的本来就是 `snapshot_intervals()`，但这里的独立归一化让
@@ -161,6 +167,9 @@ impl Scheduler {
     /// 退化模式（**E7**③）不属于本入口：`no_ranges` 只由 `Event::NoRanges` 打开，
     /// 引擎在播种之后自己决定要不要发那一枪。播种留下的槽位一律是 `None`，
     /// 与"从来没有 worker 报过就绪"在 `is_done()`/`longest_tail()` 上读作同一件事。
+    /// 这一对**真的**撞在一起时（先播种再收到 `NoRanges`）的读法由
+    /// `no_ranges_on_a_multi_gap_seed_dispatches_lowest_start_and_never_collapses_across_done` 钉：
+    /// 段表不因已确认字节而合并、派发改按起点最低、一次只一段在途、永不 `Retighten`。
     pub fn resume(total: u64, min_seg: u64, done: &[Interval]) -> Self {
         let mut sc = Self::new(total, min_seg);
         for iv in done {
@@ -1089,6 +1098,11 @@ mod tests {
             }
             compared += 1;
             let mut seeded = Scheduler::resume(total, min_seg, &seed);
+            // **复审 B-Minor 3**：`seed` 出自被测自己的 `snapshot_intervals()`，在这条用例里
+            // 原先只有"生产 vs 生产"的对照（下面那句覆盖集等式）。这里给它一个**独立参照**
+            // —— 隔壁前缀条在播种前就用 `cover` 验过一次种子（`resume_prefix_seed_is_indistinguishable_from_the_run_that_earned_it`
+            // 里那句 `assert_eq!(cover(&noisy, total), seed)`），这一格原先缺的就是那一句。
+            assert_eq!(cover(&seed, total), seed, "case {case}: 播种的输入自己得先过独立参照（夹具不许拿被测的账当公理）");
 
             // ② 记账必须一字不差。
             assert_eq!(seeded.snapshot_intervals(), seed, "case {case}: 覆盖集不同");
@@ -1212,6 +1226,15 @@ mod tests {
     ///
     /// 期望值**全部写死**（不问被测函数要），`cover` 只作为"字节集合"这条轴上的第二意见
     /// （它刻意不共享夹法，见它自己的文档）。
+    ///
+    /// **判别力要说清（复审 B-I-3 / 控制员亲跑 R-1）**：退回旧夹法（把 `start` 也 `min(last)`）之后，
+    /// 本用例**只有 ① 段的两条**红（`snapshot_intervals` 那条等式与 `pending_bytes`）——
+    /// ② 段那四条种子在旧夹法下并进同一个 `{900,999}`（`{1500,2000}`、`{1000,1000}`、`{4000,9999}`
+    /// 都被夹成 `{999,999}`，与 `{900,50_000}` 夹出的 `[900,999]` 相邻合并 ⇒ 结果一模一样），
+    /// ③ 段是 `total == 0` 那一支，旧夹法也一样什么都不接 ⇒ **两段全绿**。
+    /// "幽灵字节伪装成已完成"那一格由 `a_ghost_byte_next_to_a_near_full_seed_is_the_shape_that_fakes_completion`
+    /// 钉；`start == last` 这一格（R-2：把 `>` 写成 `>=`）由
+    /// `a_seed_that_ends_exactly_at_the_last_byte_is_not_treated_as_past_eof` 钉。
     #[test]
     fn a_seed_that_starts_past_eof_confirms_no_bytes_at_all() {
         const TOTAL: u64 = 1_000;
@@ -1221,7 +1244,14 @@ mod tests {
         let empty_handed = Scheduler::resume(TOTAL, 100, &past);
         assert_eq!(empty_handed.snapshot_intervals(), vec![], "起点在文件之外的种子不许留下任何已确认字节");
         assert_eq!(empty_handed.pending_bytes(), 1_000, "1000 个字节一个都没归属");
-        assert!(!empty_handed.is_done(), "幽灵已确认字节会把任务判成完成 —— 这一条就是那场事故的正面");
+        assert!(
+            !empty_handed.is_done(),
+            "整条越界的种子不许让进度看起来前进一步：1000 个字节都还欠着 ⇒ 不收工。\
+             （**复审 B-I-3**：这一句原先写「这一条就是那场事故的正面」，是 over-claim —— \
+             旧夹法在这一格留下最后一个字节那份幽灵确认之后，补集仍交回剩下 999 个字节那一条缝 \
+             ⇒ 本句在缺陷代码下照样绿；事故的正面在 \
+             `a_ghost_byte_next_to_a_near_full_seed_is_the_shape_that_fakes_completion`）"
+        );
         assert_eq!(empty_handed.snapshot_intervals(), cover(&past, TOTAL), "字节集合这条轴上与独立参照一致");
         check_invariants(&empty_handed, TOTAL, "seed-past-eof-only");
 
@@ -1251,6 +1281,87 @@ mod tests {
         assert!(nothing.is_done());
     }
 
+    /// **复审 B-I-3 的 R-2 那一格**：`clamp_to_file` 里 `start > last` 那道闸在 `start == last`
+    /// 时必须**放行**。"文件最后一个字节已确认"是完全合法的种子形状（`{total-1, total-1}`），
+    /// 把它当成越界丢掉 ⇒ 每一轮续传都重下那一个字节，而且**无声**（覆盖集只是少一条，账面平）。
+    /// 全树原先没有任何用例打到这一格：把 `>` 改成 `>=` 之后 163 条单测全绿（控制员亲跑 R-2）。
+    #[test]
+    fn a_seed_that_ends_exactly_at_the_last_byte_is_not_treated_as_past_eof() {
+        const TOTAL: u64 = 1_000;
+        let last = TOTAL - 1;
+
+        // ① 单字节种子正好落在最后一个字节上 ⇒ 必须进覆盖集，一个字节都不许被当成越界丢掉。
+        let mut only_last = Scheduler::resume(TOTAL, 100, &[Interval { start: last, end: last }]);
+        assert_eq!(
+            only_last.snapshot_intervals(),
+            vec![Interval { start: last, end: last }],
+            "`start == last` 不是越界：最后一个字节的种子必须原样留下（丢掉它 = 每轮续传重下它一个字节）"
+        );
+        assert_eq!(only_last.pending_bytes(), 999, "还欠 [0,998] 这 999 个字节");
+        assert!(!only_last.is_done(), "[0,998] 还没归属 ⇒ 不许收工");
+        assert_eq!(
+            only_last.on(Event::Connected(0)),
+            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: last - 1 } }],
+            "派出去的只能是剩下那条缝，终点停在种子之前"
+        );
+        check_invariants(&only_last, TOTAL, "seed-last-byte-only");
+
+        // ② 同一个字节换个写法：终点报得比 EOF 更远 ⇒ 夹完仍然算数（不许因为 `end` 越界
+        //    就把合法的 `start` 一起丢掉 —— 那正是旧夹法与 `start >= last` 两种错法的分界）。
+        let clipped = Scheduler::resume(TOTAL, 100, &[Interval { start: last, end: last + 50 }]);
+        assert_eq!(
+            clipped.snapshot_intervals(),
+            vec![Interval { start: last, end: last }],
+            "夹终点不丢种子：第 {last} 个字节确认了，与它后面那些并不存在的字节是两件事"
+        );
+        check_invariants(&clipped, TOTAL, "seed-last-byte-clipped");
+
+        // ③ 独立参照在这一格给同一个答案（`cover` 不共享 `clamp_to_file` 的写法）。
+        assert_eq!(
+            cover(&[Interval { start: last, end: last }], TOTAL),
+            vec![Interval { start: last, end: last }],
+            "字节集合这条轴上，最后一个字节的种子就是它自己"
+        );
+    }
+
+    /// **那场事故的正面形状**（复审 B-I-3：隔壁那条用例的 ① 段拦不住旧夹法，理由写在它的文档里）：
+    /// 幽灵字节能伪装成"已完成"要**两个条件同时成立** —— 一条合法种子把文件几乎盖满（`{0,998}`），
+    /// 外加一条整条越界的种子被旧夹法折成 `{999,999}`。两者相邻合并 ⇒ 补集空 ⇒ `is_done()` 为真，
+    /// 而 `999` 那个字节谁都没派过、盘上没有它。
+    #[test]
+    fn a_ghost_byte_next_to_a_near_full_seed_is_the_shape_that_fakes_completion() {
+        const TOTAL: u64 = 1_000;
+        let mut sc = Scheduler::resume(
+            TOTAL,
+            100,
+            &[
+                Interval { start: 0, end: 998 },       // 合法：前 999 个字节真的确认了
+                Interval { start: 1_500, end: 2_000 }, // 整条越界：必须整条丢掉
+            ],
+        );
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 998 }],
+            "越界那条不许并进覆盖集：并进来就是把最后那一格说成已确认"
+        );
+        assert_eq!(sc.pending_bytes(), 1, "只剩最后一个字节还欠着 —— 旧夹法在这里算成 0");
+        assert!(
+            !sc.is_done(),
+            "那一个字节从没被派出 ⇒ 这一格才是'幽灵字节伪装成已完成'的正面形状：旧夹法在这里收工"
+        );
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Assign { worker: 0, iv: Interval { start: 999, end: 999 } }],
+            "剩下的活儿必须被派出去，不许因为覆盖集看起来满了就 `Idle`"
+        );
+        check_invariants(&sc, TOTAL, "seed-ghost-vs-near-full");
+        sc.on(Event::Progress { worker: 0, abs_end: 999 });
+        sc.on(Event::WindowDone { worker: 0 });
+        assert!(sc.is_done(), "补上最后一个字节之后才真的收工");
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "相邻合并成整份文件");
+        check_invariants(&sc, TOTAL, "seed-ghost-closed");
+    }
+
     /// 种子在**中间**（两侧都有待下载的缝）时，补集必须是两条缝，且派发按正常的"最长优先"走。
     #[test]
     fn resume_with_a_middle_seed_leaves_both_gaps_and_dispatches_the_longest() {
@@ -1270,6 +1381,73 @@ mod tests {
             "剩下的起点缝必须原样派出，不被并回已确认字节"
         );
         check_invariants(&sc, TOTAL, "seed-middle-2");
+    }
+
+    /// **复审 B-Minor 8 补的那一格**：`resume` 与 `Event::NoRanges` 的组合原先**没有任何用例**打到，
+    /// 而 `resume` 的文档（"退化模式（**E7**③）不属于本入口"）只说了这一对不冲突、没说清撞在一起
+    /// 时读作什么。这条把它钉住三件事：
+    /// 1. **播种留下的多条缝不会因为 `NoRanges` 并成一段** —— `collapse_pending` 只合并相邻/重叠的
+    ///    区间，而 `resume` 造出来的补集两两之间都隔着已确认字节 ⇒ 段表**必然**还是多条。
+    ///    （派发里那句"塌成一段"只对 `no_ranges_collapses_the_pending_table_into_one_segment`
+    ///    那种"队列里的段彼此相邻"的形状成立；控制员给的"多洞种子 ⇒ 塌成一段"在真多洞形状上
+    ///    是做不到的，那正是 `push_done`/`collapse_pending` 两条合并规则合起来保护的东西：
+    ///    并过去就等于把已确认字节重新算成待下载。）
+    /// 2. 退化期的派发按**起点最低**走，不是正常期的"最长优先" —— 这一格两种读法给出的答案不同，
+    ///    所以这条用例真能分辨（下面第一枪：最低 `[0,199]`，最长会是 `[300,799]`）。
+    /// 3. 退化期一次只一段在途、永不 `Retighten`、已确认字节一个都不重下。
+    #[test]
+    fn no_ranges_on_a_multi_gap_seed_dispatches_lowest_start_and_never_collapses_across_done() {
+        const TOTAL: u64 = 1_000;
+        let seed = [Interval { start: 200, end: 299 }, Interval { start: 800, end: 899 }];
+        let mut sc = Scheduler::resume(TOTAL, 100, &seed);
+        // 播种后的正常读法：三条缝 [0,199] / [300,799] / [900,999]，最长优先会挑中间那条。
+        assert_eq!(sc.snapshot_intervals(), seed.to_vec(), "两行不相邻 ⇒ 原样进");
+        assert_eq!(sc.pending_bytes(), 800, "200 + 500 + 100 三条缝都还欠着");
+        check_invariants(&sc, TOTAL, "seed-multi-gap-before-noranges");
+
+        sc.on(Event::NoRanges);
+        assert_eq!(sc.pending_bytes(), 800, "`NoRanges` 只改派法，不许凭空造或吞掉待下载字节");
+        assert_eq!(sc.snapshot_intervals(), seed.to_vec(), "已确认字节不许被并进队列（那正是合并规则拦的事）");
+        assert!(!sc.is_done(), "三条缝一条都没补 ⇒ 不收工");
+
+        // 判据 2：起点最低，不是最长。
+        let acts = sc.on(Event::Connected(0));
+        assert_eq!(
+            acts,
+            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 199 } }],
+            "退化期派发的判据是起点最低：最长优先会给出 [300,799]，那会把 body 中段写到文件中段"
+        );
+        assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })), "退化期永不劈分: {acts:?}");
+        assert_eq!(sc.on(Event::Connected(1)), vec![Action::Idle], "退化期一次只允许一段在途");
+        check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-1");
+
+        // 三条缝必须按文件顺序一条不漏地派完，而且都不碰已确认字节。
+        sc.on(Event::Progress { worker: 0, abs_end: 199 });
+        sc.on(Event::WindowDone { worker: 0 });
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 299 }, Interval { start: 800, end: 899 }],
+            "补完 [0,199] 后与种子首行相邻合并"
+        );
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Assign { worker: 0, iv: Interval { start: 300, end: 799 } }],
+            "第二条缝：剩下的里起点最低的仍是 [300,799]"
+        );
+        sc.on(Event::Progress { worker: 0, abs_end: 799 });
+        sc.on(Event::WindowDone { worker: 0 });
+        assert_eq!(sc.pending_bytes(), 100, "只剩 [900,999]");
+        check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-2");
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Assign { worker: 0, iv: Interval { start: 900, end: 999 } }],
+            "第三条缝：已确认的 [200,299] 与 [800,899] 一个字节都没重下"
+        );
+        sc.on(Event::Progress { worker: 0, abs_end: 999 });
+        sc.on(Event::WindowDone { worker: 0 });
+        assert!(sc.is_done(), "三条缝补完 ⇒ 收工");
+        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: TOTAL - 1 }], "相邻合并成整份文件");
+        check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-done");
     }
 
     /// `state::SegView::interval()` 的注释（"Task 8 若要把断点喂回调度器"）假设的门确实通了：
