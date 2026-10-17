@@ -190,9 +190,9 @@ impl Server {
     /// —— 只有对端记下来的这条才是"发出去过什么头"的唯一权威证据。
     /// 必须在 `Server` 的 guard 还活着时读（`Drop` 会删掉日志）。
     ///
-    /// **复审 B-I-1 之后一律带条数守卫**：裸读一次的 `ranges()` 在日志落盘晚时会少几条，
-    /// 而"少一条"正好让"每条响应恰好一条记录"那类一一对应的判据往错误方向通过 ⇒ 本方法删除，
-    /// 抽取本身收进 `ranges_of`，读法只留 `ranges_at_least(n)` 这一条（评审 C-I-4 的同一纪律）。
+    /// **复审 B-Minor 4 之后一律带条数守卫**：本方法取代的那个**不等落盘的裸读版本**已删除 ——
+    /// 少读几条正好会让"每条响应恰好一条记录"那类一一对应的判据往错误方向通过
+    /// （评审 C-I-4 的同一纪律）。抽取本身收进 `ranges_of`，读日志这一侧只留带守卫的这一条。
     pub fn ranges_at_least(&self, n: usize) -> Result<Vec<Option<String>>> {
         Ok(ranges_of(&self.requests_at_least(n)?))
     }
@@ -1389,9 +1389,9 @@ pub fn expected_sha(len: u64) -> String {
 /// 请求行 → 每一条请求的 `Range` 头，按到达顺序；那一枪没发 `Range` ⇒ `None`。
 ///
 /// **复审 B-Minor 4 提出的理由**：同一段抽取原先复制在两处用例里（各自手写的 `.map(...)`），
-/// 而 `Server::ranges()` 因为"裸读一次不等落盘"被删掉后没有一个调用者，成了死夹具
-/// （⚠ 本文件顶部有文件级 `#[allow(dead_code)]` ⇒ 死夹具**不会**警告，只能靠人查）。
-/// 现在抽取只有这一份：`Server::ranges_at_least` 用它，手上已经有请求行的用例也用它。
+/// 而那个不等落盘的裸读版夹具因为零调用者被删掉了 —— 本文件顶部有文件级 `#[allow(dead_code)]`
+/// ⇒ **死夹具不会警告，这条只能靠人查**（已登记的风险）。现在抽取只有这一份：
+/// `Server::ranges_at_least` 用它，手上已经有请求行的用例也用它。
 pub fn ranges_of(requests: &[Value]) -> Vec<Option<String>> {
     requests
         .iter()

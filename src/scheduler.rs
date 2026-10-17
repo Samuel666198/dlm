@@ -1339,15 +1339,15 @@ mod tests {
                 Interval { start: 1_500, end: 2_000 }, // 整条越界：必须整条丢掉
             ],
         );
+        assert_eq!(sc.pending_bytes(), 1, "只剩最后一个字节还欠着 —— 旧夹法在这里算成 0");
+        assert!(
+            !sc.is_done(),
+            "那一个字节从没被派出 ⇒ 这一格才是「幽灵字节伪装成已完成」的正面形状：旧夹法在这里收工"
+        );
         assert_eq!(
             sc.snapshot_intervals(),
             vec![Interval { start: 0, end: 998 }],
             "越界那条不许并进覆盖集：并进来就是把最后那一格说成已确认"
-        );
-        assert_eq!(sc.pending_bytes(), 1, "只剩最后一个字节还欠着 —— 旧夹法在这里算成 0");
-        assert!(
-            !sc.is_done(),
-            "那一个字节从没被派出 ⇒ 这一格才是'幽灵字节伪装成已完成'的正面形状：旧夹法在这里收工"
         );
         assert_eq!(
             sc.on(Event::Connected(0)),
