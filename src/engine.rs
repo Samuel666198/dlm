@@ -33,7 +33,7 @@
 //! 与本节一致）。**这个式子差一字节**：`Advanced` 的 `bytes` 是
 //! "经 `store.write_at` 确认落盘的字节数"（`fetch::Outcome::Advanced` 自己定义，实现是
 //! `written(iv, cursor) = cursor - iv.start`，见 `fetch::written`），而 `Event::Progress` 的
-//! `abs_end` 是**含端点**的"已写到的绝对偏移"（`scheduler.rs:61-62`；用例
+//! `abs_end` 是**含端点**的"已写到的绝对偏移"（同一句话就写在 `Event::Progress` 那一行的文档上；用例
 //! `window_done_returns_remainder_and_reassigns_without_new_connection` 报 300 之后下一段起点是 301）。
 //! 所以正确的换算是 `abs_end = iv.start + bytes - 1`（见 `progress_abs_end`）。
 //!
@@ -611,7 +611,8 @@ fn in_scope_bytes(shot: Interval, bytes: u64, owned: Interval) -> u64 {
 /// | `Stalled` / `Failed` | `Failed` | 0 | 0 |
 ///
 /// `WindowDone` 而不是"再来一枪"：窗口读满与 body 被掐断在调度器看来是同一件事
-/// （`scheduler.rs:202` 两者都走 `release()`），剩下的尾巴由它重新决定给谁。
+/// （`Scheduler::on` 里 `Event::WindowDone | Event::Failed` 那一支两者都走 `release()`），
+/// 剩下的尾巴由它重新决定给谁。
 fn translate(outcome: &Outcome, shot: Interval, owned: Interval, worker: usize) -> (Vec<Event>, u64, u64) {
     let landed = shot_bytes(outcome, shot);
     let duplicated = landed - in_scope_bytes(shot, landed, owned);
@@ -1044,7 +1045,8 @@ impl Engine {
         }
     }
 
-    /// 每个空闲 worker 报一次 `Connected`。**只有这一支事件会交回动作**（`scheduler.rs:189`），
+    /// 每个空闲 worker 报一次 `Connected`。**只有这一支事件会交回动作**（`Scheduler::on` 里只有
+    /// `Event::Connected` 那一支把 `dispatch` 的结果交回来，其余各支一律返回空表），
     /// 所以"worker 空出来了"必须重发这个事件，而不是等调度器主动派。
     fn ping_free_workers(&mut self) -> Option<Stop> {
         for worker in 0..self.workers.len() {
