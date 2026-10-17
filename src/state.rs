@@ -213,7 +213,7 @@ pub struct Stats {
     /// ⚠ **这是从代码形状推出来的算术结论，不是实测数字**（本项目已五次把算术/记忆数写成"实测"被打回）。
     ///
     /// ② **续传那一支丢掉的预读字节**。`probe` 每一轮都会把**至多** `min(prelude_max, total_len)`
-    /// 个字节（`prelude_max = task.limits().0 = PROBE_READ_BYTES`）从线上取回来 —— "至多"是因为
+    /// 个字节（`prelude_max = task.probe_prelude_bytes() = PROBE_READ_BYTES`）从线上取回来 —— "至多"是因为
     /// 短 body / 中途掐断时取回更少（与 `engine.rs` 那条"每一轮 `Resume` 至多 …"同一口径，修复轮
     /// 8F-3a 的 F16⑤）；engine 只在 `Decision::Fresh`
     /// 那一支把它写在偏移 0，`Resume` 那一支**不写、也不落任何账**（落盘就变成给覆盖集里已有的字节
