@@ -1468,6 +1468,35 @@ pub type OnTick = Arc<dyn Fn(&RunSnapshot) + Send + Sync>;
 **9A 的验收下限**：`Config::default().on_tick == None` ⇒ **三闸一字不变（166 lib / 76 integration / clippy `-D warnings` 退出码 0）**，**既有断言一条都不许改**（撞闸就改入参，不改判据方向——本项目的老规矩）。新用例至少三格：(a) `None` 时一次都不调（用 `Arc<AtomicUsize>` 计数，不许拿打印当证据）；(b) 有 sink 时调用次数 ≥ 1 且 ≤ `运行秒数上取整 + 2`（节拍上界，防"每块都打"）；(c) 速率那一格在两拍之间交 X 字节、间隔 Y ms 时等于 `X×1e6/Y` 的整数商，**并且不等于全程平均**（这一格就是坑 4 的活体针：拿 `run_delivered/started.elapsed()` 当期望值它就红）。
 **切法**：9A＝引擎面一条（上面 1–10），9B＝`cli.rs`/`report.rs`/`main.rs` 一条。**不按文件面切**（四发按文件面切的死了两发）。
 
+### E21 附记（控制员，2026-10-17，9A 回来之后逐条追认）
+
+9A（`56e998c`）交回八条待追认，逐条裁定如下。
+
+- **C1 ＝ 甲认可**（手搭一台不碰网络、不起线程的 `Engine`，把 `WorkerReport` 直接投进 `reports` 通道、跑真实的 `drive()`）。⚠ **这一条的起因是我的派发写错了前提**：简报里写着"用本文件既有的 stub/对端夹具"，而 `src/engine.rs` 既有的 17 条用例（`git show 472a23f:src/engine.rs | grep -c '#\[test\]'` 实测）**一条都没搭过对端**，`tests/harness` 住在集成测试的编译单元里、lib 单元测试够不着。⇒ 这是"每个引用点各自复量"那一族的**第六次命中，而且这次不是一行号、是一整个前提**。执行者顶回来并如实登记，顶得对。**补一条义务给 9B**（已写进 **E22** 第 5 条）。
+- **C2 ＝ 追认**：`Config` 的 `Debug` 改手写（`dyn Fn` 不可 derive，立场与 E9 给 `Task` 的那份手写 `Debug` 一致）、私有 `enum Stop` 加 `#[derive(Debug)]`（只为断言消息能摆出"从哪条出口停的"）。两处都不是判据方向。⚠ 顺带钉一句：**9B 不许依赖 `Config` 的 `{:?}` 输出形状**。
+- **C3 ＝ 追认**：`tests/integration.rs` 16 处 `Config` 字面量补 `on_tick: None,`。控制员复量 `git diff` ⇒ 该文件**零删除行**、`src/engine.rs` 侧**只有一行删除**（就是 C2 那句 derive）⇒ "既有断言一条没改"这句**可复核、成立**。
+- **C4 ＝ 追认**：第一拍以 `Engine::new` 为锚点而**不取** `run` 的 `started`。理由正确：`started` 里夹着试探与预读写盘，把那段算进分母正是判据④点名的"慢启动把速率算低"；而备选"第一拍报 0"会撞上 `RATE_UNKNOWN` 已经占用的 `0` 语义（那里 0＝"速率未知⇒给最宽预算"，进度行会印成 `0 B/s` 而字节明明在飞）。
+- **C5 ＝ 不改引擎，改渲染口径** ⇒ 正式处置见 **E22 第 1 条**。它问"要不要把预读那批字节记进 `run_delivered`"，正解是**进度行那对 `MiB/MiB` 本来就不该用 `run_delivered`**：`run_delivered` 是"这一轮在网线上动了多少"，`21.7 MiB/48.0 MiB` 说的是"这个文件下到哪儿了"＝`covered_bytes/total_len`（天然含预读与续传）。⇒ 引擎一个字不动，"合法的不同步"从缺陷变成口径。
+- **C6 ＝ 接受**：`cargo test --lib` 从 0.38 s 涨到 3.00 s，是 E13④"节拍与退避不许造假时钟"的代价。**不 `#[ignore]`** —— 被 ignore 的用例不参与门禁，等于把判据撤出验收面，那是假绿的一种。
+- **C7 ＝ 归 9B**（E22 第 2、3 条）。
+- **C8 ＝ 追认现位置**：终值那一发在 `drive()` 出口、`stop_and_join()`/`flush()` **之前**。挪进 `finish()` 会让 `StoreFailed`/`StateFailed` 那两支失去终值，而那两支恰恰最需要"停在哪一格"；代价（`WorkerGone` 那一支上 `active_workers` 可能仍非 0，因为线程还没 join）由文档那句"此刻的读数，不是终局判定"承担，照留。
+
+**控制员独立复量（不采信自报）**：三闸亲跑 **173 / 76 / clippy 退出码 0**；十判据逐条读实现核过（`emit_tick` 里八格各自的来源、`busy_worker_count` 只数 `Busy`、`slow_retry_rounds` 取跨 worker max、`tick_if_due` 的 `LOOP_POLL` 闸、调用点确实只有 `pump` 末尾 + `drive` 出口两处、`translate`/`on_report`/`dispatch`/`save_if_due` 里一处都没有）。**变异复跑两发**：① 复跑它的 m2（速率改回全程平均）⇒ 实测红在 `the_rate_cell_is_the_difference_between_two_beats_not_the_whole_run_average` + `every_snapshot_cell_comes_from_the_documented_source`，**与它报的一字不差**；② **另加一发它没跑的 m5**（把 `active_workers` 从"只数 `Busy`"改成"非 `Idle` 都算"）⇒ 实测红在 `the_busy_count_and_the_slow_retry_rounds_follow_their_own_rules` + 出处那格 ⇒ 判据⑤那根针是我自己扎出来才算数的。两发都按反向编辑复原（`md5sum` 两侧全等 `bea63d56…`、`git diff --quiet` 通过、复跑 173 绿）。
+
+## E22：9B（CLI 与进度行渲染）的简报必抄清单
+
+派 9B 时**必须**把下面七条连同 **E20 的九处**一起抄进简报（E20 管"引擎交回来的东西怎么读"，E22 管"进度行这八格怎么摆"）：
+
+1. **那对 `MiB/MiB` 用 `covered_bytes / total_len`**（含预读与续传，才是"文件下到哪儿了"）；`run_delivered` / `run_bytes_duplicated` 只服务 `…/s` 与 `dup %`（本次运行的流量）。⇒ **C5 的正式处置**，也是 E21 判据③"两处寿命故意不同"的落点。
+2. **`total_len == 0` 是真的空文件，不是"长度未知"**（E21 判据②）⇒ 渲染侧**不许**写 `unwrap_or(1)` 这类假分母，不许除零 panic、不许印 `NaN%`；这一格是**活分支**（`bytes */0` 那格有用例）。
+3. **`--data-file` 那一支 0 次 tick，权威只有 `Report`**（E21 判据⑧）⇒ CLI 不许把"收到过 tick"当成功判据，也不许在那条路上等一个按设计永远不来的进度源。
+4. **不许依赖 `Config` 的 `{:?}` 输出形状**（E21 附记 C2：`Debug` 是手写的，`on_tick` 只打 `«观察者»`，不打闭包本体）。
+5. **至少一发经真 `engine::run` + node 对端的集成用例**，断言"挂上 sink 之后确实收到过 tick、八格都是可读的数"——手搭的 `Engine` 覆盖不到 `run()` 那条装配路径（试探、种子、worker 线程、断点）。
+6. **慢重试那一格的口径**：`slow_retry_rounds == 0` ⇒ 整格不出现；`≥ 1` ⇒ `slow-retry xN`。同一拍里 `active_workers` **合法地为 0**（全场都在 30 s 退避）⇒ 不许为了"看着还在动"把两格绑在一起显示。
+7. **`dup %` 的分母是 `run_delivered`**（与分子同拍取的本次增量），**不是** `covered_bytes`；混用会算出假小甚至 >100%。
+
+验收下限照旧：**173 lib / 76 integration / clippy `-D warnings` 退出码 0**，既有断言一条不许改；结构体加字段导致编译不过时按 E21 附记 C3 的办法处理——**只补入参，不碰判据**。
+
 
 
 
