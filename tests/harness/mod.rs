@@ -1450,3 +1450,208 @@ fn sha256_of_bytes(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+// ---------------------------------------------------------------- Task 8 阶段5B：按脚本回答的窄 206 对端
+
+/// **本仓库缺的那件仪器**（阶段5B 实测登记，T8 报告「阶段5B」缺陷节）：node 那台对端里唯一真能把一枪
+/// 掐在半路的是 `/drop/<n>`（勘误 **E5**），而它做不到"停一半、下一轮又能跑完"：
+/// - `n = 0` ⇒ 每一枪都是零字节 ⇒ **试探那一枪也死** ⇒ `probe::run` 以 `Err` 返回 ⇒ `engine::run`
+///   根本走不到 `Store::open`/`state::save`，**不会留下断点文件**（实测：`/drop/0` 那一枪的
+///   `read_bounded` 报"读预读体失败"）。
+/// - `n > 0` ⇒ 每一枪都交出 `n` 个真字节 ⇒ `fetch` 按 E12③ 交回 `Advanced { n }`（不是失败）⇒
+///   引擎一路有进度，**必然跑到完成**，`--max-retries` 那把封顶的闸永远接不上。
+///
+/// ⇒ "引擎跑到一半停下、留下半截文件 + 一份真的断点文件、然后同一 URL 又能成功跑完"这个形状
+/// 在 node 侧**没有对端**（同一 URL 是硬要求：`resume::decide` 的 ② 拿 `final_url` 比对，换个端口
+/// 就等于换了资源 ⇒ 判 `Fresh` ⇒ 续传路径根本不出现）。
+///
+/// 本夹具就是那个对端：**一条一条按脚本回答**，脚本用完之后永远诚实。它记下的不只是 `Range`，
+/// 还有每一枪的**到达时刻**（同一台机器同一个 `Instant` 钟），所以"退避真的等了一秒"能量出来，
+/// 不用造假时钟、也不用给 `fetch`/`engine` 开 `Sleep` 接缝（**E13④** 的禁令）。
+///
+/// **线程模型 = 单线程顺序服务**（`accept` 一条、把它上面的请求读干，再 `accept` 下一条）⇒
+/// 只许给"永远只有一发在途请求"的形状用：`workers == 1` 的分段形状，或**退化模式**（`NoRanges`
+/// 之后调度器规则 3 保证一次只派一段，`src/scheduler.rs` 的 `dispatch` 退化分支 —— 那种用例
+/// 恰恰要把 `workers` 给到 4，好证明"四个 worker 都报了就绪、线上仍然一次只有一枪"）。
+/// 会并发多枪的分段形状一律走 node 对端（**E13⑤**），别拿这个夹具去试。
+#[derive(Debug)]
+pub struct ScriptedPeer {
+    port: u16,
+    /// 每一枪的 `(收到的 Range 原样值, 到达时刻)`，按到达顺序。
+    shots: Arc<Mutex<Vec<(String, Instant)>>>,
+}
+
+impl ScriptedPeer {
+    pub fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// 收到过的每一枪的 `Range`（按到达顺序；没带那条头的一枪是空串）。
+    pub fn shot_ranges(&self) -> Vec<String> {
+        self.shots.lock().expect("脚本对端的记录锁没竞争者").iter().map(|(r, _)| r.clone()).collect()
+    }
+
+    /// 已经收到的枪数（用来在断言之前确认"这一轮该到的都到了"）。
+    pub fn shot_count(&self) -> usize {
+        self.shots.lock().expect("脚本对端的记录锁没竞争者").len()
+    }
+
+    /// 第 `prev` 枪到第 `next` 枪之间的到达间隔（下标从 0 数）。
+    /// 客户端拿到响应时那一行的写入早已完成（写入排在响应之前），所以不需要 `requests_within` 那种
+    /// 守株待兔的读法；但**下标越界一律当场报错**，不许悄悄给个零时长让断言碰巧通过。
+    pub fn arrival_gap(&self, prev: usize, next: usize) -> Result<Duration> {
+        let guard = self.shots.lock().expect("脚本对端的记录锁没竞争者");
+        let a = guard.get(prev).with_context(|| format!("脚本对端只收到 {} 枪，没有第 {prev} 枪", guard.len()))?.1;
+        let b = guard.get(next).with_context(|| format!("脚本对端只收到 {} 枪，没有第 {next} 枪", guard.len()))?.1;
+        Ok(b.saturating_duration_since(a))
+    }
+}
+
+/// 一枪的形状（[`spawn_scripted_peer`] 的脚本元素）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shot {
+    /// 按收到的 `Range` 如数交出那一段：`206` + 与之严格一致的 `Content-Length` / `Content-Range`，
+    /// 然后干净收尾。body 是 [`positioned_body`] ⇒ "落点错了看不出来"这件事不存在。
+    Honest,
+    /// 头**按整段如实算**（诚实的 `Content-Length` 与 `Content-Range`），body 只写 `n` 个字节就把
+    /// 连接拆掉 —— 与 node 的 `/drop/<n>` 同一病症（E5）。`n > 0` ⇒ `fetch` 交回 `Advanced { n }`；
+    /// `n == 0` ⇒ 一个字节都没落地 ⇒ `Failed(Transport)`。
+    Truncated(u64),
+    /// 一个 body 字节都不给，直接回这个状态码 ⇒ `Failed(Http(code))`。**当场就回来**：不像静默对端
+    /// 那样要把窗口预算（下界 `WINDOW_MIN_TIMEOUT_SECS` = 15 s）耗完才算失败，所以它是本轮唯一
+    /// "既真失败、又不把 wall-clock 拖走"的失败来源。
+    Status(u16),
+    /// **无视 `Range`，永远从字节 0 交出整份**：`200` + 诚实的 `Content-Length` + **不发**
+    /// `Accept-Ranges`（与 node 的 `/noranges` 同一形状，只是没有那 1 MiB 的封顶）。
+    /// 存在的理由：node 那条退化路由把 body 夹在 `min(sendLen, 1 MiB)`，而 1 MiB **装得进一个窗口**
+    /// （`WINDOW_BYTES` = 4 MiB）⇒ 退化模式下永远只需要一枪，"多枪时按起点升序、一次只派一段"
+    /// 那条判据在 node 侧**没有可测的形状**（与 E5 记的 `/flaky` 是同一类"仪器上没有这个对端"）。
+    IgnoresRange,
+}
+
+/// 起一台按脚本回答的对端。`total_len` 是它承认的文件长度（也是 blob 的长度，走
+/// [`positioned_body`] 那套"每 4 KiB 块首写块号"的形状，与 node 服务器同一约定）。
+///
+/// 任何 target 都由本对端服务（引擎给 `/blob` 之类的路径都行）；`script` 用完之后每枪按 `after`
+/// 回答（`after = Shot::Honest` 就是"故障只发生在指定的那几枪上，之后一切正常"）。
+pub fn spawn_scripted_peer(total_len: u64, script: Vec<Shot>, after: Shot) -> Result<ScriptedPeer> {
+    const MAX_CONNECTIONS: usize = 8;
+    const PER_CONNECTION: usize = 64;
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("脚本对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到脚本对端的端口")?.port();
+    let shots: Arc<Mutex<Vec<(String, Instant)>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_shots, blob) = (
+        Arc::clone(&shots),
+        positioned_body(usize::try_from(total_len).context("脚本对端的长度超出 usize")?),
+    );
+
+    thread::Builder::new()
+        .name("dlm-scripted-peer".into())
+        .spawn(move || {
+            // 已服务过的枪数（跨连接累计）：脚本按"第几枪"生效，与连接无关 —— 试探那一枪是第 0 枪。
+            let mut served = 0usize;
+            for stream in listener.incoming().take(MAX_CONNECTIONS) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                for _ in 0..PER_CONNECTION {
+                    let Some(req) = read_request_with_body(&mut stream) else { break };
+                    let range = req.header("range").unwrap_or("").to_string();
+                    thread_shots.lock().expect("线程侧记录锁").push((range.clone(), Instant::now()));
+                    let shot = script.get(served).copied().unwrap_or(after);
+                    served += 1;
+                    match serve_scripted(&mut stream, &blob, total_len, &range, shot) {
+                        // 连接还能接着用（诚实整段收尾，或零 body 的状态码）。
+                        Ok(true) => continue,
+                        // 被截短的那一枪把连接一起拆了：这条连接不可能再服务第二个请求（与 E5
+                        // 对 `/drop/<n>` 的实测同一形状），换下一条。
+                        Ok(false) => break,
+                        Err(_) => break,
+                    }
+                }
+            }
+        })
+        .context("起脚本对端线程失败")?;
+
+    Ok(ScriptedPeer { port, shots })
+}
+
+/// 把一枪按 `shot` 写出去。交回 `Ok(true)` = 连接可以接着用，`Ok(false)` = 这一枪把连接拆了。
+fn serve_scripted(
+    stream: &mut TcpStream,
+    blob: &[u8],
+    total_len: u64,
+    range: &str,
+    shot: Shot,
+) -> std::io::Result<bool> {
+    // 零 body 的状态码：头里一个长度都不许虚报。
+    if let Shot::Status(code) = shot {
+        let resp = format!(
+            "HTTP/1.1 {code} {}\r\nContent-Length: 0\r\n\r\n",
+            if code == 503 { "Service Unavailable" } else { "Server Error" }
+        );
+        stream.write_all(resp.as_bytes())?;
+        return stream.flush().map(|_| true);
+    }
+
+    // 退化那一支（`Shot::IgnoresRange`）：先于 Range 解读决定整支回答，只留一个读段的地方。
+    if shot == Shot::IgnoresRange {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+             Content-Length: {total_len}\r\nETag: \"scripted-degraded\"\r\n\r\n"
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.write_all(blob)?;
+        // 客户端读完 `stop` 就收手（剩下的是我们的 socket 缓冲）：那一枪的结论由 `fetch` 的
+        // "发了 Range 却答 200 ⇒ 先流掉前 `iv.start` 个字节"那一支给出，收尾照样干净。
+        return stream.flush().map(|_| true);
+    }
+
+    // 这一段该交哪些字节：与 node 服务器同一算法（`Range` 看不懂 / 没带 ⇒ 整份，`200`）。
+    let (start, end, status) = match parse_range(range) {
+        Some((s, e)) => {
+            let last = e.unwrap_or(total_len - 1).min(total_len - 1);
+            (s, last, if s >= total_len || s > last { 416u16 } else { 206 })
+        }
+        None => (0, total_len.saturating_sub(1), 200),
+    };
+    if status == 416 {
+        let resp = format!(
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total_len}\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        stream.write_all(resp.as_bytes())?;
+        return stream.flush().map(|_| true);
+    }
+    let span = end - start + 1;
+    // 状态行：`206` 那句才是 "Partial Content"；无 `Range` 那一支与 node 的默认分支同一读法（整份 `200`）。
+    let mut head = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: application/octet-stream\r\n\
+         Content-Length: {span}\r\nAccept-Ranges: bytes\r\nETag: \"scripted-206\"\r\n",
+        if status == 206 { "Partial Content" } else { "OK" }
+    );
+    if status == 206 {
+        head.push_str(&format!("Content-Range: bytes {start}-{end}/{total_len}\r\n"));
+    }
+    // 截短那一支：头仍然按**整段**如实算（谎只写在"body 比头短"这一处，与 `/drop/<n>` 一样）。
+    let give = match shot {
+        Shot::Truncated(n) => n.min(span),
+        _ => span,
+    };
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    // 这两个下标必然落在 `usize` 里：`blob` 就是按 `total_len` 造的，而 `start + give <= end + 1
+    // <= total_len`。取 `expect` 与 `spawn_paced_partial_stub` 同一写法（夹具不该在被测代码之前
+    // 悄悄少切一段 body —— 那会把"body 比头短"这一支变成"body 比该给的少"，两种故障混成一件）。
+    let from = usize::try_from(start).expect("Range 起点超出 usize");
+    let to = usize::try_from(start + give).expect("Range 终点超出 usize");
+    stream.write_all(&blob[from..to])?;
+    stream.flush()?;
+    if matches!(shot, Shot::Truncated(_)) {
+        // 拆连接：让客户端在 body 中间拿到"对端已关闭"，这正是 E12③ 那条"交过字节 ⇒ Advanced"
+        // 与"零字节 ⇒ Failed"的分岔入口。
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return Ok(false);
+    }
+    Ok(true)
+}
+

@@ -2386,3 +2386,809 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
     );
     Ok(())
 }
+
+// ================================================================ Task 8 阶段5B：§7.2 的三道链接 + 简报 Step 1 剩下的两条 + E13④ 的真退避
+//
+// 这一节的九条用例按派发的 P1–P5 排。两条纪律贯穿全部：
+// - **取证一律先问线上或对端，再问引擎的嘴**：`Report` 的计数只能当旁证，判据落在
+//   `Server::requests()/ranges()`、`ScriptedPeer::shot_ranges()`、盘上文件与断点文件这些
+//   **不是被测代码自己写的**东西上（spec §7.2、E13③）。
+// - **三道链接各断各的**，一条红就说出是哪一环断了：回放↔派单（引擎有没有照调度器办事）、
+//   派单↔线上（引擎说派了，线上真是那个 Range 吗）、线上↔字节（下下来的东西对不对）。
+// 简报 Step 1 那两条 `unimplemented!`（`resume_after_kill_…` 与 `no_ranges_…`）在这一节里
+// **照名字**落地成真实断言；简报给的那条 `harness::replay(observed_ranges …)` 造"预测序列"的写法
+// 按 E13③ 作废（spec §7.2 明令"不能直接拿预测序列对比"），取而代之的是 `Report::replay` 那条
+// "把本次真实事件流喂给一台全新调度器"的路子。
+
+/// 把 `Report::replay` 交回的动作折成 `(Assign 的区间, Retighten 的区间)` 两列，丢掉 `Idle`。
+/// 与 `src/engine.rs` 用例里那个同名私有帮手是同一读法；测试侧要两份是因为它在另一个 crate。
+fn replay_pairs(actions: &[dlm::scheduler::Action]) -> (Vec<Interval>, Vec<Interval>) {
+    (
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                dlm::scheduler::Action::Assign { iv, .. } => Some(*iv),
+                _ => None,
+            })
+            .collect(),
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                dlm::scheduler::Action::Retighten { iv, .. } => Some(*iv),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// 一份"应当等于盘上内容"的期望字节的散列：把期望内容落成文件、用 harness 那个独立读者算。
+/// 存在的理由：`harness::expected_sha` 只服务 node 服务器那份 blob；进程内夹具的 body 由
+/// `positioned_body` 现造，散列必须由**第三方读者**（`sha2` + 文件）算出来，不能由被测代码代劳。
+/// 交回散列；临时文件由调用方删（`harness::scratch_body` 的纪律）。
+fn sha_of_expected(name: &str, bytes: &[u8]) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let path = harness::scratch_body(name, bytes)?;
+    Ok((harness::sha256_of(&path)?, path))
+}
+
+/// **P1 / E13③ / spec §7.2：三道链接一次走通。**
+///
+/// 简报 Step 1 那条用例写的是 `harness::replay(observed_ranges …)` 造一个 `predicted` 再比 ——
+/// §7.2 明令**不许**这么干（"劈分时机取决于真实时序"，预测序列根本无从预测）。这里按 §7.2 的原话做：
+/// **把这次运行里真实发生的事件序列回放给一台全新调度器**，然后分三道断言，每道单独一条语句，
+/// 红在哪一条就说明是哪一环断了：
+/// 1. **回放 ↔ 派单**：回放给出的 `Assign` 区间序列必须与引擎真打出去的那批（`dispatched()`）
+///    **逐条同序**相等，`Retighten` 必须与 `tightened()` 逐条相等。这一道抓"引擎没照调度器办事"
+///    （或者 trace 记错了对象）。
+/// 2. **派单 ↔ 线上**：`dispatched()` 折成闭区间之后必须与 node 服务器自己记下的 `Range` 一一对上 ——
+///    **剔掉试探那一枪**，并且**用"剔掉的确实是它"来钉**（断言那条 `bytes=0-236031` 在全程只出现一次、
+///    且就是线上第一条），不是"随便少一条也算对"。跨连接的两枪谁先到线上没有保证（四条连接各自
+///    `connect`），所以顺序判据取它**因果上必然成立**的那一半：**同一条连接上的请求**必须与
+///    `dispatched()` 的相对顺序一致（一条连接同时只被一个 worker 占着 ⇒ 它上面的先后是真的先后）。
+///    这一道抓"引擎说派了，可线上不是那个 Range"。
+/// 3. **线上 ↔ 字节**：落盘文件与 `harness::expected_sha` 一字不差（那个 oracle 已被
+///    `the_sha_oracle_matches_what_the_server_serves` 对真 socket 证过，这里直接复用，不重新推）。
+///
+/// 为什么用 node 对端：**E13⑤** —— 多 worker 的引擎形状不许用进程内窄桩（`MAX_CONNECTIONS = 8`）。
+#[test]
+fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-5b-replay")?;
+    let len = 8 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/sz/{len}"),
+        dir: dir.path().to_path_buf(),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "引擎没跑完，三道链接都无从谈起：{:?}", rep.message);
+
+    // —— 链接一：把录下来的事件流喂给一台全新调度器 ——
+    let min_seg = dlm::consts::MIN_SEGMENT_BYTES;
+    let (replayed_assigns, replayed_tightens) = replay_pairs(&rep.replay(len, min_seg));
+    assert_eq!(
+        replayed_assigns,
+        rep.dispatched(),
+        "链接一：回放给出的 Assign 与引擎真打出去的一枪必须逐条同序相等"
+    );
+    assert_eq!(
+        replayed_tightens,
+        rep.tightened(),
+        "链接一（收紧那一半）：回放的 Retighten 必须与记下的收紧逐条同序相等"
+    );
+    // 两头都得真的有东西可比，否则上面两条退化成"空表 == 空表"（本项目踩过三次恒绿夹具）。
+    assert!(rep.dispatched().len() > 1, "这个形状该打出很多枪，只记到 {}: {:?}", rep.dispatched().len(), rep.dispatched());
+    assert!(!rep.tightened().is_empty(), "这个形状本来要收紧好几次；一次都没记 ⇒ 链接一的第二半没被走过");
+
+    // —— 链接二：引擎派的每一枪，线上真的收到那条 Range 吗 ——
+    let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
+    let requests = srv.requests()?;
+    let ranges: Vec<Option<String>> =
+        requests.iter().map(|r| r.get("range").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let probe_lines: Vec<usize> =
+        ranges.iter().enumerate().filter(|(_, r)| r.as_deref() == Some(probe_range.as_str())).map(|(i, _)| i).collect();
+    assert_eq!(
+        probe_lines,
+        vec![0],
+        "要从线上剔掉的必须是**试探自己**那一枪（{probe_range}），而且它必须是第一条请求；\
+         实际出现位置 {probe_lines:?}，线上 {ranges:?}"
+    );
+    // 剔掉第 0 条（上面那句已经钉死它就是试探），剩下的必须与派单**一一对应**。
+    //
+    // 对应关系是"派出去的区间 ∩ 一个窗口"，**不是**区间本身：`fetch::range_header` 发的是这一枪的
+    // **窗口** `[iv.start, min(iv.end, iv.start + WINDOW_BYTES - 1)]`（E12① + **E14**②，只有窗口够到
+    // EOF 才写成开放终点）。所以第一枪派的 `[236032, 8388607]`（8 MiB 的整条尾巴）在线上就是
+    // `bytes=236032-4430335`。把两边写在同一个形状上比，才是 §7.2 那道"线上真是这个 Range 吗"；
+    // 拿区间直接比会红得像是引擎没办事，而缺的只是窗口那一层换算。
+    let shot_reqs = &requests[1..];
+    let shot_ranges = &ranges[1..];
+    let wire = harness::wire_spans(shot_ranges, len)?;
+    let dispatched: Vec<(u64, u64)> = rep
+        .dispatched()
+        .iter()
+        .map(|iv| (iv.start, iv.end.min(iv.start.saturating_add(WINDOW_BYTES - 1))))
+        .collect();
+    assert_eq!(
+        wire.len(),
+        dispatched.len(),
+        "线上 {n} 条 Range 对引擎 {m} 枪：一对一关系断了（T8-R2 说 18 条 = 试探 + 17 枪）",
+        n = wire.len(),
+        m = dispatched.len()
+    );
+    let mut wire_sorted = wire.clone();
+    let mut dispatched_sorted = dispatched.clone();
+    wire_sorted.sort();
+    dispatched_sorted.sort();
+    assert_eq!(
+        wire_sorted,
+        dispatched_sorted,
+        "链接二：引擎派出去的区间集合与线上真收到的 Range 集合不是同一批（不是顺序问题，是**有没有这一条**的问题）"
+    );
+    // 顺序：同一连接上的请求必须按派单顺序到达（跨连接不保证，见用例文档）。
+    let mut conns: Vec<u64> = vec![];
+    let mut per_conn: Vec<Vec<(u64, u64)>> = vec![];
+    for (rec, span) in shot_reqs.iter().zip(wire.iter()) {
+        let conn = rec["conn"].as_u64().context("服务端记的 request 没有 conn 字段")?;
+        match conns.iter().position(|c| *c == conn) {
+            Some(k) => per_conn[k].push(*span),
+            None => {
+                conns.push(conn);
+                per_conn.push(vec![*span]);
+            }
+        }
+    }
+    for (conn, spans) in conns.iter().zip(&per_conn) {
+        let mut cursor = 0usize;
+        for span in spans {
+            let found = dispatched.iter().skip(cursor).position(|d| d == span).with_context(|| {
+                format!(
+                    "链接二（顺序那一半）：连接 {conn} 上的 Range {span:?} 在它前面那些之后找不到 ⇒ \
+                     这条连接上先到的一枪在引擎的派单里反而是后派的"
+                )
+            })?;
+            cursor += found + 1;
+        }
+    }
+
+    // —— 链接三：下下来的字节是那份文件吗 ——
+    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "链接三：落盘字节与服务器那份不是一字不差");
+    assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
+    Ok(())
+}
+
+/// **P2 / 简报 Step 1 的第 2 条（原本还是 `unimplemented!`）：真停一半、真续上、已完成的字节一个都不重下。**
+///
+/// "kill" 怎么落地（**仪器缺口的如实登记**，见 `tests/harness/mod.rs` 里 `ScriptedPeer` 的文档）：
+/// node 那台对端里唯一能把一枪掐在半路的是 `/drop/<n>`（E5），可它做不到"停一半之后同一 URL 还能跑完"：
+/// `n = 0` 连**试探那一枪**一起掐死 ⇒ `engine::run` 在 `probe` 就 `Err` ⇒ **压根没有断点文件**；
+/// `n > 0` 每一枪都交出 n 个真字节 ⇒ `Advanced` ⇒ 引擎一路有进度、必然跑到完成。换台服务器也不行
+/// （`resume` 的 ② 拿 `final_url` 比对，端口一变就是另一个资源 ⇒ 判 `Fresh` ⇒ 续传这条路根本不出现）。
+/// 所以这里用**按脚本回答的进程内对端**（`workers = 1` ⇒ 顺序模型与真实行为一致）：
+/// 第 0 枪诚实（试探）、第 1 枪写出 100 000 个真字节之后被拆线（`Advanced` ⇒ 那批字节算数）、
+/// 第 2 枪直接回 503（零字节 ⇒ `Failed`）配上 `--max-retries 0` ⇒ **引擎真的停在半路**，
+/// 交回 `ok = false`，**留下半截文件与一份引擎自己写的断点文件**。然后同一 URL 再跑一遍（脚本用完，
+/// 之后每枪诚实），判据全在**第二轮的线上**：
+/// - 第一轮那一条 `bytes=0-236031` 仍然只出现一次、就是第二轮的第一枪（试探），比对前先把它剔掉；
+/// - 第二轮每一枪的起点都 **≥ 断点文件说的覆盖上界**，且**没有任何一枪碰到 `snapshot_intervals()`
+///   里已经归我的字节**（判据取自 `state::load` 读回来的段表，**不是**引擎的计数器）；
+/// - 最终文件与期望内容一字不差（引擎那道 sha 闸 + harness 那个独立读者各算一遍）。
+#[test]
+fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
+    const TOTAL: u64 = 512 * 1024;
+    const DELIVERED: u64 = 100_000;
+    // 试探落盘的字节 + 那一枪真写下去的字节 = 第一轮结束时盘上应有的量。
+    let watermark = PROBE_READ_BYTES + DELIVERED;
+
+    let peer = harness::spawn_scripted_peer(
+        TOTAL,
+        vec![
+            harness::Shot::Honest,
+            harness::Shot::Truncated(DELIVERED),
+            harness::Shot::Status(503),
+        ],
+        harness::Shot::Honest,
+    )?;
+    let dir = harness::tmp_dir("eng-5b-kill")?;
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        dir: dir.path().to_path_buf(),
+        name: Some("resumed.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let state_path = dlm::state::path_for(&t.target_path());
+    let (want, want_file) = sha_of_expected("5b-kill-expected.bin", &harness::positioned_body(TOTAL as usize))?;
+
+    // —— 第一轮：真的停在半路 ——
+    let cfg = dlm::engine::Config {
+        workers: 1,
+        min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+        max_retries: Some(0),
+        verify_sha256: None,
+        force_fresh: false,
+    };
+    let first = dlm::engine::run(&t, cfg.clone())?;
+    assert!(!first.ok, "这一轮的脚本就是要它停在半路，`ok` 却给了真：{:?}", first.message);
+    assert_eq!(first.delivered, watermark, "第一轮结束时盘上就该有这么多字节：一半都没下完");
+    assert!(state_path.exists(), "停在半路必须留下断点文件，否则下一轮无从续（spec §4）");
+    let snap = dlm::state::load(&state_path)?.expect("上面已断言文件在，读回来却什么都没有");
+    let covered: Vec<(u64, u64)> = snap.segments.iter().map(|s| (s.start, s.end)).collect();
+    assert_eq!(covered, vec![(0, watermark - 1)], "断点文件说的覆盖集必须是「已确认的那些字节」：{snap:?}");
+
+    // —— 第二轮：同一 URL、同一台对端，脚本用完之后每枪诚实 ——
+    let cfg_ok = dlm::engine::Config {
+        workers: 1,
+        min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+        max_retries: None,
+        verify_sha256: Some(want.clone()),
+        force_fresh: false,
+    };
+    let second = dlm::engine::run(&t, cfg_ok)?;
+    assert!(second.ok, "第二轮该把剩下的下完：{:?}", second.message);
+    assert!(second.fresh_reason.is_none(), "第二轮走的是 `Resume`，没有「从头重来」要解释：{:?}", second.fresh_reason);
+
+    // 线上取证：前 3 枪属于第一轮，第二轮从下标 3 开始。
+    let ranges = peer.shot_ranges();
+    assert_eq!(ranges.len(), 5, "第一轮 3 枪 + 第二轮 2 枪 = 5，实际 {ranges:?}");
+    let (run1, run2) = ranges.split_at(3);
+    assert_eq!(
+        run1[0],
+        format!("bytes=0-{}", PROBE_READ_BYTES - 1),
+        "夹具前提：第一轮第一枪是试探（剔掉的就是它）"
+    );
+    assert_eq!(
+        run2[0],
+        format!("bytes=0-{}", PROBE_READ_BYTES - 1),
+        "第二轮第一枪还是试探，比对时剔掉的是它、不是随便一条"
+    );
+    let resumed_wire: Vec<Option<String>> = run2[1..].iter().cloned().map(Some).collect();
+    let resumed = harness::wire_spans(&resumed_wire, TOTAL)?;
+    assert!(!resumed.is_empty(), "第二轮一枪都没打 ⇒ 下面两条判据全是空的（恒绿）");
+    for (index, (start, end)) in resumed.iter().enumerate() {
+        assert!(
+            *start >= watermark,
+            "第二轮第 {index} 枪从 {start} 开始，而断点文件说 {} 之前都归我了（已确认的字节被重下）",
+            watermark - 1
+        );
+        for (done_start, done_end) in &covered {
+            assert!(
+                end < done_start || start > done_end,
+                "第二轮第 {index} 枪要的 [{start}, {end}] 与断点里已确认的 [{done_start}, {done_end}] 重叠 ⇒ \
+                 简报那句「不重下已完成段」断了"
+            );
+        }
+    }
+    assert_eq!(
+        resumed[0].0,
+        watermark,
+        "第二轮第一枪的起点必须**正好**是已确认覆盖的下一个字节（简报 Step 1 第 2 条的原话）"
+    );
+
+    assert_eq!(harness::sha256_of(&t.target_path())?, want, "续完之后文件必须与整份内容一字不差");
+    assert!(!state_path.exists(), "跑完之后断点文件该删（spec §4，本轮没给 --keep-state）");
+    let _ = std::fs::remove_file(&want_file);
+    Ok(())
+}
+
+/// **P3 / 简报 Step 1 的第 3 条（原本还是 `unimplemented!`）：对端不认 Range ⇒ 一次只一段、按起点升序、字节还对。**
+///
+/// 两个形状（为什么要有第二个：node 的 `/noranges` 把 body 夹在 `min(sendLen, 1 MiB)`，而 1 MiB
+/// **装得进一个窗口**（`WINDOW_BYTES` = 4 MiB）⇒ 那一支永远只需要一枪，"多枪时按起点升序、彼此不重叠"
+/// 这条判据在它上面是**空的**；同一类"仪器没有这个对端"的事 E5 已经记过一次。所以：
+/// - **A 段（node `/noranges`）**：钉"结果字节正确"（`expected_sha`，与真 socket 对过的 oracle）
+///   + 钉"四个 worker 都报了就绪，线上却只多出一条 Range"。
+/// - **B 段（进程内退化对端，5 MiB > 一个窗口）**：钉"多枪时 Ranges 严格按文件顺序、首尾相接、
+///   互不重叠"，也就是派发点名的**从线上读并发=1**（不是引擎内部的计数器）。
+///
+/// 调度器这一侧的规则在 `src/scheduler.rs` 的 `dispatch` 退化分支：`NoRanges` 之后**只要还有人在途就
+/// 一律 Idle**、且永不产生 `Retighten`（不劈分）。`tightened()` 为空 + 同轮只有一枪在途就是那条规则的
+/// 线上影子；`fed()` 里 `Connected` 的条数只用来证明"别的 worker 确实醒着、确实问过活"。
+#[test]
+fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> {
+    // —— A 段：node 的 /noranges（1 MiB，装得进一个窗口 ⇒ 只需一枪）——
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-5b-noranges")?;
+    let len = 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/noranges"),
+        dir: dir.path().to_path_buf(),
+        name: Some("degraded-node.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "退化形状也该跑得完：{:?}", rep.message);
+    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "对端不认 Range 也得一字不差");
+
+    let requests = srv.requests()?;
+    assert_eq!(requests.len(), 2, "试探 + 恰好一枪 = 2 条请求，实际 {requests:?}：分段了就不止 2 条");
+    assert_eq!(rep.dispatched().len(), 1, "退化模式一次只许有一段在途：{:?}", rep.dispatched());
+    assert!(rep.tightened().is_empty(), "退化模式永不劈分 ⇒ 不该有任何收紧：{:?}", rep.tightened());
+    let asks = rep.fed().iter().filter(|e| matches!(e, dlm::scheduler::Event::Connected(_))).count();
+    assert!(asks >= 4, "四个 worker 都该报过就绪（否则「并发=1」是因为只有一个 worker，不是退化规则）：{asks}");
+    let asked = requests[1].get("range").and_then(|v| v.as_str()).map(str::to_string);
+    let first_shot = harness::wire_spans(&[asked], len)?;
+    assert_eq!(
+        first_shot[0],
+        (PROBE_READ_BYTES, len - 1),
+        "退化模式派的第一枪必须是**起点最低**的那段缝（试探已写的字节之后），不是「最长优先」"
+    );
+
+    // —— B 段：5 MiB 的退化对端（一枪装不下 ⇒ 必然两枪，这才比得出顺序）——
+    let big = 5 * 1024 * 1024u64;
+    let peer = harness::spawn_scripted_peer(big, vec![], harness::Shot::IgnoresRange)?;
+    let dir2 = harness::tmp_dir("eng-5b-noranges-big")?;
+    let (want, want_file) = sha_of_expected("5b-degraded-expected.bin", &harness::positioned_body(big as usize))?;
+    let t2 = Task {
+        url: format!("{}/blob", peer.base()),
+        dir: dir2.path().to_path_buf(),
+        name: Some("degraded-scripted.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let rep2 = dlm::engine::run(
+        &t2,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(want.clone()),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep2.ok, "退化形状（进程内对端）也该跑得完：{:?}", rep2.message);
+    let spans = harness::wire_spans(
+        &peer.shot_ranges().into_iter().map(Some).collect::<Vec<_>>(),
+        big,
+    )?;
+    assert_eq!(spans.len(), 3, "试探 + 两枪 = 3 条，实际 {spans:?}");
+    assert_eq!(spans[0], (0, PROBE_READ_BYTES - 1), "第一枪是试探");
+    // 线上并发=1 的影子：这三条 Range 严格按文件顺序、首尾相接、彼此不重叠。
+    for pair in spans.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let (prev_end, next_start) = (a.1, b.0);
+        assert_eq!(
+            b.0,
+            a.1 + 1,
+            "退化模式下线上收到的 Range 必须首尾相接（前一条到 {prev_end}，后一条从 {next_start} 起）：\
+             {spans:?} —— 跳号 = 中间那段没人认领，重叠 = 已确认的字节被重下"
+        );
+        assert!(b.1 > a.1, "后一条必须往后走，不许回头：{spans:?}");
+    }
+    assert_eq!(spans[2].1, big - 1, "最后一枪该正好够到 EOF：{spans:?}");
+    assert!(rep2.tightened().is_empty(), "退化模式不劈分：{:?}", rep2.tightened());
+    assert_eq!(harness::sha256_of(&t2.target_path())?, want, "两枪拼起来的文件也要一字不差");
+    let _ = std::fs::remove_file(&want_file);
+    Ok(())
+}
+
+/// **P4 / E13④ 点名而阶段5A 跳过的那一条：退避真的接进了循环（真等第一个 1 s）。**
+///
+/// 表驱动的 `next_retry_delay` 只证明"这张表算得对"；本用例证明"表上那一格**真的被等了**"。
+/// 形状：第 1 枪（试探之后的第一枪）直接回 503 ⇒ `Failed(Http)` 且**当场就回来**（不像静默对端
+/// 那样要把窗口预算的下界 15 s 耗完），于是重试必须等到 `1 s` 之后才出现。取证在**对端那一侧**：
+/// `ScriptedPeer` 给每一枪盖一个到达时刻，断言第 1 枪与第 2 枪之间的间隔落在
+/// `[950 ms, 1 900 ms)` —— 下界挡"根本没等"（变异：退避直接给 `Idle`），上界挡"等错了那一格"
+/// （变异：把 `1 << attempt` 写成 `1 << (attempt + 1)` ⇒ 2 s）。
+/// **不造假时钟、不开 `Sleep` 接缝**（E13④ 的禁令），一秒就是实测的一秒。
+/// 另外钉两条：断点文件里 `stats.retries == 1`（跨轮的账，不是引擎本轮的计数器），以及
+/// 等完之后这一轮**照样跑完**、字节一字不差（退避不是"卡死"也不是"放弃"）。
+#[test]
+fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<()> {
+    const TOTAL: u64 = 512 * 1024;
+    let peer = harness::spawn_scripted_peer(
+        TOTAL,
+        vec![harness::Shot::Honest, harness::Shot::Status(503)],
+        harness::Shot::Honest,
+    )?;
+    let dir = harness::tmp_dir("eng-5b-backoff")?;
+    let (want, want_file) = sha_of_expected("5b-backoff-expected.bin", &harness::positioned_body(TOTAL as usize))?;
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        dir: dir.path().to_path_buf(),
+        name: Some("backoff.bin".to_string()),
+        // `--keep-state`：跑完了也留着断点文件，好让"重试计数落进盘上那本账"这条判据有对象可读。
+        flags: dlm::consts::FLAG_KEEP_STATE,
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 1,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(want.clone()),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "退避之后该把这一轮跑完：{:?}", rep.message);
+    assert_eq!(rep.retries, 1, "只许失败一次 ⇒ 一次重试：{rep:?}");
+    assert_eq!(peer.shot_count(), 3, "试探 + 失败那一枪 + 重试那一枪 = 3，实际 {:?}", peer.shot_ranges());
+    assert_eq!(
+        peer.shot_ranges()[1], peer.shot_ranges()[2],
+        "重试打的就是同一区间（等的是时间，不是换个地方下）"
+    );
+    let gap = peer.arrival_gap(1, 2)?;
+    assert!(
+        gap >= Duration::from_millis(950),
+        "第一次重试只等了 {gap:?} —— 退避表算得对但没接进循环（spec §6.1 的第一档是 1 秒）"
+    );
+    assert!(
+        gap < Duration::from_millis(1_900),
+        "第一次重试等了 {gap:?} —— 那不是 1 s 那一档，`next_retry_delay` 的 `1 << attempt` 走错了格子"
+    );
+
+    let state_path = dlm::state::path_for(&t.target_path());
+    let snap = dlm::state::load(&state_path)?.context("给了 --keep-state，断点文件却不在")?;
+    assert_eq!(snap.stats.retries, 1, "重试计数必须落到盘上那本账（跨轮的账不归本轮计数器）：{snap:?}");
+    assert_eq!(harness::sha256_of(&t.target_path())?, want, "等过一秒之后下来的字节照样一字不差");
+    let _ = std::fs::remove_file(&want_file);
+    Ok(())
+}
+
+/// **P5 之一：一枪写了字节之后失败/被掐，那批已写前缀算数，且不重下。**
+///
+/// `fetch` 的契约（E12③）先要说清：**`Failed` 永远不带字节**（状态码/偏移核对都排在读 body 之前），
+/// 交出过字节的那一支叫 `Advanced`。所以"失败段的已写前缀"在本模型里只有一个可达形状：
+/// 同一个区间**早先那一窗**写下去并已确认的字节，碰上后面一枪失败。这里就是那个形状：
+/// 第 1 枪写出 100 000 个真字节后被拆线（`Advanced`），第 2 枪（尾巴）直接回 503（`Failed`），
+/// `--max-retries 0` 让引擎当场停下。三条判据各自挡一种写法：
+/// - 断点文件的覆盖集**含**那 100 000 字节（`release()` 把已写前缀并进 done）⇒ 挡住"失败就把整段
+///   交回队列"那种写法（那会连已写的字节一起丢掉，下一轮从区间起点重来）；
+/// - 线上第 2 枪的 Range **正好**从 `前缀末尾 + 1` 起 ⇒ 挡住"重下时从区间起点重发"（简报担心的正是这个）；
+/// - 半截文件仍在盘上、那批字节的偏移没错（块号取证）。
+#[test]
+fn a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice() -> anyhow::Result<()> {
+    const TOTAL: u64 = 512 * 1024;
+    const DELIVERED: u64 = 100_000;
+    let watermark = PROBE_READ_BYTES + DELIVERED;
+    let peer = harness::spawn_scripted_peer(
+        TOTAL,
+        vec![
+            harness::Shot::Honest,
+            harness::Shot::Truncated(DELIVERED),
+            harness::Shot::Status(503),
+        ],
+        harness::Shot::Honest,
+    )?;
+    let dir = harness::tmp_dir("eng-5b-prefix")?;
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        dir: dir.path().to_path_buf(),
+        name: Some("prefix.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 1,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: Some(0),
+            verify_sha256: None,
+            force_fresh: false,
+        },
+    )?;
+    assert!(!rep.ok, "封顶的重试该让这一轮停住：{:?}", rep.message);
+
+    let snap = dlm::state::load(&dlm::state::path_for(&t.target_path()))?
+        .context("失败那一支必须留着断点文件（下一轮才续得上）")?;
+    assert_eq!(
+        snap.segments.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(),
+        vec![(0, watermark - 1)],
+        "已写前缀必须留在覆盖集里；失败就把整段交回队列的写法在这里红：{snap:?}"
+    );
+    let ranges = peer.shot_ranges();
+    assert_eq!(ranges.len(), 3, "试探 + 两枪：{ranges:?}");
+    assert_eq!(
+        ranges[2],
+        format!("bytes={watermark}-"),
+        "失败之后重派的那一枪必须从**已写前缀之后**开始，不许从区间起点 {PROBE_READ_BYTES} 重来"
+    );
+    assert_eq!(dlm::store::Store::open(&t.target_path(), false)?.len()?, watermark, "已写的字节不许被失败抹掉");
+    // 块号取证取一个跨过边界的对齐窗口：证明那 100 000 字节确实落在自己的偏移上，不是抄来的形状。
+    harness::require_block_alignment(&t.target_path(), 4096 * 57, 4096)?;
+    Ok(())
+}
+
+/// **P5 之二：`--max-retries` 到顶 ⇒ `ok = false` + 一句人话 + 断点文件不许被删。**
+///
+/// 判据分三块，缺一块都是"看着像失败处理"：
+/// - `ok == false`（"跑到一个结论但没跑全"，`Err` 是"根本跑不起来"，两条不许混）；
+/// - `message` 非空且带上限那一枪的原文（E12⑦：`FailKind` 的原因必须活着走到用户眼前，
+///   折成裸枚举就只剩"网络错了"这种没法行动的话）；
+/// - **盘上什么都没动**：目标文件还在（`spec §6.7` 那一支的纪律同样适用于失败收尾）、
+///   断点文件还在、`state::load` 读得回来（"失败就删断点"等于把用户已下的字节整份扔掉）。
+#[test]
+fn exhausted_retries_report_failure_with_a_message_and_keep_the_state_file() -> anyhow::Result<()> {
+    const TOTAL: u64 = 512 * 1024;
+    let peer = harness::spawn_scripted_peer(
+        TOTAL,
+        vec![harness::Shot::Honest, harness::Shot::Status(503)],
+        harness::Shot::Honest,
+    )?;
+    let dir = harness::tmp_dir("eng-5b-cap")?;
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        dir: dir.path().to_path_buf(),
+        name: Some("capped.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 1,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: Some(0),
+            verify_sha256: None,
+            force_fresh: false,
+        },
+    )?;
+    assert!(!rep.ok, "--max-retries=0 而第一枪就失败，居然报成功：{rep:?}");
+    let note = rep.message.clone().unwrap_or_default();
+    assert!(!note.trim().is_empty(), "ok=false 却不带一句人话（Task 9 只能打出个空行）：{rep:?}");
+    assert!(note.contains("重试"), "消息没说是重试到顶：{note:?}");
+    assert!(note.contains("503"), "消息丢了那一枪的原文（E12⑦ 要求原因走到用户眼前）：{note:?}");
+    assert_eq!(rep.retries, 0, "封顶 0 次 ⇒ 一次都不该重试：{rep:?}");
+
+    let state_path = dlm::state::path_for(&t.target_path());
+    assert!(state_path.exists(), "失败之后断点文件被删了（下一轮就只能从 0 重下）");
+    let snap = dlm::state::load(&state_path)?.context("断点文件在却读不回来")?;
+    assert_eq!(
+        snap.segments.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(),
+        vec![(0, PROBE_READ_BYTES - 1)],
+        "断点里的覆盖集就是试探那份字节：{snap:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(t.target_path())?.len(),
+        PROBE_READ_BYTES,
+        "目标文件不许在失败收尾时被删短或删掉"
+    );
+    Ok(())
+}
+
+/// **P5 之三：断点文件"损坏"与"不存在"是两件事，损坏 ⇒ `Err` 且**一个字节都不许多动**。**
+///
+/// 这是 `state::load` 的契约（决策 4），但它的**后果**住在引擎里：把损坏读成"没有断点"会把
+/// 已经验证过的字节重新算成待下载，还会骗过 `--no-resume` 的判据（`src/state.rs` 模块文档第 4 条）。
+/// 所以这里穿过 `engine::run` 来验，而不是只在 `state` 那一层验一次。三条取证：
+/// - 损坏 ⇒ `Err`，消息点名"断点文件"；而且**拒在上网之前**（`requests_within` 守着：一条请求都没发）
+///   —— 用 `requests().is_empty()` 那种读法本项目已经踩过三次（日志行落在客户端返回之后）；
+/// - 那份坏文件**原样留在盘上**（引擎不许"顺手"替用户删掉它看不出内容的东西，spec §6.7 同一条纪律）；
+/// - 目标文件**根本没被创建**（`Store::open` 排在这个判定之后）；
+/// - 对照支：文件不存在 ⇒ `Ok`，照跑照对（否则"损坏"这一支可以靠"永远报错"蒙过去）。
+#[test]
+fn a_corrupt_state_file_is_an_error_while_an_absent_one_is_not() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-5b-corrupt")?;
+    let len = 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/sz/{len}"),
+        dir: dir.path().to_path_buf(),
+        name: Some("corrupt.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let state_path = dlm::state::path_for(&t.target_path());
+    let target = t.target_path();
+    let garbage = "{ \"v\": 1, 这不是合法 JSON".as_bytes().to_vec();
+    std::fs::write(&state_path, &garbage).context("写坏断点文件失败")?;
+
+    let cfg = dlm::engine::Config {
+        workers: 4,
+        min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+        max_retries: None,
+        verify_sha256: None,
+        force_fresh: false,
+    };
+    let Err(e) = dlm::engine::run(&t, cfg.clone()) else {
+        panic!("断点文件是坏的，`engine::run` 却跑成功了 —— 把损坏读成\"没有断点\"就是这句话的后果");
+    };
+    let text = format!("{e:#}");
+    assert!(text.contains("断点文件"), "错误没点名是断点文件的问题：{text:?}");
+    assert_eq!(std::fs::read(&state_path)?.as_slice(), &garbage[..], "引擎把看不懂的那份改写了（用户就再也看不出自己坏了什么）");
+    assert!(!target.exists(), "拒绝开工就不该碰目标文件");
+    assert!(
+        srv.requests_within(Duration::from_millis(250))?.is_empty(),
+        "断点判错之前就已经上网了：试探那一枪白打一次"
+    );
+
+    // 对照支：同一个任务，断点文件不存在 ⇒ 这不是错误，照跑照对。
+    std::fs::remove_file(&state_path).context("删掉坏断点失败")?;
+    let rep = dlm::engine::run(&t, cfg)?;
+    assert!(rep.ok, "没有断点文件时该正常跑完：{:?}", rep.message);
+    assert_eq!(harness::sha256_of(&target)?, harness::expected_sha(len));
+    Ok(())
+}
+
+/// **P5 之四：`Decision::Fresh{reason}` 那句原因必须活着走到 `Report.fresh_reason`。**
+///
+/// `src/resume.rs` 对 Task 9 的承诺是"中途重来时把这句直接打给用户"；承诺要能被证伪，就得有一条
+/// 用例从 `engine::run` 的返回值里把它读出来（E13② 把 `resume` 从 `Config` 里删掉、改由引擎自己走
+/// `load → probe → decide` 之后，这条链路的**唯一出口**就是 `Report`）。
+/// 形状：第一轮带 `--keep-state` 跑成功（留下一份与本轮任务完全一致的断点文件），第二轮**只换一个
+/// 请求字段**（Referer）⇒ `resume` 的 ①b 判"请求本身变了" ⇒ `Fresh{原因}`。
+/// 三条断言：第一轮 `fresh_reason` 是 `None`（本来就没有需要解释的事）、第二轮是 `Some` 且点名
+/// Referer（不许糊成"要重下"）、第二轮仍然把文件下对（重来这一支该照样成功）。
+#[test]
+fn the_fresh_reason_reaches_the_report_for_the_cli_to_print() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-5b-reason")?;
+    let len = 1024 * 1024u64;
+    let url = format!("{base}/sz/{len}");
+    let t = Task {
+        url: url.clone(),
+        dir: dir.path().to_path_buf(),
+        name: Some("reason.bin".to_string()),
+        flags: dlm::consts::FLAG_KEEP_STATE,
+        ..harness::blank_task()
+    };
+    let cfg = dlm::engine::Config {
+        workers: 4,
+        min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+        max_retries: None,
+        verify_sha256: Some(harness::expected_sha(len)),
+        force_fresh: false,
+    };
+    let first = dlm::engine::run(&t, cfg.clone())?;
+    assert!(first.ok, "第一轮（根本没有断点）该成功：{:?}", first.message);
+    assert_eq!(first.fresh_reason, None, "没有断点就没有冲突，那句原因必须是 `None`（Task 9 不该为没发生的事打一行）");
+    assert!(dlm::state::path_for(&t.target_path()).exists(), "给了 --keep-state 就该留着断点文件");
+
+    let second = dlm::engine::run(
+        &Task { referer: Some("http://referer.example/page".to_string()), ..t.clone() },
+        cfg,
+    )?;
+    assert!(second.ok, "换了 Referer 判从头重来，那一轮也该成功：{:?}", second.message);
+    let reason = second.fresh_reason.clone().unwrap_or_default();
+    assert!(!reason.trim().is_empty(), "①b 那条冲突必须带着一句话走到 Report，实际 None/空串");
+    assert!(reason.contains("请求与断点不符"), "那句得手到「为什么重来」：{reason:?}");
+    assert!(reason.contains("Referer"), "那句得点名换了哪一项：{reason:?}");
+    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "重来那一支也得把文件下对");
+    // 两轮都上过快照：第一轮 1 条试探 + 若干枪，第二轮照样从头下 ⇒ 线上请求数必须比第一轮多。
+    assert!(srv.requests()?.len() > 2, "两轮都该留下线上证据");
+    Ok(())
+}
+
+/// **P5 之五：带 `--data-file` 的任务**绝不试探**，而那一发 POST **只发一次**。**
+///
+/// 依据：E11①（GET 试探确认的是"我们从没发过的那一发"，POST 试探＝把表单交两次）、
+/// R7 / E12⑧（整份那一枪被预算掐住也只许如实报未完成，**不许重发**）、E13④（该形状既不读也不写断点）。
+/// 取证只在对端那一侧：node 服务器把每一条请求的 `method` 与 `range` 都记进 JSONL ——
+/// "有没有多打一条 GET"这件事**只有线上答得出**，读引擎的代码答不出。
+#[test]
+fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("eng-5b-post")?;
+    let len = 1024 * 1024u64;
+    let body = harness::scratch_body("5b-post-form.bin", b"q=dlm&page=1")?;
+    let t = Task {
+        url: format!("{base}/sz/{len}"),
+        dir: dir.path().to_path_buf(),
+        name: Some("posted.bin".to_string()),
+        data_file: Some(body.clone()),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+        },
+    )?;
+    assert!(rep.ok, "POST 那一枪该把这份文档整份拿回来：{:?}", rep.message);
+
+    srv.requests_at_least(1)?;
+    let requests = srv.requests()?;
+    assert_eq!(requests.len(), 1, "带体的形状全程只许有一发请求（试探 + POST = 2 条就是缺陷）：{requests:?}");
+    assert_eq!(
+        srv.methods()?,
+        vec!["POST".to_string()],
+        "那一条必须是 POST：GET 就是「试探」，E11① 硬拒的那个形状"
+    );
+    assert_eq!(
+        requests[0].get("range"),
+        None,
+        "POST 那一枪不许带 Range：带了就等于把整份那一条请求切成几发重交（R7）"
+    );
+    assert_eq!(rep.retries, 0, "这一支不重试（重发＝二次提交表单）：{rep:?}");
+    assert!(rep.trace.is_empty(), "这一支没有调度器，trace 里不该有任何派单：{:?}", rep.trace);
+    assert!(!dlm::state::path_for(&t.target_path()).exists(), "该形状既不读也不写断点（E13④）");
+    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "落盘的得是那份响应体，一字不差");
+    let _ = std::fs::remove_file(&body);
+    Ok(())
+}
+
+/// **P5 之六：`Abort`（断点要口令）⇒ `engine::run` 交回 `Err`，而且**不碰断点文件、不碰目标文件**。**
+///
+/// T5 转派第 ④ 条给 T8 的原话是"`Abort` 之后不许动断点文件"。这一支的后果很具体：断点是"哪些字节
+/// 在这把 ETag 下算数"的唯一记录，把它删了/改了就等于替用户做了一个他没说过的决定（`--password`
+/// 重新给一次就能续，删掉就得从 0 重下）。
+/// 形状：盘上放一份**需要口令**的断点（`needs_secret = true`，spec §4 明写口令本身不落盘，所以
+/// 这份文件就是引擎自己会写出去的那一副形状）+ 一份半截目标文件，然后**不给口令**跑一次。
+/// 四条判据：`Err` 且点名口令；断点文件**字节与 mtime 都没变**；目标文件长度没变（没被截断）；
+/// 线上只有试探那一枪（判 `Abort` 排在 `Store::open` 之前，一个下载字节都没动）。
+#[test]
+fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let announced = srv.announced()?;
+    let dir = harness::tmp_dir("eng-5b-abort")?;
+    let len = 1024 * 1024u64;
+    let url = format!("{base}/sz/{len}");
+    let t = Task {
+        url: url.clone(),
+        dir: dir.path().to_path_buf(),
+        name: Some("secret.bin".to_string()),
+        ..harness::blank_task()
+    };
+    let target = t.target_path();
+    let state_path = dlm::state::path_for(&target);
+    // 半截目标文件 + 一份"当初带了口令"的断点：断点的其余字段与本轮探到的事实完全对得上，
+    // 好让 `Abort` 是**唯一**的结论（不是被 ①b/②/④ 抢先判成 `Fresh`）。
+    std::fs::write(&target, vec![0xABu8; (PROBE_READ_BYTES / 2) as usize]).context("铺半截目标文件失败")?;
+    let snap = dlm::state::Snapshot {
+        v: dlm::state::STATE_VERSION,
+        task: dlm::state::TaskView::from(&t),
+        validator: dlm::state::Validator {
+            etag: Some(announced.etag.clone()),
+            last_modified: Some(announced.last_modified.clone()),
+            total_len: len,
+            final_url: url.clone(),
+            ignore_mtime: false,
+        },
+        segments: vec![dlm::state::SegView { start: 0, end: PROBE_READ_BYTES / 2 - 1 }],
+        stats: dlm::state::Stats { bytes_delivered: PROBE_READ_BYTES / 2, bytes_duplicated: 0, retries: 3 },
+        needs_secret: true,
+        saved_at: dlm::state::utc_now(),
+    };
+    dlm::state::save(&state_path, &snap).context("铺断点文件失败")?;
+    let before = std::fs::read(&state_path)?;
+    let mtime_before = std::fs::metadata(&state_path)?.modified()?;
+
+    let outcome = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: None,
+            force_fresh: false,
+        },
+    );
+    let Err(e) = outcome else { panic!("断点要口令而本次没给，`engine::run` 却跑下去了：{outcome:?}") };
+    let text = e.to_string();
+    assert!(text.contains("口令"), "那句拒绝得说得出为什么不停：{text:?}");
+
+    assert_eq!(std::fs::read(&state_path)?.as_slice(), &before[..], "Abort 之后断点文件被改写过（T5 转派第 ④ 条）");
+    let after_meta = std::fs::metadata(&state_path)?;
+    assert_eq!(after_meta.modified()?, mtime_before, "断点文件的 mtime 动了 —— 内容没动也说明有人写过它");
+    assert_eq!(
+        std::fs::metadata(&target)?.len(),
+        PROBE_READ_BYTES / 2,
+        "目标文件被动过（截断/覆写）：`Store::open` 本该排在这个判定之后"
+    );
+    let requests = srv.requests()?;
+    assert_eq!(requests.len(), 1, "只许有试探那一枪（判完就拒）：{requests:?}");
+    assert_eq!(requests[0]["method"], "GET", "那一枪是试探：{requests:?}");
+    assert_eq!(
+        dlm::state::load(&state_path)?.context("断点文件读不回来了")?.stats.retries,
+        3,
+        "断点里那本账必须原样留着"
+    );
+    Ok(())
+}
