@@ -29,7 +29,8 @@
 //! ## 一条派发公式的更正（写在这里是因为它会咬人）
 //!
 //! 派发给本任务的说法是 `Advanced{bytes}` → `Progress{abs_end: iv.start + bytes}`，
-//! `fetch` 模块文档里 `Outcome` 那一节也这么写。**这个式子差一字节**：`Advanced` 的 `bytes` 是
+//! `fetch` 模块文档里 `Outcome` 那一节**曾经也这么写**（修复轮 8F-4a 已按本节改成正式，现在那一段
+//! 与本节一致）。**这个式子差一字节**：`Advanced` 的 `bytes` 是
 //! "经 `store.write_at` 确认落盘的字节数"（`fetch::Outcome::Advanced` 自己定义，实现是
 //! `written(iv, cursor) = cursor - iv.start`，见 `fetch::written`），而 `Event::Progress` 的
 //! `abs_end` 是**含端点**的"已写到的绝对偏移"（`scheduler.rs:61-62`；用例

@@ -120,8 +120,10 @@
 //!    **分子按形状分支（F12，修复轮 8F-3a）**：`Windowed` 传 `stop − iv.start`（那一支打算写的就是
 //!    打算读的），`ToEof` 传 `stop` —— 那一支的 body 从**文件偏移 0** 开始，`iv.start` 个字节要先
 //!    流掉才落盘，所以打算读的比打算写的多整整一个前缀。按"打算写多少"给分子会让预算**比这一枪
-//!    打算读的字节还小**，后果链（零进度 ⇒ `Stalled` ⇒ `rate` 不涨 ⇒ 预算不变 ⇒ 永远零进度）见
-//!    [`plan_shot`] 的文档。
+//!    打算读的字节还小**（这个方向只在形状与对端真实行为一致时成立，见 `plan_shot` 的文档），
+//!    后果链（零进度 ⇒ `Stalled` ⇒ `rate` 因**分母一直在涨**而逐枪**下降** ⇒ 预算逐枪**变宽**到
+//!    120 s 上界为止 ⇒ 只有"前缀所需墙钟超过上界"才永远零进度；原先那句"`rate` 不涨 ⇒ 预算不变"
+//!    是假的，已在 [`plan_shot`] 改写）见那里，本发修不掉的那一截**登记为已知残余**（**`T8-R7`**）。
 //!    慢到 120 s 上界之外的整条下载**照样会被自己的期限掐在半路** —— 掐断点**按进度分两支**，
 //!    不许再写成一句"交回 `Advanced`"：写过字节的（前缀已走完）那一支按 **E16**② 交回
 //!    `Advanced { bytes }`、由调度器重新决定尾巴；**还卡在前缀里**那一支落盘量为 0，
@@ -185,12 +187,23 @@
 //!   当时那条用例（`a_live_but_paced_peer_...`，`/sz/524288s`）的对端 1.6 s 就交完 body，
 //!   两种语义给出同一个结论，是一条瞎断言（它现在仍然留着，但只钉"活着 ≠ 卡死"那一件事）。
 //!   真正的机制在异步侧：请求级 `timeout` 也管 body。
-//! - **对 Task 8 的后果**（这就是派发要"钉住是哪一种语义"的理由）：一个窗口的墙钟时间**上界就是
-//!   预算**，与对端活不活着无关 ⇒ 填满一个窗口需要的速率是 `WINDOW_BYTES / window_budget(rate)`。
-//!   比这慢的对端会在窗口**没填满**时被我们自己的期限掐掉 ⇒ 交回 `Advanced{bytes}`（进度是真的），
-//!   **不是** `Stalled`（"预算到点且零字节落盘"才叫 `Stalled`，见上面那一节）。
-//!   于是"慢"在 Task 8 那里读起来是"每轮最多 15–120 s 的一轮一轮真进度"，既不算失败也不算卡死；
-//!   `rate_bps` 估高了 ⇒ 预算偏小 ⇒ 每轮被提前掐、总时长变长，但不丢字节、也不误报卡死。
+//! - **对 Task 8 的后果**（这就是派发要"钉住是哪一种语义"的理由）：一枪的墙钟时间**上界就是它的
+//!   预算**，与对端活不活着无关 ⇒ 要填满这一枪打算读的那一截，需要的速率是
+//!   `planned_bytes / 预算`（`Windowed` 那一支分子是 `WINDOW_BYTES`，`ToEof` 那一支是整条 body，见
+//!   `plan_shot`）。比这慢的对端会在**那一截没读完**时被我们自己的期限掐掉。
+//!   **掐在哪一刻决定结论走哪一支**（**E12**④ 的两支；这一段早于 **E16**，原先只写了前一支、还把它
+//!   当成无条件性质，两处都被降级那一支证伪）：
+//!   - **已经有字节落过盘** ⇒ 交回 `Advanced{bytes}`（进度是真的），**不是** `Stalled`（"预算到点
+//!     且零字节落盘"才叫 `Stalled`，见下面那一节）。这是 `Windowed` 的常态（body 的第 0 字节就是要
+//!     写的字节），也是 `ToEof` **跳完前缀之后**那一截。于是"慢"在 Task 8 那里读起来是"每轮最多
+//!     15–120 s 的一轮一轮真进度"，既不算失败也不算卡死。
+//!   - **还卡在 `ToEof` 那段没跳完的前缀里** ⇒ `written(iv, cursor) == 0` ⇒ 交回的是 `Stalled`
+//!     （读错误是超时）或 `Failed(Transport)`（别的读错误），**不是** `Advanced` ⇒
+//!     **一个活着但慢的降级对端会被报成卡死**，重试上限因此介入。判据住在 `run_window` 的
+//!     `written(iv, cursor)` 与那个 `(0, true)` 分支；上面第 2 条"掐断点按进度分两支"说的是同一件事。
+//!   - **`rate_bps` 估高了** ⇒ 预算偏小 ⇒ 每轮被提前掐、总时长变长：`Windowed` 那一支不丢字节、
+//!     也不误报卡死；`ToEof` 那一支**估高到前缀跳不完时就是把一个活对端报成卡死**（那一支的
+//!     `Advanced` 只有跳完前缀之后才拿得到）。
 //! - **别假设"不配 timeout 就等于永不等"**（派发点名）：Task 0 实测一条没配 timeout 的 reqwest 请求
 //!   在 ~30.005 s 自己死掉，时长来源未查清。本模块**永远**显式配预算（`run_window` 与 `run_whole`
 //!   都是），正是为了不让那种未查清的内部期限替我们决定语义。
@@ -343,9 +356,18 @@ pub enum FailKind {
     ValidatorChanged,
 }
 
-/// 这一枪的结论。Task 8 把它折成 `scheduler::Event`：
-/// `Advanced{bytes}` → `Progress{abs_end: iv.start + bytes}`（+ 之后由主循环决定 `WindowDone`/续派）、
-/// `Complete` → `SegmentComplete`、`Stalled`/`Failed` → `Failed`。
+/// 这一枪的结论。Task 8 把它折成 `scheduler::Event` —— **完整映射表住在 `engine::translate` 的文档上**
+/// （那里是唯一的事件翻译处，两处不一致以那里为准），这里只把两条公式写对，Task 9 读的就是这一段：
+/// - `Advanced{bytes}` → **两条**事件：`Progress{abs_end: iv.start + bytes - 1}`，然后 `WindowDone`。
+///   那个 `- 1` 不是笔误：`bytes` 是**个数**，`abs_end` 是**含端点**的绝对偏移（实现是
+///   `engine::progress_abs_end`），写成 `iv.start + bytes` 会把一个从没写过的字节报成已确认，
+///   调度器随后把它的下一字节当成待下载 ⇒ 文件里留一个洞而两本账都对得上。
+/// - `Complete` → **两条**事件：`Progress{abs_end: iv.end}`，然后 `SegmentComplete`
+///   （空区间那一格交回的 `bytes` 为 0 ⇒ 没有进度可报，只有 `SegmentComplete` 这一条）。
+/// - `Stalled` / `Failed` → 一条 `Failed`，零字节。
+///
+/// `WindowDone` 也由 `translate` 发出去（不是"折完之后主循环再补一条"）；"续不续派"是调度器收到
+/// 这两条事件之后决定的事，不在这一层。
 ///
 /// `bytes` 的语义（裁定 4/5 同源）：**这一枪经 `store.write_at` 确认落盘的字节数**，不是"从 socket
 /// 读到的字节数"，也不是"区间剩下的字节数"。`Complete` 不带字节：它是"这个区间不需要（再）取字节"，
@@ -453,12 +475,39 @@ struct ShotPlan {
 /// - `ToEof`：对端不认 `Range`，那条 body 从**文件偏移 0** 开始，而读循环要先流掉 `iv.start` 个字节
 ///   （`run_window` 里 `degraded` 那一支的 `skip`）才开始落盘 ⇒ 这一枪真要从网线上过 `stop` 个字节。
 ///
-/// 取**较大**那一支是有意的保守方向：宁可预算宽一点，也**不许比这一枪打算读的字节还小**。旧写法
-/// 无条件用 `stop − iv.start`（打算**写**的量）正好犯了后半个错，而它不是"少给一点时间"那种小事：
-/// 前缀之内的每一次掐断都是**零落盘** ⇒ `written(iv, cursor) == 0` ⇒ 走 `read_err` 那一支的
-/// `(0, true) ⇒ Outcome::Stalled`（不是 `Advanced`）⇒ 引擎的 `run_delivered` 不涨 ⇒ 下一枪的
-/// `rate` 还是同一个读数 ⇒ 预算不变 ⇒ 只要 `iv.start / rate` 罩在预算之外就**永远零进度**，
-/// 最后 `ok = false`。可达形状就是上面那张表里 `degraded-tail-toeof` 那一格。
+/// 取**较大**那一支是一个**有前提的**保守方向：**只在形状与对端真实行为一致时**，它才保证
+/// "预算不许比这一枪打算读的字节还小"。前提是两边同一次答话：形状在**上网之前**按
+/// `ProbeFacts.accept_ranges` 选，而真要跳过多少前缀是**响应到手之后**由 `run_window` 里的
+/// `degraded`（`status == 200`）决定的 —— 两者可以不一致。给 `Windowed` 却撞上 `200` 时分子是
+/// `stop − iv.start`、线上真要过的却是 `stop` ⇒ 预算**窄**了 `iv.start / rate` 那么多秒。
+/// 这不是纸面担忧，本仓库今天就这么跑测试：`tests/integration.rs` 的
+/// `a_degraded_200_body_is_skipped_not_written_at_the_wrong_offset` 与
+/// `a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body` 两条都把 `BodyShape::Windowed`
+/// 交给一个答 `200` 的对端（那两条给的速率读数足够大，前缀在预算内跳得完 ⇒ 结论仍是 `Complete`，
+/// 所以今天不红）。反方向（给 `ToEof` 而对端真认 `Range`）只会把预算算**宽**，不咬人。
+/// 这一支**没有**改成"分子取形状无关的上界 `stop`"：那会把 `Windowed` 那一支"卡住的连接最多占一个
+/// 窗口预算"这条已批准的 R1 性质拆掉 ⇒ 属于设计变更，**登记给控制员裁定**，不在本发权限内。
+///
+/// 旧写法无条件用 `stop − iv.start`（打算**写**的量）犯的正是后半个错，而它不是"少给一点时间"那种
+/// 小事：前缀之内的每一次掐断都是**零落盘** ⇒ `written(iv, cursor) == 0` ⇒ 走 `read_err` 那一支的
+/// `(0, true) ⇒ Outcome::Stalled`（不是 `Advanced`）。**链条到 `Stalled` 就断了** —— 修复轮 8F-4a
+/// 复量后把下面这半截改写（原先写的是"`run_delivered` 不涨 ⇒ 下一枪的 `rate` 还是同一个读数 ⇒
+/// 预算不变 ⇒ 永远零进度"，那句是**假的**）：`rate` 出自 `engine::running_rate_bytes_per_sec`，
+/// 在 `engine::dispatch` 里按**累计交付 ÷ 累计墙钟**算 —— 零进度时分子不涨而**分母一直在涨** ⇒
+/// `rate` 逐枪**下降** ⇒ `budget_for(planned_bytes, rate)` 的式子值**变大** ⇒ 预算逐枪**变宽**，
+/// 一路宽到 `WINDOW_MAX_TIMEOUT_SECS` 为止。恒 120 s 只发生在 `run_delivered == 0` 那一支
+/// （`Resume` 不写预读 ⇒ 本任务第一枪之前）：那里 `rate == 0`，`budget_for` 直接取上界。
+/// 于是"永远零进度"的诚实条件是**前缀所需的墙钟超过 120 s 这个上界**（`iv.start / 线上速率 >
+/// WINDOW_MAX_TIMEOUT_SECS`），而不是"预算不变"。
+/// 旧分子真正的错与那个上界无关，是更硬的一条：旧式子给的是 `2 × (stop − iv.start) / rate` 秒，
+/// 而这一枪要过 `stop` 个字节 ⇒ **只要 `iv.start ≥ 2 × (stop − iv.start)`，任意速率下预算都罩不住
+/// 前缀**——那是那一支的**必然**结局，不是"慢到一定程度才踩到"的边角。可达形状就是上面那张表里
+/// `degraded-tail-toeof` 那一格。
+///
+/// **登记为已知残余**（`T8-R7`，本条修不掉的那一截，不是"已修"）：慢到"前缀在 120 s 上界之内也
+/// 跳不完"的对端，改分子前后每一枪照样零落盘 ⇒ 每枪 `Stalled` ⇒ 重试上限介入、`ok = false`。
+/// 那是"整请求期限 + 一个写死的上界"这个形状本身的性质（**R7** / **E16**②），要动它得先动
+/// `WINDOW_MAX_TIMEOUT_SECS` 或引入第二套机制，超出本发权限。
 fn plan_shot(iv: Interval, total_len: u64, rate_bps: u64, shape: BodyShape) -> ShotPlan {
     let stop = match shape {
         // 裁定 5 / E12⑥：区间终点与"至多 `WINDOW_BYTES` 个字节"里更近的那个。
