@@ -2369,6 +2369,13 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
 /// `excess 8,465,356` 对 15 次收紧的额度 `15 × 6 × 64 KiB = 5,898,240`。⚠ 这两个数出自**两次运行**
 /// （excess 取自 E14 附记的复量表，收紧次数 15 取自阶段4 那次取证的 trace），同一形状、时序会漂 ⇒
 /// 这里只是量级对照，不是一次判决。
+///
+/// **本轮（修复轮 8F-1）复量的一次读数**（评审 C-I-2② 要求"要么删数、要么亲测再写"）：
+/// 口径 `Σ conn_close_side.sent`，形状 8 MiB × 4 worker、`/sz/8388608s` 节拍对端 ⇒
+/// `written = 11,673,632` ⇒ `excess = 3,285,024`，**同一轮** `Report.duplicated = 3,284,698`。
+/// ⚠ 这是**会随时序漂的一次读数，不是判据**：本用例对 `duplicated` 只断 `> 0` 与那条一侧界，
+/// 没有任何断言在这个量级上钉它（原先那句"实测 3.1-3.5 MB"当时无出处，现在这句有：
+/// 8F-1 的变异 M5 那一发的红消息）。
 #[test]
 fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> anyhow::Result<()> {
     const CHUNK: u64 = 64 * 1024;
