@@ -1415,11 +1415,58 @@ Task 9 的简报（`:851-890`）是**写代码之前**拟的，下面这些已�
 
 ⑨ **两条打印纪律**：`Report::trace` 是**每事件一条、无上限**的调试载体 ⇒ CLI **不许**往 stdout 打它（`--quiet` 之外也不许）；最终落点没有 `Report` 字段，CLI 打 `task.target_path()` 即可——`Store` 不改名（`store.rs` 的 `final_path` 用例写明"Task 8/9 按它报最终文件"），两者同值是构造上的事实。另：`--sha256` 的**形状校验（64 位十六进制）归 CLI**，引擎侧 `hash_matches` 只做大小写不敏感等值、给错长度只会得到"不符"而不是"参数写错了"。
 
-**留给 T9 之后那一发测试轮的Named欠账**（8F-5 的 F2 申报，控制员裁定登记而不造假夹具）：
+**留给 T9 之后那一发测试轮的具名欠账**（8F-5 的 F2 申报，控制员裁定登记而不造假夹具）：
 `ok == true` + `message == Some(..)` 这一格**今天没有用例**——造它需要断点文件先被成功写出、随后 `fs::remove_file`
 以一个非 `NotFound` 的错误失败，现成形状只有"另一个句柄占着该文件"这类 **Windows 共享冲突竞态**，没有确定形状可铺。
 ⇒ 要补的话得先给 `Engine` 开一个可注入的"删除失败"接缝（那是设计变更，不是测试技巧）。在此之前，
 这一格只在 `Report::message` 的文档里如实标注，**不许拿恒真夹具凑数**（本项目已四次把这种夹具当证据）。
+
+## E21：用户裁定（2026-10-17，"按推荐"）⇒ **E20① 走甲**，附 `RunSnapshot` 的契约与 T9 的切法
+
+**裁定一览（编号沿用上一条消息里摊给用户的那八项）**
+
+| # | 裁定 | 落点 |
+|---|---|---|
+| ① | **甲**：给引擎加运行态只读快照 + 回调出口 ⇒ E20① 关闭，T9 解锁 | 本节下半部＝派 9A 的判据 |
+| ② | `T8-R5` 残余 **1.25×–1.74×** 重复流量：**v1 不动**，登记为已知残余，T10 实测后再判 | `state.rs` 的 `bytes_duplicated` 文档已写明，不重复登记 |
+| ③ | `T8-R6` 收紧过程无观测量：**接受**，不为它开 `fetch` 每块上报 | 与本节"`--data-file` 那一支 0 次 tick"是同一条理由 |
+| ④ | `T8-R7` 整请求 120 s 上界：**接受**（那是 spec R7 的形状） | 已写成已知残余，不动 |
+| ⑤ | **`ctrlc` 不加**（依赖锁死 6 个 crate）⇒ spec §6.6 的"非零码退出"照旧留白 | STATUS 待裁清单划掉 |
+| ⑥ | **未答**：idm-recon 那台 probe-server 的同源缺陷（不 `res.end()`、`/flaky` 从不断线）。这一项我没给推荐，"按推荐"不覆盖它 ⇒ **挂着，不动那边仓库** | 留给最终评审那一次 |
+| ⑦ | T10 **不跑 `IDMan.exe` 并排对照**（默认不做） | 派 T10 时照此 |
+| ⑧ | `git push` **等全分支最终评审之后**，且要单独点头 | 分支仍是本地 |
+
+**甲的契约（9A 的验收判据；每条都可单独判红）**
+
+```rust
+// src/engine.rs —— 新增，不动任何其他形状
+pub struct RunSnapshot {           // Copy、八格，渲染 spec §5 那一行 + §6.2 的 slow-retry 所需的最小闭包
+    pub total_len: u64,            // 全长（`ProbeFacts::total_len`，多 worker 那一支恒已知）
+    pub covered_bytes: u64,        // 已确认进覆盖集的字节
+    pub run_delivered: u64,        // **本次运行**交出去落盘的字节
+    pub run_bytes_duplicated: u64, // **本次运行**的 dup 增量（与上一格同拍取，`dup %` 的分子）
+    pub instant_bytes_per_sec: u64,// **本次运行**这一拍的瞬时速率
+    pub active_workers: usize,     // 这一拍 `WorkerState::Busy` 的条数（真在途）
+    pub workers_total: usize,      // `cfg.workers`
+    pub slow_retry_rounds: u32,    // 0 ⇒ 还没进慢重试；≥1 ⇒ 已排下第 N 次 30 s 慢重试
+}
+pub type OnTick = Arc<dyn Fn(&RunSnapshot) + Send + Sync>;
+// Config 增一字段 pub on_tick: Option<OnTick>，Default = None。
+```
+
+1. **`covered_bytes = total_len.saturating_sub(sched.pending_bytes())`**。**不给 `scheduler` 加新 API**：`pending_bytes()` 的定义已经是"没进覆盖集的字节"，而 `scheduler.rs:1136` 那条等式 `pending_bytes() == total - covered`（`git blame` 实测＝`4a105e4`，8F-1）已经把它钉住了。寿命：**含上一轮续传来的字节**（文件级百分比本来就该按整文件算）。
+2. ⚠ **`total_len` 不是 `Option`，而且不许拿 0 当"未知"哨兵**（可达性复量过的两条）：`probe` 那侧**拒绝**"206 说不出可用总长"（spec §2 注 11 / `probe.rs` 那条），所以多 worker 那一支的全长恒已知；`total_len == 0` 是**真的空文件**（`bytes */0` 那一格有用例）⇒ `report` 侧唯一的义务是**不许除零、不许印 `NaN%`**，这一格是活分支，写法要照它来。
+3. `run_delivered` 直接用引擎已有的那个量（`Engine::run_delivered`）；`run_bytes_duplicated = stats.bytes_duplicated.saturating_sub(plan.stats.bytes_duplicated)`，起点＝`plan_from_decision` 交回的那份跨轮账。⇒ **这一对必须同一拍取**（分子分母不同源就是假数）。⚠ 它的寿命与 `Report::retries`/`Report::duplicated`（E20⑧ 的跨轮账）**故意不同**，两处不许互相"对齐"，文档各自写清。
+4. `instant_bytes_per_sec = (run_delivered − 上一拍的 run_delivered) × 1_000_000 / 这一拍与上一拍的间隔微秒`，间隔下限 1 ms。⚠ **不许**把 `running_rate_bytes_per_sec(run_delivered, started.elapsed())` 交出去当显示速率——那是**全程平均**（慢启动段会把它算低，E20① 点名的坑）。那一支服务的是 `fetch::window_budget` 的分子，**两个数不许共用**。
+5. `active_workers` 数的是 `WorkerState::Busy`。⚠ **不是** `Engine::any_in_flight()`（那个把 `Backoff` 也算进去，用途是"还有没有活没干完"，判据不同）。慢重试期间 `active_workers` 会是 0 而 `slow_retry_rounds ≥ 1` ⇒ 这一对组合是诚实的，**不许为好看把 Backoff 算进 active**。
+6. `slow_retry_rounds = workers.map(|w| w.attempt.saturating_sub(FAST_RETRY_MAX)).max()`。`WorkerCtl::attempt` 的语义是"这条失败链已经排下来几次重试、一次成功就归零"。⇒ 写文档时必须说明**取的是跨 worker 最大值**，既不是"全场总轮数"也不是"每条链各几轮"；§6.2 只承诺一个 `slow-retry xN`，**每 worker 的 attempt 不在 v1 交付面里**（YAGNI）。
+7. **节拍：零新计时器、零新线程、零新依赖**。挂在主循环已有的那一拍上（`LOOP_POLL = 1 s`，`last_tick` 每拍更新）：**每拍至多调一次**，收尾那一拍再调一次终值。⚠ **绝不进 `translate`/事件处理那每一块的循环**（与 E8① 同族判据），也不许为它开第二个线程。
+8. **`--data-file` 那一支 0 次 tick**（`run_whole_once` 整程阻塞在一发请求里，本函数按 E8② **不开线程** ⇒ 中途没有任何引擎侧能读的量；要造一个就是 ③ 刚裁"不做"的那件事）。`on_tick` 的文档必须写明"哪些路有 tick、哪些没有"，CLI 不许把它当必然存在的进度源——那条路的权威只有 `Report`。
+9. `Config` 是 `Clone` ⇒ 字段必须是 `Arc`；`RunSnapshot` 是 `Copy`、按引用交 ⇒ 只有闭包需要 `Send + Sync`，**快照本身不跨线程**。回调在**引擎线程里同步执行** ⇒ 文档写明"实现者不许在回调里做长阻塞 I/O，打印一行是预期用法"。
+10. 命名：spec §2 模块表那行 `report | tick(&Snapshot)` 的 `Snapshot` 与已实现的 `state::Snapshot`（磁盘断点体）撞名 ⇒ 实现用 **`RunSnapshot`**、`report::tick(&RunSnapshot)`。这是命名落地选择，不改 spec 的承诺形状。
+
+**9A 的验收下限**：`Config::default().on_tick == None` ⇒ **三闸一字不变（166 lib / 76 integration / clippy `-D warnings` 退出码 0）**，**既有断言一条都不许改**（撞闸就改入参，不改判据方向——本项目的老规矩）。新用例至少三格：(a) `None` 时一次都不调（用 `Arc<AtomicUsize>` 计数，不许拿打印当证据）；(b) 有 sink 时调用次数 ≥ 1 且 ≤ `运行秒数上取整 + 2`（节拍上界，防"每块都打"）；(c) 速率那一格在两拍之间交 X 字节、间隔 Y ms 时等于 `X×1e6/Y` 的整数商，**并且不等于全程平均**（这一格就是坑 4 的活体针：拿 `run_delivered/started.elapsed()` 当期望值它就红）。
+**切法**：9A＝引擎面一条（上面 1–10），9B＝`cli.rs`/`report.rs`/`main.rs` 一条。**不按文件面切**（四发按文件面切的死了两发）。
 
 
 
