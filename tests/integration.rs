@@ -4051,8 +4051,8 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
     );
 
     // ② 同一条闸的第二格：`--connections 0`。⚠ 立论按 **E23 附记①** 的更正版走，不抄 E23⑤ 原句：
-    //    引擎侧**有** `workers >= 1` 那道 `ensure!`（`src/engine.rs:580`，在 `build_client` 与
-    //    `ensure_parent_dir` 之前），所以 CLI 这一格拦的**不是崩溃**，而是**档与措辞** ——
+    //    引擎侧**有** `workers >= 1` 那道 `ensure!`（`engine::run` 开头那几行，在 `build_client` 与
+    //    `ensure_parent_dir` 之前 ⇒ 按符号名指，不写行号：本项目"注释抄现状"已经漂过多次），所以 CLI 这一格拦的**不是崩溃**，而是**档与措辞** ——
     //    "话没说对"（2 + "参数写错了"）不该被报成"跑不起来"（1 + 引擎那句）。
     let conns = run_dlm(&[
         "--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--connections", "0",

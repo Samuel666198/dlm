@@ -2,7 +2,8 @@
 //!
 //! 这一层**没有任何算法**：渲染全部在 [`dlm::report`]（纯函数），下载全部在 [`dlm::engine::run`]。
 //! 它唯一的实质工作是"**什么时候不上网**"与"**退出码从哪儿来**"，所以四条落点按勘误编号写在这里，
-//! 每一条都能在 `tests/integration.rs` 那三发起真二进制的用例里找到归宿：
+//! 每一条都能在 `tests/integration.rs` 里那些起真二进制的用例里找到归宿（**数条数没写**：这一族
+//! 注释只要带上"几发"就必然漂，本轮已经漂过一次 ⇒ 只写去处，不写数量）：
 //!
 //! - **E24②**（`--help` / `--version` ⇒ 0）：`cli::parse_from` 把 `clap::Error` 折进
 //!   `anyhow::Error` 时**没丢类型** ⇒ 这里 `downcast_ref::<clap::Error>()` 拿回来再 `exit()`，
@@ -31,7 +32,10 @@ use dlm::task::Task;
 const DOWNLOAD_FAILED: u8 = 1;
 /// 参数层的码。**取 2 是为了与 clap 那一支同值**（实测：`clap::Error::exit_code()` 给用法错误 2）：
 /// 脚本读到的"话没说对"只有一种码，不分"clap 发现的"与"我们发现的"。
-/// 这一格由本文件决定、不由用例钉（`--sha256 xyz` 那一发没有走真二进制的用例 ⇒ 已登记为关切）。
+/// 这一格**两边都有判据**：进程级由 `tests/integration.rs` 的
+/// `the_binary_holds_a_malformed_argument_at_the_parameter_tier` 钉（真二进制跑 `--sha256 xyz`
+/// 与 `--connections 0`，实测变异"把参数层交回 1"会红在那里），本文件的
+/// `the_error_layer_does_not_reuse_the_download_tiers` 钉"2 撞不撞下载档"。
 const BAD_ARGS: u8 = 2;
 
 fn main() -> ExitCode {
