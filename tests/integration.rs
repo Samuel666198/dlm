@@ -4384,3 +4384,643 @@ fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() 
     let _ = std::fs::remove_file(&body);
     Ok(())
 }
+
+// ================================================================ T10 / spec §7 场景 A：48 MiB 全速
+//
+// 派发简报写的是"`full_download_is_byte_exact` 已经把 48 MiB 走完 `engine::run`（`workers: 4`）"——
+// **实测不是**：那一发用的是 `{base}/sz/8388608`，也就是 **8 MiB**（同一发里 `len` 就写在第一行）。
+// spec §7 判据① 点名的尺寸是 48 MiB，而"48 MiB + 全速 + 分段"这一格今天**没有常驻用例**
+// （`the_replayed_trace_matches_the_dispatched_shots_and_the_wire` 同样是 8 MiB；
+// `the_data_file_route_…` 那一发虽然是 48 MiB 全速，走的是带体整份单发、`workers` 不起作用）。
+// ⇒ 本发补上，用的正是计划 Task 10 Step 1 给的那个名字。它不复用场景 B 的判据：B 量的是**限速下的
+// 劈分时序**，这一发量的是**全速下 48 MiB 的字节正确 + 线上形状**，两条各自有独立的红法。
+
+/// **spec §7 场景 A / 判据①（+② 的线上形状那一半）**：48 MiB 全速跑到底，落盘字节级正确，
+/// 线上枪数与派单一对一，并发真的不止一条连接，且**没有任何一枪要超过一个窗口**。
+#[test]
+fn scenario_a_fullspeed_48mib_is_byte_exact() -> anyhow::Result<()> {
+    const WORKERS: usize = 8;
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("scen-a")?;
+    let len = 48 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/blob"),
+        dir: dir.path().to_path_buf(),
+        name: Some("scen-a.bin".to_string()),
+        ..harness::blank_task()
+    };
+
+    let started = Instant::now();
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: WORKERS,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+            on_tick: None,
+        },
+    )?;
+    let wall = started.elapsed();
+    assert!(rep.ok, "全速 48 MiB 该跑完：{:?}", rep.message);
+
+    // —— 判据①：字节级正确。两边各算一遍：引擎里那道 `--sha256` 闸（`rep.ok` 已含）+ 独立读者 ——
+    assert_eq!(rep.bytes_total, len, "服务器宣布的全长");
+    assert_eq!(rep.delivered, len, "收尾时盘上真有的字节");
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len),
+        "落盘那 48 MiB 必须与服务器那份一字不差"
+    );
+
+    // —— 判据②的线上形状：条数一对一、试探是第一条、多连接真的上了线、每一枪不超一个窗口 ——
+    let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
+    let expected_lines = rep.dispatched().len() + 1;
+    srv.requests_at_least(expected_lines)?;
+    let requests = srv.requests_quiet(Duration::from_millis(300))?;
+    assert_eq!(
+        requests.len(),
+        expected_lines,
+        "线上 {} 条请求与引擎报的 {} 枪 + 试探那一枪不是一对一（T8-R2 的同一判据）",
+        requests.len(),
+        rep.dispatched().len()
+    );
+    let ranges = harness::ranges_of(&requests);
+    assert_eq!(
+        ranges[0].as_deref(),
+        Some(probe_range.as_str()),
+        "线上第一条必须是试探那一枪（{probe_range}）：实际 {ranges:?}"
+    );
+    let spans = harness::wire_spans(&ranges[1..], len)?;
+    let mut conns: Vec<u64> = vec![];
+    for rec in &requests[1..] {
+        let c = rec["conn"].as_u64().context("request 行缺 conn")?;
+        if !conns.contains(&c) {
+            conns.push(c);
+        }
+    }
+    assert!(
+        conns.len() >= 2,
+        "8 条 worker 的一跑只在线上留下 {} 条连接 ⇒ 这发的形状退化成单连接了，判据②要审的\
+         「多连接的 Range 序列」没人审（派单 {:?}）",
+        conns.len(),
+        rep.dispatched()
+    );
+    for (index, (s, e)) in spans.iter().enumerate() {
+        assert!(
+            e.saturating_sub(*s) < WINDOW_BYTES,
+            "线上第 {index} 枪要的 [{s}, {e}] 长 {} B，超过一个窗口 {WINDOW_BYTES} B ⇒ \
+             `fetch::range_header` 那道窗口帽断了（E14②：开放终点的条件是**窗口**够到文件尾，不是区间）",
+            e - s + 1
+        );
+    }
+
+    eprintln!(
+        "SCENA 取证：用时 {wall:?}、全长 {len} B、Range 枪 {}、连接 {}、派单 {} 条、引擎报 dup {} B",
+        spans.len(),
+        conns.len(),
+        rep.dispatched().len(),
+        rep.duplicated
+    );
+    Ok(())
+}
+
+// ================================================================ T10 / spec §7 场景 B：限速对端
+//
+// 派发简报 **E28⑤**：`/slow` 全尺寸（48 MiB）控制员实测 ≈24 s（`用时 23967 ms`、退 0、落盘
+// 50331648 B）。**不许缩尺寸** —— 限速这一档买到的东西是"劈分发生在传输还在飞的那段时间里"这个
+// **时序**；把 body 缩到 1 MiB 就只剩劈分粒度（且碰不到 `MIN_SEGMENT_BYTES` 那条下限），判据会量错方向。
+// 限速按**响应（≈按连接）**计（`tests/harness/probe-server.mjs`：`resume = () => slow ? setTimeout(push, 200)`），
+// 每块 64 KiB ⇒ 单条连接 ≈320 KiB/s，8 条 worker 并发的聚合 ≈ `N × 320 KiB/s`。
+// 本文件此前**没有**任何用例走过 `/slow`（`grep slow` 只命中渲染层那几格 `slow-retry` 标签），
+// 所以这一发是 spec §7 场景 B 的第一次真实覆盖。
+
+/// 从 `trace` 按 worker 跟住"这个 worker 手上现在是哪一条区间"，交回每一次劈分的 `(父区间, 收紧后的头)`。
+///
+/// 为什么不能只看 `Report::tightened()`：那道链接只交回收紧后的**头**，而"劈分点落在父区间的哪一侧"
+/// 要的恰恰是劈分**当时**那条在途区间 —— 同一个起点会被连劈多次（1/2 → 1/4 → 1/8 正是这条链），
+/// 拿"最终的父"去配"第一次的头"会把祖先链算成同一层。`trace` 的两种步骤都带 worker 序号 ⇒
+/// 按序号跟住当前区间就够，**不需要另写一个预测器**（spec §7.2 明令禁的那个）。
+fn split_records(rep: &dlm::engine::Report) -> Vec<(Interval, Interval)> {
+    let mut current: Vec<Option<Interval>> = vec![];
+    let mut out: Vec<(Interval, Interval)> = vec![];
+    for step in &rep.trace {
+        let (worker, iv, is_tighten) = match step {
+            dlm::engine::TraceStep::Dispatched { worker, iv } => (*worker, *iv, false),
+            dlm::engine::TraceStep::Tightened { worker, iv } => (*worker, *iv, true),
+            _ => continue,
+        };
+        if current.len() <= worker {
+            current.resize(worker + 1, None);
+        }
+        if is_tighten {
+            // 调度器的 `split_tail` 只从 `longest_tail()`（= 某个 `active` 槽的尾巴）劈，
+            // 而槽位为空时那条分支根本走不到 ⇒ 这里拿到 `None` 就是实现变了形状，如实崩给读者看。
+            let parent = current[worker]
+                .expect("调度器收紧了一条手上没有区间的 worker —— 本夹具的跟随逻辑跟不住，去看实现");
+            out.push((parent, iv));
+        }
+        current[worker] = Some(iv);
+    }
+    out
+}
+
+/// **spec §7 场景 B / 判据①②**：48 MiB 走限速对端，断"真的劈了、劈点在线上看得见、下限从没被踩"。
+///
+/// 每条判据独立一条语句，红在哪一条就说明是哪一环断了：
+/// - **字节级正确（判据①）**：与 `full_download_is_byte_exact` 用**同一个** oracle
+///   （`harness::expected_sha`，那条 oracle 已由 `the_sha_oracle_matches_what_the_server_serves`
+///   对真 socket 证过）。这一条只说"跑得完且下对了"，**它单独存在时本场景是空的**。
+/// - **劈分真的发生（判据②的正面）**：`trace` 里有 `Tightened`。调度器的 `Retighten` 只可能来自
+///   `split_tail`，而 `split_tail` 只劈**在途**那条区间的尾巴 ⇒ "一次都没劈"与"劈了但不是中点劈"
+///   是两种不同的红。
+/// - **劈点出现在线上（判据②的线上那一半，E13③ 的口径）**：内部账说"我把这条区间从 `mid` 劈开了"
+///   不算数，必须有一条服务端亲手记下的 `Range` **就从 `mid` 开始**。
+/// - **中点算术**：劈的是"剩余尾巴 `[written+1, end]`"的中点，所以劈点只可能落在**整条父区间中点
+///   或其右侧**（写得越多越往右移），且上半截**绝不超过父区间的一半**。这两条把"1/2 → 1/4 → 1/8 逐层
+///   对中点"这条规则钉成数字：把 `split_tail` 改成 1/3 劈会当场红（左移），改成"把整条尾巴给新人"
+///   会红在"上半截超过一半"。
+/// - **下限（`MIN_SEGMENT_BYTES`）**：每一条被**开出**过的区间都不短于下限。
+/// - **时序（限速这一档独有的那一半）**：存在一次劈分，它的劈点请求到达服务端时**父区间那一枪还在飞**
+///   （按连接的响应序配对 `response_done`），且到达时刻已在传输开始 2 s 之后 —— 后一句是必要的：
+///   8 条 worker 在 t≈0 一起报就绪，那一批劈分**全速对上同样会有**，只有"传输进行中还在劈"才是
+///   `/slow` 买到的东西。**顺序判据只取"被劈的那条区间上过线"这一半，不取"父那一枪先到"**：
+///   `Dispatched`/`Tightened` 记进账的时刻是**派单**时刻，请求上线要再过一次引擎→worker 的投递，
+///   实测 RED #1 正是撞在这一句上（"劈点 37807744 之前线上没有任何一条从 25283840 开始的 Range"）
+///   ⇒ 那条顺序义务是**我写错的**，不是实现的缺陷。
+///
+/// ⚠ 运行时长按派发简报如实记录在 `docs/evidence/`：这一发实测要跑几十秒，**不是**慢用例缺陷。
+#[test]
+fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::Result<()> {
+    const WORKERS: usize = 8;
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("scen-b")?;
+    let len = 48 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/slow"),
+        dir: dir.path().to_path_buf(),
+        name: Some("scen-b.bin".to_string()),
+        ..harness::blank_task()
+    };
+
+    let started = Instant::now();
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: WORKERS,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+            // 集成用例一律不挂观察者（与全文件同一口径，9A/E21）。
+            on_tick: None,
+        },
+    )?;
+    let wall = started.elapsed();
+    assert!(rep.ok, "限速那一跑该跑完（`verify_sha256` 那道闸也在引擎里跑过了）：{:?}", rep.message);
+
+    // —— 判据①：字节级正确（同一个 oracle，独立读者）——
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len),
+        "限速跑完的 48 MiB 必须与服务器那份一字不差"
+    );
+    assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
+
+    // —— 线上取证：**先守卫条数再读**（评审 C-I-4 的成对用法，与本文件另两处同形）——
+    let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
+    let expected_lines = rep.dispatched().len() + 1;
+    srv.requests_at_least(expected_lines)?;
+    let requests = srv.requests_quiet(Duration::from_millis(300))?;
+    assert_eq!(
+        requests.len(),
+        expected_lines,
+        "线上条数与引擎报的枪数不是一对一（T8-R2 的同一判据）：静置窗口结束时 {} 条，\
+         引擎报 {} 枪 + 试探那一枪",
+        requests.len(),
+        rep.dispatched().len()
+    );
+    let ranges = harness::ranges_of(&requests);
+    assert_eq!(
+        ranges[0].as_deref(),
+        Some(probe_range.as_str()),
+        "要从线上剔掉的必须是试探那一枪（{probe_range}）而且它是第一条：实际 {ranges:?}"
+    );
+    let shots = &requests[1..];
+    let spans = harness::wire_spans(&ranges[1..], len)?;
+    let mut conns: Vec<u64> = vec![];
+    for rec in shots {
+        let c = rec["conn"].as_u64().context("服务端记的 request 没有 conn 字段")?;
+        if !conns.contains(&c) {
+            conns.push(c);
+        }
+    }
+
+    // —— 判据②正面：劈分真的发生了（这一条空着，下面三条全是空的）——
+    let splits = split_records(&rep);
+    assert!(
+        !splits.is_empty(),
+        "48 MiB 走限速对端一整跑，调度器一次都没劈分 ⇒ 本场景什么都没买到。\
+         派单 {:?}，用时 {wall:?}",
+        rep.dispatched()
+    );
+
+    // `response_done` 按连接分组（组内按日志顺序 = 该连接上的响应顺序；node 对同一条连接的响应
+    // 是串行写出的，所以"第 k 条响应"配"第 k 条请求"是成立的）。
+    let evs = srv.events()?;
+
+    // 这条连接上第 `nth`（从 1 数）条响应结束的时刻；`None` = 那一枪到现在还没写完（= 还在飞）。
+    let response_done_ms = |conn: u64, nth: usize| -> Option<u64> {
+        evs.iter()
+            .filter(|e| e["ev"] == "response_done" && e["conn"].as_u64() == Some(conn))
+            .nth(nth - 1)
+            .and_then(|e| e["t"].as_u64())
+    };
+
+    let mut late_in_flight_splits = 0usize;
+    let mut in_flight_splits = 0usize;
+    let mut floor_hits: Vec<Interval> = vec![];
+    let mut split_times: Vec<u64> = vec![];
+    let mut parent_onlined = 0usize;
+    for (index, (parent, head)) in splits.iter().enumerate() {
+        assert_eq!(
+            head.start, parent.start,
+            "第 {index} 次劈分把头段的起点挪了：父 {parent:?} 头 {head:?}（中点劈分只能动终点）"
+        );
+        assert!(
+            head.end < parent.end,
+            "第 {index} 次劈分得到的头段不比父区间短：父 {parent:?} 头 {head:?}"
+        );
+        let mid = head.end + 1; // 上半截的起点就是劈分点
+        assert!(
+            mid >= parent.start + parent.len() / 2,
+            "第 {index} 次劈分点 {mid} 落在父区间中点以左（父 {parent:?}，中点 {}",
+            parent.start + parent.len() / 2
+        );
+        let upper = rep
+            .dispatched()
+            .into_iter()
+            .find(|iv| iv.start == mid && iv.end == parent.end)
+            .with_context(|| format!("第 {index} 次劈分后没有把上半截 [{mid}, {}] 派给任何 worker", parent.end))?;
+        assert!(
+            upper.len() <= parent.len() / 2 + 1,
+            "第 {index} 次劈分把超过一半的体量交给了新 worker：父 {parent:?} 上半截 {upper:?}"
+        );
+
+        // —— 判据②线上那一半：劈点必须真的以 `Range` 的样子出现过 ——
+        let split_shot = spans
+            .iter()
+            .position(|(s, _)| *s == mid)
+            .with_context(|| format!("劈分点 {mid} 只活在调度器的账里：线上没有任何一条 Range 从它开始（父 {parent:?}）"))?;
+        // 被劈的那条区间也得真的上过线。**但不许要求"父那一枪先到、劈点那一枪后到"**：
+        // `Tightened`/`Dispatched` 记进账的时刻是**派单**时刻，而请求要等 worker 线程真发出去才上线
+        // （引擎与 worker 之间隔着一次投递）。一条刚派出去、请求还没上线的区间照样会被下一发
+        // `Connected` 劈一刀 —— 这一发第一次就是这么红的（实测：劈点 37807744 之前线上没有
+        // 任何一条从 25283840 开始的 Range）。所以顺序判据只取"上过线"这一半，
+        // "在飞"那一半走下面的响应收尾配对，且只对**确实已上线**的父区间主张。
+        assert!(
+            spans.iter().any(|(s, _)| *s == parent.start),
+            "被劈的那条区间的起点 {} 从没以 Range 起点的样子上过线（父 {parent:?}）",
+            parent.start
+        );
+        let split_ms = shots[split_shot]["t"].as_u64().context("request 行缺 t")?;
+        split_times.push(split_ms);
+        let parent_shot = spans[..split_shot].iter().rposition(|(s, _)| *s == parent.start);
+        if parent_shot.is_some() {
+            parent_onlined += 1;
+        }
+        if let Some(ps) = parent_shot {
+            let rec = &shots[ps];
+            let conn = rec["conn"].as_u64().context("服务端记的 request 没有 conn 字段")?;
+            let nth = usize::try_from(rec["reqNoOnConn"].as_u64().context("request 行缺 reqNoOnConn")?)
+                .context("reqNoOnConn 超出 usize")?;
+            // 父那一枪到劈点请求到达时**还没写完** ⇒ 这一刀砍在飞行中的响应上。
+            let still_flying = match response_done_ms(conn, nth) {
+                Some(done) => done > split_ms,
+                None => true, // 到现在都没收尾：那一枪被中途放弃，劈分当然发生在它飞着的时候
+            };
+            if still_flying {
+                in_flight_splits += 1;
+                if split_ms >= 2_000 {
+                    late_in_flight_splits += 1;
+                }
+            }
+        }
+
+        if upper.len() < dlm::consts::MIN_SEGMENT_BYTES || head.len() < dlm::consts::MIN_SEGMENT_BYTES {
+            floor_hits.push(upper);
+            floor_hits.push(*head);
+        }
+    }
+    // —— 下限：任何一条被开出的区间都不许短于 `MIN_SEGMENT_BYTES`（放在时序判据**之前**，
+    // 这样"下限被踩"这种红不会被"这一跑没在飞"的消息盖住）——
+    let floor = dlm::consts::MIN_SEGMENT_BYTES;
+    assert!(
+        floor_hits.is_empty(),
+        "劈分出来的两半里有短于下限 {floor} B 的：{floor_hits:?} ⇒ `split_tail` 的那道 `half < min_seg` 闸断了"
+    );
+    for (index, iv) in rep.dispatched().iter().enumerate() {
+        assert!(
+            iv.len() >= floor,
+            "第 {index} 条派单 [{}, {}] 长 {} B，短于下限 {floor} B ⇒ 有人开出了一条不该开的段",
+            iv.start,
+            iv.end,
+            iv.len()
+        );
+    }
+    assert!(
+        in_flight_splits > 0,
+        "没有任何一次劈分发生在「父那一枪还在飞」的时刻 ⇒ 劈的全是没上线的区间，本场景的时序判据落空。\
+         共 {} 次劈分、{} 枪、{} 条连接、劈分到达时刻 {split_times:?}、父那一枪已上线 {parent_onlined} 发、用时 {wall:?}",
+        splits.len(),
+        spans.len(),
+        conns.len()
+    );
+    assert!(
+        late_in_flight_splits > 0,
+        "没有任何一次劈分发生在「传输已飞满 2 s 且父那一枪还没写完」的时刻 ⇒ 限速这一档买到的只剩 \
+         t≈0 那一波（全速对上同样有），本场景的时序判据落空。共 {} 次劈分、{} 枪、{} 条连接、\
+         劈分到达时刻 {split_times:?}、父那一枪已上线 {parent_onlined} 发、用时 {wall:?}",
+        splits.len(),
+        spans.len(),
+        conns.len()
+    );
+    eprintln!(
+        "SCENB 取证：用时 {wall:?}、Range 枪 {}、连接 {}、劈分 {}、劈分到达最早 {} ms / 最晚 {} ms、\
+         父在飞时劈的 {in_flight_splits} 发（其中 2 s 之后 {late_in_flight_splits} 发）、引擎报 dup {} B",
+        spans.len(),
+        conns.len(),
+        splits.len(),
+        split_times.iter().min().copied().unwrap_or(0),
+        split_times.iter().max().copied().unwrap_or(0),
+        rep.duplicated
+    );
+    Ok(())
+}
+
+// ================================================================ T10 / spec §7 场景 C′：多 worker 真杀进程再续
+//
+// **这一发为什么要另起一发**：spec §6.6（Ctrl-C 优雅收尾）由 **R11** 裁为不做，承诺改成
+// "任意时刻被杀都能续"。既有那一发 `resume_after_kill_does_not_redownload_done_segments` 已经把那个
+// 形状钉在**进程内、单 worker、`ScriptedPeer`** 上；而 `tests/harness/mod.rs` 里 `ScriptedPeer` 的文档
+// 同时写明它是**单线程顺序服务**（只许给 `workers == 1` 或退化形状用），多 worker 一律走 node 对端 ——
+// 而 node 对端做不到"停一半之后同一 URL 还能跑完"（`/drop/0` 连试探一起掐死 ⇒ `engine::run` 在
+// `probe` 就 `Err` ⇒ 压根没有断点文件；`/drop/n` 每枪都推进 ⇒ 必然跑到完成；换端口更是直接被
+// `resume::decide` 判 `Fresh`）。⇒ **多 worker 那一发的"停"只能从对端搬到进程**：真起 `dlm.exe`，
+// 从可观测状态里挑一拍硬杀（`Child::kill()` = TerminateProcess，不给它任何收尾的机会），
+// 然后**同一 URL** 再跑一遍。这正是 R11 那句话的字面形状，也是 spec §7 判据③在 8 连接下的那一发。
+//
+// 用的对端是 `/slow`（48 MiB）而不是 `/blob`：本文件实测全速那一跑 48 MiB 只要 2.7 s，
+// "跑到一半被杀"会变成一张计时彩票；限速把窗口拉到几十秒，杀点由**可观测量**决定，不靠 `sleep`。
+
+/// 真二进制的**可中途硬杀**那一发：`run_dlm` 走 `.output()`，会阻塞到 EOF，杀不了。
+/// `stdin/stdout/stderr` 全接空设备：没人读的管道写满会把子进程吊死，那测的就不是下载而是管道。
+fn spawn_dlm(args: &[&str]) -> anyhow::Result<std::process::Child> {
+    use std::process::Stdio;
+    let bin = env!("CARGO_BIN_EXE_dlm");
+    std::process::Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("起二进制失败：{bin}"))
+}
+
+/// 覆盖集之外、`[0, total)` 之内的**第一个字节**。入参按 `start` 升序且两两不重叠
+/// （`state::load` 读回来的 `segments` 就是 `snapshot_intervals()` 落盘的形状）。
+fn first_uncovered(covered: &[(u64, u64)], total: u64) -> u64 {
+    let mut cursor = 0u64;
+    for (start, end) in covered {
+        if *start > cursor {
+            return cursor;
+        }
+        cursor = cursor.max(end.saturating_add(1));
+    }
+    cursor.min(total)
+}
+
+/// 两条闭区间交叠多少字节。
+fn overlap_bytes(a: (u64, u64), b: (u64, u64)) -> u64 {
+    let s = a.0.max(b.0);
+    let e = a.1.min(b.1);
+    if e >= s { e - s + 1 } else { 0 }
+}
+
+/// **spec §7 场景 C′ / 判据③**：8 条 worker 的真进程被硬杀在半路 ⇒ 断点文件与半截目标文件都在 ⇒
+/// 同一 URL 再跑一遍退 0、字节级正确，而且**第二轮一枪都不碰断点文件说"已归我"的字节**。
+///
+/// 判据与实底：
+/// - **覆盖集照它自己说的读**（**E28⑫** 点名的那条）：本发**不假定**粒度。断点保存那一支读成
+///   合取闸（`moved && last_save.elapsed() >= 5 s`），所以"杀得早 ⇒ 断点里只有初始那一格种子"是
+///   **合法的既有形状**，不是这条用例的失败条件；杀点因此取"断点里的覆盖字节第一次超过种子"这一拍
+///   （可观测量，不是 `sleep`），拿不到就在 12 s 那一拍杀并照实登记。**量到的数写进 `docs/evidence/`，
+///   不为了好看的数去调时间或尺寸。**
+/// - **重复字节从对端自己的账算**：`conn_close_side.sent` 是"这条响应真的写出去了几个字节"，
+///   与"我们要求了几个"分开（被中途放弃的那几枪只有前者是真的）。`dup` 取"交出去的字节里落在覆盖集内
+///   的那一截"，所以试探那一枪必然贡献 `PROBE_READ_BYTES` 个字节 —— 那正是 **E14③ / E17** 登记过的
+///   "真发生了线上代价却没被任何账报出"的那一笔，本发把它量成数而不是留在文档里。
+/// - **事件边界**：第一轮那个进程已被确认退掉，死进程发不出新请求 ⇒ 边界之后的 `request` 行
+///   只能属于第二轮。再加一道独立交叉：第二轮每条请求的 `remotePort` 必须出现在边界之后的
+///   `socket_open` 里（第二轮是新进程，连接不可能复用第一轮已随进程消失的池）。
+///   ⚠ 不能用 `socket_open.seq` 对号：那台 node 服务器在 `.on("connection")` 里把 `connSeq` **自加了两次**
+///   （一次给 `id`、一次给 `socks` 记录），于是 `socket_open.seq` 恒等于请求行 `conn` 减一 ——
+///   那是 `tests/harness/probe-server.mjs` 的既有形状（简报明令不许改它），所以这里改走 `remotePort`。
+#[test]
+fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() -> anyhow::Result<()> {
+    const WORKERS: &str = "8";
+    // 杀点等的是可观测量（覆盖集长到种子之外），不是 `sleep`。上限取 30 s 的理由写在下面那条
+    // "前提没成立就如实失败"的判据旁边：`/slow` 上一枪 = 一个 4 MiB 窗口 ≈ 13 s，而断点里的
+    // `done` **只在一枪收尾时长**（`Progress` 不往里加），再加上保存闸那 5 s ⇒ 种子之外的那一格
+    // 最早也要 ~18 s 才出现。整跑 ≈24 s，所以 30 s 既够用又不会让第二轮等不到东西。
+    const SEED_ONLY_TIMEOUT: Duration = Duration::from_secs(30);
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("scen-c")?;
+    let announced = srv.announced()?;
+    let len = announced.size; // 由**这台服务器自己宣布**（派发第 7 条：不抄历史值）
+    let url = format!("{base}/slow");
+    let out_dir = dir.path().display().to_string();
+    let out_name = "scen-c.bin";
+    let target = dir.path().join(out_name);
+    let state_path = dlm::state::path_for(&target);
+    let args =
+        ["--url", &url, "--out-dir", &out_dir, "--out-name", out_name, "--connections", WORKERS, "--quiet"];
+
+    // —— 第一轮：真进程，杀点从可观测量里取（固定 `sleep` 会把这一发变成计时彩票）——
+    let started = Instant::now();
+    let mut child = spawn_dlm(&args)?;
+    let mut covered_at_kill: Vec<(u64, u64)> = vec![];
+    let mut first_save: Option<Duration> = None;
+    loop {
+        if let Some(snap) = dlm::state::load(&state_path)? {
+            let covered: Vec<(u64, u64)> = snap.segments.iter().map(|s| (s.start, s.end)).collect();
+            let bytes: u64 = covered.iter().map(|(s, e)| e - s + 1).sum();
+            if bytes > PROBE_READ_BYTES && first_save.is_none() {
+                first_save = Some(started.elapsed());
+            }
+            covered_at_kill = covered;
+            if first_save.is_some() {
+                break;
+            }
+        }
+        if child.try_wait()?.is_some() {
+            // 只有"已经跑到头"才允许在这里出环：跑完会删断点 ⇒ 下面那句 `state_path.exists()` 会红，
+            // 红得有名有姓（这一发买的是"中途被杀"，提前结束就是没买到）。
+            break;
+        }
+        if started.elapsed() >= SEED_ONLY_TIMEOUT {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let kill_reason = if first_save.is_some() {
+        "覆盖集长到种子上方那一拍"
+    } else {
+        "12 s 上限（断点没长出种子之外，E28⑫ 那一格）"
+    };
+    child.kill().context("硬杀子进程失败")?;
+    child.wait().context("等子进程退掉失败")?;
+    let killed_after = started.elapsed();
+
+    // —— 杀完之后盘上必须留下那两样东西（R11 的字面承诺）——
+    assert!(
+        state_path.exists(),
+        "硬杀之后没有断点文件 ⇒「任意时刻被杀都能续」根本不成立（杀于 {killed_after:?}，{kill_reason}）"
+    );
+    assert!(target.exists(), "硬杀之后目标文件不在 ⇒ 连半截文件都没留下");
+    let partial_len = std::fs::metadata(&target)?.len();
+    assert!(partial_len > 0, "半截目标文件长度是 0 ⇒ 这一拍什么都没落盘");
+
+    let snap = dlm::state::load(&state_path)?.context("上面已断言断点文件在，读回来却什么都没有")?;
+    assert_eq!(snap.validator.total_len, len, "断点记的全长要与这台服务器宣布的一致");
+    let covered = covered_at_kill;
+    let covered_bytes: u64 = covered.iter().map(|(s, e)| e - s + 1).sum();
+    assert!(
+        covered_bytes <= partial_len,
+        "断点说归我的字节（{covered_bytes} B）比盘上真有的（{partial_len} B）还多 ⇒ 断点对磁盘说谎（E17 那本账）"
+    );
+    let first_gap = first_uncovered(&covered, len);
+    assert!(first_gap < len, "覆盖集已经把整份文件说成归我了，第二轮无从续起：{covered:?}");
+
+    // —— 第二轮：同一条 URL、同一个命令，这次等它跑完 ——
+    std::thread::sleep(Duration::from_millis(500)); // 让第一轮那些"客户端已经没了"的连接把收尾行写完
+    let before = srv.events()?;
+    let boundary = before.len();
+    let run1_requests = before.iter().filter(|e| e["ev"] == "request").count();
+    let second = run_dlm(&args)?;
+    assert!(second.status.success(), "续的那一轮该退 0：{}", stderr_of(&second));
+    assert_eq!(
+        harness::sha256_of(&target)?,
+        harness::expected_sha(len),
+        "续完之后那 48 MiB 必须与服务器那份一字不差"
+    );
+
+    // —— 线上取证：先守卫条数（第二轮至少要有试探 + 一枪），再守满一段时间 ——
+    srv.requests_at_least(run1_requests + 2)?;
+    srv.requests_quiet(Duration::from_millis(300))?;
+    let all = srv.events()?;
+    assert!(all.len() >= boundary, "对端日志会缩短？边界之后读回来的行比边界之前还少");
+    let run2 = &all[boundary..];
+    let run2_requests: Vec<_> = run2.iter().filter(|e| e["ev"] == "request").collect();
+    let opened: Vec<u64> =
+        run2.iter().filter(|e| e["ev"] == "socket_open").filter_map(|e| e["remotePort"].as_u64()).collect();
+    assert!(!run2_requests.is_empty(), "第二轮一条请求都没打出 ⇒ 下面所有判据都是空的（恒绿）");
+    let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
+    assert_eq!(
+        run2_requests[0].get("range").and_then(serde_json::Value::as_str),
+        Some(probe_range.as_str()),
+        "第二轮第一枪该是试探那一枪"
+    );
+    for rec in &run2_requests {
+        let rp = rec["remotePort"].as_u64().context("request 行缺 remotePort")?;
+        assert!(opened.contains(&rp), "第二轮的请求挂在一条边界之前就存在的连接上（remotePort {rp}）⇒ 事件边界取错了");
+    }
+
+    // 对端自己记的"这条响应真写出了多少字节"：`conn_close_side` 按连接分组，组内第 k 条配该连接上第
+    // k 条请求（node 对同一条连接的响应是串行写出的）。配对不齐就当场报错，不许悄悄少算一枪。
+    let mut closes: Vec<(u64, Vec<u64>)> = vec![];
+    for e in run2.iter().filter(|ev| ev["ev"] == "conn_close_side") {
+        let c = e["conn"].as_u64().context("conn_close_side 没有 conn")?;
+        let sent = e["sent"].as_u64().context("conn_close_side 没有 sent")?;
+        match closes.iter_mut().find(|(k, _)| *k == c) {
+            Some((_, v)) => v.push(sent),
+            None => closes.push((c, vec![sent])),
+        }
+    }
+    let mut per_conn: Vec<(u64, usize)> = vec![];
+    for rec in &run2_requests {
+        let c = rec["conn"].as_u64().context("request 行缺 conn")?;
+        match per_conn.iter_mut().find(|(k, _)| *k == c) {
+            Some((_, n)) => *n += 1,
+            None => per_conn.push((c, 1)),
+        }
+    }
+    for (c, n) in &per_conn {
+        let got = closes.iter().find(|(k, _)| k == c).map(|(_, v)| v.len()).unwrap_or(0);
+        assert_eq!(*n, got, "连接 {c} 上 {n} 条请求只等到 {got} 条 conn_close_side ⇒ 对端那份 sent 账配不平");
+    }
+
+    let mut dup_total = 0u64;
+    let mut dup_probe = 0u64;
+    let mut sent_total = 0u64;
+    let mut min_resume_start = u64::MAX;
+    for (index, rec) in run2_requests.iter().enumerate() {
+        let range = rec
+            .get("range")
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("第二轮第 {index} 枪没带 Range"))?;
+        let (s, _) = harness::wire_span(range, len)?;
+        let conn = rec["conn"].as_u64().context("request 行缺 conn")?;
+        let nth = usize::try_from(rec["reqNoOnConn"].as_u64().context("request 行缺 reqNoOnConn")?)
+            .context("reqNoOnConn 超出 usize")?;
+        let sent = closes
+            .iter()
+            .find(|(k, _)| *k == conn)
+            .and_then(|(_, v)| v.get(nth - 1).copied())
+            .with_context(|| format!("连接 {conn} 第 {nth} 条响应的 sent 没记下来"))?;
+        sent_total += sent;
+        // 对端真交出去的那一段（不是我们要求的那一段）：被中途放弃的响应只算它实际写出的字节。
+        // `sent == 0`（一头就没写出去）那一支单独给 0，免得 `s + sent - 1` 在减法上翻车。
+        let served = (s, s + sent.saturating_sub(1));
+        let dup: u64 = if sent == 0 {
+            0
+        } else {
+            covered.iter().map(|c| overlap_bytes(served, *c)).sum()
+        };
+        dup_total += dup;
+        if index == 0 {
+            // 试探那一枪：它天生重取预读那一截，是 **E14③ / E17** 那笔"真发生了线上代价却没被
+            // 任何账报出"的字节。这一发把它量成数，但它不是判据③的失败（判据管的是"已完成段"，
+            // 而试探要的那 236 032 B 从来不是"段"，是引擎每次都要读的头部事实）。
+            dup_probe = dup;
+            continue;
+        }
+        assert_eq!(
+            dup,
+            0,
+            "第二轮第 {index} 枪要走了断点文件说已归我的 {dup} B（交出去的那段 {served:?}）⇒ \
+             判据③「不重下已完成段」断了。覆盖集 {covered:?}"
+        );
+        assert!(
+            s >= first_gap,
+            "第二轮第 {index} 枪从 {s} 开始，而断点说的第一个未覆盖字节是 {first_gap} ⇒ 前缀被回头重取"
+        );
+        min_resume_start = min_resume_start.min(s);
+    }
+    assert!(
+        min_resume_start != u64::MAX,
+        "第二轮除了试探那一枪一枪都没打 ⇒ 上面那两条判据审的是空表（恒绿夹具）"
+    );
+
+    eprintln!(
+        "SCENC 取证：杀于 {killed_after:?}（{kill_reason}；覆盖集长到种子上方那一拍 {}）；\
+         断点覆盖 {} 格 / {covered_bytes} B；半截文件 {partial_len} B；第一个未覆盖字节 {first_gap}；\
+         第二轮 {} 枪 / 交出 {sent_total} B / 落在覆盖集内 {dup_total} B（其中试探那一枪 {dup_probe} B）；\
+         第二轮剔掉试探后最早起点 {min_resume_start} B",
+        first_save.map(|d| format!("{d:?}")).unwrap_or_else(|| "未出现".to_string()),
+        covered.len(),
+        run2_requests.len(),
+    );
+    Ok(())
+}
