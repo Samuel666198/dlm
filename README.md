@@ -69,6 +69,13 @@ bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；�
 - URL 里带 userinfo（`http://user:pass@host/`）一律拒绝。
 - 错误消息、摘要、进度行都不抄请求体的任何一截；`--data-file` 指向的文件内容不会进任何输出。
 - `Cli` 与 `Task` 的手写 `Debug` 掩掉口令，是为了日志防线，不是产品文案。
+- **会话 Cookie 是第二类凭据，v1 不给它划凭据那样的边界**（2026-10-18 定）：`--cookie` 与 `--referer` 原样发送、
+  **不看 scheme**（明文 http 上照发，这是刻意设计），会出现在 `--no-start` 摘要与断点文件 `task.cookies` 里，
+  且 `needs_secret` **只看 `password`** ⇒ 用 Cookie 认证的任务在续传时会静默复用盘上断点里那把钥匙。
+  要这条变严＝一次设计变更（把 `cookies` 折进 `needs_secret`），不是 bug。
+- **HTTPS 的信任锚＝你本机的证书存储**（不是随二进制分发的根，见设计稿 §10 **R15**）：
+  `reqwest` 的 `rustls` 特性在这棵依赖图里落在 `rustls-platform-verifier`，`webpki-roots` 一个都没进锁。
+  ⇒ 上面那条"口令只走 HTTPS"防的是**明文把口令裸奔**，它**不防**"系统存储里有一根你不想信的根"（企业 MITM CA、误装的根照样被信任）。
 
 ## 带请求体那条路（`--data-file`）
 
@@ -82,6 +89,7 @@ bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；�
 |---|---|
 | 不处理 Ctrl-C 信号。承诺是"**任意时刻被杀都能续**"（实测成立），不含"优雅收尾、非零码退出" | spec §10 R11 |
 | 续传不发 `If-Range`；一致性判定靠我们自己记的 `ETag` / `Last-Modified` / 最终 URL | spec §10 R9 |
+| **HTTPS 证书信的是本机证书存储**，不是随二进制分发的根（`webpki-roots` 没进锁）；设计稿 §9 旧句"不依赖系统证书栈"是假的 | spec §10 R15 |
 | 416 不是无条件"标完成"：只有 `Content-Range: bytes */<len>` 里的 `len` 等于我们手里的总长才认 | spec §10 R10 |
 | 断点保存的节奏**等于一枪收尾的节奏**（那句"每 5 秒兜底"是合取条件，从不单独生效）⇒ 开跑十几秒内被硬杀，断点里只有初始那一格种子 | spec §10 R14 |
 | 分段终点帽之后仍有残余重复流量：48 MiB 实测 `dup` 12.8% / 14.3% / 20.8%（三跑），限速档 ≈ 20%，续传第二轮 20.7%。压到"每笔 ≤ 一块"要改劈分规则，属 v2 | 计划 E14 / E31 |
@@ -113,7 +121,7 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | 位置 | 是什么 |
 |---|---|
 | [`docs/superpowers/specs/2026-10-15-dlm-kernel-design.md`](docs/superpowers/specs/2026-10-15-dlm-kernel-design.md) | 设计稿（模块划分、常量、断点结构、CLI、错误处理、测试策略）。**§10 是勘误节：实测推翻的东西在这里，正文不回改** |
-| [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
+| [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md`](docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) | 执行状态：进度表、当前基线、恢复步骤、下游必守的裁定、挂账的 minor、等用户点头的事 |
 | `docs/evidence/` | 一次性实测记录（数字都来自真跑） |
 | `.superpowers/sdd/2026-10-15-dlm-kernel/` | 逐任务的执行报告、评审原文、变异账（被 `.gitignore` 忽略，不随仓库走） |

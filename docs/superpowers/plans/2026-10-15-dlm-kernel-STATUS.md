@@ -1,8 +1,45 @@
 # dlm 内核 v1 — 执行状态与恢复说明
 
-计划：[`2026-10-15-dlm-kernel.md`](./2026-10-15-dlm-kernel.md)（末尾 `## 勘误` E1–**E31** 为权威，与正文冲突时以勘误为准；**E28＝T9 评审四发的实测复核（含撤销 E26 附记那条假前提），E29＝9B-4 两发修复轮的账，E30＝T10 的落地账（含"名字像 ≠ 覆盖到"）＋ E30 附记（撤销"seq 与 conn 差一"那条我自己照抄的假结论），E31＝用户第二批裁定 ＋ T11 把 `slow-retry xN` 端到端买到**；原"预留 E18"未发出，编号已顺延，不回填空位）
-设计：[`../specs/2026-10-15-dlm-kernel-design.md`](../specs/2026-10-15-dlm-kernel-design.md)（§10 勘误 R1–**R14**，R5 已作废 R4；R8–R13＝T9 评审换来的，**R14＝T10 量到的"保存粒度＝收尾粒度"那一格**）
+计划：[`2026-10-15-dlm-kernel.md`](./2026-10-15-dlm-kernel.md)（末尾 `## 勘误` E1–**E32** 为权威，与正文冲突时以勘误为准；**E28＝T9 评审四发的实测复核（含撤销 E26 附记那条假前提），E29＝9B-4 两发修复轮的账，E30＝T10 的落地账（含"名字像 ≠ 覆盖到"）＋ E30 附记（撤销"seq 与 conn 差一"那条我自己照抄的假结论），E31＝用户第二批裁定 ＋ T11 把 `slow-retry xN` 端到端买到**；原"预留 E18"未发出，编号已顺延，不回填空位）
+设计：[`../specs/2026-10-15-dlm-kernel-design.md`](../specs/2026-10-15-dlm-kernel-design.md)（§10 勘误 R1–**R16**，R5 已作废 R4；R8–R13＝T9 评审换来的，**R14＝T10 量到的"保存粒度＝收尾粒度"那一格**）
 分支 `sdd/dlm-kernel`，未 push、无远程。**2026-10-18 更新。**
+
+## 今日收工断点（2026-10-18 控制员；**恢复时先读这一节，别凭记忆**）
+
+**源码树干净，HEAD `4fe6a7c`，未 push。** 四闸由控制员亲跑：**`--lib` 214 / `--bins` 3 / `--test integration` 89（63.36 s）/ `clippy --all-targets -- -D warnings` 退出码 0**（不是执行者报的数）。
+
+今天落了六件事：补 `README.md`（工作区规则要求，之前缺）；T99 全分支最终评审三发（`t99-final-F1-obligations.md` / `-F2-surface.md` / `-F3-triage.md`，均在 `.superpowers/sdd/2026-10-15-dlm-kernel/`）；
+勘误 **E32**（凭据闸被"同一意图的畸形写法"绕过：六种形状实测表 + 三轮修复 + "这条其实第一天就登记过、被我降级成挂账"那条自查）；
+spec **R15**（信任锚＝本机证书存储）与 **R16**（段表 `end` 是闭区间含端点，R6 与 §4 示例那个 `236032` 差一字节）；
+STATUS 自己那四处自相矛盾（E/R 计数、恢复步骤的 166/76、下游裁定第 7 条的 `/slow` 154 s、第 8 条的 `Config` 清单与"逐个封存等价"）；
+账本 `progress.md` 末尾 append 撤销那条根本不存在的"node 对端 `seq` 与 `conn` 差一"。
+
+**⚠ 恢复的第一件事＝按现成简报重派 G1c，不要重新发明**：`.superpowers/sdd/2026-10-15-dlm-kernel/t99-G1c-brief.md`。
+这一发在今日收工时被控制员**主动中止**；中止前复量 `git diff src/ tests/` **为空** ⇒ **没有半成品、没有遗留变异**，简报与实测记录都在，直接重派即可。
+为什么它必须第一个做：**凭据闸至今仍有第三族未修**——`http:/u:p@h`、`http:/\u:p@h`、`http:////u:p@h` 三形状实测各退 0，
+一次性本机对端各收到 `authorization: Basic …`（**明文 http**），而规范写法 `http://u:p@h` 退 2（对照）。
+⇒ **README 里"`http://` 配 `--password` 直接失败"与"断点文件里永远没有口令"这两句，今天对畸形写法仍不成立**（E32 已写明，别当已修）。
+G1c 的设计是**反转默认**：只放行规范 `http(s)://`（authority 的终止符是斜杠、反斜杠、问号、井号这四种，段内不许有 `@`），其余当场以"参数写错了"拒绝 ⇒ 我们放行的集合是 reqwest 接受集的**真子集**，不再逐形状追对面；
+并把同一套严格判据也给 `probe.rs` 那条**服务器控制的落地 URL**（E9 的理由：凭据会原样进 `validator.final_url`）。
+⚠ 简报里要求这一发必须有**进程级零泄漏判据**（每支带凭据的 http 形状退 2 且对端 `authorization` 命中 0）——前两发都只在库级判据里打转，所以每发都漏一族。
+已登记的代价：`ftp://` 与怪写法从"交给 reqwest 报错"变成"我们当场拒"＝**用户可见行为变更**（要落进 README 与 E33）。
+
+**之后还剩四步（顺序固定，都碰同一批文件，不许并发派发）**：
+① **G5**（`.superpowers/…/t99-G5-brief.md` 已写好）＝`--out-name` 不许越出 `--out-dir`（用户 2026-10-18 裁"拒掉"，相对子路径 `sub/x.bin` 仍允许）＋ 派生名四格现状钉死
+＋ `src/engine.rs:996` 与 `:1594` 那两份**重复抄写**的用户文案里的 `（spec §6.7）` 删掉、提成一处，并把那根针从"只扫 `--help`"扩成"扫一次真跑的 stdout+stderr、且带一发 `--sha256` 不符的正臂"。
+② **G5b**（`.superpowers/…/t99-G5b-brief.md` 已写好）＝`--help` 十六条选项**说明全空**（复量：`git log -S "help = "` 与 `-S "help="` 均为空、`pub struct Cli` 体内 `///` 数为 0 ⇒ 历史上从来没有过，不是哪一发修泄漏时删的）；
+补 16 句用户面一行说明 ＋ 别名映射进帮助 ＋ 两根针（结构针断"每条 `get_help()` 非空"、进程针断帮助里含 `/d` 与 `/onboot`），三发变异里 **m1/m2 就是为了证明这两根针不是装饰**。
+③ **勘误 E33** ＝三发最终评审的分诊账（F3 分诊 40 行：12 现在修 / 17 作 v1 限制交付 / 11 撤销，另有 8 组重复·矛盾·腐坏）
+＋ 一条我已复量的更正：`src/engine.rs` 里 `Report::message` 文档那句"`ok = true` + `message = Some(..)` 今天没有用例钉住"**是假的**
+—— `src/main.rs` 的退出档用例第①支就是这一格（⇒ 那笔"具名欠账"应登记为**已半交付**：装配层钉住、生产路径仍造不出）。
+＋ E28③ 那一族的另一半：内部文档坐标进了**失败文案**，而当年那根针只管 `--help`。
+④ **G4**（`Cargo.lock` 入库：`.gitignore` 删那行 + `git add Cargo.lock`——`reqwest 0.13.5` 这一档与 R15 的信任锚结论**只活在这个没入库的文件里**）
+与 `.superpowers/` 归档（用户已裁"打包归档再删原件"；落点建议 `projects/.temporary/`＝工作区规则里的"清理前暂存"位。**这一步必须放在所有报告都写完之后**，
+且要"先验归档件完整、再删原件"，因为 STATUS 第 172 行那一处引用的 `progress.md` / `closureA-review.md` 是全树唯一副本）。
+
+**仍欠用户一句话的两条**（不要自动执行）：**`git push`**（分支全程只在本地、无远程）；
+**`idm-recon` 那台 probe-server 的同源缺陷要不要复测并更正 `idm-recon/docs/25-blackbox-probe.md`**——那边仓库至今一个字没动，
+这一条我当时给的是提问而不是推荐 ⇒ 不在任何一次"按推荐"的覆盖范围内。
 
 ## 进度
 
@@ -21,11 +58,11 @@
 | **T10 spec §7 四场景** | ✅ **收口**（`c889ea0..de4eab3`，账见计划 **E30**）：三发新用例 ＝ `scenario_a_fullspeed_48mib_is_byte_exact`（全速 48 MiB 字节级正确）、`scenario_b_throttled_splits_at_midpoints_and_respects_the_floor`（`/slow` 全尺寸：真的劈了＋劈点真上线＋中点算术＋下限＋劈在**飞行中的响应**上）、`scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes`（真 spawn ＋ 真 kill ＋ 同 URL 再续，判据③"覆盖集内的字节一个都不许多要"）＋ `docs/evidence/2026-10-18-spec7-四场景验收.md`（判据→用例对照表在其 §8，偏差登记在 §6）。⚠ **执行者死于写报告之前**（129 次调用 / 65 分钟）⇒ 控制员独立验收：四闸亲跑、M-C1 亲跑复现红、`md5sum -c` 全等、工作树 **640 增 / 0 删**（既有判据一字未动）。⚠ **我那条"场景 A 早有活体"的错账已进 E30**：既有那发跑的是 **8 MiB**、oracle 是 `expected_sha` ⇒ 只 grep 函数名就断言它覆盖什么；**新纪律：凡"某一发用例覆盖了 X"，落笔前读它的入参尺寸＋期望值来源——名字像 ≠ 覆盖到。** | 四条成功判据全部有载体（对照表在 evidence §8）＋ §6.2 由 T11 补上 ⇒ **下一发＝全分支最终评审** |
 | **T11 买仪器（用户批准的 §6.2）** | ✅ **`91010fc`**：`tests/harness/probe-server.mjs` 新增 `/probe-only`（**只**服务试探的 `bytes=0-236031` 走原正常路径、其余 503 空 body ＋ 新事件 `response_refuse`、拒绝照样 `res.end()`；该文件 **0 行删除**）＋ 真二进制程级用例 `the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused`。**抓到的字面行** `0.4%  0.2 MiB/48.0 MiB  0.0 MiB/s  x0/8  slow-retry x1`——同一行还是 **E25⑤／E25①／E25②** 三条口径的活样本（`x0` 与 `slow-retry` 同拍不绑、速率不足一档印 `0.0`、0.468% 截成 `0.4%`）。对端账 1 正常 / 56 拒，退 1，断点保留，目标是 `236032 B` 的字节正确前缀。⇒ **spec §6.2 的 `slow-retry xN` 端到端不再是"说得出、验不了"** | 账见计划 **E31**；四闸 **202 / 3 / 89 / 0**（集成 63.2 s） |
 
-计划文末 `## 勘误` 现有 **E1–E28**（E7–E28 都是执行期实测后才写进计划的，正文不回改；**E19 ＝ T8 任务级评审第 1 发的三条**：E16 判据操作化成"枪数 + 线上区间 + sha"并附变异证据、§6.2 进度行缺数据面待裁、E8① 的"唯一调用点"误读已纠正；**E20 ＝ T9 派发前的九处更正 + 一处具名欠账**；**E21 ＝ 用户八项裁定的落点 + 甲的 `RunSnapshot` 契约（10 条判据 + 9A 的验收下限）**；**E27 ＝ 9B-3 六条关切**；**E28 ＝ T9 评审四发逐条实测后的十条裁定，含一条撤销我自己 E26 附记前提的**）；设计稿 §10 现有 **R1–R13**（R8–R13＝T9 评审换来的：预读/下限无 CLI 旋钮、`If-Range` 不存在、416 是条件分支、Ctrl-C 不做、§5 计数与 `x4/8`、`--data-file` 的真实形状）。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
+计划文末 `## 勘误` 现有 **E1–E32**（2026-10-18 最终评审换来的更正一路涨到 E32；本节只报**范围**、不抄内容 ⇒ 抄具体条数正是上一版腐坏的方式。E7 起都是执行期实测后才写进计划的，正文不回改；**E19 ＝ T8 任务级评审第 1 发的三条**：E16 判据操作化成"枪数 + 线上区间 + sha"并附变异证据、§6.2 进度行缺数据面待裁、E8① 的"唯一调用点"误读已纠正；**E20 ＝ T9 派发前的九处更正 + 一处具名欠账**；**E21 ＝ 用户八项裁定的落点 + 甲的 `RunSnapshot` 契约（10 条判据 + 9A 的验收下限）**；**E27 ＝ 9B-3 六条关切**；**E28 ＝ T9 评审四发逐条实测后的十条裁定，含一条撤销我自己 E26 附记前提的**）；设计稿 §10 现有 **R1–R16**（R14＝保存节奏是合取闸；R15＝**v1 的信任锚是本机证书存储**、§9 那句"自带根"是假的；R16＝断点段表的 `end` 是**闭区间含端点**、R6 与 §4 示例那个 `236032` 差一字节。R8–R13＝T9 评审换来的：预读/下限无 CLI 旋钮、`If-Range` 不存在、416 是条件分支、Ctrl-C 不做、§5 计数与 `x4/8`、`--data-file` 的真实形状）。派发任何任务前先把与该任务相关的 E/R 条目抄进 brief。
 
-**当前基线（2026-10-18 控制员实测于 `91010fc`）**：`cargo test --lib` **202 passed / 0 failed**（3.01 s）、`cargo test --bins` **3 passed / 0 failed**（0.00 s；**第四闸**，E26：只有它看得见装配层读错退出档）、`cargo test --test integration` **89 passed / 0 failed**（**63.2 s**——T11 买 `slow-retry xN` 端到端那一发独占 ~61 s，与其余并行 ⇒ 净增 ~22 s，这是**买判据的价格**）、`cargo clippy --all-targets -- -D warnings` **退出码 0**；`git status` 干净；分支 `sdd/dlm-kernel`，**未 push、无远程**。验收面是**这四闸**（E26）；下限＝**只许增、不许删、不许改判据方向**（**简报里一律写 floor，不写 exact**——E26 之后那条措辞换成"exact"曾被合理读成上限，导致执行者有一发判据没敢加）。
+**当前基线（2026-10-18 控制员实测于 `4fe6a7c`）**：`cargo test --lib` **214 passed / 0 failed**（3.01 s）、`cargo test --bins` **3 passed / 0 failed**（0.00 s；**第四闸**，E26：只有它看得见装配层读错退出档）、`cargo test --test integration` **89 passed / 0 failed**（**63.2 s**——T11 买 `slow-retry xN` 端到端那一发独占 ~61 s，与其余并行 ⇒ 净增 ~22 s，这是**买判据的价格**）、`cargo clippy --all-targets -- -D warnings` **退出码 0**；`git status` 干净；分支 `sdd/dlm-kernel`，**未 push、无远程**。验收面是**这四闸**（E26）；下限＝**只许增、不许删、不许改判据方向**（**简报里一律写 floor，不写 exact**——E26 之后那条措辞换成"exact"曾被合理读成上限，导致执行者有一发判据没敢加）。
 
-## 下一个动作（2026-10-18 断点；**当前下一发＝下面第 4 项 全分支最终评审**，第 1、2、2b、3 项均已收口，原文留着是因为它们是论证与实测记录）
+## 下一个动作（2026-10-18 断点；**当前下一发＝最上面「今日收工断点」里的那一发 G1c（重派现成简报），不是下面任何一项**；第 1、2、2b、3 项均已收口；**第 4 项只收了一半**：最终评审三发已回来并处置、代裁清单已成文，但 `.superpowers/` 归档与 `git push` 仍未做；原文留着是因为第 1–3 项是论证与实测记录）
 
 1. **T8 任务级收口评审（进行中，按"条数 ≤ 4、只读、报告必须落文件"切发）**：
    - **第 1 发 评审 E ＝ E12–E17 义务逐条对账** ✅ 已回来并处置：38 条义务 **落实 35 / 部分 1 / 未落实 2**，无实现面回归；
@@ -74,6 +111,8 @@
    ⇒ 场景 3 的"续传不重下已完成段"不许假定断点比种子更细；
    §6.2 的 `slow-retry xN` 端到端今天**拿不到**（`/drop/0` 把预读一起砸 ⇒ 走 `Err` 不进重试链）
    ⇒ 要钉它需要一条新对端形状"预读能过、worker 枪必挂"，那是**仪器变更**，T10 若要买就单独登记。
+   ⚠ **本条的"拿不到"已于同日作废**：那把新对端形状真被造出来并量到了（`/probe-only` ＋ 进程级用例，见计划 **E31** 与进度表 T11 行）
+   ⇒ 留着这段是因为它记的是"**当时为什么判不到**"——那一档缺的是仪器而不是判据，这个诊断现在被实测背书了。
    多 worker 的真"杀了再续"＝spawn `dlm` 二进制 + kill 子进程，断言 `fresh_reason.is_none()`、续传后每一枪线上起点
    ≥ 覆盖集终点 + 1、最终 sha256。**可选加固**（复审 A′ 的 R7 配方）：给预算表补两格"两支都不落在 15/120 上"的行，
    关掉"下界夹平"盲区——它原先的立论前提（`stop.max(WINDOW_BYTES)` 隐身）已被我实测推翻，所以只算可选。
@@ -87,12 +126,17 @@
 cd /e/WorkSpace/projects/tool/dlm
 SDD="C:/Users/ROG/.qoder-cn/plugins/cache/qoder-marketplace/superpowers/6.3.0/skills/subagent-driven-development/scripts"
 git rev-parse --abbrev-ref HEAD          # 应为 sdd/dlm-kernel
-git log --oneline -6                     # 顶端是本文件的新 docs 提交；其下依次 c433995 → 5f69db3 → 0d847f0 → 02e73a6 → 923b743
+git log --oneline -6                     # 顶端是最近几发 docs/test 提交 ⇒ 本文件**不维护**这条清单（旧版在这里抄了 6 个 sha，三轮之后整条成假）
 git status --porcelain                   # 应为空（不空就是树里有在制品，先按 md5 备份再动）
-cargo test --lib 2>&1 | tail -2          # 应为 166 passed
-cargo test --test integration 2>&1 | tail -2   # 应为 76 passed
-tail -40 .superpowers/sdd/2026-10-15-dlm-kernel/progress.md   # 末段是 8F-4b 接手账（四发死上限的切法更正）
-bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
+cargo test --lib 2>&1 | tail -2           # 期望值＝上面「当前基线」那一行；这里**故意不复制数字**（抄过的 166 就是腐坏源）
+cargo test --bins 2>&1 | tail -2          # 同上（第四闸，E26：只有它看得见装配层读错退出档）
+cargo test --test integration 2>&1 | tail -2  # 同上；这发要跑约一分钟，它起真对端
+cargo clippy --all-targets -- -D warnings # 期望退出码 0
+tail -40 .superpowers/sdd/2026-10-15-dlm-kernel/progress.md   # ⚠ 这个文件被 .gitignore 忽略、全树唯一副本；它的末段带着一条**已被实测撤销**的仪器缺陷，2026-10-18 已在文末 append 更正 ⇒ 读末段时先看那条 dated 更正
+# （旧版这一行写的是"末段是 8F-4b 接手账"；账本会被后续每一发继续追加，别把它的形状抄死）
+# 计划里的 Task 正文到 **Task 10** 为止（T11 与最终评审的修复轮都**没有** `### Task` 正文，只有文末勘误）
+# ⇒ 派修复轮时**自己写简报文件**（`.superpowers/sdd/2026-10-15-dlm-kernel/t99-*-brief.md` 那一族），
+#   不要再跑 `task-brief <plan> 8` 那种"从计划里切一发"的命令——它切出来的是已完成任务的旧正文。
 ```
 
 账本在 `.superpowers/sdd/`（被 `.superpowers/sdd/.gitignore` 整目录忽略 ⇒ `git clean -fdx` 会连账一起清，届时以本文件 + `git log` 为恢复源）。每任务循环：`task-brief` → 派实现者（记 BASE）→ `review-package PLAN BASE HEAD` → 派评审 → 需要则修复轮（≤5）→ 记账 `Task N: complete`。
@@ -106,7 +150,13 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 5. **T9 的两处计划缺陷预先改掉**：`parse_from` 签名泛化为 `<I, S> where S: Into<OsString> + Clone`（否则计划自己的测试字面量 `["dlm", "--url", …]` 编译不过，断言不许改）；`ProgressLine` 无人定义 ⇒ 由 `src/report.rs` 自造，字段反推自 `:885` 那行渲染格式。
 6. **T6 要补一条守卫用例**（E3）：同一连接上"读满一个 206 → 再发一个 416"必须都完成 —— 这是唯一守住 `res.end()` 修复不被回退的东西。
 7. **T10 的"掐断后能续、且不重下已完成段"必须用 `/drop/<n>`**（E5），不是 `/flaky` —— `/flaky` 从来只把长度改成 4 MiB，不会中断 body。限速场景用 `GET /sz/<n>s`（n 取 65536 的整数倍，约 n/65536×200 ms），不用 `/slow`（48 MiB 真限速后要跑约 154 秒）。
+   ⚠ **本条后半句已被实测推翻（E28⑤，2026-10-18 复量）：`/slow` 全尺寸 48 MiB 实测 24 秒**，那个 154 s 是**按单连接**算出来的，而限速按连接计、8 条 worker 并发 ⇒ 聚合 ≈ `N × 320 KiB/s`。
+   ⇒ **T10 场景 B 用的就是 `/slow` 全尺寸**（`scenario_b_throttled_splits_at_midpoints_and_respects_the_floor`）；`/sz/<n>s` 仍是量"劈分节奏"的便宜档。
+   这张表是"派发时逐条抄进 brief"的那张 ⇒ 抄之前先看这一行括注，别把 154 s 抄进下一发。
 8. **T8 的简报有三处断接口，一律按 E13 改**：`Scheduler` 没有续传播种门（要加 `resume(total, min_seg, done)` 并配"与 `new`＋逐个封存等价"的用例）；`Config.resume: Decision` 站不住 ⇒ **引擎自走 `load → probe → decide`**，`Config` 改 `{workers, min_seg, max_retries, verify_sha256, force_fresh, keep_state}`；Step 1 那条 `harness::replay(Range 序列)` 与 spec §7.2 相反 ⇒ 录**事件序列**回放给真 `Scheduler`，比"动作 vs 实际派发 vs 线上 Range"三道链接。
+   ⚠ **本条有两处落后于它自己引用的勘误，抄进简报之前按这两句改**（2026-10-18 控制员对码复量）：
+   ① `Config` 的字段清单**不在本文维护**（抄一遍就是下一个腐坏源；现状＝`src/engine.rs` 的 `pub struct Config`，已实测确认**里面没有 `keep_state`**——它在 `Task::flags` 的 `FLAG_KEEP_STATE` 那一格，**E13②** 的自纠是对的）；
+   ② "与 `new`＋逐个封存等价"这一句按字面**做不到、不许钉**（**E15** 已裁定：动作序列逐条相同不成立 ⇒ 只钉可观测的等价面）。
 9. **`FailKind::Transport(String)`**（T7 裁定 D）⇒ `Outcome`/`FailKind` 从 `Copy` 降为 **`Clone`**（worker 线程发结论走克隆）。原因串在生产侧已保证**单行、≤200 字符、不含 body 字节** ⇒ **T9 打印时不许再截断或再拼接**（两处截断会互相吃掉信息）。
 10. **`probe::run` 对带 `data_file` 的任务在上网前硬拒**（E11①）⇒ 引擎必须跳过 probe、用 `fetch::run_whole`，且**这一枪只发一次**（重发＝二次提交表单，spec R7 已封顶）；该形状**既不读也不写断点文件**（E13④：存一份段表等于造一条永远执行不了的假 `Resume`）。
 11. **完成判定分两本账**（E7 追加段 + E13④）：`sched.is_done()` **且** `store.len() == total_len` 才算完；`snapshot_intervals()`/`confirmed_bytes()` 是"归属已定的字节"，**永远不许**当"已写字节数"去过 spec §6.7 的闸。给了 `--sha256` 就读真文件算（`sha2` 早在依赖里，不是新增），不匹配则**保留文件与断点**并报错退出。
@@ -151,10 +201,18 @@ bash "$SDD/task-brief" docs/superpowers/plans/2026-10-15-dlm-kernel.md 8
 ## 挂账的 minor（评审判"不阻塞"，最终评审 triage）
 
 - **口令规则的残余绕过**：前导空格/Tab 的 URL（`" \thttp://…"`）仍过校验，而 reqwest 的 `Url::parse` 会剥掉它们 ⇒ 这类串真能明文发口令。修法二选一：`validate()` 改比 `Url::parse(…).scheme()`，或 T9 先拒带首尾空白的 url。
-- 空 URL 规则无单测；`target_path` 只断言了 `file_name()`，没断言 `dir` 真被用上、没覆盖 `"download"` 兜底与 query/fragment 剥离。
+  ⚠ **已修（2026-10-18，G1 `9cf00e6` + G1b），并且这一行本身要读成一条纪律而不是一条待办**：它从 `89a0eb2`（**T0/T1 收工那天**）就登记在这里、诊断完全正确，
+  却被我自己归进"挂账的 minor（不阻塞）"跟着项目走了 **90 发提交**。⇒ ① **凭据能上明文线／能落盘的形状不是 minor**，分诊先按后果分档、不按"评审有没有说阻塞"分档；
+  ② 上面那两支修法**都没采纳**：`Url::parse` 要把 `url` 提成直接依赖（破你定的 6 个 crate 上限），"先拒带首尾空白"只治第一步（G1 做的就等于它，仍被 C0 前导与 scheme 内插 Tab 绕过）；
+  ③ 实际落的是第三支＝**自己实现 WHATWG 的两步预处理**（先删全文 tab/LF/CR，再删首尾 `U+0000`–`U+0020`），见计划 **E32**。
 - 计划字面要求的两个边角要人裁：无 path 的 URL（`https://example.com`）文件名取成 `example.com`；百分号编码名不解码（`a%20b.zip` 原样落盘）。
+  ⇒ **2026-10-18 控制员裁**：**保留现状**＋钉用例＋写进 README（百分号解码要引第三方 crate ⇒ 破 6 个 crate 上限；把 host 当文件名无害、改成报错无收益）。
+  同日实测五种形状的落点名（`https://example.com`⇒`example.com`、`…/`⇒`download`、`a%20b.zip`⇒原样、`?x=1#f`⇒剥掉、`…/dir/`⇒`download`）。
 - `--cookie` / `--referer` 同样是凭据，明文 HTTP 下照发；spec §4 只管口令，本轮不自作规则。
+  ⇒ **2026-10-18 用户裁："只补文档边界"**（不改代码、不折进 `needs_secret`）；已写进 README「凭证与边界」。**这一条从此不是挂账，是设计。**
 - 依赖基线不可复现：`Cargo.toml` 用开区间，`.gitignore` 还忽略着 `Cargo.lock`（应用型 crate 通常该提交 lockfile）。
+  ⇒ **2026-10-18 裁"入库"**（G4）：`.gitignore` 删那行 + 提交 `Cargo.lock`。⚠ `reqwest 0.13.5` 这一档、以及 R15 那条信任锚结论，**只活在这个没入库的文件里**。
+- 空 URL 规则无单测；`target_path` 只断言了 `file_name()`，没断言 `dir` 真被用上、没覆盖 `"download"` 兜底与 query/fragment 剥离。
 - 计划勘误文案两处错标：E2 把"判定段"标成 Task 6 Step 3（实为 Task 0 Step 3）；E4 被取代那段把"停在 body 中间"写成 §7 场景 2（应是场景 3，E5 用的编号才对）。
 
 ### T6/T7 收口后新挂的 minor（2026-10-16，同样只进最终评审 triage，本轮不动）
