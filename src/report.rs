@@ -691,6 +691,9 @@ mod tests {
     fn the_flags_cell_names_the_set_bits_and_never_the_mask_value() {
         // **E23⑥**："别把 `flags` 的数字印出来"那一格的正面写法。位号（bit0/bit1/bit2）照字面留着
         // —— 那是 spec §5 那张表里的名字，不是掩码；掩码（`sample_task(false).flags == 5`）一个都不许出现。
+        // ⚠ 下面那一行**是夹具守卫，不是判据**：它断的是本发二十行前自己搭出来的字面量，产品代码改了
+        // 它也不会红（评审登记过的同族形状）。留着它只为了"夹具悄悄换了形状时，期望串会红得莫名其妙"
+        // 这件事能提前一步说清。真正钉 E23⑥ 的是紧跟其后那两行对 `flags_cell` 的断言。
         let base = sample_task(false);
         assert_eq!(base.flags, FLAG_ADD_ONLY | FLAG_KEEP_STATE);
         assert_eq!(

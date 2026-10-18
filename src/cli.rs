@@ -1,6 +1,6 @@
 //! 参数解析层（Task 9B-1）：POSIX 长选项为主，IDM 的斜杠别名**在进 clap 之前**就地展开。
 //!
-//! 依据：spec §5（usage 的 14 个长选项 + `flags` 位义 + 那句"别名在同一层展开，目的是让现成调用
+//! 依据：spec §5（usage 列出的那串长选项 + `flags` 位义 + 那句"别名在同一层展开，目的是让现成调用
 //! IDM 的脚本不改就能接上"）、勘误 **E20②③④⑤⑨**、**E23①–⑦**（别名表的取证权威是
 //! `projects/tool/idm-recon/docs/50-idm-capability-spec.md` 的 **C3** 行）。
 //!
@@ -14,7 +14,7 @@
 //!   （`src/engine.rs` 里 `run` 的第二行），所以 E23⑤ 那句"引擎侧对 workers 无下限闸"在这一点上
 //!   已经过时 ⇒ 这一格的 `--connections 0` 拦截**不是**唯一防线，它是**边界**防线：报错要发生在
 //!   参数区、措辞是"参数写错了"，而不是等一次试探之后才说"跑不起来"。
-//! - **`min_seg` 没有 CLI 入口**（E20⑥/E23⑤：spec §5 那 12+1 个长选项里没有一个能改它），
+//! - **`min_seg` 没有 CLI 入口**（E20⑥/E23⑤：spec §5 那一串长选项里没有一个能改它），
 //!   `prelude_max` 同理 ⇒ 本层不许自己发明 `--min-seg` / `--probe-bytes`。
 //! - **`Config` 的两个数只从 `Config` 取**（E20⑤）：`Task` 上那一族常数访问器（`limits()`）已整条
 //!   删除，照它填会把 `--connections` 静默吞成默认值。本文件的写法是**从 `Config::default()` 起步、
@@ -38,7 +38,7 @@ use crate::task::Task;
 ///
 /// 这张表有三种读法，逐条都有出处：
 /// - **映射**（值 `Some(长名)`）五条：`/d→--url`、`/p→--out-dir`、`/f→--out-name`、`/n→--quiet`、
-///   `/a→--no-start`。计划正文 `:882` 那行把 `/q` 记成 `--quiet`、`/a` 记成 `--add-only` 是**反的**
+///   `/a→--no-start`。计划正文 Task 9 Step 3 那张别名表把 `/q` 记成 `--quiet`、`/a` 记成 `--add-only` 是**反的**
 ///   而且是**没取证的长名** —— `--no-start` 这个名字的依据是 spec §5 的 flags 表自己写的
 ///   "bit0 = 只入队不下（等价 `--no-start`）"（**E23①②**）。`the_alias_table_is_the_c3_attestation…`
 ///   那一格就是这个改口的活体针（mu1 打在这里）。
