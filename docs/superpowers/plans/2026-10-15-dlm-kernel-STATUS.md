@@ -6,7 +6,7 @@
 
 ## 今日收工断点（2026-10-18 控制员；**恢复时先读这一节，别凭记忆**）
 
-**源码树干净，HEAD `4fe6a7c`，未 push。** 四闸由控制员亲跑：**`--lib` 214 / `--bins` 3 / `--test integration` 89（63.36 s）/ `clippy --all-targets -- -D warnings` 退出码 0**（不是执行者报的数）。
+**工作树干净，未 push。最后一发**动源码**的提交是 `4fe6a7c`（G1b），其后 `1344fea` 只动文档 ⇒ 四闸数字是对 `4fe6a7c` 这棵源码树亲跑的（`--lib` 214 / `--bins` 3 / `--test integration` 89，63.36 s / `clippy --all-targets -- -D warnings` 退出码 0）。
 
 今天落了六件事：补 `README.md`（工作区规则要求，之前缺）；T99 全分支最终评审三发（`t99-final-F1-obligations.md` / `-F2-surface.md` / `-F3-triage.md`，均在 `.superpowers/sdd/2026-10-15-dlm-kernel/`）；
 勘误 **E32**（凭据闸被"同一意图的畸形写法"绕过：六种形状实测表 + 三轮修复 + "这条其实第一天就登记过、被我降级成挂账"那条自查）；
