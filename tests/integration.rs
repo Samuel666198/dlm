@@ -4143,3 +4143,114 @@ fn the_binary_still_prints_the_summary_when_quiet_meets_no_start() -> anyhow::Re
     );
     Ok(())
 }
+
+/// 侦测文本里有没有"<数字> 条长选项"这一族**计数形状**（量词写作"条"或"个"，数字与名词之间
+/// 允许隔着至多两个空格/量词字符，覆盖 `14条长选项`、`14 条长选项`、`4 个长选项` 等排版）。
+/// 不用正则：本项目依赖表里没有 regex，而这一形状窄到手工扫描比引入依赖更便宜。
+fn counts_long_options(text: &str) -> bool {
+    for (at, _) in text.match_indices("长选项") {
+        let before: Vec<char> = text[..at].chars().collect();
+        for gap in 0..3 {
+            if before.len() <= gap {
+                break;
+            }
+            // 数字落在 gap 位上，中间那些字符只许是空格或量词。
+            let mid_ok = before[before.len() - gap..].iter().all(|c| matches!(c, ' ' | '条' | '个'));
+            if mid_ok && before[before.len() - 1 - gap].is_ascii_digit() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// **E28③ / E27②**：`Cli` 的结构体文档注释曾被 clap derive 当 `long_about` **原样印进 `--help`** ——
+/// 内部勘误论证、漂移过的选项计数、实现纪律（"字段一律私有…暗道"）全到了用户表面。
+/// 这一发就是那条纪律终于立成的**针**：扫真二进制的 `--help` stdout，禁内部词与计数形状。
+/// 负向扫描不带对照臂就是恒真（纪律要求，也是这条勘误自己的立场）⇒ 同一段 stdout 必须**同时**
+/// 证明六条长选项名都在场；哪天帮助面整个坏了，对照臂会先把这一发红掉，而不是让禁串扫描空转。
+#[test]
+fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
+    let out = run_dlm(&["--help"])?;
+    assert!(
+        out.status.success(),
+        "`--help` 仍是退出码 0 那一档（E24②，本用例的扫描对象以能打出帮助为前提）：exit={:?}，stderr：{}",
+        out.status.code(),
+        stderr_of(&out)
+    );
+    let h = stdout_of(&out);
+
+    // 对照臂（正向）：这六条长选项必须出现在帮助里。缺任何一条 ⇒ 帮助面坏了，
+    // 下面那一串"没印内部措辞"的负向断言就不再是它声称在测的东西。
+    for opt in ["--url", "--out-dir", "--out-name", "--connections", "--quiet", "--no-start"] {
+        assert!(h.contains(opt), "对照臂：帮助里少了 {opt} —— 此时负向扫描测的已是\"坏帮助\"而非\"禁串\"：{h}");
+    }
+
+    // 禁串：只有仓库内部才该出现的词，出现在交付给用户的帮助面上就是 E28③ 复发。
+    for banned in ["勘误", "§", "clap", "别名层", "long_about", "暗道", "into_task", "into_config"] {
+        assert!(!h.contains(banned), "帮助面不许印 {banned:?}（E28③：内部论证漏到了用户表面）：{h}");
+    }
+    // 禁形状一：`E` + 数字 —— 勘误编号（E23②、E28③ 这种）的骨架。
+    let chars: Vec<char> = h.chars().collect();
+    let errata_marker = chars.windows(2).any(|w| w[0] == 'E' && w[1].is_ascii_digit());
+    assert!(!errata_marker, "帮助面不许印\"E+数字\"的勘误编号形状（E28③）：{h}");
+    // 禁形状二："<数字> 条长选项" —— 选项计数（`c6ac42e` 纪律：数量不进文档，而这里进的是用户面）。
+    assert!(!counts_long_options(&h), "帮助面不许印\"<数字> 条/个长选项\"的计数（E27②：这个数已经错过一次）：{h}");
+    Ok(())
+}
+
+/// **E28⑧-1**：`--` 之后别名**不再展开**（`expand_idm_aliases` 的 `after_ddash` 那一支）。
+/// 全树此前没有任何用例把 `--` 作为参数传进去 ⇒ 三行实测补一发，带对照：
+/// 第一行是对照（不给 `--`，`/q` 按 C3 表"接受并忽略"、退 0）；后两行给 `--`，别名位变成
+/// clap 的"未预期参数"。**`-- /d` 那行才是牙**：若 `--` 之后仍展开，`/d` 会变成第二个 `--url`，
+/// clap 报的是 "the argument '--url <URL>' cannot be used multiple times" 而不是
+/// "unexpected argument '/d' found" ⇒ 那一行把"没展开"与"展开了再说错"区分开。
+#[test]
+fn the_binary_stops_expanding_aliases_after_the_double_dash() -> anyhow::Result<()> {
+    // 第一行：不给 `--`，`/q` 被丢掉，其余照常（退出码 0 + 摘要）。
+    let plain = run_dlm(&["--url", "http://x.example/A", "/q", "--no-start"])?;
+    assert_eq!(
+        plain.status.code(),
+        Some(0),
+        "对照行：`--` 之前的 /q 是\"接受并忽略\"的别名，必须退 0（E23③）：exit={:?}，stderr：{}",
+        plain.status.code(),
+        stderr_of(&plain)
+    );
+    assert!(
+        stdout_of(&plain).contains("任务摘要"),
+        "对照行的摘要照打（`--no-start` 短路在 CLI 层，E20④）：{}",
+        stdout_of(&plain)
+    );
+
+    // 第二行：`--` 之后的 `/q` 不再是别名 ⇒ 停在参数层的 clap 用法错（码 2），点名 token 原文。
+    let ddash_q = run_dlm(&["--url", "http://x.example/A", "--", "/q", "--no-start"])?;
+    assert_eq!(
+        ddash_q.status.code(),
+        Some(2),
+        "`--` 之后的 /q 是未预期参数，不许再被展开吞掉：exit={:?}，stderr：{}",
+        ddash_q.status.code(),
+        stderr_of(&ddash_q)
+    );
+    let eq = stderr_of(&ddash_q);
+    assert!(eq.contains("unexpected argument '/q' found"), "错误要点名 token 原文 '/q'：{eq}");
+
+    // 第三行（有牙）：`--` 之后的 `/d` 同样不展开。
+    let ddash_d = run_dlm(&["--url", "http://x.example/A", "--", "/d", "--no-start"])?;
+    assert_eq!(
+        ddash_d.status.code(),
+        Some(2),
+        "`--` 之后的 /d 是未预期参数：exit={:?}，stderr：{}",
+        ddash_d.status.code(),
+        stderr_of(&ddash_d)
+    );
+    let ed = stderr_of(&ddash_d);
+    assert!(
+        ed.contains("unexpected argument '/d' found"),
+        "`-- /d` 那行必须点名 '/d'；报成 '--url' 就说明 after_ddash 那一支丢了：{ed}"
+    );
+    assert!(
+        !ed.contains("cannot be used multiple times"),
+        "出现这句说明 `-- /d` 被展开成了第二个 `--url`（\"展开了再说错\"≠\"没展开\"）：{ed}"
+    );
+    Ok(())
+}

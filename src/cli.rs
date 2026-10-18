@@ -127,6 +127,11 @@ fn expand_idm_aliases<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Resu
         }
         if let Some(long) = alias_target(&arg) {
             // 命中的别名：`Some(长名)` 换成那条长选项写法；`None`（`/q` `/s` `/onboot`）连 token 一起丢掉。
+            // **E28④**：展开出来的长名同样要占值位。下面那条值位探测只认**输入里**的 `--长名`，
+            // 这里不置上的话，用户的**值**（`/f /n` 里那个 `/n`）会被再当别名位展开 ⇒ 等价性自己拆了。
+            // 展开成旗标（`/n`→`--quiet`、`/a`→`--no-start`）或被忽略（`None`）的那两支**不许**置值位：
+            // 多置一格就是把下一个真参数吞成旗标的值（`VALUE_TAKING_LONGS` 文档写的另一半 hazard）。
+            value_slot = long.is_some_and(|name| VALUE_TAKING_LONGS.contains(&name));
             out.extend(long.map(OsString::from));
             continue;
         }
@@ -178,12 +183,15 @@ pub fn parse_from<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Result<C
     Ok(cli)
 }
 
-/// clap 的长选项面：spec §5 usage 的那 14 条，加上 **E23②** 补的第 15 条 `--no-start`
-/// （usage 代码块漏了它，而同一节的 flags 表已经写了"bit0 等价 `--no-start`" ⇒ 不补就没有任何
-/// 入口能置起 bit0，那句"打印任务摘要后退出"就落不了地）。
-///
-/// 字段一律私有：外面的面只有 `into_task` / `into_config` / `quiet` / `no_start` 四格，
-/// 少一条"顺手读一下 cli.url"的暗道。
+// 这段是 `Cli` 的实现依据，**必须留在源码、绝不能到用户表面**：clap derive 会把结构体的 `///`
+// 当 `long_about`，`dlm --help` 就原样打印它（E28③ 实测漏出去过一整段内部勘误论证）。
+// 判据是 `tests/integration.rs::the_binary_help_prints_no_internal_review_prose`（带对照臂的
+// 禁串/禁形状扫描）；按 `c6ac42e` 的纪律，这里不写选项计数，只写去处。
+// - 长选项面照 spec §5 的 usage 清单，另补 **E23②** 那条 `--no-start`：usage 代码块漏了它，
+//   而同节的 flags 表已经写了"bit0 等价 `--no-start`" ⇒ 不补就没有任何入口能置起 bit0，
+//   那句"打印任务摘要后退出"就落不了地。
+// - 字段一律私有：外面的面只有 `into_task` / `into_config` / `quiet` / `no_start` 四格，
+//   少一条"顺手读一下 cli.url"的暗道。
 #[derive(Parser, PartialEq, Eq)]
 #[command(name = "dlm", version, about = "多连接下载内核（POSIX 长选项 + IDM 斜杠别名）")]
 pub struct Cli {
@@ -559,6 +567,59 @@ mod tests {
         assert!(!c.quiet(), "值位的 /n 不是静默旗标");
         assert_eq!(c.into_task()?.url, "/n");
         Ok(())
+    }
+
+    /// **E28④**：值位探测今天只认**输入里**的 `--长名`；别名命中那一支吐出长名后 `continue`，
+    /// 不置值位 ⇒ 别名展开出来的 `--out-name` 后面那个 token（用户的**值**）又被当别名位展开。
+    /// 实测：`dlm /d URL /f /n` 退 2（"a value is required for '--out-name <NAME>'"），
+    /// 而长选项写法 `dlm --url URL --out-name /n` 退 0 —— 别名层的等价性自己拆了。
+    /// 每一行是（别名写法，长选项写法），两写法必须**逐字段相等**（`Cli` 派生 `PartialEq`，
+    /// 手写 `Debug` 掩口令 ⇒ 两格的 `assert_eq!` 都是本文件的既有形状）。
+    /// 表里 (b) 组是牙：值本身长得像别名 token；(c) 组守另一半 hazard —— 展开成**旗标**或
+    /// **什么都不是**的别名（`/n` `/a` `/q`）绝不许多置值位，那会把下一个真参数吞掉。
+    #[test]
+    fn an_expanded_alias_still_occupies_its_value_slot() {
+        const URL: &str = "https://x/a.bin";
+        let cases: &[(&[&str], &[&str])] = &[
+            // (a) 普通值：三条吃值别名各一发（今天已是绿的，留作表的骨架）。
+            (&["dlm", "/d", URL], &["dlm", "--url", URL]),
+            (&["dlm", "/d", URL, "/p", "D:/d"], &["dlm", "--url", URL, "--out-dir", "D:/d"]),
+            (&["dlm", "/d", URL, "/f", "b.bin"], &["dlm", "--url", URL, "--out-name", "b.bin"]),
+            // (b) 值本身长得像别名 token —— E28④ 的实测缺陷就咬在这一组。
+            (&["dlm", "/d", URL, "/f", "/n"], &["dlm", "--url", URL, "--out-name", "/n"]),
+            (&["dlm", "/d", URL, "/f", "/q"], &["dlm", "--url", URL, "--out-name", "/q"]),
+            (&["dlm", "/d", URL, "/p", "/onboot"], &["dlm", "--url", URL, "--out-dir", "/onboot"]),
+            (&["dlm", "/d", "/n", "/f", "/q"], &["dlm", "--url", "/n", "--out-name", "/q"]),
+            // (c) 展开成旗标/被忽略项的别名不吃下一 token：旗标别名后头跟的仍是待展开的别名。
+            (&["dlm", "/d", URL, "/n", "/f", "b.bin"], &["dlm", "--url", URL, "--quiet", "--out-name", "b.bin"]),
+            (&["dlm", "/d", URL, "/a", "/f", "b.bin"], &["dlm", "--url", URL, "--no-start", "--out-name", "b.bin"]),
+            (&["dlm", "/d", URL, "/q", "/f", "b.bin"], &["dlm", "--url", URL, "--out-name", "b.bin"]),
+        ];
+        for (idm, posix) in cases {
+            let a = parse(idm);
+            let b = parse(posix);
+            match (a, b) {
+                (Ok(x), Ok(y)) => assert_eq!(x, y, "别名写法 {idm:?} 必须与长选项写法 {posix:?} 逐字段相等（E28④ 的等价性）"),
+                (Err(x), Err(y)) => panic!("两种写法都失败了：{idm:?} ⇒ {x}；{posix:?} ⇒ {y}"),
+                (Ok(_), Err(y)) => panic!("别名写法 {idm:?} 成了、长选项写法 {posix:?} 却失败：{y}"),
+                (Err(x), Ok(_)) => panic!("长选项写法 {posix:?} 成了、别名写法 {idm:?} 却失败：{x}（E28④：展开出来的长名没占值位）"),
+            }
+        }
+    }
+
+    /// **E28⑧-2 的反向针**：`--min-seg` / `--probe-bytes` 这两个旋钮**不存在**
+    /// （E20⑥/E23⑤ 裁过"不许为 `min_seg`/`prelude_max` 发明 CLI 入口"，spec §10 R8 如实登记）。
+    /// 今天它们缺席只由"`Cli` 里没有这个字段"保证——那种保证红不了，也就不会在下一轮真把字段
+    /// 加上时报警。这一发不测新行为，是两行保险：谁给 `Cli` 加了这两条长选项，这里先红。
+    #[test]
+    fn min_seg_and_probe_bytes_have_no_cli_entry() {
+        for (flag, value) in [("--min-seg", "1"), ("--probe-bytes", "4096")] {
+            let Err(err) = parse(&["dlm", "--url", "https://x/a", flag, value]) else {
+                panic!("{flag} 被接受了 —— dlm 没有这个旋钮，E20⑥/E23⑤ 禁止为它发明 CLI 入口");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains(flag), "拒绝要原样点名 {flag}，用户才知道哪格写错了：{msg}");
+        }
     }
 
     #[test]
