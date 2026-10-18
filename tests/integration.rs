@@ -3668,3 +3668,327 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
     );
     Ok(())
 }
+
+// ================================================================ Task 9B-2：装配路径上的进度行与 CLI 的退出档
+//
+// 勘误 **E22 第 5 条 / E24 第 5 条**：`src/engine.rs` 的 `mod tests` 里那些手搭 `Engine` 够不着
+// `engine::run` 这条装配路径（试探 → 种子 → worker 线程 → 断点保存），而 9B-1 被禁止建 `report.rs`，
+// 于是"挂上 sink 之后到底有没有收到过 tick、收到的那八格是不是可读的数"今天必须由这几发用例交。
+// 第一发是**进程内**（真 `engine::run` + node 对端 + 真渲染器），后三发是**真二进制**
+// （`CARGO_BIN_EXE_dlm`）—— 因为 `--help` 的退出码、bit0 的短路、`--quiet` 到底挂不挂 sink 这三件事
+// 都住在 `main.rs`，进程内没有任何代码路径能观察到它们（`main` 不是库的一部分）。
+//
+// 判据方向：**`Report` 始终是权威**，`on_tick` 只是"这一拍的样子"（E21⑦⑧）⇒ 这几发都不断 tick 的条数，
+// 只断"至少收到过一发"与"终值那几格与这次下载对得上"。
+
+/// 一格"一位小数的数"的形状（渲染口径 **E25①②**：单位只有 MiB 一档、百分比一位小数）。
+fn is_one_decimal(s: &str) -> bool {
+    match s.split_once('.') {
+        Some((whole, frac)) => {
+            !whole.is_empty()
+                && whole.chars().all(|c| c.is_ascii_digit())
+                && frac.len() == 1
+                && frac.chars().all(|c| c.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
+/// 把一行进度拆成格子。渲染器**格间用两个空格、格内最多一个空格**（`12.0 MiB/48.0 MiB`），
+/// 所以按 `"  "` 切是无歧义的 —— 而这个"无歧义"本身也是被断言的形状之一。
+fn tick_cells(line: &str) -> Vec<&str> {
+    line.split("  ").collect()
+}
+
+/// 起真二进制。存在的理由：`--help` 的退出码（E24②）、bit0 的短路（E20④）、`--quiet` 不挂 sink
+/// （E24①）这三条只住在 `main.rs`，进程内观察不到。
+fn run_dlm(args: &[&str]) -> anyhow::Result<std::process::Output> {
+    let bin = env!("CARGO_BIN_EXE_dlm");
+    std::process::Command::new(bin)
+        .args(args)
+        .output()
+        .with_context(|| format!("起二进制失败：{bin}"))
+}
+
+fn stdout_of(o: &std::process::Output) -> String {
+    String::from_utf8_lossy(&o.stdout).to_string()
+}
+fn stderr_of(o: &std::process::Output) -> String {
+    String::from_utf8_lossy(&o.stderr).to_string()
+}
+
+/// **E22⑤ / E24⑤ 的那一发**：真 `engine::run` + node 对端 + 真渲染器，断"确实收到过 tick，
+/// 八格都是可读的数"。sink 里做的事与 `main.rs` 挂的那一发同形（在引擎线程里同步调 `report::tick`）。
+#[test]
+fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> {
+    use std::sync::{Arc, Mutex};
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("tick-assembly")?;
+    let len = 8 * 1024 * 1024u64;
+    let t = Task {
+        url: format!("{base}/sz/{len}"),
+        dir: dir.path().to_path_buf(),
+        ..harness::blank_task()
+    };
+    let beats: Arc<Mutex<Vec<(String, dlm::engine::RunSnapshot)>>> = Arc::new(Mutex::new(vec![]));
+    let collector = beats.clone();
+    let on_tick: dlm::engine::OnTick = Arc::new(move |s: &dlm::engine::RunSnapshot| {
+        collector.lock().unwrap().push((dlm::report::tick(s), *s));
+    });
+
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+            on_tick: Some(on_tick),
+        },
+    )?;
+
+    // 权威仍然是 `Report`（E21⑧）：本用例不断 tick 的条数，只断"至少一发"。
+    assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
+    assert_eq!((rep.bytes_total, rep.delivered), (len, len), "服务器说的长度与盘上真有的字节");
+
+    let seen = beats.lock().unwrap();
+    assert!(
+        !seen.is_empty(),
+        "挂上 sink 之后一发快照都没收到 —— 装配路径（试探→种子→worker→断点）上没有进度源"
+    );
+    for (line, snap) in seen.iter() {
+        // 快照侧：八格各自落在文档说的范围内（**E21①②③⑤**）。
+        assert_eq!(snap.total_len, len, "`total_len` 那格取的是试探到的全长（E21②）：{snap:?}");
+        assert!(snap.covered_bytes <= snap.total_len, "覆盖集不可能超过全长：{snap:?}");
+        assert_eq!(snap.workers_total, 4, "`workers_total` 就是 cfg.workers：{snap:?}");
+        assert!(snap.active_workers <= snap.workers_total, "在途的不可能比总数还多：{snap:?}");
+        // 渲染侧：形状必须拆得开，而且每一格都是**可读的数**（不是 `None`、不是 `NaN`、不是空白）。
+        let cells = tick_cells(line);
+        assert!(
+            (4..=6).contains(&cells.len()),
+            "一行该是 4~6 格（百分比 / 已下对 / 速率 / 连接数 + 可选 dup + 可选 slow-retry）：{line:?}"
+        );
+        let pct = cells[0].strip_suffix('%').unwrap_or_else(|| panic!("第一格不是百分比：{line:?}"));
+        assert!(is_one_decimal(pct), "百分比要是一位小数的数：{line:?}");
+        // `unwrap_or(u64::MAX)`：拆不出整数的话就让**这一格红**，而不是让测试炸在解析错误上。
+        let pct_whole = pct.split('.').next().unwrap_or("").parse::<u64>().unwrap_or(u64::MAX);
+        assert!(
+            pct_whole < 100 || (pct_whole == 100 && pct.ends_with(".0")),
+            "文件百分比不许超过 100%（`100.0%` 是满的那一格，E25③）：{line:?}"
+        );
+        let (done, total) = cells[1]
+            .strip_suffix(" MiB")
+            .and_then(|s| s.split_once(" MiB/"))
+            .unwrap_or_else(|| panic!("第二格该是 `<已下> MiB/<全长> MiB`：{line:?}"));
+        assert!(is_one_decimal(done) && is_one_decimal(total), "那对 MiB 都要是一位小数：{line:?}");
+        assert_eq!(total, "8.0", "8 MiB 的全长手算就是 `8.0`（E25①）：{line:?}");
+        assert!(
+            done.split('.').next().unwrap_or("").parse::<u64>().unwrap_or(u64::MAX) <= 8,
+            "已下的整数部分不许超过全长（8 MiB）：{line:?}"
+        );
+        let rate = cells[2]
+            .strip_suffix(" MiB/s")
+            .unwrap_or_else(|| panic!("第三格是速率：{line:?}"));
+        assert!(is_one_decimal(rate), "速率要是一位小数的 MiB/s：{line:?}");
+        let (active, workers) = cells[3]
+            .strip_prefix('x')
+            .and_then(|s| s.split_once('/'))
+            .unwrap_or_else(|| panic!("第四格是 `x<在途>/<总数>`：{line:?}"));
+        assert!(active.chars().all(|c| c.is_ascii_digit()) && !active.is_empty(), "在途那格是整数：{line:?}");
+        assert_eq!(
+            workers, "4",
+            "分母就是 `workers_total`（它的字段文档写着\"进度行里那个 x4 的分母\"）：{line:?}"
+        );
+        // 后面两格各自独立出现或不出现（E25④⑤）：一旦出现就必须是那个形状。
+        for extra in &cells[4..] {
+            if let Some(dup) = extra.strip_prefix("dup ") {
+                let p = dup.strip_suffix('%').unwrap_or_else(|| panic!("dup 那格该带百分号：{line:?}"));
+                assert!(is_one_decimal(p), "dup 那格要是一位小数的数：{line:?}");
+            } else if let Some(rounds) = extra.strip_prefix("slow-retry x") {
+                assert!(
+                    !rounds.is_empty() && rounds.chars().all(|c| c.is_ascii_digit()),
+                    "慢重试那格要给得出轮数：{line:?}"
+                );
+            } else {
+                panic!("第五格之后只许是 `dup X%` 或 `slow-retry xN`：{line:?}");
+            }
+        }
+    }
+    // 终值那一发（E21⑦ 的第二处调用点）必须说"下完了"：`ok` ⇒ 调度器没有未归属字节 ⇒
+    // `covered_bytes == total_len`（判据①那条减法）⇒ 渲染出来就是手算的两格字面量。
+    let (last_line, last) = seen.last().expect("上面已经断过非空");
+    assert_eq!(last.covered_bytes, last.total_len, "收尾那一拍的覆盖集应当是满的：{last:?}");
+    assert!(last.run_delivered > 0, "这一轮在网线上确实动过字节：{last:?}");
+    assert!(
+        last_line.starts_with("100.0%  8.0 MiB/8.0 MiB  "),
+        "终值那一发的头两格是手算的字面量（8 MiB ⇒ `8.0`、覆盖满 ⇒ `100.0%`）：{last_line:?}"
+    );
+    Ok(())
+}
+
+/// **E24②**：`--help` / `--version` 必须以 0 退出，而用法错误保留 clap 自己的码（2）——
+/// E20⑦ 那"两档"说的是**下载结果**，不覆盖参数层。一刀切成 `Err ⇒ 1` 会让 `dlm --help` 以 1 退出。
+#[test]
+fn the_binary_exits_zero_for_help_and_keeps_clap_code_for_a_usage_error() -> anyhow::Result<()> {
+    let help = run_dlm(&["--help"])?;
+    assert!(
+        help.status.success(),
+        "`--help` 的退出码必须是 0（E24②），实测 {:?}，stderr：{}",
+        help.status.code(),
+        stderr_of(&help)
+    );
+    let h = stdout_of(&help);
+    assert!(h.contains("Usage"), "帮助要真打到 stdout 上：{h}");
+    for opt in ["--url", "--out-dir", "--data-file", "--sha256", "--quiet", "--no-start"] {
+        assert!(h.contains(opt), "帮助里少了 {opt}（第 15 条长选项 `--no-start` 也在这一面上，E23②）：{h}");
+    }
+    assert!(run_dlm(&["--version"])?.status.success(), "`--version` 与 `--help` 同一档（E24②）");
+
+    let bad = run_dlm(&["--quiet"])?; // 少了必填的 --url
+    assert_eq!(
+        bad.status.code(),
+        Some(2),
+        "用法错误走 clap 自己的码而不是下载那两档：exit={:?}，stderr：{}",
+        bad.status.code(),
+        stderr_of(&bad)
+    );
+    assert!(stderr_of(&bad).contains("--url"), "那句报错要指出缺的是 --url：{}", stderr_of(&bad));
+    Ok(())
+}
+
+/// **E20④ / E24③**：bit0 由 CLI 在进入 `engine::run` **之前**短路 —— 打印摘要、退出码 0、
+/// 一个字节都不许多打（对端一条请求都没看到、目标文件没被创建）。摘要里口令这个话题整个不出现。
+#[test]
+fn the_binary_short_circuits_no_start_without_touching_the_wire() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("bin-no-start")?;
+    let out_dir = dir.path().display().to_string();
+    let url = format!("{base}/blob");
+
+    let out = run_dlm(&["--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--no-start"])?;
+    assert!(
+        out.status.success(),
+        "`--no-start` 的语义是\"打印任务摘要后退出\"，不是失败（E20④）：exit={:?}，stderr：{}",
+        out.status.code(),
+        stderr_of(&out)
+    );
+    let so = stdout_of(&out);
+    assert!(so.contains("任务摘要"), "摘要那一行该说清这是什么：{so}");
+    assert!(so.contains(&url), "摘要要逐字段打，URL 是其中一格（E23⑥：不许拿 Debug 当渲染器）：{so}");
+    assert!(so.contains("blob.bin"), "输出文件名那一格：{so}");
+    for verdict in ["下载已完成", "下载未完成"] {
+        assert!(!so.contains(verdict), "短路之后不该有最终结果行（引擎压根没进）：{so}");
+    }
+    assert!(!dir.path().join("blob.bin").exists(), "目标文件被创建了 —— 摘要之后还动了磁盘");
+    // 负向判据按 harness 的纪律下：**守满**一段时间而不是裸读一次日志（日志行落盘晚于客户端拿到
+    // 响应，裸读的"一条都没有"会在真故障上碰巧为真）。
+    let reqs = srv.requests_within(Duration::from_millis(500))?;
+    assert!(reqs.is_empty(), "bit0 说\"一个字节都不许多打\"，对端却看到 {} 条请求：{reqs:?}", reqs.len());
+
+    // 口令那一格连 `[redacted]` 都不许出现（E23⑥/E24③）。走 https 是因为 `http://` + 口令
+    // 在解析期就被拒（E3），而 https 那条路在 `--no-start` 下根本不会上网。
+    let via_alias = run_dlm(&[
+        "--url",
+        "https://example.invalid/a.bin",
+        "--out-dir",
+        &out_dir,
+        "--user",
+        "alice",
+        "--password",
+        "hunter2",
+        "/a",
+    ])?;
+    assert!(
+        via_alias.status.success(),
+        "`/a` 与 `--no-start` 同义（E23②）：stderr：{}",
+        stderr_of(&via_alias)
+    );
+    let so2 = stdout_of(&via_alias);
+    assert!(so2.contains("alice"), "用户那一格照打（掩码只属于 `Debug`，摘要不是日志）：{so2}");
+    for banned in ["hunter2", "[redacted]", "password", "口令"] {
+        assert!(!so2.contains(banned), "摘要里不许出现 {banned}（E24③：口令这个话题整个不在摘要里）：{so2}");
+    }
+    assert_eq!(
+        srv.requests_within(Duration::from_millis(300))?.len(),
+        0,
+        "第二条 `--no-start` 同样不许发请求"
+    );
+    Ok(())
+}
+
+/// **E24① / E20⑦**：`--quiet` 的落点是"一次都不挂 sink"（不是"挂了但里面不打印"），
+/// 最终结果照打；非零退出码的**唯一**判据是 `!ok`；`trace` 一个字都不进 stdout。
+#[test]
+fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() -> anyhow::Result<()> {
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("bin-exit")?;
+    let out_dir = dir.path().display().to_string();
+    let len = 64 * 1024u64;
+    let url = format!("{base}/sz/{len}");
+    let good_sha = harness::expected_sha(len);
+
+    // ① 成功 + 非静默 ⇒ 退出码 0，stdout 里既有进度行（`\r`）也有最终结果。
+    let ok = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "ok.bin",
+        "--connections", "2", "--sha256", &good_sha,
+    ])?;
+    let sok = stdout_of(&ok);
+    assert!(
+        ok.status.success(),
+        "下完了还非零就是撒谎：exit={:?}，stderr：{}",
+        ok.status.code(),
+        stderr_of(&ok)
+    );
+    assert!(sok.contains('\r'), "非静默必须挂上 sink 并打出那一行进度（E24①）：{sok:?}");
+    assert!(sok.contains("下载已完成"), "最终结果行照打：{sok}");
+    assert!(sok.contains("这个断点文件从建立起一共重试"), "那两格是跨断点文件的账（E20⑧/E25⑥）：{sok}");
+    assert!(sok.contains("归属之外可能被重下"), "`duplicated` 不是账单，措辞不许漂（E14③）：{sok}");
+    for trace_word in ["Seeded", "Dispatched", "TraceStep", "Interval"] {
+        assert!(!sok.contains(trace_word), "`trace` 一个字都不许进 stdout（E20⑨）：{trace_word} 出现了：{sok}");
+    }
+
+    // ② 同一件事走 `--quiet` ⇒ **一个 `\r` 都不许有**（sink 一次都没挂），而结果照打。
+    let quiet = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "quiet.bin",
+        "--connections", "2", "--quiet",
+    ])?;
+    let sq = stdout_of(&quiet);
+    assert!(quiet.status.success(), "静默不等于失败：stderr：{}", stderr_of(&quiet));
+    assert!(!sq.contains('\r'), "`--quiet` 的落点是\"一次都不挂 sink\"（E24①），实测 stdout：{sq:?}");
+    assert!(sq.contains("下载已完成"), "静默关的是刷新的那一行，不是结果（E24①）：{sq}");
+
+    // ③ 下完了但校验不符 ⇒ `ok = false` ⇒ 退出码 1，`message` 那句原样打（裁定 9：不再截断不拼接）。
+    let wrong_sha = "0".repeat(64);
+    let bad = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "bad.bin",
+        "--connections", "2", "--sha256", &wrong_sha,
+    ])?;
+    let sbad = stdout_of(&bad);
+    assert_eq!(
+        bad.status.code(),
+        Some(1),
+        "非零档的唯一判据是 `!ok`（E20⑦）：exit={:?}",
+        bad.status.code()
+    );
+    assert!(sbad.contains("下载未完成"), "结论那一句要跟着 `ok` 走：{sbad}");
+    assert!(sbad.contains("sha256 不符"), "引擎那句人话要原样到达用户：{sbad}");
+
+    // ④ 引擎侧 `Err`（断点文件损坏，`run` 根本跑不起来）⇒ 也是非零，且那句原因进 stderr。
+    let corrupt_target = dir.path().join("corrupt.bin");
+    let corrupt_state = dlm::state::path_for(&corrupt_target);
+    std::fs::write(&corrupt_state, "{ 这不是 JSON").context("铺坏断点文件失败")?;
+    let err = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "corrupt.bin", "--connections", "2",
+    ])?;
+    assert_ne!(
+        err.status.code(),
+        Some(0),
+        "`Err` 那一支也必须非零（E20⑦）：exit={:?}",
+        err.status.code()
+    );
+    let se = stderr_of(&err);
+    assert!(se.contains("跑不起来"), "那支的措辞要说\"跑不起来\"，与 `ok = false` 分得开：{se}");
+    assert!(!se.contains("Seeded"), "错误路径上也不许漏 trace（E20⑨）：{se}");
+    Ok(())
+}

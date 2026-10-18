@@ -597,6 +597,64 @@ mod tests {
         Ok(())
     }
 
+    /// **重复别名那一支（E23 附记② / E24④）**：别名层的唯一判据是"与长选项写法等价"，
+    /// 所以 `dlm /d A /d B` 与 `dlm --url A --url B` 必须给出**同一个**结果，不许一种报错一种不报。
+    ///
+    /// ⚠ 派发那句"`--url A --url B` ⇒ `url == \"B\"`，不报错"在本仓库今天的 clap 4 上**不成立**：
+    /// `Cli` 的 `url: String` 走派生出来的 `ArgAction::Set`，而 clap 4 对重复出现的单值参数默认就报
+    /// `the argument '--url <URL>' cannot be used multiple times`（实测见这条用例的 `eprintln!`）。
+    /// 要让那半句成真得改 `Cli` 的 `#[arg(...)]` 属性面，而那不在 9B-2 的允许改动清单里
+    /// ⇒ 这一格把**裁定里可钉的那一半**（两写法逐字段等价、且不许静默吞掉第二次出现）钉死，
+    /// 另一-half 等控制员裁（报告关切 1）。等价性一旦自己拆了（例如别名层给重复别名一句自己的报错），
+    /// 下面那条 mixed 分支就是活体针。
+    #[test]
+    fn a_repeated_alias_behaves_exactly_like_a_repeated_long_option() {
+        let alias = parse(&["dlm", "/d", "https://x/a", "/d", "https://x/b"]);
+        let long = parse(&["dlm", "--url", "https://x/a", "--url", "https://x/b"]);
+        let text = |r: &anyhow::Result<Cli>| r.as_ref().map(|c| format!("{c:?}")).unwrap_or_else(|e| e.to_string());
+        eprintln!("重复别名 ⇒ {}\n重复长选项 ⇒ {}", text(&alias), text(&long));
+        match (alias, long) {
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a, b, "重复给同一条别名必须与重复给长选项逐字段相等（E23 附记②）");
+                assert_eq!(a.into_task().unwrap().url, "https://x/b", "后者覆盖前者，且不许因此报错");
+            }
+            (Err(a), Err(b)) => {
+                let (sa, sb) = (a.to_string(), b.to_string());
+                assert_eq!(sa, sb, "两种写法给的错误必须逐字相同（别名层只是另一种拼法）");
+                assert!(sa.contains("--url"), "重复那一支不许被静默吞掉，报错要点名长选项：{sa}");
+            }
+            _ => panic!("一种写法报错、另一种不报错 ⇒ 别名层的等价性自己拆了（E23 附记② 的立论）"),
+        }
+        // 重复的是**吃值的别名**，值位探测也得跟着对：`/p` 重复时两写法仍然同形。
+        let both = parse(&["dlm", "/d", "https://x/a", "/p", "D:/one", "/p", "D:/two"]);
+        let both_long = parse(&["dlm", "/d", "https://x/a", "--out-dir", "D:/one", "--out-dir", "D:/two"]);
+        assert_eq!(both.is_err(), both_long.is_err(), "重复 `/p` 与重复 `--out-dir` 必须同一个结论");
+        match (both, both_long) {
+            (Ok(x), Ok(y)) => {
+                assert_eq!(x, y);
+                assert_eq!(y.into_task().unwrap().dir, PathBuf::from("D:/two"), "以后者为准");
+            }
+            (Err(x), Err(y)) => assert_eq!(x.to_string(), y.to_string(), "同上：错误也要逐字相同"),
+            _ => unreachable!("上面已经断过 is_err 同形"),
+        }
+        // 重复的**开关型**别名（`/n`）与重复的 `--quiet` 也必须在同一个结论上对齐：
+        // 实测两写法都报 `the argument '--quiet' cannot be used multiple times`（clap 4 对重复出现的
+        // 单值参数与 `SetTrue` 旗标都不给"后者覆盖"）。这一格的意义不在"报错对不对"（那归控制员裁，
+        // 报告关切 1），而在**别名层没给自己单开一条结论**。
+        let flag_alias = parse(&["dlm", "/d", "https://x/a", "/n", "/n"]);
+        let flag_long = parse(&["dlm", "--url", "https://x/a", "--quiet", "--quiet"]);
+        assert_eq!(flag_alias.is_err(), flag_long.is_err(), "重复 `/n` 与重复 `--quiet` 必须同一个结论");
+        match (flag_alias, flag_long) {
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a, b, "两种写法逐字段相等");
+                assert!(b.quiet(), "重复的静默旗标仍然只 meant 一件事");
+                assert_eq!(a.into_task().unwrap().flags, 0, "重复 `/n` 不许往 flags 里塞任何位（E20③）");
+            }
+            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "错误也要逐字相同：{a}"),
+            _ => unreachable!("上面已经断过 is_err 同形"),
+        }
+    }
+
     #[test]
     fn the_alias_table_is_the_c3_attestation_and_nothing_more() {
         // 这一格钉的是**表本身**（E23①②③④）：映射错了就整体读回头像，而"多一个别名"就是发明功能。
