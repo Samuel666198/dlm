@@ -72,6 +72,30 @@ http.createServer((req, res) => {
     return;
   }
   const rng = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+  // /probe-only：只服务"试探那一枪"的路由（T11 新增，为 spec §6.2 的 `slow-retry xN` 端到端观测买的仪器）。
+  // 形状：Range 恰好是试探的限量读（起点 0、终点 < 236032，即 `bytes=0-236031`）时**照常服务**
+  // —— 不碰下面的正常路径，状态码/Content-Range/头/body 与 `/blob` 同一算法一个都不改；
+  // **其余每一条请求**（含无 Range 的整份 GET）一律回 503 空 body，并记一条新事件 `response_refuse`
+  //（与 `request` / `response_done` / `response_drop` 都区分得开，用例按**字段名**取数计数）。
+  // 它买到的东西：试探成功 ⇒ 引擎用 [0, 236031] 种子开工 ⇒ 每条 worker 枪的起点都 ≥ 236032 ⇒
+  // 全部被拒（`Outcome::Failed(Http(503))`，零字节落地）⇒ 快速退避 1/2/4/8/16 s 用尽后转入 30 s
+  // 无限慢重试 ⇒ `slow-retry xN` 那一格第一次在**活着的引擎**上长出非零值、进真进程的进度行。
+  // 此前量不到它的原因（docs/evidence/2026-10-18 §6 第 5 条）：唯一制造中途失败的对端 `/drop/<n>`
+  // 要么把试探也杀掉（`/drop/0` ⇒ `probe::run` 交 Err，重试链根本没开始），要么交出 n>0 个真字节
+  //（⇒ Advanced，引擎照常推进，退避不介入）。
+  // 拒绝分支**必须 `res.end()`**：不收尾的响应会把 keep-alive 连接的 `_httpMessage` 吊住，同连接
+  // 后续响应全部沉默卡死（本文件 push 循环上方那段实测教训，这里同样吃这一条纪律）。
+  if (req.url.startsWith("/probe-only")) {
+    const PROBE_MAX = 236032; // 与 dlm::consts::PROBE_READ_BYTES 对齐（试探请求 `bytes=0-236031`）
+    const isProbeShot = !!(rng && rng[1] === "0" && rng[2] && parseInt(rng[2], 10) < PROBE_MAX);
+    if (!isProbeShot) {
+      res.writeHead(503, { "Content-Length": "0" });
+      res.end();
+      log("response_refuse", { conn: rec.id, url: req.url, status: 503, range: req.headers.range || null });
+      return;
+    }
+    // 是试探那一枪 ⇒ 不 return，落到下面的正常路径（206 + Content-Range 分母 = 48 MiB，种子照常铺出）。
+  }
   let start = 0, end = sendLen - 1, status = 200;
   if (rng && (rng[1] || rng[2])) {
     start = rng[1] ? parseInt(rng[1], 10) : Math.max(0, sendLen - parseInt(rng[2], 10));

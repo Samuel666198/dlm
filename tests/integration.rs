@@ -5031,3 +5031,231 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
     );
     Ok(())
 }
+
+// ================================================================ T11 / spec §6.2 的 `slow-retry xN`
+//
+// 派发背景（`docs/evidence/2026-10-18-spec7-四场景验收.md` §6 第 5 条）：`slow-retry xN` 那一格
+// 在渲染层（`report.rs` 的 tick 表）与快照判据（`engine.rs` 判据⑥）两侧都有常驻用例，但**本仓库
+// 没有任何一次真进程的真进度行观测到过它**。此前仪器上唯一制造中途失败的对端 `/drop/<n>`：
+// `/drop/0` 连试探那一枪也杀 ⇒ `probe::run` 交 `Err` ⇒ `engine::run` 压根进不了重试链；
+// `n > 0` 交出真字节 ⇒ `fetch` 交 `Advanced` ⇒ 引擎照常推进、退避不介入。
+// ⇒ 本轮加仪器：node 侧 `/probe-only` 路由**只**对试探的限量 Range（`bytes=0-236031`）照常服务，
+// 其余每条请求（含无 Range 的整份 GET）一律 503 空 body，并记 `response_refuse` 事件。
+// 形状：试探成功 ⇒ 种子 [0, 236031] ⇒ 每条 worker 枪起点 ≥ 236032 ⇒ 全部被拒
+//（`Outcome::Failed(Http(503))`，零字节落地）⇒ 快速退避 1+2+4+8+16 s（31 s）用尽 ⇒ 转入 30 s 慢重试
+// ⇒ `slow_retry_rounds = attempt - FAST_RETRY_MAX ≥ 1`。主循环在退避期照样每秒醒来交一拍
+//（`tick_if_due`；`x0/8` 是 E25⑤ 的合法形状）⇒ 真进度行第一次能带着 `slow-retry xN` 落地。
+// `--max-retries 6` 封顶整条链（快速+慢速一起数，spec §6.2 末句）：第 7 枪失败即停 ⇒
+// 整跑 ≈ 31 + 30 + 开销。**6 是能量到 `x1` 的最小封顶**：5 只走到快用尽（attempt 到 5，
+// `slow_retry_rounds` 恒 0），那一档 `slow-retry` 行根本不会出现 ⇒ 换不来这一发要买的东西。
+
+/// **spec §6.2 / E28⑫ 同族登记（证据文件 §6 第 5 条）的端到端一发**：真 `dlm.exe`（`run_dlm`，
+/// 不是 `engine::run`）对 `{base}/probe-only`，**不带 `--quiet`**（它从不挂 sink，E24①，
+/// `the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink` 钉着；带它这一发
+/// 量的就不是进度行了），`--max-retries 6` 让整跑能到头而不是无限慢重试。判据一条一个方向：
+/// - **主判据**：stdout 里存在带着 `slow-retry x` 且 N ≥ 1 的进度行。这一行必须**同时**带着
+///   百分比格与 `MiB/MiB` 对（否则将来渲染器一改，这一发就退化成"只认得 slow-retry"的空壳）。
+/// - **退出档**：非零，且措辞是 `main` 的 `ok=false` 结果那一支（"下载未完成" + "重试到顶"），
+///   与"参数写错了"（参数层，E26/C3 的禁词写法）和"跑不起来"（`Err` 那一支，试探都没成功）分得开。
+/// - **盘上形状**（spec §6.2/§6.7：失败不删用户可能还要的东西）：断点文件活着、能读回来、
+///   全长对、种子那一格在；目标文件是**部分但内容自洽**的前缀（按 `positioned_body` 逐字节比）。
+/// - **对端自己的账**（仪器侧判据，字段一律**按名字**取——规则 4，两种事件的 JSON 字段顺序相反，
+///   按列位对号读的是仪器不是产品）：试探的限量 Range 恰好一条且被**正常服务**（206 / 236 032 B）；
+///   至少 6 条 worker 枪被拒（同一链条排下第一发慢重试的前提）；每一条被拒的 Range 起点 ≥ 种子之后。
+#[test]
+fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("slow-retry")?;
+    let announced = srv.announced()?;
+    let len = announced.size; // 由这台服务器自己宣布（不抄历史值，与场景 C 同一口径）
+    let url = format!("{base}/probe-only");
+    let out_dir = dir.path().display().to_string();
+    let out_name = "slow-retry.bin";
+    let target = dir.path().join(out_name);
+    let state_path = dlm::state::path_for(&target);
+    let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
+
+    let started = Instant::now();
+    let run = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", out_name,
+        "--connections", "8", "--max-retries", "6",
+    ])?;
+    let wall = started.elapsed();
+    let so = stdout_of(&run);
+    let se = stderr_of(&run);
+
+    // —— 主判据：真进度行带着 `slow-retry xN`（N ≥ 1），而且那一行不是空壳 ——
+    // 分段按 `\r`（`tick_sink` 每发都以 `\r` 开头，E25 的分工），但**最后一发会被 `finish` 的
+    // 让行换行与结果块接在后面**（实测 2026-10-18：`… slow-retry x1\n下载未完成 …`）⇒ 每段先
+    // 截到第一个 `\n` 为止再拆格。截断只影响"尾巴上挂了什么"，不影响"这一行本身是什么形状"。
+    let slow_lines: Vec<&str> = so
+        .split('\r')
+        .map(|segment| segment.split('\n').next().unwrap_or(segment))
+        .filter(|line| line.contains("slow-retry x"))
+        .collect();
+    assert!(
+        !slow_lines.is_empty(),
+        "整跑 {wall:?} 没有任何一行进度带 `slow-retry x` ⇒ spec §6.2 那一格端到端仍然没被观测到。\
+         stdout 前 400 字节：{:?}；stderr：{se}",
+        so.get(..400)
+    );
+    let mut max_rounds = 0u32;
+    for line in &slow_lines {
+        let cells = tick_cells(line);
+        assert!(cells.len() >= 4, "带 slow-retry 的行至少要有前四格（百分比 / MiB 对 / 速率 / x 连接数）：{line:?}");
+        let pct = cells[0]
+            .strip_suffix('%')
+            .with_context(|| format!("进度行第一格不是百分比：{line:?}"))?;
+        assert!(is_one_decimal(pct), "百分比要是一位小数的数：{line:?}");
+        let (done, total) = cells[1]
+            .strip_suffix(" MiB")
+            .and_then(|s| s.split_once(" MiB/"))
+            .unwrap_or_else(|| panic!("第二格该是 `<已下> MiB/<全长> MiB`：{line:?}"));
+        assert!(is_one_decimal(done) && is_one_decimal(total), "那对 MiB 都要是一位小数：{line:?}");
+        assert_eq!(total, "48.0", "全长那一格就是这台服务器宣布的 48 MiB（E25① 的单位口径）：{line:?}");
+        for extra in cells.iter().skip(4) {
+            if let Some(rounds) = extra.strip_prefix("slow-retry x") {
+                assert!(
+                    !rounds.is_empty() && rounds.chars().all(|c| c.is_ascii_digit()),
+                    "慢重试那一格要给得出轮数：{line:?}"
+                );
+                // `unwrap_or(0)`：解析炸了就落在上面那条形状判据的红里，不让测试炸在解析上。
+                max_rounds = max_rounds.max(rounds.parse::<u32>().unwrap_or(0));
+            } else {
+                assert!(extra.starts_with("dup "), "第四格之后只许是 `dup X%` 或 `slow-retry xN`：{line:?}");
+            }
+        }
+    }
+    assert!(
+        max_rounds >= 1,
+        "`slow-retry xN` 的 N 至少要到 1（判据⑥的首个非零值：attempt 6 − FAST_RETRY_MAX 5）：{slow_lines:?}"
+    );
+
+    // —— 退出档与措辞：跑起来了、但重试到顶；既不是参数层也不是 `Err` 层 ——
+    assert_ne!(
+        run.status.code(),
+        Some(0),
+        "全部 worker 枪被拒的整跑不许退 0：exit={:?}，stderr：{se}",
+        run.status.code()
+    );
+    assert!(so.contains("下载未完成"), "结果行要走 `main` 的 `ok=false` 那一支：{so}");
+    assert!(so.contains("重试到顶"), "那句说明要指名「重试到顶」，这是封顶那一支的专属措辞：{so}");
+    for banned in ["参数写错了", "跑不起来"] {
+        assert!(
+            !so.contains(banned) && !se.contains(banned),
+            "两条流里出现 {banned:?} 就说明档位不对：`参数写错了` 是参数层（E26/C3），\
+             `跑不起来` 是 `main` 的 `Err` 那一支（那意味着连试探都没成功，本发要量的形状根本没发生）。\
+             stderr：{se}"
+        );
+    }
+    // 退避账：走到第一发慢重试并让第 7 枪撞封顶，至少要在 1+2+4+8+16（31 s）之后再睡 30 s。
+    // 这一句防的是"退避根本没真睡"的实现回归；上界不钉（机器负载不可控），如实只钉下界。
+    assert!(
+        wall >= Duration::from_secs(61),
+        "退避链 1+2+4+8+16+30 = 61 s 还没走完就收工 ⇒ 快速/慢速退避至少有一档没真睡（实测 {wall:?}）"
+    );
+
+    // —— 盘上形状：断点活着、种子在账、目标文件是部分但内容自洽的前缀 ——
+    assert!(
+        state_path.exists(),
+        "spec §6.2/§6.7：重试到顶的失败不许删断点（那是下一轮续起的依据）：{}",
+        state_path.display()
+    );
+    let snap = dlm::state::load(&state_path)?.context("断点文件存在却读不回来（损坏？）")?;
+    assert_eq!(snap.validator.total_len, len, "断点记的全长要与这台服务器宣布的一致");
+    let covered: Vec<(u64, u64)> = snap.segments.iter().map(|s| (s.start, s.end)).collect();
+    let covered_bytes: u64 = covered.iter().map(|(s, e)| e - s + 1).sum();
+    assert!(
+        covered.contains(&(0, PROBE_READ_BYTES - 1)),
+        "试探那一枪的 [0, {}] 种子必须已被断点认领（它成功了才有后面的形状）：{covered:?}",
+        PROBE_READ_BYTES - 1
+    );
+    assert!(target.exists(), "失败之后目标文件不在 ⇒ 连半截前缀都没留下");
+    let partial_len = std::fs::metadata(&target)?.len();
+    assert!(
+        covered_bytes <= partial_len,
+        "断点说归我的字节（{covered_bytes} B）比盘上真有的（{partial_len} B）还多 ⇒ 断点对磁盘说谎（E17 那本账）"
+    );
+    assert!(
+        partial_len >= PROBE_READ_BYTES && partial_len < len,
+        "这一跑只有试探那 {} B 真落了盘（其余枪全被拒、零字节落地）：实测半截 {partial_len} B / 全长 {len} B",
+        PROBE_READ_BYTES
+    );
+    let want = harness::positioned_body(usize::try_from(partial_len)?);
+    assert_eq!(
+        std::fs::read(&target)?,
+        want,
+        "半截那一段必须与服务器同偏移的内容逐字节一致（部分，但要自洽）：{partial_len} B"
+    );
+
+    // —— 对端自己的账：先守卫"两条形状都已落盘"，再取全量计数 ——
+    srv.events_while(|evs| {
+        evs.iter().any(|e| e["ev"] == "response_refuse")
+            && evs.iter().any(|e| e["ev"] == "response_done" && e["url"] == "/probe-only")
+    })?;
+    let evs = srv.events()?;
+    let served: Vec<&serde_json::Value> = evs
+        .iter()
+        .filter(|e| e["ev"] == "response_done" && e["url"] == "/probe-only")
+        .collect();
+    assert_eq!(
+        served.len(),
+        1,
+        "整跑只许有**一条**被正常服务的响应，而且它是试探那一枪（其余全被拒）：{served:?}"
+    );
+    assert_eq!(
+        served[0]["status"].as_u64(),
+        Some(206),
+        "试探那一枪是 206 限量读，不是整份 200：{:?}",
+        served[0]
+    );
+    assert_eq!(
+        served[0]["bytes"].as_u64(),
+        Some(PROBE_READ_BYTES),
+        "试探那一枪交出的字节数正好是限量读（种子就是它）：{:?}",
+        served[0]
+    );
+    let probe_shots = evs
+        .iter()
+        .filter(|e| e["ev"] == "request" && e["range"].as_str() == Some(probe_range.as_str()))
+        .count();
+    assert_eq!(probe_shots, 1, "带试探限量 Range 的请求必须恰好一条（多一条就是回头重取/重试探）：{probe_range}");
+    let refused: Vec<&serde_json::Value> = evs.iter().filter(|e| e["ev"] == "response_refuse").collect();
+    assert!(
+        refused.len() >= 6,
+        "封顶 6 的那条链要先被拒满 6 次才排下第一发慢重试 ⇒ 到顶时至少已有 6 条拒绝；实测 {} 条。\
+         少于 6 而进度行又带着 slow-retry，只能说明这一发走的不是本设计形状。",
+        refused.len()
+    );
+    for e in &refused {
+        let range = e["range"].as_str().with_context(|| format!("拒绝行没带 range：{e:?}"))?;
+        let (s, _) = harness::wire_span(range, len)?;
+        assert!(
+            s >= PROBE_READ_BYTES,
+            "被拒的那一枪起点 {s} 落在种子 [0, {}) 之内 ⇒ 要么对端把试探形状也拒了（那会退化成 \
+             `Err` 那一支），要么引擎回头重取已确认的字节：{e:?}",
+            PROBE_READ_BYTES - 1
+        );
+    }
+
+    eprintln!(
+        "T11 取证：用时 {wall:?}、exit={:?}、带 slow-retry 的进度行 {} 行（最大 x{max_rounds}）、\
+         拒绝 {} 条、正常服务 {} 条、半截文件 {partial_len} B、断点 {} 格 / {covered_bytes} B；\
+         样例行（取最大轮数那一行）：{:?}",
+        run.status.code(),
+        slow_lines.len(),
+        refused.len(),
+        served.len(),
+        covered.len(),
+        slow_lines
+            .iter()
+            .find(|line| {
+                tick_cells(line)
+                    .iter()
+                    .any(|c| c.strip_prefix("slow-retry x").and_then(|n| n.parse::<u32>().ok()) == Some(max_rounds))
+            })
+            .copied()
+            .unwrap_or_else(|| slow_lines[0])
+    );
+    Ok(())
+}
