@@ -44,6 +44,30 @@ impl fmt::Debug for Task {
     }
 }
 
+/// 闸判的那份串＝reqwest（WHATWG 基本 URL 解析器）**真拿去解析**的那份。两步，顺序与规范一致：
+/// 1. 删掉**全部** ASCII tab / LF / CR —— 这一刀在规范里是"任意位置"，不是只删首尾；
+/// 2. 再删掉**首尾**的「C0 控制符或空格」（`U+0000`–`U+001F` 与 `U+0020`）。
+///
+/// **只做形状归一，不改 `Task::url` 本体**：这里返回的是一份新串，落盘用的还是原串（见 `validate()` 文档）。
+///
+/// 为什么 `str::trim()` 不够（T99-G1 那一发用的正是它）：`trim` 按 `char::is_whitespace` 判首尾，
+/// 于是第 2 步**少认**了 C0 里非空白的那批（`U+0000`–`U+0008`、`U+000E`–`U+001F`），
+/// 第 1 步则**整个缺失**。少认的后果是 `get(..7)` 前缀判据与 `scheme_separator_len` 同时认不出 scheme
+/// ⇒ 明文 HTTP 那一支与 userinfo 那一支**两道闸一起恒假**。实测形状与后果记在勘误 **E32**，不复制表格。
+///
+/// **多认/少认哪个方向危险要记清**：少认＝绕过（要防的就是这一支）；多认＝保守地拒一条本来也走不出
+/// reqwest 的串（可接受）。本函数选的是"照解析器剥"，两边都不多：`U+00A0` / `U+2028` 这类 Unicode 空白
+/// 解析器不剥，我们也不再剥（`trim()` 以前会剥，那是多认支，不算缺陷，但对齐之后没必要留着）。
+fn url_for_gate(raw: &str) -> String {
+    let without_ct = raw
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect::<String>();
+    without_ct
+        .trim_matches(|c: char| (c as u32) <= 0x20)
+        .to_string()
+}
+
 /// `scheme://` 之后的字节下标；没有合法 scheme 时 `None`。
 ///
 /// scheme 按 RFC 3986 = `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`，**大小写都算**：
@@ -90,14 +114,15 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 /// - **认不出 scheme ⇒ 假**（保守那一支）：这种 URL 本来也走不出 reqwest（"relative URL without a
 ///   base"），但凭据没有理由因为少写了 `https://` 就被送出去。
 ///
-/// **入参先 trim**（T99-G1，与 `validate()` 读同一份串）：`probe::with_contract_headers` 与 `fetch`
-/// 复用**这一个**判据决定 `Authorization: Basic` 上不上线。不同步的后果是"闸按 trim 后的串放行了
-/// `  https://host`，发头时按原串算出 `false` ⇒ 该带的凭据静默不带" —— 与闸那一侧是同一个"两把串"的病。
+/// **入参先归一**（T99-G1 加的是 `trim()`，T99-G1b 换成 `url_for_gate`，与 `validate()` 读同一份串）：
+/// `probe::with_contract_headers` 与 `fetch` 复用**这一个**判据决定 `Authorization: Basic` 上不上线。
+/// 不同步的后果是"闸按归一后的串放行了 `\u{1}https://host`，发头时按原串算出 `false` ⇒
+/// 该带的凭据静默不带" —— 与闸那一侧是同一个"两把串"的病。
 /// `scheme_separator_len` 本体不动（它是 `validate()` 与这里共用的底层形状判断，牵到 `probe.rs`
 /// 那条"服务器控制的落地 URL"检查，那一支的入参不由我们控制）。
 pub(crate) fn url_is_https(url: &str) -> bool {
-    let url = url.trim();
-    match scheme_separator_len(url) {
+    let url = url_for_gate(url);
+    match scheme_separator_len(&url) {
         // `scheme_separator_len` 给的是 `"://" 之后`的下标，减 3 正好回到 scheme 末尾 ⇒ 那一段就是
         // scheme 名本身（不含冒号）。
         Some(after_scheme) => url[..after_scheme - 3].eq_ignore_ascii_case("https"),
@@ -108,26 +133,27 @@ pub(crate) fn url_is_https(url: &str) -> bool {
 impl Task {
     /// 唯一的校验闸（规则只住这一处，见勘误 E23 附记的纪律）。
     ///
-    /// **三条判据读的都是 `self.url` trim 之后的那一份**，不是原串：reqwest 走 WHATWG 基本 URL
-    /// 解析器，那个解析器会剥掉首尾空白与控制字符 —— 于是 `" \thttp://host/a.bin"` 照样解析成功、
+    /// **三条判据读的都是同一份归一后的串**（`url_for_gate`），不是原串：reqwest 走 WHATWG 基本 URL
+    /// 解析器，那个解析器会删掉全部 tab/LF/CR 与首尾的 C0 控制符或空格 —— 于是
+    /// `" \thttp://host/a.bin"`、`"\u{1}http://host/a.bin"`、`"http\t://host/a.bin"` 都照样解析成功、
     /// 照样把请求发出去，而读原串的判据（第 1 字节起的 `http://`、`://` 的 scheme 形状、authority
     /// 里的 `@`）会同时恒假。后果由控制员实测记录在勘误 **E32**：口令可在明文 http 上线、也可随
     /// `task.url` 落进断点文件。这里只把「过闸的串」与「判 scheme 的串」统一成同一份。
     ///
     /// **存储形状一个字都不改**：`task.url` 照原样落盘（续传要用），凭据之所以不可能再落盘，
-    /// 是因为闸会把这类输入拒掉，**不是**因为我们把串改干净了 —— 别把这一发"顺手修"成 trim 后回写。
+    /// 是因为闸会把这类输入拒掉，**不是**因为我们把串改干净了 —— 别把这一发"顺手修"成归一后回写。
     pub fn validate(&self) -> anyhow::Result<()> {
-        // `str::trim` 按 `char::is_whitespace` 判空白（空格 / `\t` / `\n` / `\r` / `\u{0b}` / `\u{0c}`），
-        // 比手写 `trim_matches(|c| …)` 的字符清单更全 —— 用 `trim()`，别退回字符清单那一版。
-        let url = self.url.trim();
+        // 归一规则只住在 `url_for_gate` 那一处（T99-G1b）：以前这里是 `self.url.trim()`，
+        // 只按 `char::is_whitespace` 剥首尾 ⇒ 少认了首尾的 C0 与串中间的 tab/LF/CR（少认＝绕过，见其文档）。
+        let url = url_for_gate(&self.url);
         anyhow::ensure!(!url.is_empty(), "缺少 URL");
         let plain_http = url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("http://"));
         anyhow::ensure!(!(plain_http && self.password.is_some()),
             "明文 HTTP 不发送口令：请改用 https:// 或去掉 --password");
         // 勘误 E9：凭据写在 URL 的 userinfo 里会**原样落盘**两处（`task.url` 与 `validator.final_url`），
         // 而 `state` 删不掉 URL（续传要用）。所以这条只在**这一个**闸口里判，`state` 只指路、不重复实现。
-        // 入参交进来的是**已 trim 的** `url`（`authority_has_userinfo` 本体不 trim，见它的文档）。
-        anyhow::ensure!(!authority_has_userinfo(url),
+        // 入参交进来的是**已归一的** `url`（`authority_has_userinfo` 本体不归一，见它的文档）。
+        anyhow::ensure!(!authority_has_userinfo(&url),
             "URL 的 host 前不能带凭据（userinfo，形如 https://用户:口令@主机/…）：\
              请把它去掉并改用 --user / --password 传入");
         Ok(())
@@ -244,12 +270,13 @@ mod tests {
         assert!(x.validate().is_ok(), "口令走 --user/--password 是本工具支持的形状");
     }
 
-    // ---- T99-G1：URL 首尾空白不得绕过凭据闸 ----
+    // ---- T99-G1 / G1b：URL 的"首尾空白 + 首尾 C0 + 串中间 tab/LF/CR"都不得绕过凭据闸 ----
     //
-    // 这四把负向判据（1/2/3 加既有那格）钉的是**同一个契约**：`validate()` 与 `url_is_https()` 读的是
-    // **同一份串**（trim 之后的），不是"过闸看原串、判 scheme 看另一份"。实测证据（V1 未带凭据跑完、
-    // V2 明文 http 上线 Basic、V4 口令进断点文件）由控制员记在计划勘误 **E32**，这里不复述过程。
-    // 三把正向对照臂（4/5/6）的作用相同：证明 trim 只把判据读正，没有把合法写法与保守那一支一起改掉。
+    // 这些负向判据（G1 的 1/2/3 加既有那格）钉的是**同一个契约**：`validate()` 与 `url_is_https()` 读的是
+    // **同一份串**（`url_for_gate` 归一之后的），不是"过闸看原串、判 scheme 看另一份"。实测证据
+    // （V1 未带凭据跑完、V2 明文 http 上线 Basic、V4 口令进断点文件，以及 G1b 那四种形状）由控制员记在
+    // 计划勘误 **E32**，这里不复述过程。正向对照臂（G1 的 4/5/6）的作用相同：证明归一只把判据读正，
+    // 没有把合法写法与保守那一支一起改掉。
 
     #[test]
     fn rejects_password_over_plain_http_with_leading_whitespace() {
@@ -308,7 +335,7 @@ mod tests {
 
     #[test]
     fn accepts_https_url_with_leading_whitespace() {
-        // 正向对照臂：证明上面那把 trim 没把合法写法一起杀掉 —— 带首尾空白的 `https://`（不带口令）
+        // 正向对照臂：证明上面那把归一没把合法写法一起杀掉 —— 带首尾空白的 `https://`（不带口令）
         // 仍然过闸。闸管的是"读哪份串"，不是"替用户把 URL 改干净"（`task.url` 照原样落盘）。
         for url in ["   https://example.com/a.bin", "\thttps://example.com/a.bin\t"] {
             assert!(t(url).validate().is_ok(), "{url:?} 是加密的、authority 无 @，必须放行");
@@ -328,6 +355,9 @@ mod tests {
         assert!(!url_is_https("\thttp://h/"), "带首空白的明文 http 不是 https");
         assert!(!url_is_https("  not-a-url  "), "保守那一支仍成立：认不出 scheme ⇒ 假");
         assert!(!url_is_https("   "), "全空白 ⇒ 假（不是 panic，也不是真）");
+        // T99-G1b 追加的两条：这一族的判据必须与闸读同一份**归一后**的串，而不只是"去掉空白"。
+        assert!(url_is_https("\u{1}https://h/"), "前导 C0 不是新 scheme：解析器剥掉它，那还是 https");
+        assert!(!url_is_https("ht\ntp://h/"), "串中间的 LF 被删掉后是 `http` ⇒ 不是 https（保守那一支照旧）");
     }
 
     #[test]
@@ -340,6 +370,157 @@ mod tests {
         let mut secure = t("https://example.com/a.bin");
         secure.password = Some("hunter2".into());
         assert!(secure.validate().is_ok(), "干净 https 带口令必须放行");
+    }
+
+    // ---- T99-G1b：归一对齐 WHATWG 的两步（删**全部** tab/LF/CR ＋ 删**首尾** C0 或空格）----
+    //
+    // `trim()` 只按 `char::is_whitespace` 剥首尾 ⇒ 少认了两类：首尾的 C0 里非空白那批、串中间的 tab/LF/CR。
+    // 少认＝绕过（要防的方向），多认＝保守地拒一条本来也走不出 reqwest 的串（可接受）。
+    // 下面四把负向格逐条对应控制员在 G1 之后实测的四种形状（退 0 且对端真收到 `authorization: Basic`），
+    // 过程与后果记在勘误 **E32**，这里不复述表格。两把正向格防"修过头"，并钉住"归一不回写"。
+
+    #[test]
+    fn rejects_password_over_plain_http_with_leading_c0_control() {
+        // `U+0001` 不是空白（`char::is_whitespace` 为假），但落在 WHATWG 的"首尾 C0 控制符或空格"里，
+        // 解析器照剥 ⇒ 这条在 reqwest 那里就是**明文** http。G1 之后实测：退 0、口令上了明文线（E32）。
+        for url in [
+            "\u{1}http://example.com/a.bin",
+            "\u{1f}http://example.com/a.bin", // C0 的最后一个码位
+            "\u{0}http://example.com/a.bin",  // NUL 也在那一刀里
+            " \u{1}http://example.com/a.bin", // 空格与 C0 混着排在前面
+            "\u{1}http://example.com/a.bin\u{1}", // 尾同一支（首尾都削）
+        ] {
+            let mut x = t(url);
+            x.password = Some("hunter2".into());
+            let Err(err) = x.validate() else {
+                panic!("{url:?} 的 scheme 前只有 C0/空格，配口令必须被闸拒掉");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains("明文 HTTP 不发送口令"), "错误文案要指改 https 或去掉 --password：{msg}");
+            assert!(!msg.contains("hunter2"), "错误消息本身不该把口令抄一遍：{msg}");
+        }
+    }
+
+    #[test]
+    fn rejects_userinfo_behind_leading_c0_control() {
+        // 同一份串上的第二道闸（E9 的 userinfo）：前导 C0 曾经让 `scheme_separator_len` 返回 `None`，
+        // `authority_has_userinfo` 于是拿整条串找第一个 `/`，截到的那段里没有 `@` ⇒ 恒假（实测退 0，E32）。
+        for url in [
+            "\u{1}http://u:p@example.com/a.bin",
+            "\u{1f}https://alice:s3cret@x/a.bin",
+            "\u{1} https://alice@x/a.bin", // C0 + 空格混排：两步都走到才认得出 scheme
+            "\u{1}http://u:p@example.com/a.bin ",
+        ] {
+            let Err(err) = t(url).validate() else {
+                panic!("{url:?} 的 authority 里有 @，前导 C0 不许让它变成合法写法");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
+            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+        }
+    }
+
+    #[test]
+    fn rejects_tab_inside_the_scheme_separator() {
+        // "删全部 tab/LF/CR"那一步（不只是首尾）：`http\t://…` 在解析器那里就是 `http://…`。
+        // 修复前 tab 卡在 `h` 与 `://` 中间 ⇒ `get(..7)` 与 `find("://")` 两头都对不上 ⇒ 两道闸同时恒假。
+        for url in [
+            "http\t://u:p@example.com/a.bin",
+            "h\tttp://u:p@example.com/a.bin", // tab 落在 scheme 名里也一样
+            "https\t://alice:s3cret@x/a.bin", // scheme 大写/https 两支同一条路
+            "http\t://alice@x",               // 只有用户名也是凭据形态
+        ] {
+            let Err(err) = t(url).validate() else {
+                panic!("{url:?} 删掉中间的 Tab 就是带 userinfo 的 URL，必须被闸拒掉");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
+            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+        }
+    }
+
+    #[test]
+    fn rejects_newline_inside_the_url_shape() {
+        // 与上一格同一步的另一半：LF/CR 也照样被解析器**在任意位置**删掉 —— `ht\ntp://…` 删掉 `\n`
+        // 之后才是 `http`，所以这一格证明的是"删全部 tab/LF/CR"那一刀，不是首尾那一刀。
+        for url in [
+            "ht\ntp://u:p@example.com/a.bin",
+            "h\rttp://u:p@example.com/a.bin",
+            "https\r\n://alice:s3cret@x/a.bin", // 两个都算，位置在 scheme 之后也一样
+            "http://alice:s3cret@x/a\r.bin",    // 串尾方向的中间 CR 也不许把 authority 挪出 @
+        ] {
+            let Err(err) = t(url).validate() else {
+                panic!("{url:?} 删掉中间的换行就是带 userinfo 的 URL，必须被闸拒掉");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
+            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+        }
+        // 同一刀也喂 `plain_http` 那一支：中间 LF 的明文 http 配口令必须走"明文 HTTP 不发送口令"。
+        let mut x = t("ht\ntp://example.com/a.bin");
+        x.password = Some("hunter2".into());
+        let Err(err) = x.validate() else {
+            panic!("`ht\\ntp://…` 归一后是明文 HTTP，配口令必须被闸拒掉");
+        };
+        assert!(err.to_string().contains("明文 HTTP 不发送口令"), "要走那一支：{err}");
+    }
+
+    #[test]
+    fn accepts_https_url_with_leading_c0_control_or_space() {
+        // 正向对照臂 ①：归一不许把合法写法一起杀掉。带前导 C0（混着空格）的 `https://`、不带口令 ⇒ 过闸；
+        // 同一份串上 `url_is_https` 必须给 `true` —— 凭据该发就发，走的是加密线，不能因为前导控制符就静默不发。
+        for url in [
+            "  \u{1}https://example.com/a.bin",
+            "\u{1}https://example.com/a.bin",
+            "\u{1f} https://example.com/a.bin\t", // 尾部混一个 Tab（同一步会删掉它）
+            "\u{1}https://example.com/a@b.bin",   // `@` 在 path 里仍然只是 path
+        ] {
+            assert!(t(url).validate().is_ok(), "{url:?} 归一后是加密的、authority 无 @，必须放行");
+            assert!(url_is_https(url), "{url:?} 的 scheme 就是 https，判据要给真");
+        }
+        // 口令支照放行（与 `accepts_https_url_with_leading_whitespace` 同一立场，只是多了 C0）。
+        let mut x = t("\u{1}https://example.com/a.bin");
+        x.password = Some("hunter2".into());
+        assert!(x.validate().is_ok(), "https 带口令是本工具支持的形状，前导 C0 不改变这一点");
+    }
+
+    #[test]
+    fn gate_normalization_does_not_rewrite_the_stored_url() -> anyhow::Result<()> {
+        // 正向对照臂 ②（本发的"存储形状"契约）：`url_for_gate` 只产**判据读的那份串**，
+        // 绝不回写 `task.url`。续传要拿原串重新发请求，改写过的话下一条任务的字节就对不上来源。
+        const RAW: &str = "\u{1}http\t://host/a.bin";
+        let x = t(RAW);
+        assert!(x.validate().is_ok(), "{RAW:?} 归一后是明文 http、authority 无 @ 且不带口令 ⇒ 必须放行");
+        assert_eq!(x.url, RAW, "闸只读归一后的那份，不许把归一结果写回 `task.url`");
+        assert_eq!(url_for_gate(RAW), "http://host/a.bin", "归一本身的两步（对照读：不回写、只给判据）");
+
+        // `Snapshot::from_task` 那条落盘路径同样不受影响：它只是调 `validate()`（规则仍只住一处，
+        // 见 E23 附记），存下来的还是原串。夹具在本格里手搭 —— `state.rs` 一行没动。
+        let validator = crate::state::Validator {
+            etag: Some("E".into()),
+            last_modified: Some("L".into()),
+            total_len: 10,
+            final_url: RAW.into(),
+            ignore_mtime: false,
+        };
+        let snap = crate::state::Snapshot::from_task(
+            &x,
+            validator.clone(),
+            vec![crate::state::SegView { start: 0, end: 9 }],
+        )
+        .expect("过闸的任务必须能构造快照");
+        assert_eq!(snap.task.url, RAW, "断点文件里存的必须是原串，不是归一后的那份");
+        assert_eq!(snap.validator.final_url, RAW, "`validator.final_url` 同样不回写");
+        assert!(!snap.needs_secret, "这条任务本来就没带口令");
+
+        // 反面：同一形状配上口令 ⇒ 落盘口也拒（`from_task` 调的就是这同一个闸，G1b 修的那份串自动生效）。
+        let mut with_secret = x.clone();
+        with_secret.password = Some("hunter2".into());
+        let Err(err) = crate::state::Snapshot::from_task(&with_secret, validator, Vec::new()) else {
+            panic!("前导 C0 + 中间 Tab 的明文 http 配口令，在落盘口也必须被拒");
+        };
+        assert!(err.to_string().contains("明文 HTTP 不发送口令"), "落盘口要走闸文案：{err}");
+        Ok(())
     }
 
     // ---- 评审 F4：派生的 Debug 会把口令打出来 ----
