@@ -3674,9 +3674,12 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
 // 勘误 **E22 第 5 条 / E24 第 5 条**：`src/engine.rs` 的 `mod tests` 里那些手搭 `Engine` 够不着
 // `engine::run` 这条装配路径（试探 → 种子 → worker 线程 → 断点保存），而 9B-1 被禁止建 `report.rs`，
 // 于是"挂上 sink 之后到底有没有收到过 tick、收到的那八格是不是可读的数"今天必须由这几发用例交。
-// 第一发是**进程内**（真 `engine::run` + node 对端 + 真渲染器），后三发是**真二进制**
+// 第一发是**进程内**（真 `engine::run` + node 对端 + 真渲染器），后五发是**真二进制**
 // （`CARGO_BIN_EXE_dlm`）—— 因为 `--help` 的退出码、bit0 的短路、`--quiet` 到底挂不挂 sink 这三件事
 // 都住在 `main.rs`，进程内没有任何代码路径能观察到它们（`main` 不是库的一部分）。
+// 9B-3 又补两发（**E26/C3** 参数层的进程级码与措辞、**E26/C5** `--quiet` + `--no-start` 那一叠），
+// 它们同样只能在这个面上钉：一个读的是 `main::parameter_error` 交的码，另一个读的是
+// `main::dispatch` 里"短路在两个位都读完之后"那个位置。
 //
 // 判据方向：**`Report` 始终是权威**，`on_tick` 只是"这一拍的样子"（E21⑦⑧）⇒ 这几发都不断 tick 的条数，
 // 只断"至少收到过一发"与"终值那几格与这次下载对得上"。
@@ -3990,5 +3993,153 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
     let se = stderr_of(&err);
     assert!(se.contains("跑不起来"), "那支的措辞要说\"跑不起来\"，与 `ok = false` 分得开：{se}");
     assert!(!se.contains("Seeded"), "错误路径上也不许漏 trace（E20⑨）：{se}");
+    Ok(())
+}
+
+/// **E26/C3**：形状写错的参数停在**参数层**。真二进制这一支必须退 `BAD_ARGS`（2）并说"参数写错了"，
+/// 既不走进引擎换回一句校验结论（**E20⑨**：那是把"你话没说对"报成"东西下坏了"），也不是 clap
+/// 的用法块。三者里有两个**故意同码**（E26/C3 追认 `BAD_ARGS = 2` 的理由就是"脚本读到的
+/// '话没说对'只该有一种码"）⇒ 码分不开来源，**措辞**是唯一的分档证据，所以这里把三个来源各钉一次：
+/// 我们的必须在、引擎的必须不在、clap 的必须不在。
+///
+/// 为什么这一发要放在**进程级**：今天这一格只被 `main.rs::tests` 那发手搭 `anyhow!` 的函数级用例钉住，
+/// 它测的是"`parameter_error` 拿到一句话之后交回哪个码"，**测不到**"`check_boundaries` 那句
+/// 到底是不是走到这里的那一句"，也测不到那一趟有没有上网 ⇒ 两头都可能在装配处断掉而无人可见
+/// （`--lib` 200 全绿、`--bins` 3 全绿的那种形状，E26 的 C1 已经付过一次学费）。
+#[test]
+fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("bin-bad-args")?;
+    let out_dir = dir.path().display().to_string();
+    let url = format!("{base}/blob");
+
+    // ① `--sha256` 给的不是"64 个十六进制字符"。选 `xyz` 而不是空串：`Some("xyz")` 在
+    //    `Config::verify_sha256` 上是完全合法的形状，**只有** `check_boundaries` 这一层拦得住它
+    //    （**E23⑤** 把这一格判给 CLI 的原话），所以"没走到引擎"这句断言在这里不是空话。
+    let sha = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--sha256", "xyz",
+    ])?;
+    let es = stderr_of(&sha);
+    let so = stdout_of(&sha);
+    assert_eq!(
+        sha.status.code(),
+        Some(2),
+        "形状错的退出档是 `BAD_ARGS`（E26/C3，与 clap 的用法错同码）：exit={:?}，stderr：{es}",
+        sha.status.code()
+    );
+    assert!(es.contains("参数写错了"), "参数层的措辞要原样到达 stderr（E23⑤）：{es}");
+    assert!(es.contains("--sha256"), "那句话还得点名是哪一格写错了，否则用户没法改：{es}");
+    for engine_wording in ["校验不符", "sha256 不符", "跑不起来", "下载未完成"] {
+        assert!(
+            !es.contains(engine_wording) && !so.contains(engine_wording),
+            "两条流里出现 {engine_wording:?} 就说明这趟已经走进了引擎\
+             （前两个是引擎的校验结论，`跑不起来` 是 `main` 的 `Err` 那一支，`下载未完成` 是结果行）：\
+             stderr：{es}，stdout：{so}"
+        );
+    }
+    assert!(
+        !es.contains("Usage"),
+        "码是 2，但这一支**不是** clap 的用法块 —— 两个来源同码，靠这句措辞分开（见本用例文档）：{es}"
+    );
+    assert!(!dir.path().join("blob.bin").exists(), "参数层失败之后磁盘上一个字节都不该动过");
+    // 负向判据按 harness 的纪律下：**守满**一段时间（日志行落盘晚于客户端拿到响应）。
+    let reqs = srv.requests_within(Duration::from_millis(500))?;
+    assert!(
+        reqs.is_empty(),
+        "对端看到 {} 条请求 ⇒ 形状闸没拦住，白跑一整趟下载才告诉你结论（E23⑤ 拦的正是这一格）：{reqs:?}",
+        reqs.len()
+    );
+
+    // ② 同一条闸的第二格：`--connections 0`。⚠ 立论按 **E23 附记①** 的更正版走，不抄 E23⑤ 原句：
+    //    引擎侧**有** `workers >= 1` 那道 `ensure!`（`src/engine.rs:580`，在 `build_client` 与
+    //    `ensure_parent_dir` 之前），所以 CLI 这一格拦的**不是崩溃**，而是**档与措辞** ——
+    //    "话没说对"（2 + "参数写错了"）不该被报成"跑不起来"（1 + 引擎那句）。
+    let conns = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--connections", "0",
+    ])?;
+    let ec = stderr_of(&conns);
+    assert_eq!(
+        conns.status.code(),
+        Some(2),
+        "`--connections 0` 与 `--sha256 xyz` 同一个档（E26/C3：'话没说对'只有一种码）：exit={:?}，stderr：{ec}",
+        conns.status.code()
+    );
+    assert!(
+        ec.contains("参数写错了") && ec.contains("--connections"),
+        "参数层措辞 + 点名那一格，两条都要在：{ec}"
+    );
+    for engine_wording in ["跑不起来", "至少要是 1"] {
+        assert!(
+            !ec.contains(engine_wording) && !stdout_of(&conns).contains(engine_wording),
+            "出现 {engine_wording:?} 就说明这一格是被引擎拦下的，不是 CLI（E23 附记① 的更正就落在这里）：{ec}"
+        );
+    }
+    assert!(!dir.path().join("blob.bin").exists(), "第二格同样不该动磁盘");
+    assert_eq!(
+        srv.requests_within(Duration::from_millis(300))?.len(),
+        0,
+        "第二格同样一个字节都不许多打（日志是同一份 ⇒ 这里仍是对端的全量账）"
+    );
+    Ok(())
+}
+
+/// **E26/C5**：`--quiet` 与 `--no-start` **同时**给。行为由两条裁定叠出来，两条在这一格上都有落点：
+/// **E24①** 把 `--quiet` 的语义收窄成"关掉每一拍那一发进度行"（**最终摘要与错误照打**），
+/// **E20④** 把 bit0 的短路放在 `engine::run` **之前** —— 而 `dispatch` 的形状是先读 `quiet()`
+/// 与 `no_start()` 两个位、再消费 `Cli`，所以短路那一刻两个位都已经读过了 ⇒ 结论是
+/// **摘要照打、一个 `\r` 都没有、退出码 0**。
+///
+/// 这一格今天没有用例，而叠出来的两支各有自己的回归方向："quiet 把摘要也吞了"（把 E24①
+/// 读成"什么都不说"）与"no-start 其实下了"（短路位置挪到挂 sink 之后）。所以这里同时断
+/// 正向（摘要每一格都在）、反向（无 `\r`、无结果行、stderr 全空）与代价（零请求、无文件）。
+#[test]
+fn the_binary_still_prints_the_summary_when_quiet_meets_no_start() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("bin-quiet-no-start")?;
+    let out_dir = dir.path().display().to_string();
+    let url = format!("{base}/blob");
+    let without_quiet = ["--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--no-start"];
+    let mut both = without_quiet.to_vec();
+    both.push("--quiet");
+
+    let out = run_dlm(&both)?;
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "`--quiet` + `--no-start` 既不是失败也不是静默退出（E24①/E20④）：exit={:?}，stderr：{}",
+        out.status.code(),
+        stderr_of(&out)
+    );
+    let sq = stdout_of(&out);
+    assert!(sq.contains("任务摘要"), "`--quiet` 吞掉摘要就是越权（E24①：静默只关刷新的那一行）：{sq}");
+    assert!(sq.contains(&url) && sq.contains("blob.bin"), "摘要仍要逐字段打（E23⑥：不许拿 Debug 当渲染器）：{sq}");
+    assert!(!sq.contains('\r'), "这一支上永远不该有进度行（引擎压根没进，也就没有进度源）：实测 stdout {sq:?}");
+    for verdict in ["下载已完成", "下载未完成"] {
+        assert!(!sq.contains(verdict), "短路之后不该有最终结果行（E20④）：{sq}");
+    }
+    assert!(
+        stderr_of(&out).is_empty(),
+        "这一支没有任何话要说；stderr 一旦有内容，说明走成了参数层或 `Err` 那一支：{}",
+        stderr_of(&out)
+    );
+
+    // 对照组：**同一串参数、不给 `--quiet`**。`report::summary` 是纯函数、不含时间，
+    // 所以"静默与否"在只入队这一支上必须是一个可观测的**恒等**，而不只是"摘要还在"——
+    // 这一句才是那根反针：它挡住"quiet 顺手改了某几格"这种比"整个吞掉"难得多的回归。
+    let plain = run_dlm(&without_quiet)?;
+    assert_eq!(plain.status.code(), Some(0), "对照组（只 `--no-start`）也是 0：{}", stderr_of(&plain));
+    assert_eq!(
+        sq,
+        stdout_of(&plain),
+        "`--quiet` 在 `--no-start` 这一支上不该改变 stdout 的任何一个字节（E24① 的收窄版）"
+    );
+
+    assert!(!dir.path().join("blob.bin").exists(), "摘要之后动了磁盘 ⇒ 这一支又开始下载了（E20④）");
+    let reqs = srv.requests_within(Duration::from_millis(500))?;
+    assert!(
+        reqs.is_empty(),
+        "bit0 说\"一个字节都不许多打\"，对端却看到 {} 条请求（两发都没进引擎 ⇒ 这本账此刻还是空的）：{reqs:?}",
+        reqs.len()
+    );
     Ok(())
 }
