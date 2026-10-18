@@ -3944,9 +3944,18 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
         stderr_of(&ok)
     );
     assert!(sok.contains('\r'), "非静默必须挂上 sink 并打出那一行进度（E24①）：{sok:?}");
+    // **E28⑧-3 补的那一格**（本轮追加，上面那几行一字未动）：不只"有 `\r`"，而是**整个 stdout 以进度行
+    // 开头** —— `tick_sink` 把 `\r` 放在最前（先回行首再写这一行），所以第一发就写在第 0 列。
+    assert!(sok.starts_with('\r'), "非静默那一趟的 stdout **以进度行开头**（`\r` 打在最前，E25 的分工）：{sok:?}");
     assert!(sok.contains("下载已完成"), "最终结果行照打：{sok}");
     assert!(sok.contains("这个断点文件从建立起一共重试"), "那两格是跨断点文件的账（E20⑧/E25⑥）：{sok}");
     assert!(sok.contains("归属之外可能被重下"), "`duplicated` 不是账单，措辞不许漂（E14③）：{sok}");
+    // **E28⑧-3 的另一半 + E28①(1) 的对照**（本轮追加）：可分段那一路**收尾那一发换行还在** ——
+    // 进度行是 `\r` 原地覆盖的，结果行必须由那一发换行让它独占一行，而不是盖在残行后面，
+    // 也不是被两个换行抬成一空行（那正是带体那一路今天犯的错的反面，见
+    // `the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick` 的第一臂）。
+    assert!(sok.contains("\n下载已完成"), "结果行前面必须有且只有**一个**让行换行：{sok:?}");
+    assert!(!sok.contains("\n\n下载已完成"), "让行只该出现一次；出现空行说明有人多打了一发：{sok:?}");
     for trace_word in ["Seeded", "Dispatched", "TraceStep", "Interval"] {
         assert!(!sok.contains(trace_word), "`trace` 一个字都不许进 stdout（E20⑨）：{trace_word} 出现了：{sok}");
     }
@@ -3960,6 +3969,11 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
     assert!(quiet.status.success(), "静默不等于失败：stderr：{}", stderr_of(&quiet));
     assert!(!sq.contains('\r'), "`--quiet` 的落点是\"一次都不挂 sink\"（E24①），实测 stdout：{sq:?}");
     assert!(sq.contains("下载已完成"), "静默关的是刷新的那一行，不是结果（E24①）：{sq}");
+    // **E28⑧-3 补的那一格**（本轮追加）：静默那一支的 stdout **第一格就是结果行** ——
+    // 既不是空行（收尾那发换行跟着 sink 一起没挂），也不是被 `\r` 开头的进度行顶到前面去。
+    // 前一句挡住"多一个换行"那一族回归，后一句挡住"少一句话"那一族 ⇒ 两句不是同一条判据。
+    assert!(!sq.starts_with('\n'), "静默那一支不许以换行开头（没有进度行就没有让行那一发）：{sq:?}");
+    assert!(sq.starts_with("下载已完成"), "静默那一支的 stdout 第一个字符就是结果行：{sq:?}");
 
     // ③ 下完了但校验不符 ⇒ `ok = false` ⇒ 退出码 1，`message` 那句原样打（裁定 9：不再截断不拼接）。
     let wrong_sha = "0".repeat(64);
@@ -4252,5 +4266,121 @@ fn the_binary_stops_expanding_aliases_after_the_double_dash() -> anyhow::Result<
         !ed.contains("cannot be used multiple times"),
         "出现这句说明 `-- /d` 被展开成了第二个 `--url`（\"展开了再说错\"≠\"没展开\"）：{ed}"
     );
+    Ok(())
+}
+
+/// **E28①(1) 恢复的那张 C2 处方**（E26/C2 原文 → E26 附记以"端到端不可达"撤销 → **E28①** 用一次
+/// 真进程实测把那句前提推翻，处方在此恢复；本项目第十处"可达性断言未复量"）。
+///
+/// 判据的内容是 **spec §10 R13** 写清的出货形状：一条 `POST`、不带 `Range`、**试探零发**、
+/// **不读也不写断点文件**、整份一次落盘、退 **0**；再加 **E21⑧ / E22③** 的 CLI 侧那一半——
+/// 这一支全程**一个 `\r` 都没有**（引擎在这条路上一发 tick 都不交，`run_whole_once` 整程阻塞在
+/// 那一发 POST 里）。
+///
+/// 为什么进程级那一发不是库侧那发（`a_data_file_task_is_never_probed_and_posts_exactly_once`）的重复：
+/// 那一发证的是**引擎**，而"`main.rs` 在这一支上会不会自己印出一行进度、会不会多打一个空行"
+/// 住在装配层，进程内没有任何代码路径观察得到（与 E26/C1 把 `--bins` 升成第四闸同一个理由）。
+///
+/// ⚠ **本用例同时是它自己量出来的那发缺陷的针**（用户表面）：`main.rs::finish` 以前在
+/// `!quiet` 时**无条件** `println!()` 让出那一行 —— 那一发的用途只是"把被 `\r` 原地覆盖的进度行
+/// 让出来"，而这一支压根没有进度行 ⇒ 结果行前面凭空多一个**空行**。
+/// 下面的判据按**修正后的形状**下（第一行就是结果行），所以它在修复前是红的（红相见报告）。
+/// 修复的判据取**任务形状**（`Task::segmentable()`，正是 `engine::run` 用来在 `run_whole_once` 与
+/// 多 worker 那条路之间分流的那一位），**不取"这一趟实际收到过几发 tick"**（**E22③** 禁止 CLI 把
+/// "收到过 tick"当证据；**E26/C6** 已明否"给 `tick_sink` 加内部可变性去数发数"那条路）。
+///
+/// 负向判据带**对照臂**（同一台对端、同一条 URL、只是不给 `--data-file`）：
+/// 没有对照，那一串"不许有 `\r` / 不许有跨轮账"就是恒真。
+#[test]
+fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("bin-data-file")?;
+    let out_dir = dir.path().display().to_string();
+    let len = 1024 * 1024u64;
+    let url = format!("{base}/sz/{len}");
+    let form = b"q=dlm&page=one-shot";
+    let body = harness::scratch_body("9b4b-form.bin", form)?;
+
+    // -------------------------------------------------- 第一臂：带体，**不给** `--quiet`
+    let out = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "posted.bin",
+        "--data-file", &body.display().to_string(),
+    ])?;
+    let s = stdout_of(&out);
+    let target = dir.path().join("posted.bin");
+    assert!(
+        out.status.success(),
+        "带体那一支跑得完就是 `下载已完成`（R13），还非零等于撒谎：exit={:?}，stderr：{}",
+        out.status.code(),
+        stderr_of(&out)
+    );
+    assert!(
+        !s.contains('\r'),
+        "这一支全程不许有任何一行进度：引擎在这条路上一发 tick 都不交（E21⑧/E22③），\
+         装配层也不该自己造一个出来。实测 stdout：{s:?}"
+    );
+    // 那一发缺陷的正身：修正后的形状是"结果行就是 stdout 的第一行"。
+    assert!(
+        !s.starts_with('\n'),
+        "结果行前面多出一个空行 —— 让行那一发只在**能打出进度行**的那一支才有意义（E28① 的缺陷）：{s:?}"
+    );
+    assert!(s.starts_with("下载已完成"), "第一行就是结果行（与上一句合起来钉死形状）：{s:?}");
+    assert!(s.contains("用时 "), "耗时那一格照打（`--quiet` 关的从来不是它）：{s}");
+    assert!(s.contains(&format!("全长 {len} B")), "结果行报的全长要等于对端宣布的那个数：{s}");
+    assert!(s.contains(&target.display().to_string()), "结果行要点名落点：{s}");
+    // 该形状不落断点 ⇒ 跨轮那三格**整格不出现**，而不是印 0 冒充测过（E13④ + E25⑥ 末句）。
+    for unbilled in ["这个断点文件从建立起一共重试", "归属之外可能被重下", "归属已定"] {
+        assert!(!s.contains(unbilled), "带体那一支不许出现 {unbilled:?}（没有断点就没有跨轮的账）：{s}");
+    }
+    assert!(
+        stderr_of(&out).is_empty(),
+        "成功那一支 stderr 该是全空（R13 实测）：{}",
+        stderr_of(&out)
+    );
+
+    // 落盘的字节数 == 结果行宣布的那个数（一句话里的两个来源各自钉一次）。
+    let meta = std::fs::metadata(&target).context("带体那一支没把目标文件落到盘上")?;
+    assert_eq!(meta.len(), len, "整份单发要把全长都落到盘上（R13）：{s}");
+    assert!(
+        !dlm::state::path_for(&target).exists(),
+        "该形状既不读也不写断点（E13④/R13）：`--keep-state` 没参与，进程级也不许出现断点文件"
+    );
+
+    // 对端的账：**只许一条**、方法 `POST`、**不带 `Range`**、`Content-Length` 等于体文件长度。
+    // 上界判据走 harness 的两步（`requests_within` 一见到请求就返回，答不出"不许更多" ⇒
+    // 那一入口只服务"一条都不许有"）：`requests_at_least(1)` 保证不漏读，
+    // `requests_quiet` **守满**一段时间保证不多读。必须在对照臂之前读，否则读的是两趟的总和。
+    srv.requests_at_least(1)?;
+    let reqs = srv.requests_quiet(Duration::from_millis(500))?;
+    assert_eq!(reqs.len(), 1, "带体的形状全程只许一发请求（试探 + POST = 2 条就是缺陷）：{reqs:?}");
+    assert_eq!(reqs[0]["method"], "POST", "那一发是 POST；GET 就是试探（E11①）：{reqs:?}");
+    assert_eq!(reqs[0].get("range"), None, "POST 那一枪不许带 `Range`（R7/R13）：{reqs:?}");
+    let want_cl = form.len().to_string();
+    assert_eq!(
+        reqs[0]["extra_headers"]["content-length"].as_str(),
+        Some(want_cl.as_str()),
+        "上线的请求体长度要等于那份体文件的字节数（R13）：{reqs:?}"
+    );
+
+    // -------------------------------------------------- 对照臂：同一条 URL，不给 `--data-file`
+    // 这一臂证明的是"进程级观察者**看得见**那一行 `\r`"——于是第一臂那句"看不见"才是结论，
+    // 而不是仪器坏了（本项目对负向判据的硬要求：带对照，否则恒真）。
+    let seg = run_dlm(&[
+        "--url", &url, "--out-dir", &out_dir, "--out-name", "segmented.bin", "--connections", "2",
+    ])?;
+    let ss = stdout_of(&seg);
+    assert!(
+        seg.status.success(),
+        "对照臂自己得先跑完，否则下面的形状断言测的是失败路径：{}",
+        stderr_of(&seg)
+    );
+    assert!(ss.starts_with('\r'), "对照臂（可分段）的 stdout 以进度行开头 —— 仪器看得见 `\\r`：{ss:?}");
+    assert!(ss.contains("\n下载已完成"), "可分段那一路的让行换行还在（结果行独占一行）：{ss:?}");
+    assert!(!ss.contains("\n\n下载已完成"), "让行只该出现一次：{ss:?}");
+    assert!(
+        ss.contains("这个断点文件从建立起一共重试"),
+        "跨轮那两本账只在可分段那一路出现（与第一臂互为对照，E13④）：{ss}"
+    );
+    let _ = std::fs::remove_file(&body);
     Ok(())
 }
