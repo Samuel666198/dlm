@@ -4824,9 +4824,16 @@ fn overlap_bytes(a: (u64, u64), b: (u64, u64)) -> u64 {
 /// - **事件边界**：第一轮那个进程已被确认退掉，死进程发不出新请求 ⇒ 边界之后的 `request` 行
 ///   只能属于第二轮。再加一道独立交叉：第二轮每条请求的 `remotePort` 必须出现在边界之后的
 ///   `socket_open` 里（第二轮是新进程，连接不可能复用第一轮已随进程消失的池）。
-///   ⚠ 不能用 `socket_open.seq` 对号：那台 node 服务器在 `.on("connection")` 里把 `connSeq` **自加了两次**
-///   （一次给 `id`、一次给 `socks` 记录），于是 `socket_open.seq` 恒等于请求行 `conn` 减一 ——
-///   那是 `tests/harness/probe-server.mjs` 的既有形状（简报明令不许改它），所以这里改走 `remotePort`。
+///   ⚠ **这里选 `remotePort` 而不是 `socket_open.seq` 对号，理由不是"那两个号对不上"**。
+///   原先这段写的是"node 在 `.on("connection")` 里把 `connSeq` 自加了两次 ⇒ `socket_open.seq` 恒等于
+///   请求行 `conn` 减一"——**控制员实测推翻**（2026-10-18，两种形状：单轮 `/sz/2097152`，以及
+///   `/slow` 上"硬杀第一轮 + 第二轮跑完"的双轮）：同一条 `remotePort` 上 `socket_open.seq` 与
+///   `request.conn` **相等**（60260→seq 1→conn 1 … 60265→seq 6→conn 6）。读源码也站不住那句：
+///   `connection` 那一支是 `const id = ++connSeq;` 之后把**同一个** `id` 同时给 `socks.set` 与
+///   `socket_open`，只加一次；另一处 `++connSeq` 住在请求处理里的 `if (!socks.has(s))` 守卫之后，
+///   正常次序下根本不走（而且它真走的话给出的方向还是反的）。
+///   ⇒ 仍然走 `remotePort`，但用一条**不依赖任何计数器同步**的理由：它是这条 TCP 连接本身的身份，
+///   跨进程、跨轮都稳定，也不受"服务器将来怎么改编号"影响。**别把这条当仪器缺陷记着。**
 #[test]
 fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() -> anyhow::Result<()> {
     const WORKERS: &str = "8";
