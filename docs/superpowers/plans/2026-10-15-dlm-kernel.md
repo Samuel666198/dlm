@@ -1559,6 +1559,17 @@ pub type OnTick = Arc<dyn Fn(&RunSnapshot) + Send + Sync>;
 
 ⇒ **9B-3 的范围（4 项）**：C2、C3、C5 三发新集成用例 + C4 那句文档。验收下限随之变成 **200 lib / 3 bins / 83 integration / clippy 0**（80→83 是三发新增）。
 
+### E26 附记（控制员，2026-10-18，落完 E26 之后当场复量）：**C2 那张处方是我写的假判据**
+
+我判 C2 时写"补一发集成：在 `--data-file` 那条路上挂 sink，断 **0 发进度行**且结果行照打"。**复量之后这张处方作废**，两条实测事实：
+
+1. **`--data-file` 今天从 `engine::run` 根本走不通**：`tests/integration.rs:185` `a_data_file_task_is_refused_before_the_probe_touches_the_wire`（**评审 F1** 的裁定）断的就是"`probe::run` 在打出任何请求之前拒掉带 `--data-file` 的任务"。⇒ 去"挂 sink 并断 0 发"就是在测一条**到不了的路径**：**恒假分支当判据**，本项目第八次撞自己立的这条规矩。
+2. **`run_whole_once` 那整条路今天是不可达代码**（可达性事实，不是我漏读）：`engine::run` ① 试探 那一步必然拒 ⇒ 唯一入口 `Task.data_file` 到不了它。`--data-file` 因此是 **spec §5 的十二个长选项里唯一一个"CLI 收、但产品行为不存在的"那个** ⇒ 这是**第八处"文档承诺了实现给不起的东西"**，与 `Task::limits()`、`prelude_max` 同族。
+3. 为什么不能"照 评审 F1 的相反方向改回去"：F1 那条裁定的原文落在 `src/probe.rs:114`（模块文档「本模块没做的事」**第 1 条**："带 `--data-file` 的任务一律不试探……（评审 **F1** 的裁定，`run()` 里那道 `ensure!`）"）与 `src/probe.rs:198`，而 `tests/integration.rs:171-183` 写了它的理由："若照 F1 相反方向走，`--data-file` 必须变成 `Task` 上第二个不进断点文件的字段、`resume` 的比对要加一格（形状变更）" ⇒ 那是**设计变更**，要用户点头，不属于 9B-3，也不属于我自己裁的范围。
+
+⇒ **C2 的处置改为三条**：① **不补**那发假判据；② 9B-3 只补 C3 与 C5 ⇒ 验收下限 **200 lib / 3 bins / 82 integration / clippy 0**（我原文那句 83 作废）；③ 把"`--data-file` 不可达"登记成一条**待用户裁定**（选项：v1 让 CLI 明确拒绝它并说明"内核尚未接通"／或按 F1 相反方向做那份形状变更／或留现状＝引擎内部可达性为零但 CLI 仍收）。**集成面上已有的唯一保护**：F1 那一发 + 库侧 `engine::tests::the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some`（它拿手搭 `Engine` 直接调 `run_whole_once` 验"不打 tick"，所以"那一支的渲染契约"并不是无人管，只是**端到端不可达**）。
+⚠ 顺带一条**给最终评审的账**：`main.rs::BAD_ARGS`（`C3`）与 `parameter_error` 的真二进制形状，9B-3 补完之后仍然没有覆盖 `--help` 那一支的**进程内**验证（`clap::Error::exit()` 是 `-> !`，测不了自己）—— 那条只能靠真二进制那一发（已由 9B-2 前人的 `the_binary_exits_zero_for_help_and_keeps_clap_code_for_a_usage_error` 钉住，实测绿），**不算欠账**，写在这里是为了别让下一轮误以为还缺。
+
 
 
 
