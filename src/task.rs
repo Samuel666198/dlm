@@ -110,7 +110,7 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 ///
 /// 产品承诺（README 与 `Task::validate()` 的文档同一句话）：
 /// > 本 CLI 只接受 `http://` 或 `https://` 的规范写法：scheme 之后必须紧跟恰好 `://`，
-/// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）里不许出现 `@`。
+/// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）**非空**且里面不许出现 `@`。
 /// > 任何其它形状一律当场以"参数写错了"拒绝。
 ///
 /// 返回 `Some(true)` = 规范的 `https://`、`Some(false)` = 规范的 `http://`、
@@ -129,7 +129,7 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 /// **不引入 `Url::parse`**：真解析一次要 `url` crate ⇒ 破"直接依赖只许 6 个 crate"的用户上限
 /// （2026-10-15 定的），这一支已被明确否掉，所以判据只能做成形状。
 ///
-/// 三步判据，缺一即 `None`（入参是**原始** URL：第一步归一住在本函数里，两个调用点不可能吃到两份串）：
+/// 四步判据，缺一即 `None`（入参是**原始** URL：第一步归一住在本函数里，两个调用点不可能吃到两份串）：
 /// 1. [`url_for_gate`] 的那两刀（tab/LF/CR 与首尾 C0）；
 /// 2. 归一之后的串首必须是 `http://` 或 `https://`（大小写不敏感），且 `://` **恰好一次** ——
 ///    分隔符之后紧跟的第一个字节不许是 `/` 或 `\`（那正是"少斜杠/多斜杠/反斜杠"那一族）；
@@ -142,11 +142,14 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 ///    ⚠ 残余一面要说窄：`validate()` 那一侧还**并联**着 `authority_has_userinfo`（简报明令本体不许动，
 ///    它的终止符集合只有 `/` `?` `#`），所以 `http://h\\a@x` 在闸上仍按 userinfo 拒 ——
 ///    方向是"多拒"（不是绕过），登记在 T99-G1c 报告 §5，不在本发的射程内。
+/// 4. **authority 非空**（T99-G1c-R1 **裁定三**，控制员裁的扩面）：`https://`、`http://` 这种空 host
+///    以前过得了形状闸（`url_is_https` 还给真），失败点落在 reqwest 的 `builder error: empty host`
+///    （真下载退 1、`--no-start` 退 0）⇒ 现在由我们当场拒，不再靠对面兜底。
 pub(crate) fn canonical_http_authority(raw: &str) -> Option<bool> {
     canonical_shape_of(&url_for_gate(raw))
 }
 
-/// [`canonical_http_authority`] 的第二、三步（第一步已由调用方做过；拆开是因为 `validate()`
+/// [`canonical_http_authority`] 的第二到四步（第一步已由调用方做过；拆开是因为 `validate()`
 /// 手里已经有那份归一后的串，两处共用同一个形状判据本体，不复读原文）。
 fn canonical_shape_of(url: &str) -> Option<bool> {
     let after = scheme_separator_len(url)?;
@@ -165,6 +168,14 @@ fn canonical_shape_of(url: &str) -> Option<bool> {
         return None;
     }
     let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    // 第四步（T99-G1c-R1 **裁定三**，控制员裁的扩面）：authority 为空 ⇒ 非规范。
+    // 以前 `https://` / `http://` 过得了形状闸（`url_is_https` 还给真），失败点落在对面：
+    // 真下载由 reqwest 报 `builder error: empty host`（退 1，凭据上不了线）。方向本就安全，
+    // 但那句话变成"靠对面兜底"—— 本项目对"两把串"付过太多次学费，所以宁可多拒两条
+    // （合法用户不会写空 host）。代价：`--no-start` 从退 0 变退 2。
+    if rest[..end].is_empty() {
+        return None;
+    }
     if rest[..end].contains('@') {
         return None; // authority 里的凭据形态（E9 那一支在 `validate()` 里另有更具体的措辞）
     }
@@ -215,10 +226,11 @@ impl Task {
     /// 而是只放行规范写法。产品承诺（README 与 `canonical_http_authority` 的文档同一句话）：
     ///
     /// > **本 CLI 只接受 `http://` 或 `https://` 的规范写法：scheme 之后必须紧跟恰好 `://`，
-    /// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）里不许出现 `@`。**
+    /// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）非空且里面不许出现 `@`。**
     /// > 任何其它形状一律**当场以"参数写错了"拒绝**（⇒ 天然落退出码 **2**）。
     ///
-    /// 其它形状（含 `ftp://`、`file://` 与不写 scheme 的串）都在这"任何其它"里。这是一次**用户可见的
+    /// 其它形状（含 `ftp://`、`file://`、不写 scheme 的串，以及 T99-G1c-R1 裁定三补的**空 host**：
+    /// `https://`、`http://`）都在这"任何其它"里。这是一次**用户可见的
     /// 行为变更**：这类串以前是"放过去交给 reqwest 报错"，现在由我们当场拒。判据的取舍方向只有一个：
     /// 少认（放行）才有安全后果，多认（拒一条 reqwest 本来抓得住的串）只代价一句报错。
     ///
@@ -341,10 +353,11 @@ mod tests {
         ] {
             assert!(t(url).validate().is_ok(), "{url} 的 authority 里没有 @，必须放行");
         }
-        // 没有 scheme 的输入按"authority 从串首算起"处理（保守那一支）：含 @ 就拒，不含就放行到
-        // 后面的真正失败（reqwest 会报"relative URL without a base"）。
+        // 无 scheme 的串（`x/a.bin`、`/n`、`//h/x`）⇒ **本 CLI 不接受**，由形状闸（`validate()` 第四条）
+        // 当场拒（T99-G1c 反转默认；以前那一支是"含 @ 就拒、不含就放行到 reqwest 的
+        // relative URL without a base"，已被"只放行规范写法"废除）。
         assert!(t("alice:s3cret@x/a.bin").validate().is_err(), "无 scheme 但 authority 含 @ ⇒ 拒");
-        assert!(t("x/a.bin").validate().is_ok(), "无 scheme 且不含 @ ⇒ 本闸不管（不是 URL 解析器）");
+        assert!(t("http://h/a@b").validate().is_ok(), "规范写法、`@` 落在 path 里 ⇒ 不是凭据（正向对照臂）");
     }
 
     #[test]
@@ -620,8 +633,8 @@ mod tests {
     // 之后实测 `http:/h`、`http:/\h`、`http:////h` 三型**照样**退 0 并把 `authorization: Basic` 打到
     // 明文线上（G1b 报告 §6.1）⇒ **逐形状清单追不上对面实现的接受集**。
     // 于是这一发改成"只放行规范写法"：`^https?://`（大小写不敏感、分隔符恰好一次）＋ authority
-    // （终止符 `/` `\` `?` `#`）无 `@`。放行集是 reqwest 接受集的**真子集**，所以"判的是一回事、
-    // 它解析成另一回事"这一族在这里没有落点。
+    // （终止符 `/` `\` `?` `#`）非空（R1 **裁定三**补的那一刀）且无 `@`。放行集是 reqwest 接受集的
+    // **真子集**，所以"判的是一回事、它解析成另一回事"这一族在这里没有落点。
     //
     // 每一格同时断**三件事**，为的是把 G1 立的"过闸的串＝判 scheme 的串"钉成结构而不是注释：
     // ① `validate()` 的结论，以及**走的是哪一支**（按错误里的字样判，不按消息位置判）；
@@ -691,6 +704,11 @@ mod tests {
             ("x/a.bin", false, Refused(SHAPE, None)),
             ("/n", false, Refused(SHAPE, None)),
             ("//h/x", false, Refused(SHAPE, None)),
+            // ⑤b 空 host（T99-G1c-R1 **裁定三**，控制员裁的扩面）：以前是"闸放行 ⇒ 由 reqwest 报
+            //      `builder error: empty host`"（`--no-start` 退 0、真下载退 1），现在由形状闸当场拒。
+            //      顺带关掉上一发报告 §5.2 那一格：空 host 绝不能再被 `url_is_https` 算成真。
+            ("https://", false, Refused(SHAPE, None)),
+            ("http://", false, Refused(SHAPE, None)),
             // ⑥ 必须放行的规范写法（含简报点名的合法变体与两格 IPv6 —— 抓"终止符把 `]` 当分隔"那种过严）
             ("http://h/x", false, Want::Plain),
             ("HTTP://h/x", false, Want::Plain),

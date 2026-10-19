@@ -563,9 +563,9 @@ mod tests {
     fn a_slash_token_in_value_position_stays_a_value() -> anyhow::Result<()> {
         let t = task(&["dlm", "--url", "https://x/a.bin", "--out-name", "/f"])?;
         assert_eq!(t.name.as_deref(), Some("/f"), "POSIX 上 /f 这样的串是合法的**值**，把它展开成别名会把用户的参数吃掉");
-        let c = parse(&["dlm", "--url", "/n", "--out-name", "/d"])?;
+        let c = parse(&["dlm", "--url", "https://x/n", "--out-name", "/d"])?;
         assert!(!c.quiet(), "值位的 /n 不是静默旗标");
-        assert_eq!(c.into_task()?.url, "/n");
+        assert_eq!(c.into_task()?.url, "https://x/n");
         Ok(())
     }
 

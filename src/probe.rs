@@ -187,7 +187,7 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
 ///
 /// 1. `task::authority_has_userinfo` —— E9 / Task 5 评审 C3 那一支，**本体一个字没动**；
 /// 2. `task::canonical_http_authority` —— T99-G1c 新立的"只认规范写法"：非规范形状
-///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme）也拒。
+///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme、空 host）也拒。
 ///
 /// 为什么要第 2 条：`final_url` 会原样落进 `validator.final_url`（与 E9 同一条理由），而
 /// `resume` 的 ② 会把它连同断点里那份一起打进原因串 —— 一条我们**判不出形状**的落地 URL
