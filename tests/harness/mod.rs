@@ -599,6 +599,68 @@ pub fn spawn_redirect_stub(authority_template: &str) -> Result<(Stub, String)> {
     Ok((Stub { port, seen }, land_url))
 }
 
+/// **T99-G1e 任务一**：`Location` 用**调用方给的整串字面量**的重定向对端。
+///
+/// 为什么要它（T99-G1e 简报）：`spawn_redirect_stub` 把 `Location` **拼**成
+/// `http://{authority}/landed`（scheme 与分隔符 `://` 都由函数写死），所以它**造不出**
+/// "服务器交回的 `Location` 本身形状不规范"那一族 —— 而 `src/probe.rs:196-201` 与
+/// `tests/integration.rs` 那两处文档恰好把这一族说成"本机造不出"。本函数把那一格交给调用方：
+/// 传什么就在这条 302 里回什么，好让"reqwest 交回的落地串长什么样"这件事**由实测决定**。
+///
+/// 与 `spawn_redirect_stub` 的差别**只有两点**（形状其余照抄，包括自己 bind 拿端口、
+/// `MAX_CONNECTIONS`、一条连接最多两条、`/start` 之外那条约好的诚实 200）：
+/// 1. `Location` 是**调用方给的整串字面量**，不再拼 `http://{authority}/landed`；串里出现
+///    `{port}` 子串时换成本对端**实际拿到**的端口（同 `spawn_redirect_stub` 那套 `replace`）；
+/// 2. 交回的 `String` 就是**替换后的 `Location` 原文**（调用方要用它做期望值的原料）。
+///
+/// ⚠ **本体一个字没改、也不去调本函数**（`spawn_redirect_stub` 有三发现役用户，
+/// 把它的 `Location` 拼法参数化＝将那三发已绿的用例拖进本轮的判据面）。这两发并列存在是
+/// 刻意的：本项目对"测试侧并列新谓词优于放宽旧谓词"已有裁定。
+pub fn spawn_raw_redirect_stub(location: &str) -> Result<(Stub, String)> {
+    // 与 `spawn_redirect_stub` 同一理由：端口要 bind 之后才知道 ⇒ 自己 bind、把 Location
+    // 拼死在闭包里，再把同一个 listener 交给对端线程。
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .context("原始 Location 重定向对端 bind 失败")?;
+    let port =
+        listener.local_addr().context("拿不到原始 Location 重定向对端的端口")?.port();
+    let raw_location = location.replace("{port}", &port.to_string());
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_seen, thread_location) = (Arc::clone(&seen), raw_location.clone());
+    const MAX_CONNECTIONS: usize = 8;
+
+    thread::Builder::new()
+        .name("dlm-raw-redirect-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(MAX_CONNECTIONS) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                // 一条连接上最多两条：`/start`（回 302）与落地那条（回 200）。
+                for served in 0..2usize {
+                    let Some(target) = read_request_target(&mut stream) else { break };
+                    thread_seen.lock().expect("线程侧记录锁").push(target.clone());
+                    let resp = if target.starts_with("/start") {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {thread_location}\r\nContent-Length: 0\r\n\r\n"
+                        )
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                         Content-Length: 0\r\nAccept-Ranges: bytes\r\nETag: \"stub\"\r\n\r\n"
+                            .to_string()
+                    };
+                    if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
+                        break;
+                    }
+                    if served == 1 {
+                        break; // 重定向只有一次，答完落地那条就收连接
+                    }
+                }
+            }
+        })
+        .context("起原始 Location 重定向对端线程失败")?;
+
+    Ok((Stub { port, seen }, raw_location))
+}
+
 /// "说不出长度"的对端：`/no-length` 回 `200` + `Transfer-Encoding: chunked`，
 /// **既没有** `Content-Length` **也没有** `Content-Range`，也不发 `Accept-Ranges`。
 pub fn spawn_lengthless_stub() -> Result<Stub> {
