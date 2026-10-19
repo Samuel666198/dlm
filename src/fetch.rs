@@ -253,7 +253,7 @@ use crate::probe;
 use crate::resume::ProbeFacts;
 use crate::scheduler::Interval;
 use crate::store::Store;
-use crate::task::{Task, authority_has_userinfo};
+use crate::task::Task;
 
 /// 一次从 socket 读的块大小（与 harness 服务器的出块粒度一致，也是 `store.write_at` 的粒度）。
 ///
@@ -779,8 +779,9 @@ pub fn run_window(
         Ok(resp) => resp,
         Err(e) => {
             // 重定向**中途**失败时，带凭据的落地 URL 只出现在 reqwest 的错误里 ⇒ 同一个闸、同一句话
-            // （`probe::LANDED_CREDENTIALS`，Task 5 评审 C3；与 `probe::run` 的错误支完全同形）。
-            if e.url().is_some_and(|u| authority_has_userinfo(u.as_str())) {
+            // （`probe::landed_url_is_refused` 的三支合取 ＋ `probe::LANDED_CREDENTIALS`，Task 5 评审 C3 /
+            // T99-G1f；与 `probe::run` 的错误支完全同形，口令字面值取自手上的 `task`）。
+            if e.url().is_some_and(|u| probe::landed_url_is_refused(u.as_str(), task.password.as_deref())) {
                 bail!("{}", probe::LANDED_CREDENTIALS);
             }
             // 这一支还没开始读 body ⇒ 必然零进度（`is_timeout` 在这里直接可用：`execute` 交回的是
@@ -792,7 +793,8 @@ pub fn run_window(
             });
         }
     };
-    if authority_has_userinfo(resp.url().as_str()) {
+    // 落地闸（T99-G1f 起与 `probe` 同一支判据：userinfo ／形状／本任务口令的字面值，三支任一不过即拒）。
+    if probe::landed_url_is_refused(resp.url().as_str(), task.password.as_deref()) {
         bail!("{}", probe::LANDED_CREDENTIALS);
     }
 
@@ -1003,8 +1005,9 @@ pub fn run_whole(
         Ok(resp) => resp,
         Err(e) => {
             // 重定向**中途**失败：带凭据的落地 URL 只出现在 reqwest 的错误里 ⇒ 同一个闸、同一句话
-            // （`probe::LANDED_CREDENTIALS`，Task 5 评审 C3）。这一支还没看到响应 ⇒ 没有事实可交。
-            if e.url().is_some_and(|u| authority_has_userinfo(u.as_str())) {
+            // （`probe::landed_url_is_refused` 的三支合取 ＋ `probe::LANDED_CREDENTIALS`，Task 5 评审 C3 /
+            // T99-G1f）。这一支还没看到响应 ⇒ 没有事实可交。
+            if e.url().is_some_and(|u| probe::landed_url_is_refused(u.as_str(), task.password.as_deref())) {
                 bail!("{}", probe::LANDED_CREDENTIALS);
             }
             return Ok((
@@ -1019,10 +1022,12 @@ pub fn run_whole(
         }
     };
     // **E9 那道闸在这一支同样成立**：`run_whole` 交回的 `ProbeFacts.final_url` 就是这条落地 URL，
-    // 它会被 `state` 落盘、被 `resume` 的 ② 写进原因串。判据与措辞都不是第二个版本
-    // （`task::authority_has_userinfo` + `probe::LANDED_CREDENTIALS`，与 `probe::run`、`run_window` 同源）。
+    // 它会被 `state` 落盘、被 `resume` 的 ② 写进原因串。判据与措辞都不是第二个版本 ——
+    // T99-G1f 起七个落地口统一走 `probe::landed_url_is_refused`（userinfo ／形状／本任务口令的
+    // 字面值，三支合取），措辞统一是 `probe::LANDED_CREDENTIALS`，与 `probe::run`、`run_window`
+    // 同源；本行这一道与下面 `facts_from_response` 里那一道是**双保险**，不是两本账。
     let final_url = resp.url().to_string();
-    if authority_has_userinfo(&final_url) {
+    if probe::landed_url_is_refused(&final_url, task.password.as_deref()) {
         bail!("{}", probe::LANDED_CREDENTIALS);
     }
 
@@ -1035,7 +1040,7 @@ pub fn run_whole(
     let headers = resp.headers().clone();
     // F2 的落点：**与 `probe` 同一个函数**把这五个字段读出来（`asked_for_range = false` —— 这一支
     // 一条 Range 都没发，所以 `accept_ranges` 只能看头说，这与 `prelude_max == 0` 时 probe 的读法一致）。
-    let facts = probe::facts_from_response(status, false, &headers, &final_url)?;
+    let facts = probe::facts_from_response(status, false, &headers, &final_url, task.password.as_deref())?;
 
     let mut cursor = 0u64;
     let mut buf = vec![0u8; CHUNK_BYTES];

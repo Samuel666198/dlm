@@ -59,7 +59,11 @@
 //!    **T99-G1c 把这一处的判据加严到两条并联**（`landed_url_is_refused`）：除了 userinfo，
 //!    **非规范形状**（`http:/host`、`http:\\host`、多斜杠、http/https 之外的 scheme）也拒 ——
 //!    理由与 E9 同一条：这份串会原样落进 `validator.final_url`。
-//!    `authority_has_userinfo` 本体一个字没动，动的是调用点。
+//!    **T99-G1f 收成一条三支合取的 task-aware 判据**（半支 1 userinfo ｜半支 2 形状｜
+//!    **第三支：落地串里出现本任务 `--password` 的字面值 ⇒ 拒**，`!p.is_empty()` 那一刀不可省）。
+//!    动机与实测口径（半支 2 在落地口恒不触发、`@` 可被对面按相对引用折进 **path**）全写在
+//!    `landed_url_is_refused` 的文档里；七个落地口（本模块 247/259/328 ＋ `fetch` 四处）共用
+//!    这一条判据，`authority_has_userinfo` / `canonical_shape_of` 本体一个字没动，动的是调用点。
 //! 6. **验证子按响应头的原样值保存，不归一化**（与 `resume::ProbeFacts` 的文档同一立场）；
 //!    但 `ETag`/`Last-Modified` 里出现**非 UTF-8 字节**时只能记成 `None`：`ProbeFacts` 与断点文件
 //!    都装不下它，`If-Range` 更没有强验证子可用。这不是"忽略噪音"—— 少了一把验证子，
@@ -168,7 +172,8 @@ impl ProbeResult {
     }
 }
 
-/// 落地 URL 带 userinfo 时那句**不回显 URL** 的拒绝（模块文档第 5 条）。
+/// 落地 URL 带 userinfo、形状不规范、或**带着本任务口令的字面值**时那句**不回显 URL** 的拒绝
+/// （模块文档第 5 条）。
 /// 两处失败路径共用同一个常量：成功响应里的落地 URL、以及 reqwest 在跟随重定向时失败的
 /// 那个 URL —— 一条规则不该有两个版本的措辞。
 ///
@@ -179,33 +184,57 @@ impl ProbeResult {
 ///
 /// `pub(crate)` 是 Task 7 的可见性改动（逻辑一个字没动）：`fetch` 的每一枪也可能被重定向到一条
 /// 带凭据的落地 URL（spec §6.5 + Task 5 评审 C3），同一个闸必须用**同一句**话拒绝。
+/// T99-G1f 之后这一句同样覆盖第三判据（落地串里带着本任务口令的字面值）—— 危害与措辞同源，
+/// 不另起一句。
 pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在主机名前面带着凭据（userinfo 那一段）：\
                                   它会被写进断点文件、并出现在续传冲突的原因里，因此拒绝收下这份事实；\
                                   本消息不回显那条地址";
 
-/// 落地 URL 的**调用点**判据（T99-G1c §1.2）：两条闸**并联**，任一不过就拒。
+/// 落地 URL 的**调用点**判据（T99-G1c §1.2 立的并联闸，T99-G1f 收成三条合取）：任一不过就拒。
+/// 七个落地口（`probe::run` 两处 ＋ `facts_from_response` 一处 ＋ `fetch` 四处）共用**这一条**，
+/// 一条规则不许有两本账。
 ///
 /// 1. `task::authority_has_userinfo` —— E9 / Task 5 评审 C3 那一支，**本体一个字没动**；
 /// 2. `task::canonical_http_authority` —— T99-G1c 新立的"只认规范写法"：非规范形状
 ///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme、空 host）也拒。
+/// 3. **第三支（T99-G1f，内容判据）**：本任务给过 `--password`（`Some(p)` 且 **`p` 非空**）且
+///    落地串里出现 `p` 的**字面值** ⇒ 拒。判据不是"形状"而是"内容"，位置无关（path/query 都算）。
 ///
-/// 为什么要第 2 条：`final_url` 会原样落进 `validator.final_url`（与 E9 同一条理由），而
-/// `resume` 的 ② 会把它连同断点里那份一起打进原因串 —— 一条我们**判不出形状**的落地 URL
-/// 不该被收下，即使它此刻看起来没有 `@`。
+/// 第三支为什么必须存在（T99-G1e §1/§2 实测）：对面交回 `Location: http:/alice:s3cret@host/…`
+/// 这类串时，url 2.5.8 按**相对引用**解析 —— `@` 连同 `alice:s3cret` 落进 **path**，落地串形状
+/// 完全规范、authority 干净 ⇒ 半支 1 与半支 2 都看不见，`probe::run` 实测 `Ok`，那条串照原样
+/// 进 `ProbeFacts.final_url`。
+/// 危害模型要写准（用户 2026-10-19 裁定二，**不是**"凭据泄露给第三方"——对面本来就拿得到这个口令）：
+/// 修的是"**它被我们自己的手**经 `final_url` 写回用户磁盘上那份号称永不含口令的断点文件、
+/// 并被 `resume` 的 ② 原因串原样打回终端"（`src/state.rs:14-16` 那句"这一支由校验闸拒绝"
+/// 管的是用户自己写的 URL，服务器交回的那一半此前没人管）。
 ///
-/// 两条是**并集**关系，不是包含关系，各有对方够不着的一族：
-/// - 第 1 条更严的那一族：`@` 前面出现 `\`（它的终止符集合是 `/` `?` `#`，截到的 authority 更长，
-///   于是看得见那个 `@`；第 2 条按四个终止符切，`\` 就是分隔 ⇒ authority 里没有 `@`）。
-/// - 第 2 条更严的那一族：分隔符**根本不是** `://`（`http:/host`、`http:\\host`、多斜杠那一族）。
-///   那种串下第 1 条走"没有合法 scheme ⇒ 从串首找第一个 `/`"的保守支，只要 `@` 前面有 `/` 就恒假 ——
-///   控制员实测的 `http:/u:PASS@127.0.0.1:8899/x1.bin` 正是这一族（T99-G1b 报告 §6.1）。
+/// ⚠⚠ **`!p.is_empty()` 那一刀不许省**：`str::contains("")` 恒真 ⇒ 漏了它，"给了空口令"
+/// 会让**每一条**落地 URL 都被拒，等于把下载整条路砸掉，而且是一根恒红的假闸。这一刀由单元用例
+/// `an_empty_password_refuses_no_landing_url_at_all` 钉着（m1 变异：摘掉它 ⇒ 那一发必须红）。
 ///
-/// 取并集 ⇒ 任一侧认出来的坏味道都拒，不会因为"共用一个判据"而互相放水。
+/// ## 三支在落地口的实测口径（覆盖 T99-G1c 那两句旧话）
+///
+/// T99-G1c 原注释写"两条是并集关系，各有对方够不着的一族"—— **在落地口这一句已被 T99-G1e
+/// 实测证伪**（十条服务器给的 `Location`，交回的落地串**一支**都不是"无 `@` 但非规范"：凡对面
+/// 真跟随的，交回的都是 `http://<非空 authority>/…`，scheme 已小写化、`://` 恰好一次、authority
+/// 里无 `@`）。现行口径：
+/// - **半支 1 与第三支在落地口是活的**（半支 1：`Location` 里斜杠 ≥ 2 时 `@` 真落在 authority，
+///   实测 L2；第三支：`@` 折进 path 那一族，实测 L1/L3/L4，形状两闸放行、只有内容判据看得见）；
+/// - **半支 2 在落地口是 belt-and-braces（实测恒不触发）**：留着它不是新增死分支（它是现役代码，
+///   `Task::validate()` 侧仍在两处用例下活着），而是给"对面升级后交回非规范串"留的形状兜底；
+/// - ⚠ **这整个结论只在这台仪器 ＋ reqwest 0.13.5 / url 2.5.8 / tower-http 0.6.11 / http 1.5.0
+///   上成立**（L1/L3/L4 的 path 折入分支纯粹是 url crate 的实现分支）——升级对面任一版本
+///   **必须复量** `tests/integration.rs` 的 `measure_the_landing_strings_…` 那张表。
+/// - 已知检测不到的形式（具名欠账，本仓库无 base64 工具也不加依赖）：对面把口令以 **Basic 的
+///   base64 形式**或**百分号编码形式**回显进 path 时，字面值比对看不见。
 ///
 /// ⚠ **入参不由我们控制**（是服务器给的），所以这里不做归一之外的任何改写：只判、只拒，
 /// 不改写、不回显。
-fn landed_url_is_refused(url: &str) -> bool {
-    authority_has_userinfo(url) || canonical_http_authority(url).is_none()
+pub(crate) fn landed_url_is_refused(url: &str, password: Option<&str>) -> bool {
+    authority_has_userinfo(url)
+        || canonical_http_authority(url).is_none()
+        || password.is_some_and(|p| !p.is_empty() && url.contains(p))
 }
 
 /// 发**一发**试探请求，取回事实与预读。
@@ -243,8 +272,8 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
             // 跟随重定向**中途**失败时，那条带凭据的落地 URL 只出现在 reqwest 的错误里
             // （`Error::url()` 就是它，见 reqwest 0.13.5 `async_impl/client.rs` 里
             // `Pending::poll` 用 tower-http 的 `RequestUri` 覆写 `self.url` 那一段）⇒
-            // 先把同一个判据套上去，换成一句不回显的拒绝。
-            if e.url().is_some_and(|u| landed_url_is_refused(u.as_str())) {
+            // 先把同一个判据（三支合取，含本任务口令的字面值那一支）套上去，换成一句不回显的拒绝。
+            if e.url().is_some_and(|u| landed_url_is_refused(u.as_str(), task.password.as_deref())) {
                 bail!("{LANDED_CREDENTIALS}");
             }
             return Err(e).context("试探请求发不出去");
@@ -255,8 +284,9 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     // `headers` 与 `final_url` 先取出来：`resp` 随后要被 body 的读取消耗掉（`Read` 要 `&mut`）。
     let headers = resp.headers().clone();
     let final_url = resp.url().clone();
-    // 模块文档第 5 条那道闸，排在**任何**可能复述这条 URL 的消息之前。
-    if landed_url_is_refused(final_url.as_str()) {
+    // 模块文档第 5 条那道闸（三支合取：userinfo ／形状／本任务口令的字面值），
+    // 排在**任何**可能复述这条 URL 的消息之前。
+    if landed_url_is_refused(final_url.as_str(), task.password.as_deref()) {
         bail!("{LANDED_CREDENTIALS}");
     }
 
@@ -290,7 +320,7 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
         bail!("试探请求被服务器拒绝：HTTP {status}");
     }
 
-    let facts = facts_from_response(status, range.is_some(), &headers, final_url.as_str())?;
+    let facts = facts_from_response(status, range.is_some(), &headers, final_url.as_str(), task.password.as_deref())?;
     let prelude = read_bounded(resp, prelude_max)?;
     Ok(ProbeResult { facts, prelude })
 }
@@ -316,16 +346,20 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
 ///
 /// 所以那两支留在调用方，本函数只管"给定一个 2xx 的响应，这五个字段是什么"。
 ///
-/// 落地 URL 那道凭据闸（模块文档第 5 条 / Task 5 评审 **C3** / 勘误 **E9**）**在本函数里**：
-/// 它是"事实能不能收下来"的一部分，而 `fetch` 这一枪同样可能被重定向到带 userinfo 的落地地址。
-/// 对 `probe::run` 是幂等的（那边排在更前面），对 `fetch` 是唯一的一道。
+/// 落地 URL 那道凭据闸（模块文档第 5 条 / Task 5 评审 **C3** / 勘误 **E9** / T99-G1f 第三判据）
+/// **在本函数里**：它是"事实能不能收下来"的一部分，而 `fetch` 这一枪同样可能被重定向到
+/// 带 userinfo、带口令字面值的落地地址。对 `probe::run` 是幂等的（那边排在更前面），
+/// 对 `fetch::run_whole` 的落地 URL 是与 :1025 双保险里更贴事实装填口的那一道。
+/// `password` 由调用方从手上的 `task` 交进来（`task.password.as_deref()`）：第三判据是
+/// **task-aware** 的——只比对**本任务给过的口令字面值**，不判形状之外的任何"坏味道"。
 pub(crate) fn facts_from_response(
     status: StatusCode,
     asked_for_range: bool,
     headers: &HeaderMap,
     final_url: &str,
+    password: Option<&str>,
 ) -> Result<ProbeFacts> {
-    if landed_url_is_refused(final_url) {
+    if landed_url_is_refused(final_url, password) {
         bail!("{LANDED_CREDENTIALS}");
     }
     let total_len = total_len(headers, status).with_context(|| {
@@ -759,6 +793,79 @@ mod tests {
         }
     }
 
+    // ---- T99-G1f 第三判据的三臂（反臂 / 正臂 / 空口令臂，同发）----
+    //
+    // 为什么钉在单元层直调判据、而不是简报原本设想的"进程级三臂"（照实登记的偏差，理由实测）：
+    // `Task::validate()` 先拒"明文 HTTP ＋ 口令"（spec §4 / E9，用例
+    // `a_password_over_plain_http_never_leaves_the_socket` 钉着"一个字节都没上网"），
+    // 本机对端又不做 TLS ⇒ 在这台仪器的明文桩上，**带口令的任务永远走不到落地闸**（走得到的
+    // 任务永远 `password: None`，第三支恒假）。第三支真正可达的是 https 侧（口令只在那边上线），
+    // 那维持"真 TLS 不碰本机"的具名欠账。所以：反臂/正臂/空口令臂在这里钉判据本身，
+    // 进程级正臂（"统一判据没误杀无口令的落地路"）钉在
+    // `tests/integration.rs::the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_password`。
+
+    /// 反臂：G1e L1 实测原文形状的落地串（形状规范、authority 干净、`alice:hunter2` 折在 **path**），
+    /// 本任务口令正是 `hunter2` ⇒ 必须拒。两支旧闸都看不见它（这正是 T99-G1e §2 量出的那一格）。
+    #[test]
+    fn the_landing_gate_refuses_a_landing_url_carrying_this_tasks_password() {
+        let l1 = "http://127.0.0.1:56296/alice:hunter2@127.0.0.1:56296/landed";
+        // 夹具前提：这两支旧闸对这条串都是"放行"——拒它的只能是第三支。
+        assert!(!authority_has_userinfo(l1), "夹具前提：L1 形状的 @ 不在 authority 里");
+        assert!(canonical_http_authority(l1).is_some(), "夹具前提：L1 形状完全规范");
+        // 第三支只看"字面值在不在串里"，位置无关。
+        for url in [
+            l1,
+            "http://127.0.0.1:56296/landed?token=hunter2",
+            "http://127.0.0.1:56296/hunter2",
+            "https://host/a.bin#hunter2",
+        ] {
+            assert!(landed_url_is_refused(url, Some("hunter2")), "{url} 里带着本任务的口令字面值，必须拒");
+        }
+        // 拒绝走的是同一句不回显的话：措辞的"不含 URL 成分"由
+        // `the_landing_gate_rejects_a_userinfo_authority_and_never_echoes_it` 钉；这里钉的是
+        // **装填事实的口**（第三支的真落盘点）拒的就是那句常量、且消息里没有口令。
+        let h = headers(&[("content-length", "10")]);
+        let Err(err) = facts_from_response(StatusCode::OK, false, &h, l1, Some("hunter2")) else {
+            panic!("final_url 就是从这里装填的：带本任务口令的落地串不许交回事实");
+        };
+        let msg = err.to_string();
+        assert_eq!(msg, LANDED_CREDENTIALS, "同一个常量，不许有第二个版本：{msg}");
+        assert!(msg.contains("凭据") && msg.contains("重定向"), "措辞要可行动：{msg}");
+        assert!(!msg.contains("hunter2"), "拒绝消息不回显口令：{msg}");
+    }
+
+    /// 正臂（简报字面形状）：同一族落地串，但 path 里那串**不等于**本任务口令 ⇒ 照旧放行。
+    /// 缺这一臂，第三支就是一根不知道自己会不会误杀的闸。
+    #[test]
+    fn the_landing_gate_accepts_password_shaped_paths_that_are_not_this_tasks_password() {
+        let land = "http://127.0.0.1:56296/someone:else@127.0.0.1:56296/landed";
+        assert!(!landed_url_is_refused(land, Some("hunter2")), "串里没有 hunter2，第三支不许开火");
+        // 口令给过、但落地串里没有它：同一句话的正方向。
+        assert!(!landed_url_is_refused("http://127.0.0.1:56296/landed", Some("hunter2")));
+        // 第三支是 task-aware 的：任务没口令 ⇒ 对面爱在 path 里放什么口令形状的文本都归半支 1/半支 2
+        // 管（G1e 实测：这种串两闸放行），内容判据**不**凭空替用户做"这看着像凭据"的决定。
+        assert!(!landed_url_is_refused(land, None), "任务没口令，落地串按形状与 userinfo 判");
+    }
+
+    /// 空口令臂：`--password ""` 的库层形状（`Some(String::new())`）＋ 任意**其余都过**的落地串 ⇒
+    /// 照旧放行。这一臂专门钉 `!p.is_empty()`：`str::contains("")` 恒真，摘掉那一刀它必红（m1）。
+    #[test]
+    fn an_empty_password_refuses_no_landing_url_at_all() {
+        for url in [
+            "http://127.0.0.1:56296/landed",
+            "https://host:8443/a.bin?u=1",
+            "http://127.0.0.1:56296/alice@127.0.0.1:56296/landed",
+        ] {
+            assert!(
+                !landed_url_is_refused(url, Some("")),
+                "空口令让 {url} 被拒 ⇒ `!p.is_empty()` 那一刀没了（每条落地 URL 都被拒 = 恒红假闸，下载整条路被砸掉）"
+            );
+        }
+        // 对照方向（不许被"修 m1"的人顺手放宽）：空串不是"没有口令"的另一种写法被特判放行——
+        // 它就是靠 `!p.is_empty()` 这一刀出局；非空口令照旧逐字判。
+        assert!(landed_url_is_refused("http://127.0.0.1:56296/x/hunter2", Some("hunter2")));
+    }
+
     // ---- 请求的形状（单元层就看得见，不必打网络）----
 
     /// 单元层的客户端：只用它**建**请求（`build_request` 不发），所以不碰网络。
@@ -1032,7 +1139,7 @@ mod tests {
             ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
             ("accept-ranges", "bytes"),
         ]);
-        let facts = facts_from_response(StatusCode::PARTIAL_CONTENT, true, &h, "https://x/a.bin")
+        let facts = facts_from_response(StatusCode::PARTIAL_CONTENT, true, &h, "https://x/a.bin", None)
             .expect("这一份响应读得出事实");
         assert_eq!(
             facts,
@@ -1048,13 +1155,13 @@ mod tests {
 
         // `asked_for_range = false`（`run_whole` 那一格）：只看头。头说 bytes 就认，头说 none 就不认。
         let claims = headers(&[("content-length", "10"), ("accept-ranges", "bytes")]);
-        let facts = facts_from_response(StatusCode::OK, false, &claims, "https://x/a.bin").expect("读得出事实");
+        let facts = facts_from_response(StatusCode::OK, false, &claims, "https://x/a.bin", None).expect("读得出事实");
         assert!(facts.accept_ranges, "没发 Range 时行为上没有证据可看，只能由头说");
         assert_eq!(facts.total_len, 10, "200 的 Content-Length 就是它交出来的整个 body（模块文档第 4 条）");
         let denies = headers(&[("content-length", "10"), ("accept-ranges", "none")]);
-        assert!(!facts_from_response(StatusCode::OK, false, &denies, "https://x/a.bin").expect("读得出事实").accept_ranges);
+        assert!(!facts_from_response(StatusCode::OK, false, &denies, "https://x/a.bin", None).expect("读得出事实").accept_ranges);
         // 反方向（不许被顺手改掉）：发过 Range 而对方回 200 ⇒ 仍然不认（评审 I1 那一格）。
-        assert!(!facts_from_response(StatusCode::OK, true, &claims, "https://x/a.bin").expect("读得出事实").accept_ranges);
+        assert!(!facts_from_response(StatusCode::OK, true, &claims, "https://x/a.bin", None).expect("读得出事实").accept_ranges);
     }
 
     #[test]
@@ -1062,7 +1169,7 @@ mod tests {
         // 这道闸必须住在读法**里面**：`fetch::run_whole` 不经过 `probe::run`，外面那道闸够不着它；
         // 而它拒绝用的必须是同一个常量，不是第二个版本的措辞（`probe` 那一侧因此多一次同值判断，无副作用）。
         let h = headers(&[("content-length", "10")]);
-        let Err(err) = facts_from_response(StatusCode::OK, false, &h, "https://alice:s3cret@host/x") else {
+        let Err(err) = facts_from_response(StatusCode::OK, false, &h, "https://alice:s3cret@host/x", None) else {
             panic!("落地 URL 带 userinfo（E9 / Task 5 评审 C3）时不许交回事实");
         };
         let msg = err.to_string();
