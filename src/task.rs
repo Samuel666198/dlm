@@ -44,11 +44,17 @@ impl fmt::Debug for Task {
     }
 }
 
-/// 闸判的那份串＝reqwest（WHATWG 基本 URL 解析器）**真拿去解析**的那份。两步，顺序与规范一致：
+/// 闸判的那份串＝reqwest（WHATWG 基本 URL 解析器）**真拿去解析**的那份。**第一步**（共两步，
+/// 第二步是 [`canonical_http_authority`]）：
 /// 1. 删掉**全部** ASCII tab / LF / CR —— 这一刀在规范里是"任意位置"，不是只删首尾；
 /// 2. 再删掉**首尾**的「C0 控制符或空格」（`U+0000`–`U+001F` 与 `U+0020`）。
 ///
 /// **只做形状归一，不改 `Task::url` 本体**：这里返回的是一份新串，落盘用的还是原串（见 `validate()` 文档）。
+///
+/// 为什么 T99-G1c 之后这一步**还留着**：那一步把 `" \thttp://…"` 与 `"http\t://…"` 这类写法还原成
+/// 规范形状，于是它们走的是"userinfo / 明文 HTTP"那两支（措辞对用户可行动），而不是被第二步当成
+/// 非规范写法拒掉 —— 这是**用户体验**那一侧，不是安全边界；安全边界在第二步（少认形状＝绕过，
+/// 而"把首尾空白当规范"并不放行任何凭据：还原之后 authority 里的 `@` 照样看得见）。
 ///
 /// 为什么 `str::trim()` 不够（T99-G1 那一发用的正是它）：`trim` 按 `char::is_whitespace` 判首尾，
 /// 于是第 2 步**少认**了 C0 里非空白的那批（`U+0000`–`U+0008`、`U+000E`–`U+001F`），
@@ -100,6 +106,71 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
     after[..end].contains('@')
 }
 
+/// **只认规范写法**的形状闸（T99-G1c 的设计：**反转默认** —— 不再试图认出所有坏写法，只放行规范写法）。
+///
+/// 产品承诺（README 与 `Task::validate()` 的文档同一句话）：
+/// > 本 CLI 只接受 `http://` 或 `https://` 的规范写法：scheme 之后必须紧跟恰好 `://`，
+/// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）里不许出现 `@`。
+/// > 任何其它形状一律当场以"参数写错了"拒绝。
+///
+/// 返回 `Some(true)` = 规范的 `https://`、`Some(false)` = 规范的 `http://`、
+/// `None` = **这条 URL 本 CLI 不接受**（调用点报错，不是降级、不是转交 reqwest 去报错）。
+///
+/// 为什么只有这一支站得住（前两轮各留一族的根因）：reqwest 走 WHATWG 解析器，那个解析器对
+/// **special scheme** 在冒号后吃掉任意一串 `/` 与 `\` —— `http:/host`、`http:\host`、`http:////host`
+/// 都照样解析成带 userinfo 的 http URL（控制员 2026-10-18 实测三族，见 T99-G1b 报告 §6.1）。
+/// **逐形状清单追不上对面实现的接受集**，所以这里把判据收成一个有限集合：
+/// `None` 那一支覆盖"所有非规范形状"，而放行集是 reqwest 接受集的**真子集** ⇒ 放行的每一条
+/// 我们判的 scheme/authority 就是它解析出来的那一套，不存在"判的是一回事、解析成另一回事"。
+/// 代价是**多拒**（`ftp://` 之类原本交给 reqwest 报错的串现在由我们当场拒），
+/// 那是用户可见的行为变更，见 README 与勘误；少认才有安全后果（凭据上明文线、进断点文件），
+/// 多认只有一句报错。
+///
+/// **不引入 `Url::parse`**：真解析一次要 `url` crate ⇒ 破"直接依赖只许 6 个 crate"的用户上限
+/// （2026-10-15 定的），这一支已被明确否掉，所以判据只能做成形状。
+///
+/// 三步判据，缺一即 `None`（入参是**原始** URL：第一步归一住在本函数里，两个调用点不可能吃到两份串）：
+/// 1. [`url_for_gate`] 的那两刀（tab/LF/CR 与首尾 C0）；
+/// 2. 归一之后的串首必须是 `http://` 或 `https://`（大小写不敏感），且 `://` **恰好一次** ——
+///    分隔符之后紧跟的第一个字节不许是 `/` 或 `\`（那正是"少斜杠/多斜杠/反斜杠"那一族）；
+/// 3. authority（分隔符之后到第一个 `/`、`\`、`?`、`#`）里不含 `@`。
+///    终止符集合带 `\` 是刻意的：WHATWG 对 special scheme 把 `\` 当路径分隔符 ⇒ `http://h\\a@x`
+///    的 authority 是 `h`，那个 `@` 在 path 里、不是凭据。少带一个终止符就会把 path 里的 `@`
+///    读成凭据 ⇒ 多拒一条本来抓得下来的合法写法（本项目的老账：`split(['?','#'])` 少一个终止符
+///    就少一半形状 —— 同一族反方向犯的错，所以 `https://h:8443/a.bin?u=alice@x#frag` 与
+///    `http://[::1]:8080/u:p@x` 两格都在表里钉着）。
+///    ⚠ 残余一面要说窄：`validate()` 那一侧还**并联**着 `authority_has_userinfo`（简报明令本体不许动，
+///    它的终止符集合只有 `/` `?` `#`），所以 `http://h\\a@x` 在闸上仍按 userinfo 拒 ——
+///    方向是"多拒"（不是绕过），登记在 T99-G1c 报告 §5，不在本发的射程内。
+pub(crate) fn canonical_http_authority(raw: &str) -> Option<bool> {
+    canonical_shape_of(&url_for_gate(raw))
+}
+
+/// [`canonical_http_authority`] 的第二、三步（第一步已由调用方做过；拆开是因为 `validate()`
+/// 手里已经有那份归一后的串，两处共用同一个形状判据本体，不复读原文）。
+fn canonical_shape_of(url: &str) -> Option<bool> {
+    let after = scheme_separator_len(url)?;
+    // `scheme_separator_len` 交回的是 `"://"` 之后的下标，减 3 回到 scheme 末尾 ⇒ 那一段就是 scheme 名。
+    let scheme = url.get(..after - 3)?;
+    let is_https = if scheme.eq_ignore_ascii_case("https") {
+        true
+    } else if scheme.eq_ignore_ascii_case("http") {
+        false
+    } else {
+        return None; // http/https 之外的 scheme（含 `httpx://`、`ftp://`）本 CLI 不接受
+    };
+    let rest = url.get(after..)?;
+    // `://` 之后又是 `/` 或 `\` ⇒ 分隔符不止一次（`http:///h`、`http:////u:p@h`、`http://\h`）。
+    if rest.starts_with(['/', '\\']) {
+        return None;
+    }
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    if rest[..end].contains('@') {
+        return None; // authority 里的凭据形态（E9 那一支在 `validate()` 里另有更具体的措辞）
+    }
+    Some(is_https)
+}
+
 /// 这条 URL 的 scheme 是不是 `https`（**大小写都算**；认不出合法 scheme 时给假）。
 ///
 /// 新增的 `pub(crate)` 辅助函数（评审 **F2**）：**不改动上面任何函数的行为**，只是把 `validate()`
@@ -114,31 +185,42 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 /// - **认不出 scheme ⇒ 假**（保守那一支）：这种 URL 本来也走不出 reqwest（"relative URL without a
 ///   base"），但凭据没有理由因为少写了 `https://` 就被送出去。
 ///
-/// **入参先归一**（T99-G1 加的是 `trim()`，T99-G1b 换成 `url_for_gate`，与 `validate()` 读同一份串）：
+/// **入参先归一，再过形状闸**（T99-G1 加的是 `trim()`，T99-G1b 换成 `url_for_gate`，T99-G1c 再叠上
+/// [`canonical_http_authority`]，与 `validate()` 读同一份串）：
+/// **只有"规范写法且 scheme 是 `https`"才给 `true`** —— 非规范形状（`https:/\host`、`https:////host`、
+/// `ftp://`…）一律 `false`，那是保守那一支（认不出是加密线就不发凭据），与闸那一支同源：
+/// 判据与 `validate()` 走的是同一个函数的同一次归一，两把串不许分家。
 /// `probe::with_contract_headers` 与 `fetch` 复用**这一个**判据决定 `Authorization: Basic` 上不上线。
 /// 不同步的后果是"闸按归一后的串放行了 `\u{1}https://host`，发头时按原串算出 `false` ⇒
 /// 该带的凭据静默不带" —— 与闸那一侧是同一个"两把串"的病。
 /// `scheme_separator_len` 本体不动（它是 `validate()` 与这里共用的底层形状判断，牵到 `probe.rs`
 /// 那条"服务器控制的落地 URL"检查，那一支的入参不由我们控制）。
 pub(crate) fn url_is_https(url: &str) -> bool {
-    let url = url_for_gate(url);
-    match scheme_separator_len(&url) {
-        // `scheme_separator_len` 给的是 `"://" 之后`的下标，减 3 正好回到 scheme 末尾 ⇒ 那一段就是
-        // scheme 名本身（不含冒号）。
-        Some(after_scheme) => url[..after_scheme - 3].eq_ignore_ascii_case("https"),
-        None => false,
-    }
+    canonical_http_authority(url) == Some(true)
 }
 
 impl Task {
     /// 唯一的校验闸（规则只住这一处，见勘误 E23 附记的纪律）。
     ///
-    /// **三条判据读的都是同一份归一后的串**（`url_for_gate`），不是原串：reqwest 走 WHATWG 基本 URL
+    /// **四条判据读的都是同一份归一后的串**（`url_for_gate`），不是原串：reqwest 走 WHATWG 基本 URL
     /// 解析器，那个解析器会删掉全部 tab/LF/CR 与首尾的 C0 控制符或空格 —— 于是
     /// `" \thttp://host/a.bin"`、`"\u{1}http://host/a.bin"`、`"http\t://host/a.bin"` 都照样解析成功、
     /// 照样把请求发出去，而读原串的判据（第 1 字节起的 `http://`、`://` 的 scheme 形状、authority
     /// 里的 `@`）会同时恒假。后果由控制员实测记录在勘误 **E32**：口令可在明文 http 上线、也可随
-    /// `task.url` 落进断点文件。这里只把「过闸的串」与「判 scheme 的串」统一成同一份。
+    /// `task.url` 落进断点文件。这里把「过闸的串」与「判 scheme 的串」统一成同一份。
+    ///
+    /// **第四条是 T99-G1c 的"反转默认"**：前三条只认得**规范形状**上的坏味道，而 WHATWG 对 special
+    /// scheme 的分隔符容忍（`http:/h`、`http:\h`、`http:////h`、少斜杠、反斜杠当分隔符）意味着
+    /// **"认出所有坏写法"这一支补不完**（G1 与 G1b 各留一族，控制员实测）。所以第四条不再去认坏写法，
+    /// 而是只放行规范写法。产品承诺（README 与 `canonical_http_authority` 的文档同一句话）：
+    ///
+    /// > **本 CLI 只接受 `http://` 或 `https://` 的规范写法：scheme 之后必须紧跟恰好 `://`，
+    /// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）里不许出现 `@`。**
+    /// > 任何其它形状一律**当场以"参数写错了"拒绝**（⇒ 天然落退出码 **2**）。
+    ///
+    /// 其它形状（含 `ftp://`、`file://` 与不写 scheme 的串）都在这"任何其它"里。这是一次**用户可见的
+    /// 行为变更**：这类串以前是"放过去交给 reqwest 报错"，现在由我们当场拒。判据的取舍方向只有一个：
+    /// 少认（放行）才有安全后果，多认（拒一条 reqwest 本来抓得住的串）只代价一句报错。
     ///
     /// **存储形状一个字都不改**：`task.url` 照原样落盘（续传要用），凭据之所以不可能再落盘，
     /// 是因为闸会把这类输入拒掉，**不是**因为我们把串改干净了 —— 别把这一发"顺手修"成归一后回写。
@@ -156,6 +238,14 @@ impl Task {
         anyhow::ensure!(!authority_has_userinfo(&url),
             "URL 的 host 前不能带凭据（userinfo，形如 https://用户:口令@主机/…）：\
              请把它去掉并改用 --user / --password 传入");
+        // 第四条（T99-G1c）：前三条管的是"规范形状上的坏味道"，这一条管"形状本身"。
+        // 非规范 ⇒ 拒，不降级、不转交 reqwest 报错。排在前面的 E9 那条**位置是刻意的**：
+        // 规范串上的 userinfo（`https://alice:口令@host/x`）必须继续收到那句能行动的措辞
+        // （"改用 --user / --password 传入"），不能被这句泛泛的"参数写错了"顶掉。
+        anyhow::ensure!(canonical_shape_of(&url).is_some(),
+            "参数写错了：URL 要的是 `http://` 或 `https://` 的规范写法（scheme 之后紧跟恰好 `://`，\
+             host 前不带凭据），不接受 `http:/host`、`http:/\\host`、`http:////host` 这类分隔符变体，\
+             也不接受 http/https 之外的 scheme 与不写 scheme 的串");
         Ok(())
     }
     pub fn segmentable(&self) -> bool { self.data_file.is_none() }
@@ -521,6 +611,140 @@ mod tests {
         };
         assert!(err.to_string().contains("明文 HTTP 不发送口令"), "落盘口要走闸文案：{err}");
         Ok(())
+    }
+
+    // ---- T99-G1c：**反转默认** —— 闸不再认坏写法，只放行规范写法 ----
+    //
+    // 同一条根因（我们判的串 ≠ reqwest 真解析的串）已经打了三发：G1 `9cf00e6`（读 `trim()` 后的串）、
+    // G1b `4fe6a7c`（自己做 WHATWG 两步预处理），每一发都只关掉"列举到的那一族"：控制员在 `4fe6a7c`
+    // 之后实测 `http:/h`、`http:/\h`、`http:////h` 三型**照样**退 0 并把 `authorization: Basic` 打到
+    // 明文线上（G1b 报告 §6.1）⇒ **逐形状清单追不上对面实现的接受集**。
+    // 于是这一发改成"只放行规范写法"：`^https?://`（大小写不敏感、分隔符恰好一次）＋ authority
+    // （终止符 `/` `\` `?` `#`）无 `@`。放行集是 reqwest 接受集的**真子集**，所以"判的是一回事、
+    // 它解析成另一回事"这一族在这里没有落点。
+    //
+    // 每一格同时断**三件事**，为的是把 G1 立的"过闸的串＝判 scheme 的串"钉成结构而不是注释：
+    // ① `validate()` 的结论，以及**走的是哪一支**（按错误里的字样判，不按消息位置判）；
+    // ② `canonical_http_authority` 的形状裁决（`None` = 本 CLI 不接受）；
+    // ③ `url_is_https` 与 ② 同向：被拒的串绝不能算 https（保守那一支 ⇒ 凭据不上线）。
+    // 口令一律用同一个哨兵 `hunter2`，每格另断"错误消息里不许出现它，也不许出现 URL 里的凭据"。
+    #[test]
+    fn the_gate_admits_only_the_canonical_http_shape() {
+        // 一格 = (原始 URL, 有没有给 --password, 期望)。
+        #[derive(Clone, Copy)]
+        enum Want {
+            /// 规范的 `http://` ⇒ 放行，`url_is_https` 给假。
+            Plain,
+            /// 规范的 `https://` ⇒ 放行，`url_is_https` 给真。
+            Secure,
+            /// 拒 = (错误里必须出现的字样, `canonical_http_authority` 的裁决)。
+            /// 裁决给 `Some(false)` 的那几格是"形状规范、但撞在明文+口令那一支上"；
+            /// 其余一律 `None` —— **非规范形状绝不能落进放行那一支**。
+            Refused(&'static str, Option<bool>),
+        }
+        use Want::Refused;
+        const SECRET: &str = "hunter2";
+        const URLINFO: &str = "userinfo";
+        const PLAIN_TEXT: &str = "明文 HTTP 不发送口令";
+        const SHAPE: &str = "参数写错了";
+        const MISSING: &str = "缺少 URL";
+        let rows: &[(&str, bool, Want)] = &[
+            // ① 控制员在 `4fe6a7c` 之后实测出来的第三族（分隔符变体，凭据写在 URL 里）
+            ("http:/u:PASS@127.0.0.1:8899/x1.bin", false, Refused(SHAPE, None)),
+            ("http:/\\u:PASS@127.0.0.1:8899/x2.bin", false, Refused(SHAPE, None)),
+            ("http:////u:PASS@127.0.0.1:8899/x3.bin", false, Refused(SHAPE, None)),
+            ("http:\\u:PASS@127.0.0.1:8899/x4.bin", false, Refused(URLINFO, None)),
+            ("http:\\\\u:PASS@127.0.0.1:8899/x5.bin", false, Refused(URLINFO, None)),
+            ("http:u:PASS@127.0.0.1:8899/x6.bin", false, Refused(URLINFO, None)),
+            ("http:///u:PASS@127.0.0.1:8899/x7.bin", false, Refused(SHAPE, None)),
+            ("https:/h/a.bin", false, Refused(SHAPE, None)),
+            ("https:/\\h/a.bin", false, Refused(SHAPE, None)),
+            ("https:////h/a.bin", false, Refused(SHAPE, None)),
+            // 第三族不带凭据的那一半：旧判据连"这是明文 http"都认不出来（`plain_http` 要字面 7 字节）
+            ("http:/h/a.bin", true, Refused(SHAPE, None)),
+            // ② G1 那一族（首尾空白）与 G1b 那一族（首尾 C0、串中间 tab/LF/CR）
+            ("\u{1}http://u:PASS@h/x", false, Refused(URLINFO, None)),
+            ("http\t://u:PASS@h/x", false, Refused(URLINFO, None)),
+            (" \thttp://u:PASS@h/x", false, Refused(URLINFO, None)),
+            ("ht\ntp://u:PASS@h/x", false, Refused(URLINFO, None)),
+            ("h\tttp://u:PASS@h/x", false, Refused(URLINFO, None)),
+            ("https\r\n://alice:s3cret@h/x", false, Refused(URLINFO, None)),
+            ("http://alice:s3cret@h/a\r.bin", false, Refused(URLINFO, None)),
+            ("\u{1}http://h/x", true, Refused(PLAIN_TEXT, Some(false))),
+            (" \thttp://h/x", true, Refused(PLAIN_TEXT, Some(false))),
+            // ③ 规范形状上的 E9 两支（措辞与方向**一个字都没改**，只是现在只在规范串上跑）
+            ("http://h/x", true, Refused(PLAIN_TEXT, Some(false))),
+            ("HTTP://h/x", true, Refused(PLAIN_TEXT, Some(false))),
+            ("HtTp://h/x", true, Refused(PLAIN_TEXT, Some(false))),
+            ("https://alice:s3cret@h/x", false, Refused(URLINFO, None)),
+            ("HTTPS://ALICE:S3CRET@h/x", false, Refused(URLINFO, None)),
+            ("https://alice@h/x", false, Refused(URLINFO, None)),
+            ("https://alice:s3cret@h/x/a?q=1#f", false, Refused(URLINFO, None)),
+            // ④ 空与全空白（走"缺少 URL"那一支，不是形状那一支）
+            ("", false, Refused(MISSING, None)),
+            ("   ", false, Refused(MISSING, None)),
+            ("\u{1}\u{0}\t ", false, Refused(MISSING, None)),
+            // ⑤ http/https 之外的 scheme 与不写 scheme 的串：**改完由我们当场拒**（用户可见变更）
+            ("ftp://h/x", false, Refused(SHAPE, None)),
+            ("file:///c/tmp/a.bin", false, Refused(SHAPE, None)),
+            ("httpx://h/x", false, Refused(SHAPE, None)),
+            ("x/a.bin", false, Refused(SHAPE, None)),
+            ("/n", false, Refused(SHAPE, None)),
+            ("//h/x", false, Refused(SHAPE, None)),
+            // ⑥ 必须放行的规范写法（含简报点名的合法变体与两格 IPv6 —— 抓"终止符把 `]` 当分隔"那种过严）
+            ("http://h/x", false, Want::Plain),
+            ("HTTP://h/x", false, Want::Plain),
+            ("HtTp://h/x", false, Want::Plain),
+            ("http://h:8080/a.bin?x=1#f", false, Want::Plain),
+            ("https://h:8443/a.bin?x=1#f", false, Want::Secure),
+            ("http://[::1]:8080/a.bin", false, Want::Plain),
+            ("http://[::1]:8080/u:p@x", false, Want::Plain),
+            ("https://[fe80::1]:8443/a@b.bin", false, Want::Secure),
+            ("http://h/a@b.bin", false, Want::Plain),
+            ("http://h/a.bin?to=me@host", false, Want::Plain),
+            ("http://h/a.bin#frag@1", false, Want::Plain),
+            ("https://h/x", true, Want::Secure),
+            ("HTTPS://H/X", true, Want::Secure),
+            // ⑦ 第一步（那两刀）还挣得到的那几格：还原成规范写法 ⇒ 放行，不是拒
+            (" \thttp://h/x", false, Want::Plain),
+            ("http://h/x\u{1}", false, Want::Plain),
+            ("\u{1f} https://h/x\t", false, Want::Secure),
+            ("ht\ntp://h/x", false, Want::Plain),
+            ("http://h/a\tb.bin", false, Want::Plain),
+        ];
+        for (raw, with_password, want) in rows {
+            let mut x = t(raw);
+            if *with_password {
+                x.password = Some(SECRET.into());
+            }
+            // ②与③：形状裁决与发头判据必须读**同一份串**（`canonical_http_authority` 内部就是那一步归一）。
+            let shape = canonical_http_authority(raw);
+            let https = url_is_https(raw);
+            match *want {
+                Want::Plain | Want::Secure => {
+                    let secure = matches!(*want, Want::Secure);
+                    if let Err(err) = x.validate() {
+                        panic!("规范写法 {raw:?}（口令={with_password}）必须放行，实际被拒：{err}");
+                    }
+                    assert_eq!(shape, Some(secure), "{raw:?} 是规范写法 ⇒ 裁决必须是 Some({secure})");
+                    assert_eq!(https, secure, "{raw:?}：`url_is_https` 必须与闸同向（分家的后果是该带的凭据静默不带）");
+                    assert_eq!(x.url, *raw, "闸只读归一后的那份，绝不把归一结果写回 `task.url`");
+                }
+                Refused(needle, want_shape) => {
+                    let Err(err) = x.validate() else {
+                        panic!("{raw:?}（口令={with_password}）必须被闸拒掉 —— 放行就意味着凭据可以上明文线、\
+                                也可以随 `task.url` 落进断点文件");
+                    };
+                    let msg = err.to_string();
+                    assert!(msg.contains(needle), "{raw:?} 要走「{needle}」那一支，实际消息：{msg}");
+                    for leak in [SECRET, "PASS", "s3cret", "alice"] {
+                        assert!(!msg.contains(leak), "错误消息不该把凭据抄一遍（{leak:?}）：{msg}");
+                    }
+                    assert_eq!(shape, want_shape, "{raw:?} 的形状裁决与期望不符（闸与裁决必须同源）");
+                    assert!(!https, "{raw:?} 已被拒 ⇒ 绝不能再被算成 https（保守那一支＝不发凭据）");
+                }
+            }
+        }
     }
 
     // ---- 评审 F4：派生的 Debug 会把口令打出来 ----

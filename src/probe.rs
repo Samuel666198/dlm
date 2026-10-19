@@ -56,6 +56,10 @@
 //!    消息里，绕过 §4 硬规约的原意。裁定是**拒绝**（既不悄悄收下，也不悄悄改写 ② 要比的那个串），
 //!    并且错误消息**不回显**那条 URL。判据复用 `task::authority_has_userinfo`（同一个函数，
 //!    与 E9 那一侧不会读成两样）。
+//!    **T99-G1c 把这一处的判据加严到两条并联**（`landed_url_is_refused`）：除了 userinfo，
+//!    **非规范形状**（`http:/host`、`http:\\host`、多斜杠、http/https 之外的 scheme）也拒 ——
+//!    理由与 E9 同一条：这份串会原样落进 `validator.final_url`。
+//!    `authority_has_userinfo` 本体一个字没动，动的是调用点。
 //! 6. **验证子按响应头的原样值保存，不归一化**（与 `resume::ProbeFacts` 的文档同一立场）；
 //!    但 `ETag`/`Last-Modified` 里出现**非 UTF-8 字节**时只能记成 `None`：`ProbeFacts` 与断点文件
 //!    都装不下它，`If-Range` 更没有强验证子可用。这不是"忽略噪音"—— 少了一把验证子，
@@ -140,7 +144,7 @@ use reqwest::header::{
 use reqwest::StatusCode;
 
 use crate::resume::ProbeFacts;
-use crate::task::{authority_has_userinfo, url_is_https, Task};
+use crate::task::{Task, authority_has_userinfo, canonical_http_authority, url_is_https};
 
 /// 试探之后关于远端文件**此刻**的事实 + 已取回的预读字节。
 ///
@@ -179,6 +183,31 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
                                   它会被写进断点文件、并出现在续传冲突的原因里，因此拒绝收下这份事实；\
                                   本消息不回显那条地址";
 
+/// 落地 URL 的**调用点**判据（T99-G1c §1.2）：两条闸**并联**，任一不过就拒。
+///
+/// 1. `task::authority_has_userinfo` —— E9 / Task 5 评审 C3 那一支，**本体一个字没动**；
+/// 2. `task::canonical_http_authority` —— T99-G1c 新立的"只认规范写法"：非规范形状
+///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme）也拒。
+///
+/// 为什么要第 2 条：`final_url` 会原样落进 `validator.final_url`（与 E9 同一条理由），而
+/// `resume` 的 ② 会把它连同断点里那份一起打进原因串 —— 一条我们**判不出形状**的落地 URL
+/// 不该被收下，即使它此刻看起来没有 `@`。
+///
+/// 两条是**并集**关系，不是包含关系，各有对方够不着的一族：
+/// - 第 1 条更严的那一族：`@` 前面出现 `\`（它的终止符集合是 `/` `?` `#`，截到的 authority 更长，
+///   于是看得见那个 `@`；第 2 条按四个终止符切，`\` 就是分隔 ⇒ authority 里没有 `@`）。
+/// - 第 2 条更严的那一族：分隔符**根本不是** `://`（`http:/host`、`http:\\host`、多斜杠那一族）。
+///   那种串下第 1 条走"没有合法 scheme ⇒ 从串首找第一个 `/`"的保守支，只要 `@` 前面有 `/` 就恒假 ——
+///   控制员实测的 `http:/u:PASS@127.0.0.1:8899/x1.bin` 正是这一族（T99-G1b 报告 §6.1）。
+///
+/// 取并集 ⇒ 任一侧认出来的坏味道都拒，不会因为"共用一个判据"而互相放水。
+///
+/// ⚠ **入参不由我们控制**（是服务器给的），所以这里不做归一之外的任何改写：只判、只拒，
+/// 不改写、不回显。
+fn landed_url_is_refused(url: &str) -> bool {
+    authority_has_userinfo(url) || canonical_http_authority(url).is_none()
+}
+
 /// 发**一发**试探请求，取回事实与预读。
 ///
 /// `agent` 由调用方持有并复用（Task 8 的整轮都用同一个客户端，这样连接池才有意义）；
@@ -215,7 +244,7 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
             // （`Error::url()` 就是它，见 reqwest 0.13.5 `async_impl/client.rs` 里
             // `Pending::poll` 用 tower-http 的 `RequestUri` 覆写 `self.url` 那一段）⇒
             // 先把同一个判据套上去，换成一句不回显的拒绝。
-            if e.url().is_some_and(|u| authority_has_userinfo(u.as_str())) {
+            if e.url().is_some_and(|u| landed_url_is_refused(u.as_str())) {
                 bail!("{LANDED_CREDENTIALS}");
             }
             return Err(e).context("试探请求发不出去");
@@ -227,7 +256,7 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     let headers = resp.headers().clone();
     let final_url = resp.url().clone();
     // 模块文档第 5 条那道闸，排在**任何**可能复述这条 URL 的消息之前。
-    if authority_has_userinfo(final_url.as_str()) {
+    if landed_url_is_refused(final_url.as_str()) {
         bail!("{LANDED_CREDENTIALS}");
     }
 
@@ -296,7 +325,7 @@ pub(crate) fn facts_from_response(
     headers: &HeaderMap,
     final_url: &str,
 ) -> Result<ProbeFacts> {
-    if authority_has_userinfo(final_url) {
+    if landed_url_is_refused(final_url) {
         bail!("{LANDED_CREDENTIALS}");
     }
     let total_len = total_len(headers, status).with_context(|| {

@@ -515,6 +515,159 @@ fn a_password_over_plain_http_never_leaves_the_socket() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- T99-G1c：进程级零泄漏判据
+
+/// **表里每一支被闸拒掉的带凭据形状，用真二进制跑一遍 ⇒ 退出码 2 且对端日志里 `authorization`
+/// 命中数为 0**（这一轮真正的价值所在：前两发的判据都只在库层打转，所以每发都漏一族）。
+///
+/// 取证一律按**字段名**：node 对端把非标准头记在 `extra_headers` 那张表里，`authorization` 是其中
+/// 的键（`probe_puts_the_task_headers_on_the_wire_but_not_credentials_in_the_clear` 与
+/// `fetch_carries_the_nine_item_contract_headers_on_the_wire` 用的是同一张表、同一个读法）。
+/// 按列位置读会在头表换序时静默失读，那种"恒绿"本项目已经付过学费。
+///
+/// 三条对照臂在**同一发**里，各堵一种"看着绿其实什么都没测"的修法：
+/// ① **正向控制臂先跑**：规范 `http://` 且不带凭据 ⇒ 退 0，而对端日志**必须真的长出请求行** ——
+///    这一臂让后面那句"命中数为 0"不再是"对端压根没在记日志"的假证据（`requests_at_least` 读不到
+///    就超时红，所以它自己就是针）。
+/// ② 规范 `http://` + `--password` ⇒ 同样退 2，但那句话必须是"明文 HTTP 不发送口令"：
+///    证明"退 2"来自口令闸，而不是我们把请求打断在别的地方。
+/// ③ 规范 `https://` + `--no-start` ⇒ 退 **0**（`--no-start` 短路在 CLI 层（**E20④**），这一格
+///    不联网、不需要真 TLS 夹具）：堵"严格化顺手把合法写法一起杀掉"那一侧。
+///
+/// 上界那一半按 harness 的纪律下（`requests_at_least` 之后 `requests_quiet`）：先让正向臂那一发
+/// 落进账里，再守满一段静置窗口看有没有多出来的请求 —— 少读几条会让"没多出一条请求"碰巧为真。
+///
+/// ⚠ 本用例**没有**测到的两支，照实登记在 `t99-G1c-report.md`（不写恒真断言凑数）：
+///    真 https 上"凭据真上线"那一跳（本仓库的 node 对端不做 TLS），以及**服务器给的**落地 URL
+///    长得不规范那一支（reqwest 交回的 `Url` 永远序列化成规范写法，本机造不出那条夹具）。
+#[test]
+fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("g1c-leak")?;
+    let out_dir = dir.path().display().to_string();
+    // authority 从 harness 自己报的 base 上取（端口是 bind 之后才知道的，不许写死）。
+    let authority = base.strip_prefix("http://")
+        .context("harness 的 base 不以 http:// 开头，本用例的形状拼不出来")?
+        .to_string();
+
+    // ① 正向控制臂：规范 http、不带凭据 ⇒ 必须真的下载、真的在日志里留下一条请求。
+    let ok = run_dlm(&[
+        "--url", &format!("{base}/sz/4096"), "--out-dir", &out_dir,
+        "--out-name", "control.bin", "--quiet",
+    ])?;
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "对照臂（规范 http、不带凭据）必须下载成功，否则后面那句'零命中'就是假证据：exit={:?}，stderr：{}",
+        ok.status.code(),
+        stderr_of(&ok),
+    );
+    let before = srv.requests_at_least(1)?;
+    assert!(!before.is_empty(), "正向臂的请求没落进日志 ⇒ 日志读法本身是坏的");
+    assert!(dir.path().join("control.bin").exists(), "对照臂的目标文件要在盘上");
+
+    // ② 被拒的那些：每一支都**真指向本对端** ⇒ 一旦放行，`authorization` 就会落在日志里，
+    //    而不是"发不出去所以没证据"。形状来源是 G1b 报告 §6.1 的第三族 + G1/G1b 两族 + 规范对照。
+    //    每格 = (形状, 凭据走不走 `--password`)。
+    const CRED: &str = "u:PASS@";
+    let refused: Vec<(String, bool)> = vec![
+        (format!("http://{CRED}{authority}/x0.bin"), false),   // 规范写法（对照：这一支从 G1 之前就该退 2）
+        (format!("http:/{CRED}{authority}/x1.bin"), false),    // 第三族：单斜杠
+        (format!("http:/\\{CRED}{authority}/x2.bin"), false),  // 第三族：斜杠 + 反斜杠
+        (format!("http:////{CRED}{authority}/x3.bin"), false), // 第三族：四斜杠
+        (format!("http:\\\\{CRED}{authority}/x4.bin"), false), // 反斜杠两支
+        (format!("http:{CRED}{authority}/x5.bin"), false),     // 什么分隔符都没有
+        (format!("http:///{CRED}{authority}/x6.bin"), false),  // 三斜杠
+        (format!("\u{1}http://{CRED}{authority}/x7.bin"), false),  // 前导 C0（G1b 那一族）
+        (format!("http\t://{CRED}{authority}/x8.bin"), false),     // scheme 分隔符里插 Tab
+        (format!(" \thttp://{CRED}{authority}/x9.bin"), false),    // 前导空白（G1 那一族）
+        (format!("ht\ntp://{CRED}{authority}/x10.bin"), false),    // scheme 里插 LF
+        // 同一族的另一半：**凭据走 `--password`**、形状仍是分隔符变体。这一组是"零命中"抓不住的那一半 ——
+        // 放行它不会让 `authorization` 上线（`url_is_https` 给假），但会**真打出一枪**并交出非 2 的码，
+        // 所以下面那条"请求条数不许多"才是它的针。G1b 报告 §6.1 末尾登记的就是这一支。
+        (format!("http:/{authority}/pw1.bin"), true),
+        (format!("http:/\\{authority}/pw2.bin"), true),
+        (format!("http:////{authority}/pw3.bin"), true),
+    ];
+    for (shape, with_password) in &refused {
+        let mut args: Vec<&str> = vec![
+            "--url", shape.as_str(), "--out-dir", out_dir.as_str(),
+            "--out-name", "leak-check.bin", "--quiet",
+        ];
+        if *with_password {
+            args.extend_from_slice(&["--user", "alice", "--password", "hunter2"]);
+        }
+        let out = run_dlm(&args)?;
+        let code = out.status.code();
+        let es = stderr_of(&out);
+        let so = stdout_of(&out);
+        assert_eq!(
+            code,
+            Some(2),
+            "{shape:?} 必须在参数层就被拒（**E23⑤/E26/C3**：'话没说对'只有一种码）：exit={code:?}，stderr：{es}"
+        );
+        assert!(
+            so.is_empty(),
+            "{shape:?} 的 stdout 有输出 ⇒ 这一趟走到了打印摘要或结果行那一步，参数闸没拦住：{so}"
+        );
+        assert!(!es.contains("PASS"), "stderr 不许把 URL 里的口令抄一遍：{es}");
+        assert!(!es.contains("hunter2"), "stderr 不许把 --password 抄一遍：{es}");
+        assert!(!es.contains("跑不起来"), "出现引擎那句就说明这趟走进了装配：{es}");
+        assert!(
+            !dir.path().join("leak-check.bin").exists(),
+            "{shape:?} 被拒之后磁盘上不该有目标文件（闸排在任何 I/O 之前）"
+        );
+    }
+
+    // ② 的另一半：规范 http + `--password` 同样退 2，但走的是**口令**那一支。
+    let plain = run_dlm(&[
+        "--url", &format!("{base}/blob"), "--out-dir", &out_dir, "--out-name", "plain.bin",
+        "--user", "alice", "--password", "hunter2", "--quiet",
+    ])?;
+    assert_eq!(
+        plain.status.code(),
+        Some(2),
+        "规范 http + 口令也要退 2（这一支证明'退 2'不是我们把请求打断在别处）：stderr：{}",
+        stderr_of(&plain)
+    );
+    let es = stderr_of(&plain);
+    assert!(es.contains("明文 HTTP 不发送口令"), "对照臂要走的那一支：{es}");
+    assert!(!es.contains("hunter2"), "错误消息不许抄口令：{es}");
+
+    // ③ 规范 https + 凭据 + `--no-start` ⇒ 退 0：严格化没把合法写法一起杀（这一格不联网）。
+    let secure = run_dlm(&[
+        "--url", "https://example.invalid/dir/a.bin", "--out-dir", &out_dir,
+        "--out-name", "secure.bin", "--user", "alice", "--password", "hunter2", "--no-start",
+    ])?;
+    assert_eq!(
+        secure.status.code(),
+        Some(0),
+        "规范 https + 口令 + `--no-start` 必须退 0（**E20④** 的短路在 CLI 层，不联网也不需要真 TLS）：stderr：{}",
+        stderr_of(&secure)
+    );
+
+    // 上界与零命中：先 `requests_at_least` 保证不漏读，再 `requests_quiet` 守满静置窗口看不许多读。
+    let after = srv.requests_at_least(before.len())?;
+    let quiet = srv.requests_quiet(std::time::Duration::from_millis(500))?;
+    assert_eq!(
+        quiet.len(),
+        before.len(),
+        "被拒的那 {} 发（形状表每一支 + 规范 http 带口令那一支）里有任何一发打到了对端 ⇒ 形状闸没拦住\
+         （目标文件没被创建不代表线上没打）：正向臂之后 {before:?}，静置窗口之后 {quiet:?}",
+        refused.len() + 1,
+    );
+    let auth_hits = after
+        .iter()
+        .filter(|r| r["extra_headers"].get("authorization").is_some())
+        .count();
+    assert_eq!(
+        auth_hits,
+        0,
+        "对端按字段名记的 `extra_headers.authorization` 命中 {auth_hits} 次 ⇒ 有凭据上了明文线：{after:?}"
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------- 派发第 9 条（评审 C3）
 
 /// **服务器**把用户带到一条 authority 里写着凭据的 URL ⇒ probe 必须拒绝，且错误里不回显那条 URL。
