@@ -225,29 +225,77 @@ pub(crate) fn url_is_https(url: &str) -> bool {
     canonical_http_authority(url) == Some(true)
 }
 
-/// `--out-name` 那一格会不会把落点带出 `--out-dir`（T99-G5 第 1 条，用户 2026-10-18 裁定＝**拒掉**）。
+/// **只查"越目录"那一半**：按 `/` 与 `\` 两种分隔符切段后，任一段恰为 `.` 或 `..` ⇒ 这份名字会把
+/// 落点带出 `--out-dir`（切段与"整段相等"的理由见 [`out_name_leaves_out_dir`] 第 3 刀）。
+///
+/// ⚠ **本发（T99-G5c-R1）的轴 = 这道闸对两种名字来源用的是*不同宽度*的判据**（控制员裁定表，
+/// 不许改判：不许统一成"两边都查"，不许统一成"两边都不查"，**更不许 sanitize**）：
+///
+/// | 名字来源 | 拒 `.`／`..` 段 | 拒 `/`、`\` 打头 | 拒「字母＋`:`」盘符形状 |
+/// |---|---|---|---|
+/// | 用户显式 `--out-name` | 拒（[`out_name_leaves_out_dir`] 全判据，现役不动） | 拒（同上） | **拒（同上，现役不动）** |
+/// | 由 URL 末段推导 | **拒**（本函数） | 不可能出现（末段不含 `/`） | **不拒** |
+///
+/// 为什么推导名那一支**不查**文件名合法性（盘符形状），四条理由：
+/// 1. 用户 2026-10-18 那句裁定是"**落点不许越出 `--out-dir`**"。`u:p@x`、`a:b` 这种带冒号的末段
+///    **不出目录** —— "这个文件名在 Windows 上到底能不能创建"是另一件事，**没人裁过**，不该由一道
+///    越目录闸顺手收下。
+/// 2. 更硬的一条：本项目那张形状表（`the_gate_admits_only_the_canonical_http_shape`）把
+///    `http://[::1]:8080/u:p@x` 定为**规范写法、必须放行**。两道闸对同一条 URL 一个说"规范"、
+///    一个说"参数写错了"＝**两本账**，正是勘误 E32 那一族病（G5c 半成品那一版红的就是这一格）。
+/// 3. 显式那一支维持全判据**不是**因为冒号名字在 Unix 上合法（它也合法），而是因为**用户亲手打的串**
+///    里 `C:` 打头就是绝对路径意图，拒它是把落点说清楚；推导那一支的输入不是用户亲手打的名字，
+///    是 URL 的一个片段 ⇒ **只对"走出目录"负责**。
+/// 4. 这条不对称由 `the_derived_name_and_the_explicit_one_are_not_held_to_the_same_width` 钉着
+///    （同一个串走推导 ⇒ 放行，走 `--out-name` ⇒ 拒）。缺那一臂，下一个改这里的人会把它"顺手统一"：
+///    统一成两边都查＝重新引入上面第 2 条那一红并与形状表变成两本账，统一成两边都不查＝把越目录放开。
+fn escapes_out_dir(name: &str) -> bool {
+    name.split(['/', '\\']).any(|seg| seg == ".." || seg == ".")
+}
+
+/// **用户显式给的 `--out-name`** 那一格会不会把落点带出 `--out-dir`（T99-G5 第 1 条立的闸，
+/// 用户 2026-10-18 裁定＝**拒掉**；本函数是它对**显式名**那一支的**全判据**，现役宽度不动）。
+///
+/// 为什么这一闸也得管到推导名：用户 2026-10-18 的裁定原文是"**落点不许越出 `--out-dir`**"，
+/// 那句话里**没有**"只在用户显式命名时才管用"的限定 ⇒ G5 那一版只管了显式名，是同一条承诺没做完。
+/// 但补完的是**覆盖面**而不是**宽度**：推导名那一支走 [`escapes_out_dir`]，只查越目录那一半。
 ///
 /// 危害的来源只有一句实现事实：`Task::target_path()` 是 `self.dir.join(name)`，而 `PathBuf::join`
-/// 遇到**绝对形状**会整份丢掉左半边（`D:\out`.join(`/n`) ＝ `/n`），遇到 `..` 段则在真实文件系统
-/// 解析时往上走一层（`--out-name ../escaped.bin` 的摘要里"输出目录"与"落点"两行自相矛盾）。
-/// 控制员实测：`../x`、`/n` 两族都能出去；而从 URL 末段**推导**的名字带不出这个洞
-/// （`rsplit('/')` 只取最后一段，`…/a/../../evil.bin` 的末段是 `evil.bin`）—— 所以这一闸只管
-/// **用户亲手给的 `name`**，`name == None` 那一路（推导名）根本不进这个函数。
+/// 遇到**绝对形状**会整份丢掉左半边（`D:\out`.join(`/n`) ＝ `/n`），遇到 `.`／`..` 段则在真实文件系统
+/// 解析时把落点挪到父目录／挪到目录本身。
+///
+/// ⚠ **危害要说准（注释与报告同一句话）**：`target_path()` 读的是 `task.url` —— **用户自己打进去的
+/// 那一条**，不是服务器重定向交回的 `final_url` ⇒ 这一族是**用户自伤**那一格（自己写了个会走出目录的
+/// URL／名字），**不是远端可利用的漏洞**。所以措辞停留在"参数写错了"那一族（天然退 2），
+/// 不许写成"目录穿越攻击已修"，也不许升级成安全告警的口吻。
+///
+/// G5 当时把推导名那一支判成"带不出洞"，理由写在旧注释里：`rsplit('/')` 只取最后一段
+/// （`…/a/../../evil.bin` 的末段是 `evil.bin` —— 这一支确实安全，新闸不许误杀它）。
+/// 控制员 2026-10-19 用真二进制实测（`--no-start`）证明**漏了另一半**：末段**本身就可以是** `..` 或 `.`：
+/// `--url https://127.0.0.1:1/..` 的落点是 `<out-dir>\..`（走出去了），`…/.` 的落点是 `<out-dir>\.`
+/// （落在目录本身）。⇒ 判据现在查的是 [`Task::effective_name`]，即 `join` 真会拿到的那份串。
 ///
 /// 只禁这两类，**相对子路径照旧允许**（`sub/x.bin` 必须仍放行）：裁的是"不许越出去"，
-/// 不是"不许有子目录"。判据三刀：
+/// 不是"不许有子目录"。判据三刀（第 1、2 刀只落在**显式名**那一支上，见 [`escapes_out_dir`] 那张表）：
 /// 1. 串首是 `/` 或 `\` ⇒ 绝对形状（POSIX 绝对路径／Windows UNC 与根）。
 /// 2. 前两字节是「ASCII 字母 + `:`」（`C:` 形状）⇒ Windows 盘符前缀。
 ///    `C:x` 在 Windows 上是"A 盘当前目录里的 x"，同样是"离开 `--out-dir`"的写法，所以只看前两字节、
 ///    不要求后面跟分隔符。代价：Unix 上合法文件名 `a:b.txt` 会被多拒一条 —— 方向是多拒（一句可行动的
 ///    报错），不是少认，且与"这一族在 Windows 上真是路径"这件事一致。
-/// 3. 按 `/` **与** `\` 两种分隔符切段，任一段恰为 `..` ⇒ 往上走。
+/// 3. 按 `/` **与** `\` 两种分隔符切段，任一段恰为 `..`（T99-G5c 起**还包括** `.`）⇒ 走出目录／走到目录本身。
+///    ⚠ **按"整段相等"判，绝不按"包含子串"判**：`v1.2.bin`、`a...b`、`my.file.tar.gz` 都是合法名字，
+///    换成 `name.contains('.')` 或 `contains("..")` 就会把它们一起拒掉 —— 本发的 m2 变异守的正是这一条。
+///    这一刀单独住 [`escapes_out_dir`]：它是"越目录"那一半，也是推导名那一支**唯一**用到的判据。
+///    `.` 这一格是 G5c 补的：`--url …/.` 推出来的末段就是 `.`，`join` 交回的是目录本身而不是目录里的
+///    一个文件（`<out-dir>\.`），同样不是"落在 `--out-dir` 里"的形状。
 ///    分隔符集合带 `\` 是刻意的：闸必须对着**用户脚下这台机器**的最宽解释判，而 Windows 上
 ///    `..\x` 就是父目录（少带一个分隔符＝`..\evil.bin` 整串被当成一个文件名放过去，父目录照进）。
 ///
 /// **读的是原串、不做归一**：`url_for_gate` 那两刀（tab/LF/CR 与首尾 C0）是给 WHATWG 解析器对齐的，
 /// 文件名侧没有对面那个"吃掉空白与多余斜杠"的解析器可对齐 —— `join` 拿到什么就写什么。
-/// 因此这一闸**不比 `target_path()` 更宽容，也不比它更严**：判的就是 `join` 真会怎么做。
+/// 因此这一闸**不比 `target_path()` 更宽容，也不比它更严**：判的就是 `join` 真会怎么做，
+/// 而且（G5c 之后）判的是**同一份串** —— 两侧都读 [`Task::effective_name`]，不存在"闸看一本账、
+/// 落盘看另一本账"。**宽度**按来源分两支（那张表），**取的那份串**不分两支。
 fn out_name_leaves_out_dir(name: &str) -> bool {
     let b = name.as_bytes();
     if b.first().is_some_and(|c| *c == b'/' || *c == b'\\') {
@@ -256,15 +304,25 @@ fn out_name_leaves_out_dir(name: &str) -> bool {
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
         return true;
     }
-    name.split(['/', '\\']).any(|seg| seg == "..")
+    escapes_out_dir(name)
 }
 
 impl Task {
     /// 唯一的校验闸（规则只住这一处，见勘误 E23 附记的纪律）。
     ///
-    /// **T99-G5 第 1 条加了第五条判据**（`--out-name` 的形状，见 [`out_name_leaves_out_dir`]）：
-    /// 下面那句"四条判据读的都是同一份归一后的串"管的仍是 **URL 那四条**；名字那一条读 `self.name`
-    /// 原串，因为它要对齐的是 `PathBuf::join` 而不是 WHATWG 解析器。规则依旧只住这一处。
+    /// **T99-G5 第 1 条加了第五条判据**（落点名字的形状，见 [`out_name_leaves_out_dir`]）：
+    /// 下面那句"四条判据读的都是同一份归一后的串"管的仍是 **URL 那四条**；名字那一条读
+    /// [`Task::effective_name`] 那份**原串**，因为它要对齐的是 `PathBuf::join` 而不是 WHATWG 解析器。
+    /// 规则依旧只住这一处。
+    ///
+    /// ⚠ **T99-G5c 改的是第五判据"查哪一份名字"，T99-G5c-R1 改的是"对不同来源用多宽的判据"**：G5 那一版
+    /// 只查 `self.name`，于是`--out-name` 不给、名字由 URL 末段推导的那一半从没过分（实测 `--url …/..`
+    /// 的落点是 `<out-dir>\..`）。现在第五判据查的是 `effective_name()` —— 也就是 `target_path()` 真拿去
+    /// `join` 的那份串 ⇒ 闸与落盘共用同一个出口，不存在两本账。宽度则按来源分两支：显式名用全判据
+    /// [`out_name_leaves_out_dir`]，推导名只用 [`escapes_out_dir`]（那张不对称表连同四条理由住在它的
+    /// 文档里，`the_derived_name_and_the_explicit_one_are_not_held_to_the_same_width` 是它的针）。
+    /// 危害仍是**用户自伤**那一格（`task.url` 是用户自己打的，不是服务器交回的 `final_url`），
+    /// 不是远端可利用的漏洞。
     ///
     /// **四条判据读的都是同一份归一后的串**（`url_for_gate`），不是原串：reqwest 走 WHATWG 基本 URL
     /// 解析器，那个解析器会删掉全部 tab/LF/CR 与首尾的 C0 控制符或空格 —— 于是
@@ -314,25 +372,58 @@ impl Task {
              主机名非空且 host 前不带凭据），不接受 `http:/host`、`http:/\\host`、`http:////host` 这类分隔符变体，\
              也不接受 http/https 之外的 scheme 与不写 scheme 的串；`https://`（没有主机名）与 \
              `https://:8443/a.bin`（只有端口、没有主机名）这一族，请在 `://` 之后补上主机名");
-        // 第五条（T99-G5 第 1 条）：前四条管 URL，这一条管 `--out-name`。排在最后**是刻意的**——
-        // 它读的是 `self.name` 而不是归一后的 URL 串，把它插在中间会让"四条判据读同一份串"那句话
-        // 变成需要读者自己分辨的例外。措辞走"参数写错了"那一族 ⇒ 天然落退出码 2（E23⑤：与引擎那句
-        // "校验不符"不同源）。排在最末还有一个可观察的后果：URL 与名字同时写错时，用户先看到 URL 那句。
-        if let Some(name) = &self.name {
-            anyhow::ensure!(!out_name_leaves_out_dir(name),
-                "参数写错了：--out-name 要的是落在 --out-dir 里的名字，\
-                 不能是绝对路径、也不能含 \"..\" 段（要子目录请直接写相对路径，如 sub/x.bin）");
+        // 第五条（T99-G5 第 1 条立、T99-G5c 把覆盖面补完、T99-G5c-R1 定下宽度那张表）：前四条管 URL，
+        // 这一条管**最终生效的那个名字**。排在最后**是刻意的**——它读的是 `effective_name()` 而不是
+        // 归一后的 URL 串，把它插在中间会让"四条判据读同一份串"那句话变成需要读者自己分辨的例外。
+        // 措辞走"参数写错了"那一族 ⇒ 天然落退出码 2（E23⑤：与引擎那句"校验不符"不同源）。排在最末
+        // 还有一个可观察的后果：URL 与名字同时写错时，用户先看到 URL 那句。
+        //
+        // ⚠ 这里分成两支钉的是**判据宽度**，不是**取名的来源**：`name` 那一侧（显式名）用全判据
+        // [`out_name_leaves_out_dir`]，`None` 那一侧（推导名）只用 [`escapes_out_dir`]（只查 `.`／`..`
+        // 段）。两边读的都是 [`Task::effective_name`] 交回的**同一份串** ⇒ 闸与 `target_path()` 共用
+        // 同一个出口，不存在两本账；那张不对称表与四条理由住在 [`escapes_out_dir`] 的文档里。
+        // ⚠ 并且**没有**做任何"把 `..` 剥掉/换成 `download`"的 sanitize：静默改写用户的落点与用户
+        // 裁的"拒掉"相反。
+        // 两种来源的**措辞也分开**：显式名点名 `--out-name`，推导名说出"这条 URL 的末段"——
+        // 否则没写 `--out-name` 的用户会去改自己根本没填过的那一格。
+        let name = self.effective_name();
+        let refused = match &self.name {
+            Some(_) => out_name_leaves_out_dir(&name),
+            None => escapes_out_dir(&name),
+        };
+        if refused {
+            anyhow::bail!(match &self.name {
+                Some(_) => "参数写错了：--out-name 要的是落在 --out-dir 里的名字，\
+                            不能是绝对路径、也不能含 \"..\" 段（要子目录请直接写相对路径，如 sub/x.bin）",
+                None => "参数写错了：这条 URL 的末段推不出一个落在 --out-dir 里的名字\
+                        （末段是 \".\" 或 \"..\" 时落点会走到目录之外或目录本身）；\
+                        请用 --out-name 显式给一个相对文件名",
+            });
         }
         Ok(())
     }
     pub fn segmentable(&self) -> bool { self.data_file.is_none() }
     pub fn ignore_mtime(&self) -> bool { self.flags & FLAG_IGNORE_MTIME != 0 }
+    /// **真正会落盘的那个名字**：用户给的 `--out-name`，不给时从 URL 末段推导。
+    ///
+    /// 提成一个函数只为一个理由（T99-G5c 第 1 条）：`target_path()` 与 `validate()` 必须读**同一份**串，
+    /// 否则闸守的是"用户填的那个字段"，磁盘上落的却是另一本账 —— G5 那一版漏掉的正是这一格。
+    ///
+    /// 推导规则（**与 G5 之前逐字相同**，本发只搬位置不改语义：先砍掉 `?`/`#` 之后的 query 与
+    /// fragment，再取最后一个 `/` 之后的那段）；那段为空（URL 以 `/` 收尾）或整条没有 `/` 之外的
+    /// 末段时兜到 `download`。百分号**原样保留**，不做解码 —— 这一格是 STATUS 里"保留现状＋钉用例"
+    /// 那条裁定的对象（`derived_names_from_the_url_take_their_last_segment_only`）。
+    ///
+    /// ⚠ 这里**不 sanitize**：推出来是 `..` 就照实是 `..`，由 `validate()` 拒掉，不由这里改写。
+    fn effective_name(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        let tail = self.url.split(['?', '#']).next().unwrap_or(&self.url);
+        tail.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download").to_string()
+    }
     pub fn target_path(&self) -> PathBuf {
-        let name = self.name.clone().unwrap_or_else(|| {
-            let tail = self.url.split(['?', '#']).next().unwrap_or(&self.url);
-            tail.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download").to_string()
-        });
-        self.dir.join(name)
+        self.dir.join(self.effective_name())
     }
     // 这里**不留任何常数访问器**：`Task` 只带每条任务真不一样的东西（URL、目录、名字、flags、
     // 凭据、验证子、body 文件）。以前有个 `limits() -> (预读, 段下限, 连接数)`，文档写着
@@ -967,5 +1058,118 @@ mod tests {
             let got = x.target_path().file_name().map(|s| s.to_string_lossy().into_owned());
             assert_eq!(got.as_deref(), Some(*want_tail), "{url} 推导出来的落点末段与现状不符");
         }
+    }
+
+    // ---- T99-G5c 第 3 条（推导名那一半的负臂）＋ T99-G5c-R1（不对称表）----
+
+    /// 推导名负臂（控制员 2026-10-19 用真二进制实测到的那两格 ＋ 同族的另一半形状）：
+    /// 不给 `--out-name` 时，URL 末段**本身就可以是** `..` 或 `.` ⇒ 落点走到目录之外／目录本身。
+    /// 要求三件：`is_err()`、走"参数写错了"那一族（E23⑤ ⇒ 退 2）、措辞点名**这条 URL 的末段**而不是
+    /// `--out-name` —— 用户根本没填那一格，指错地方等于把用户支使去改一个空字段。
+    /// m1 变异（把第五判据退回只查 `self.name`）只能红在这里。
+    #[test]
+    fn rejects_derived_names_that_walk_out_of_the_out_dir() {
+        const SHAPE: &str = "参数写错了";
+        const DERIVED: &str = "这条 URL 的末段";
+        let table: &[(&str, &str)] = &[
+            ("https://h/..", "末段单独一个 `..`：落点是 --out-dir 的上一级"),
+            ("https://h/.", "末段是 `.`：落点是目录本身，不是目录里的一个文件"),
+            ("https://h/a/..", "`..` 前面还有别的段：切段之后末段仍然是它"),
+            ("https://h/../..", "两个 `..` 连着写：末段还是 `..`，不因为多走一层就换个判法"),
+            ("https://h/..?q=1", "先砍 query 再取名 ⇒ 末段仍是 `..`，query 不是挡箭牌"),
+            ("https://h/..#frag", "同上，fragment 也不是"),
+            (r"https://h/..\x", r"反斜杠版：Windows 上 `..\x` 是真的父目录形状，切段带 `\` 才看得见"),
+        ];
+        for (url, why) in table {
+            let x = t(url);
+            assert!(x.name.is_none(), "夹具：这一族必须走推导名那一路，否则测的是显式判据");
+            let Err(err) = x.validate() else {
+                panic!("{url} 的末段（{why}）必须被闸拒掉，实际放行了");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains(SHAPE), "{url} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2），实际：{msg}");
+            assert!(msg.contains(DERIVED),
+                "{url} 没给 --out-name，消息得说出矛头是这条 URL 的末段，否则用户会去改自己没填过的那格：{msg}");
+            assert!(!msg.contains("漏洞") && !msg.contains("exploit"),
+                "这是\"参数写错了\"那一族的措辞（用户自伤，不是远端可利用），不许升级成安全告警的口吻：{msg}");
+        }
+    }
+
+    /// 推导名正臂（"修过头"的牙）：末段**长得像**越目录或像非法文件名，但都不走出目录 ⇒ 必须放行。
+    /// - `a/../../evil.bin` 钉"我们没拿整条 URL 做子串匹配"（简报点名的那一格）；
+    /// - `v1.2.bin`、`a...b`、`my.file.tar.gz`、`seg..ment` 钉"按整段相等判、不按包含子串判"
+    ///   （m2 变异的红臂就是这些格）；
+    /// - `u:p@x` 钉"推导名那一支不查盘符形状"（不对称表第三列，形状表也守着同一格）。
+    #[test]
+    fn allows_derived_names_that_only_look_like_an_escape() {
+        // 一格 = (URL, 放行后 target_path() 应有的末段；`None` = 这一格只断放行，不断末段)。
+        let table: &[(&str, Option<&str>)] = &[
+            ("https://h/a/../../evil.bin", Some("evil.bin")),
+            ("https://h/v1.2.bin", Some("v1.2.bin")),
+            ("https://h/a...b", Some("a...b")),
+            ("https://h/my.file.tar.gz", Some("my.file.tar.gz")),
+            ("https://h/seg..ment", Some("seg..ment")),
+            // ⚠ 这一格不断末段：Windows 上 `PathBuf::join("u:p@x")` 会把 `u:` 当**盘符前缀**整份丢掉
+            // 左半边（实测 `target_path().file_name()` 交回的是 `p@x`）。闸**照旧不许**用这件事当拒的
+            // 理由 —— 那是"这个名字在 Windows 上算哪条路径"，不是"它走出 --out-dir 的那一刀"，
+            // 没人裁过；拿它当理由就是本发那张不对称表被推翻、与形状表重新变成两本账（m3 那一发）。
+            ("http://[::1]:8080/u:p@x", None),
+        ];
+        for (url, want_tail) in table {
+            let x = t(url);
+            assert!(x.validate().is_ok(),
+                "{url} 的末段不走出目录，闸不许拒（拒了就是修过头）：{:?}", x.validate().err());
+            if let Some(want) = *want_tail {
+                let got = x.target_path().file_name().map(|s| s.to_string_lossy().into_owned());
+                assert_eq!(got.as_deref(), Some(want),
+                    "{url} 既然放行，闸判的那份名字就必须是 target_path() 真拿去 join 的那份（两本账）");
+            }
+        }
+    }
+
+    /// **钉的是不对称本身，不是某一边的宽容**（控制员裁定表的代码形态）。
+    /// 同一份串走两条路 ⇒ 结论可以不同：由 URL 末段**推导**时只查"越目录"那一半（[`escapes_out_dir`]），
+    /// 用户**显式**给 `--out-name` 时用全判据（[`out_name_leaves_out_dir`]，含盘符形状，现役不动）。
+    ///
+    /// 为什么这一臂必须有：缺它，下一个改这里的人会把它"顺手统一"——
+    /// 统一成两边都查＝把 `http://[::1]:8080/u:p@x` 那格重新判红、与形状表变成两本账（m3 就是这一发的针）；
+    /// 统一成两边都不查＝把 `.`／`..` 那格放开（`..` 那一行守的就是这一支）。
+    #[test]
+    fn the_derived_name_and_the_explicit_one_are_not_held_to_the_same_width() {
+        // 一格 = (那份串, 推导那一支放行吗, 显式那一支放行吗)。
+        let table: &[(&str, bool, bool)] = &[
+            ("u:p@x", true, false),  // 形状表点名的末段：字母＋冒号，但不走出目录
+            ("a:b", true, false),    // 同一族的另一半（不带 `@`，排除"`@` 才是放行理由"）
+            ("C:x", true, false),    // 真盘符形状：显式那一支按现役拒，推导那一支不查它
+            ("..", false, false),    // 越目录那一半**两边都查** ⇒ 不许"统一成都不查"
+            (".", false, false),     // 同上，落点是目录本身那一格
+            ("x.bin", true, true),   // 两支都没有理由管的普通名字（正向对照）
+        ];
+        for (name, derived_ok, explicit_ok) in table {
+            let url = format!("http://[::1]:8080/{name}");
+            let derived = t(&url);
+            assert!(derived.name.is_none(), "夹具：第一路必须是推导名");
+            let derived_got = derived.validate().is_ok();
+            assert_eq!(derived_got, *derived_ok,
+                "{name:?} 走推导那一路应当{}（不对称表：只查越目录那一半）",
+                if *derived_ok { "放行" } else { "被拒" });
+
+            let explicit = named("https://example.com/a.bin", name);
+            assert!(explicit.name.is_some(), "夹具：第二路必须是显式 --out-name");
+            let explicit_got = explicit.validate().is_ok();
+            assert_eq!(explicit_got, *explicit_ok,
+                "{name:?} 走显式那一路应当{}（现役全判据，宽度本发不动）",
+                if *explicit_ok { "放行" } else { "被拒" });
+
+            if derived_got != explicit_got {
+                // 两支结论不同的那几格才算钉住了不对称：消息必须各自指对字段。
+                let msg = explicit.validate().err().unwrap().to_string();
+                assert!(msg.contains("--out-name"),
+                    "{name:?} 两支结论不同 ⇒ 显式那一支的措辞必须点名 --out-name，否则用户分不清：{msg}");
+            }
+        }
+        // 不对称臂的另一半证据：形状表那条"规范写法必须放行"的 URL 在这里也必须是绿的。
+        let x = t("http://[::1]:8080/u:p@x");
+        assert!(x.validate().is_ok(), "形状表把这条定为规范写法 ⇒ 越目录闸不许对它说\"参数写错了\"");
     }
 }
