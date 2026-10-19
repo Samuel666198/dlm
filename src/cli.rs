@@ -564,7 +564,7 @@ mod tests {
         let t = task(&["dlm", "--url", "https://x/a.bin", "--out-name", "/f"])?;
         assert_eq!(t.name.as_deref(), Some("/f"), "POSIX 上 /f 这样的串是合法的**值**，把它展开成别名会把用户的参数吃掉");
         let c = parse(&["dlm", "--url", "https://x/n", "--out-name", "/d"])?;
-        assert!(!c.quiet(), "值位的 /n 不是静默旗标");
+        assert!(!c.quiet(), "`--url`/`--out-name` 都是值位旗标：值位上长得像别名的 /xxx 串不被展开成静默旗标");
         assert_eq!(c.into_task()?.url, "https://x/n");
         Ok(())
     }

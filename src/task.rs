@@ -110,7 +110,9 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 ///
 /// 产品承诺（README 与 `Task::validate()` 的文档同一句话）：
 /// > 本 CLI 只接受 `http://` 或 `https://` 的规范写法：scheme 之后必须紧跟恰好 `://`，
-/// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）**非空**且里面不许出现 `@`。
+/// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）**非空、且第一个字节不是 `:`**
+/// > （这两刀合起来＝主机名非空；后一半是 T99-G1d **裁定一** 把"authority 非空"收到 host 层那一刀），
+/// > 里面不许出现 `@`。
 /// > 任何其它形状一律当场以"参数写错了"拒绝。
 ///
 /// 返回 `Some(true)` = 规范的 `https://`、`Some(false)` = 规范的 `http://`、
@@ -142,9 +144,13 @@ pub(crate) fn authority_has_userinfo(url: &str) -> bool {
 ///    ⚠ 残余一面要说窄：`validate()` 那一侧还**并联**着 `authority_has_userinfo`（简报明令本体不许动，
 ///    它的终止符集合只有 `/` `?` `#`），所以 `http://h\\a@x` 在闸上仍按 userinfo 拒 ——
 ///    方向是"多拒"（不是绕过），登记在 T99-G1c 报告 §5，不在本发的射程内。
-/// 4. **authority 非空**（T99-G1c-R1 **裁定三**，控制员裁的扩面）：`https://`、`http://` 这种空 host
-///    以前过得了形状闸（`url_is_https` 还给真），失败点落在 reqwest 的 `builder error: empty host`
+/// 4. **主机名非空**（T99-G1c-R1 **裁定三** 立的是"authority 非空"，T99-G1d **裁定一** 把同一刀收到 host 层）：
+///    空 host 的两种长相都在这里拒 —— 整串为空（`https://`、`http://`）与**空 host 带端口**
+///    （`https://:8443/a.bin`、`https://:/a.bin`，判据是 authority 首字节为 `:`）。
+///    以前这两族都过得了形状闸（`url_is_https` 还给真），失败点落在 reqwest 的 `builder error: empty host`
 ///    （真下载退 1、`--no-start` 退 0）⇒ 现在由我们当场拒，不再靠对面兜底。
+///    为什么用首字节而不是切端口：合法 host 的首字节不可能是 `:`（IPv6 字面量按 RFC 3986 必带方括号），
+///    所以这一刀数学上碰不到任何合法写法 —— 表里 `https://[::1]:8080/a.bin` 那一格就是它的正向对照臂。
 pub(crate) fn canonical_http_authority(raw: &str) -> Option<bool> {
     canonical_shape_of(&url_for_gate(raw))
 }
@@ -168,15 +174,24 @@ fn canonical_shape_of(url: &str) -> Option<bool> {
         return None;
     }
     let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
-    // 第四步（T99-G1c-R1 **裁定三**，控制员裁的扩面）：authority 为空 ⇒ 非规范。
-    // 以前 `https://` / `http://` 过得了形状闸（`url_is_https` 还给真），失败点落在对面：
+    let authority = &rest[..end];
+    // 第四步（T99-G1c-R1 **裁定三** 立的是"authority 非空"；T99-G1d **裁定一** 把同一刀收到 **host** 层）：
+    // host 为空 ⇒ 非规范，而"host 为空"只有两种长相 —— authority 整串为空（`https://`、`http://`），
+    // 或**以 `:` 开头**（空 host + 端口：`https://:8443/a.bin`、`https://:/a.bin`）。
+    // 以前后一种过得了形状闸（`url_is_https` 还给真、`--no-start` 退 0 打出摘要），失败点落在对面：
     // 真下载由 reqwest 报 `builder error: empty host`（退 1，凭据上不了线）。方向本就安全，
     // 但那句话变成"靠对面兜底"—— 本项目对"两把串"付过太多次学费，所以宁可多拒两条
-    // （合法用户不会写空 host）。代价：`--no-start` 从退 0 变退 2。
-    if rest[..end].is_empty() {
+    // （合法用户不会写空 host）。代价：`--no-start` 那一臂从退 0 变退 2。
+    //
+    // **为什么是 `starts_with(':')` 而不是 `split(':').next()`**：URL 的 host 段第一个字节不可能是
+    // `:`（IPv6 字面量按 RFC 3986 必须带方括号，`[::1]:8080` 的首字节是 `[`），所以这一刀
+    // **数学上碰不到任何合法写法**。`split(':').next()` 会把 `[::1]:8080` 算成 `[` —— 侥幸不错，
+    // 但那是靠"没人写裸 IPv6"兜底，正是本项目不要的那种判据。
+    // 下面那一刀已经把 authority 里**任意位置**的 `@` 拒掉了 ⇒ 这里不必再为 userinfo 做剥离。
+    if authority.is_empty() || authority.starts_with(':') {
         return None;
     }
-    if rest[..end].contains('@') {
+    if authority.contains('@') {
         return None; // authority 里的凭据形态（E9 那一支在 `validate()` 里另有更具体的措辞）
     }
     Some(is_https)
@@ -226,11 +241,13 @@ impl Task {
     /// 而是只放行规范写法。产品承诺（README 与 `canonical_http_authority` 的文档同一句话）：
     ///
     /// > **本 CLI 只接受 `http://` 或 `https://` 的规范写法：scheme 之后必须紧跟恰好 `://`，
-    /// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）非空且里面不许出现 `@`。**
+    /// > 主机段（authority，终止符是 `/` `\` `?` `#` 之一）非空、首字节不是 `:`（合起来＝主机名非空）
+    /// > 且里面不许出现 `@`。**
     /// > 任何其它形状一律**当场以"参数写错了"拒绝**（⇒ 天然落退出码 **2**）。
     ///
-    /// 其它形状（含 `ftp://`、`file://`、不写 scheme 的串，以及 T99-G1c-R1 裁定三补的**空 host**：
-    /// `https://`、`http://`）都在这"任何其它"里。这是一次**用户可见的
+    /// 其它形状（含 `ftp://`、`file://`、不写 scheme 的串，以及"空 host"那一族：T99-G1c-R1 裁定三补的
+    /// `https://`、`http://`，与 T99-G1d 裁定一补的**空 host 带端口** `https://:8443/a.bin`、`https://:/a.bin`）
+    /// 都在这"任何其它"里。这是一次**用户可见的
     /// 行为变更**：这类串以前是"放过去交给 reqwest 报错"，现在由我们当场拒。判据的取舍方向只有一个：
     /// 少认（放行）才有安全后果，多认（拒一条 reqwest 本来抓得住的串）只代价一句报错。
     ///
@@ -256,8 +273,9 @@ impl Task {
         // （"改用 --user / --password 传入"），不能被这句泛泛的"参数写错了"顶掉。
         anyhow::ensure!(canonical_shape_of(&url).is_some(),
             "参数写错了：URL 要的是 `http://` 或 `https://` 的规范写法（scheme 之后紧跟恰好 `://`，\
-             host 前不带凭据），不接受 `http:/host`、`http:/\\host`、`http:////host` 这类分隔符变体，\
-             也不接受 http/https 之外的 scheme 与不写 scheme 的串");
+             主机名非空且 host 前不带凭据），不接受 `http:/host`、`http:/\\host`、`http:////host` 这类分隔符变体，\
+             也不接受 http/https 之外的 scheme 与不写 scheme 的串；`https://`（没有主机名）与 \
+             `https://:8443/a.bin`（只有端口、没有主机名）这一族，请在 `://` 之后补上主机名");
         Ok(())
     }
     pub fn segmentable(&self) -> bool { self.data_file.is_none() }
@@ -633,8 +651,9 @@ mod tests {
     // 之后实测 `http:/h`、`http:/\h`、`http:////h` 三型**照样**退 0 并把 `authorization: Basic` 打到
     // 明文线上（G1b 报告 §6.1）⇒ **逐形状清单追不上对面实现的接受集**。
     // 于是这一发改成"只放行规范写法"：`^https?://`（大小写不敏感、分隔符恰好一次）＋ authority
-    // （终止符 `/` `\` `?` `#`）非空（R1 **裁定三**补的那一刀）且无 `@`。放行集是 reqwest 接受集的
-    // **真子集**，所以"判的是一回事、它解析成另一回事"这一族在这里没有落点。
+    // （终止符 `/` `\` `?` `#`）非空（R1 **裁定三**）、首字节不是 `:`（G1d **裁定一**：那一刀从
+    // "authority 非空"收到"主机名非空"，夹住 `https://:8443/a.bin` 那族空 host 带端口的写法）且无 `@`。
+    // 放行集是 reqwest 接受集的**真子集**，所以"判的是一回事、它解析成另一回事"这一族在这里没有落点。
     //
     // 每一格同时断**三件事**，为的是把 G1 立的"过闸的串＝判 scheme 的串"钉成结构而不是注释：
     // ① `validate()` 的结论，以及**走的是哪一支**（按错误里的字样判，不按消息位置判）；
@@ -709,13 +728,23 @@ mod tests {
             //      顺带关掉上一发报告 §5.2 那一格：空 host 绝不能再被 `url_is_https` 算成真。
             ("https://", false, Refused(SHAPE, None)),
             ("http://", false, Refused(SHAPE, None)),
-            // ⑥ 必须放行的规范写法（含简报点名的合法变体与两格 IPv6 —— 抓"终止符把 `]` 当分隔"那种过严）
+            //      同一族的另一半（T99-G1d **裁定一**：那一刀从"authority 非空"收到"主机名非空"）——
+            //      "空 host 带端口"这一族以前过得了只查 `is_empty()` 的那一刀，失败点落在 reqwest 的
+            //      `builder error: empty host`（`--no-start` 退 0、真下载退 1）⇒ 现在同样由我们当场拒。
+            ("https://:8443/a.bin", false, Refused(SHAPE, None)), // 空 host + 端口：本发新夹的那一族
+            ("https://:/a.bin", false, Refused(SHAPE, None)),     // 空 host + 空端口
+            // ⑥ 必须放行的规范写法（含简报点名的合法变体与 IPv6 那几格 —— 抓"终止符把 `]` 当分隔"和
+            //      "把端口那枚冒号当成 host 起点"那种**过严**；G1d **裁定一** 那一刀的正向对照臂就在这里）
             ("http://h/x", false, Want::Plain),
             ("HTTP://h/x", false, Want::Plain),
             ("HtTp://h/x", false, Want::Plain),
             ("http://h:8080/a.bin?x=1#f", false, Want::Plain),
             ("https://h:8443/a.bin?x=1#f", false, Want::Secure),
             ("http://[::1]:8080/a.bin", false, Want::Plain),
+            // G1d **裁定一** 新增的正向对照臂：带方括号的 IPv6 字面量首字节是 `[` 而不是 `:` ⇒ 那一刀
+            // 数学上碰不到它。这一格实测放行（`Admits(true)` 落在本表就是 `Want::Secure`），
+            // 变异 m2（把刀换成 `authority.contains(':')`）实测到它红 ⇒ 它是真针，不是装饰。
+            ("https://[::1]:8080/a.bin", false, Want::Secure),
             ("http://[::1]:8080/u:p@x", false, Want::Plain),
             ("https://[fe80::1]:8443/a@b.bin", false, Want::Secure),
             ("http://h/a@b.bin", false, Want::Plain),

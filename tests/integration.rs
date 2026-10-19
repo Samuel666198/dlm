@@ -567,7 +567,8 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
     assert!(dir.path().join("control.bin").exists(), "对照臂的目标文件要在盘上");
 
     // ② 被拒的那些：每一支都**真指向本对端** ⇒ 一旦放行，`authorization` 就会落在日志里，
-    //    而不是"发不出去所以没证据"。形状来源是 G1b 报告 §6.1 的第三族 + G1/G1b 两族 + 规范对照。
+    //    而不是"发不出去所以没证据"。形状来源是 G1b 报告 §6.1 的第三族 + G1/G1b 两族 + 规范对照
+    //    + 空 host 两臂（R1 裁定三、G1d 裁定一；那两臂不指向对端，只钉"退 2 且不走进装配"）。
     //    每格 = (形状, 凭据走不走 `--password`)。
     const CRED: &str = "u:PASS@";
     let refused: Vec<(String, bool)> = vec![
@@ -588,6 +589,13 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
         (format!("http:/{authority}/pw1.bin"), true),
         (format!("http:/\\{authority}/pw2.bin"), true),
         (format!("http:////{authority}/pw3.bin"), true),
+        // 最后一族（T99-G1c-R1 裁定三 ＋ T99-G1d **裁定一**）：**空 host 由我们在参数层当场拒、退 2**，
+        // 不再靠 reqwest 那句 `builder error: empty host` 兜底（以前是 `--no-start` 退 0、真下载退 1）。
+        // 这一句是**用户可见承诺**，进程级以前没有针（复审 I-3）；R1.6 那六行证据在 `target/` 里，随清理即失。
+        // 两臂都不指向本对端 ⇒ 下面那段循环的三条判据（退码 2、stderr 不含"跑不起来"、
+        // 请求条数不许多）**自动适用**，不为它们单开断言、不放宽任何一条既有判据。
+        ("https://".to_string(), true),            // 空 host：R1 裁定三那一族
+        ("https://:8443/d.bin".to_string(), true), // 空 host + 端口：本发裁定一新夹的那一族
     ];
     for (shape, with_password) in &refused {
         let mut args: Vec<&str> = vec![
