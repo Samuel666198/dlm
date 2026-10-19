@@ -1172,4 +1172,157 @@ mod tests {
         let x = t("http://[::1]:8080/u:p@x");
         assert!(x.validate().is_ok(), "形状表把这条定为规范写法 ⇒ 越目录闸不许对它说\"参数写错了\"");
     }
+
+    /// **T99-G5d 第 1 件：一根结构针 —— "闸查的名字"与"`target_path()` 真拿去落盘的名字"必须是
+    /// 同一份 `effective_name()` 的两次读取。**
+    ///
+    /// 为什么行为差分不够（本发存在的全部理由，T99-G5c-R2 实测）：让 `target_path()` 不复用
+    /// `effective_name()`、自己再算一遍**等价**的末段（变异 m4 复现），实测 `--lib` 与
+    /// `--test integration` 两层**零红**——两份算法今天确实给出同一个串，行为差分看不见"两处各写
+    /// 一份等价算法"。能抓它的只有钉实现形状的结构针（与 G5 给 `src/fetch.rs` 四处立的那根是
+    /// 同一格病灶的第二次出现，照同一形状办：按函数体切片判＋跳过注释行）。
+    ///
+    /// 三条断言，全部**按函数体切片**判、**跳过以 `//` 开头的行**（本项目已两次撞上"源码扫描的
+    /// 两种假红：注释与字符串里的同名 token"——闸的文档注释里本来就写着 `effective_name`，
+    /// 整文件 grep 会把注释当调用点）：
+    /// 1. `fn validate(` 体内**出现** `self.effective_name()` —— 闸读的是最终生效的那个名字；
+    /// 2. `fn target_path(` 体内**出现** `self.effective_name()` 且**不出现** `rsplit('/')` ——
+    ///    落盘不许自己再算一遍（m4 复现实测红在这里，本发的存在证明）；
+    /// 3. `fn effective_name(` 体内**出现** `rsplit('/')` —— 末段算法**只住这一处**。没有这一条，
+    ///    "禁字＋出现"可以两句一起被掏空：把算法搬进 `target_path`、再删掉这里的，断言 1/2 各自
+    ///    照逻辑仍是绿的（m5 实测红在这里）。
+    ///
+    /// 扫描区按文件里第一个 `#[cfg(test)]` 切断：**这根针自己的文本就带着这些 token**，不切就是
+    /// 这种针的第三种假红（针扫到自己），顺手防掉。读文件走运行时 `fs::read_to_string` +
+    /// `CARGO_MANIFEST_DIR`（与 G5 那根同形）：不是 `include_str!`，更不是把源码抄进测试当字符串
+    /// ——抄一份的针既测不到实现也拦不住改动。
+    ///
+    /// ⚠ **这根针的失效条件**（不许读成"那条算法算得对"）：它钉的是"闸与落盘读同一处算法"这**一件**事，
+    /// **不**保证这条末段算法本身算得对——`effective_name` 的取值对不对由
+    /// `derived_names_from_the_url_take_their_last_segment_only` 那几发表钉。反过来，有人把
+    /// `effective_name` **改名**且两侧同时改指新名，这一发也会红——那是"钉形状"的代价，刻意的：
+    /// 一本账要有名字可查，换了名字就照新名字同步这根针，不许悄悄换账本。
+    #[test]
+    fn the_gate_and_the_landing_share_one_name_source_and_the_tail_algorithm_lives_only_in_effective_name() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("task.rs");
+        let all = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）", path.display()));
+        let src = match all.find("#[cfg(test)]") {
+            Some(at) => &all[..at],
+            None => panic!("src/task.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"),
+        };
+
+        // 签名行在**产品区**的非注释行里必须恰好出现一次：出现第二个同名函数＝第二本账。
+        let sig_count = |sig: &str| -> usize {
+            src.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(sig)).count()
+        };
+        for sig in ["fn validate(", "fn target_path(", "fn effective_name("] {
+            assert_eq!(sig_count(sig), 1,
+                "`{sig}` 在 src/task.rs 产品区应当恰好出现一次（两处同名＝两本账），实得 {} 次", sig_count(sig));
+        }
+
+        // 函数体切片：从签名行起按大括号深度截到函数结束，只收非 `//` 开头的行。
+        // 这三个函数体里没有字符串/字符字面量带 `{`/`}`，按原文数大括号就够（字节级约定与 G5
+        // 那根的计数同一脉：这一族针是形状针，不是解析器）。
+        fn body_of(src: &str, sig: &str) -> String {
+            let mut body = String::new();
+            let mut depth: i32 = 0;
+            let mut inside = false;
+            for line in src.lines() {
+                let t = line.trim_start();
+                if t.starts_with("//") { continue; }
+                if !inside {
+                    if !t.contains(sig) { continue; }
+                    inside = true;
+                }
+                depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                body.push_str(line);
+                body.push('\n');
+                if depth == 0 { break; }
+            }
+            assert!(inside, "产品区里找不到含 `{sig}` 的非注释行——判据应当存在的函数没了");
+            assert_eq!(depth, 0, "`{sig}` 的函数体在大括号深度上没闭合——针的夹具跟不上实现形状");
+            body
+        }
+
+        let validate = body_of(src, "fn validate(");
+        assert!(validate.contains("self.effective_name()"),
+            "断言 1 红：`fn validate(` 的体内不再读 `self.effective_name()`——闸退回查另一本账\
+             （例如只查 `self.name`），放下的名字与落盘的名字不再是同一份");
+
+        let target = body_of(src, "fn target_path(");
+        assert!(target.contains("self.effective_name()"),
+            "断言 2a 红：`fn target_path(` 的体内不再读 `self.effective_name()`——这正是 m4 的形状：\
+             落盘自己再算一遍末段，两份等价算法各住一处；行为差分对它实测零红（G5c-R2），只有这根针抓得到");
+        assert!(!target.contains("rsplit('/')"),
+            "断言 2b 红：`fn target_path(` 的体内出现了 `rsplit('/')`——落盘在自己算末段，m4 禁的那件事；\
+             末段算法只许住在 `effective_name()` 一处");
+
+        let effective = body_of(src, "fn effective_name(");
+        assert!(effective.contains("rsplit('/')"),
+            "断言 3 红：`rsplit('/')` 不在 `fn effective_name(` 的体内了——末段算法被搬走或删掉（m5）。这一条\
+             证明断言 2 的禁字不是装饰：把算法搬进 target_path 再删掉这里的，断言 1/2 各自照逻辑仍是绿的");
+    }
+
+    /// **T99-G5d 第 2 件：一发行为差分——对表里每一行，两个**独立观察量**恒等：
+    /// A＝"闸放不放"（`validate().is_ok()`），B＝"真拿去落盘的那个串的最后一段是不是个普通名字"。
+    ///
+    /// ⚠ **这一发不是为了抓 m4（抓不到，上一轮同样的改动实测零红，那是第 1 件结构针存在的证明），
+    /// 是为了把"两条算法万一算得不一样"（m4′ 那一族）从"靠注释提醒"升级成"靠针报警"。**
+    /// m4′ 具体红在哪一格（复现实测）：`https://h/..?x=1`——重算时不砍 query，末段成 `..?x=1`
+    /// （普通名字 ⇒ B 真），而闸砍了 query 后末段是 `..`（A 假），两侧不等 ⇒ 报警。
+    ///
+    /// B 是**测试自己写的独立量具**，不复用产品里的 `escapes_out_dir`/`out_name_leaves_out_dir`
+    /// ——差分要的就是两侧算法不同源；复用的话本发就退化成"断言 A==A"。切段方式与产品一致是巧合，
+    /// 语义上是"我去看真拿去落盘那个串的最后一段"。
+    ///
+    /// ⚠ 为什么 B 用"字符串按两种分隔符切段看最后一段"，不用 `Path::components()`／`file_name()`
+    /// （动手前的校准发在本机实测，简报里这句纠正成立）：`components()` 会把 `.` **规范化掉**——
+    /// `Path::new("d/.").components()` 交回 `[Normal("d")]`，"最后一段"变成目录本身，
+    /// `https://h/.` 那一格会**假红**；`file_name()` 对以 `..` 结尾的路径交回 `None`
+    /// （`Path::new("d/..").file_name() = None`），读起来像产品 bug。⇒ 只剩字符串切段这一条路。
+    ///
+    /// ⚠ **本针的适用域（照实登记，报告同名一节）**：A==B 只在"名字本身不带分隔符段"的行上成立。
+    /// 名字内部带分隔符而末段是普通名字的行（`--out-name ../x`、推导 `https://h/..\x`）实测
+    /// **A 假而 B 真**——那是显式/推导两支的**判据宽度差**（全判据看所有段、B 量具天生只看最后一段），
+    /// 不是两本账。把这些行塞进恒等表就是永久假红，所以拆出来单立一段"盲区段"，按实测登记成
+    /// `(假, 真)`。（⚠ 简报把 `--out-name ../x` 写成"两侧都假"，本机实测为 A 假 B 真——
+    /// 简报自身笔误，照实测办；两格真正的负臂由 `rejects_out_name_that_leaves_the_out_dir`
+    /// 与 `rejects_derived_names_that_walk_out_of_the_out_dir` 守着。）
+    #[test]
+    fn what_the_gate_admits_and_what_the_landing_tail_shows_always_agree() {
+        // 一格 = (URL, `--out-name`；`None` = 走推导名)。全是今天真存在的形状，A/B 见各行注。
+        let table: &[(&str, Option<&str>)] = &[
+            ("https://h/..", None),                                    // 推导＝`..` ⇒ 两侧都假
+            ("https://h/.", None),                                     // 落点是目录本身 ⇒ 两侧都假
+            ("https://h/..?x=1", None),                                // 砍 query 后末段仍是 `..` ⇒ 两侧都假；这一格是 m4′ 的牙
+            ("https://h/a.bin#..", None),                              // 末段 `a.bin` ⇒ 两侧都真
+            ("https://h/v1.2.bin", None),                              // 两侧都真（长得像 `..` 的合法名）
+            ("https://h/u:p@x", None),                                 // 两侧都真——这一行同时是不对称表的差分侧
+            ("https://example.com/a.bin", Some("sub/x.bin")),          // 显式子路径 ⇒ 两侧都真
+            ("https://example.com/a.bin", Some("..")),                 // 显式名末段就是 `..` ⇒ 两侧都假
+        ];
+        for (url, name) in table {
+            let x = match name { Some(n) => named(url, n), None => t(url) };
+            let a = x.validate().is_ok();
+            let seg = x.target_path().to_string_lossy().split(['/', '\\']).next_back().unwrap_or("").to_string();
+            let b = seg != "." && seg != "..";
+            assert_eq!(a, b,
+                "url={url} --out-name={name:?}：闸放不放 A={a}，落盘串的最后一段是 {seg:?}（是普通名字吗 B={b}）——\
+                 两侧不同意＝闸与落盘在读两本账（或两支宽度在这一格塌了，见文档注释的适用域声明）");
+        }
+
+        // 盲区段：名字内部带 `..` 段而末段普通 ⇒ B 量具天生看不见，实测登记为 (A 假, B 真)。
+        // 哪天这两格翻面（例如有人把两支宽度"顺手统一"），这一段先响——它不是这件事的业主
+        // （业主是不对称表那发），只是哨兵。
+        for (url, name) in [("https://example.com/a.bin", Some("../x")), ("https://h/..\\x", None)] {
+            let x = match name { Some(n) => named(url, n), None => t(url) };
+            let a = x.validate().is_ok();
+            let seg = x.target_path().to_string_lossy().split(['/', '\\']).next_back().unwrap_or("").to_string();
+            let b = seg != "." && seg != "..";
+            assert_eq!((a, b), (false, true),
+                "url={url} --out-name={name:?} 是登记过的盲区格（末段普通、名字内部含 `..` 段）：实测组合翻了＝\
+                 判据宽度被动过，去对照那支不对称表");
+        }
+    }
 }
