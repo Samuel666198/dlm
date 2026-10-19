@@ -61,6 +61,26 @@ const ALIASES: &[(&str, Option<&str>)] = &[
     ("/onboot", None),
 ];
 
+/// `ALIASES` 那张表的**用户面**版本：只写"哪种写法换成哪条长选项、哪几种写法什么都不做"，
+/// 一行一个事实，取证编号与取舍理由一个字都不带（判据住在 `tests/integration.rs` 的
+/// `the_binary_help_prints_no_internal_review_prose`，射程把这一段也算在内）。
+///
+/// 为什么这一族话**只有在这里出现一次**：`/q` 这类写法今天唯一的去处是 `expand_idm_aliases`
+/// 那句报错——那要求用户先写错一次才知道有这回事。只会 IDM 写法的人没有任何地方能查出 `/q`
+/// 是什么，所以别名表必须进 `--help`，而不只进错误信息。
+///
+/// ⚠ 排版：本仓库的 clap 没开 `wrap_help`，这一段**逐字**打印（不折行、不改缩进），
+/// 所以行首的两格缩进会原样出现在帮助里；期望值按渲染现场写死在结构针里。
+const ALIAS_EPILOG: &str = "\
+斜杠写法（IDM 风格，与长选项等价）：
+  /d → --url
+  /p → --out-dir
+  /f → --out-name
+  /n → --quiet
+  /a → --no-start
+  /q、/s、/onboot 被接受但不做任何事（v1 没有对应的子系统）
+表以外的斜杠写法会直接报错";
+
 /// 需要**再吃一个参数**的长选项（别名展开的"值位"探测用）。这份清单必须与下面 `Cli` 的字段一一对应：
 /// 少一格就会把用户的**值**当成别名位（`--out-dir /d` 里那个 `/d` 在 POSIX 上是一条绝对路径，
 /// 展开成 `--url` 就把参数吃掉了）；多一格就会把旗标当值吃掉。开关型的那五个
@@ -192,40 +212,54 @@ pub fn parse_from<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Result<C
 //   那句"打印任务摘要后退出"就落不了地。
 // - 字段一律私有：外面的面只有 `into_task` / `into_config` / `quiet` / `no_start` 四格，
 //   少一条"顺手读一下 cli.url"的暗道。
+// - **T99-G5b 的分工（写成三条才不会下一次又混起来）**：
+//   ① 上面这种 `//` ＝ 实现纪律，永不进用户表面；
+//   ② 每个字段那串 `help = "…"` ＝ 该行选项的一行说明，**只写实现真给得起的事实**
+//      （默认值、取值范围、哪一路不读写断点，都能在下面几行的实现处对号）；
+//   ③ `ALIAS_EPILOG` ＝ 别名表的用户面。
+//   ⚠ 字段上**不要写 `///`**：derive 会把字段文档同时喂给 `help` 与 `long_help`，
+//   于是"顺手在字段上写一段论证"就变成"论证印进 --help"（E28③ 那一族的字段版）。
+//   这里刻意用 `help = ` 属性而不是 `///`：derive 生成的调用顺序是文档注释在前、属性在后，
+//   所以属性写的用户文案**压得住**将来误加的字段文档，而不是被它顶掉。
 #[derive(Parser, PartialEq, Eq)]
-#[command(name = "dlm", version, about = "多连接下载内核（POSIX 长选项 + IDM 斜杠别名）")]
+#[command(
+    name = "dlm",
+    version,
+    about = "多连接下载内核（POSIX 长选项 + IDM 斜杠别名）",
+    after_help = ALIAS_EPILOG
+)]
 pub struct Cli {
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", help = "要下载的 URL（必填；只接受 http:// 或 https:// 的规范写法）")]
     url: String,
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", help = "输出目录（默认当前目录）")]
     out_dir: Option<PathBuf>,
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help = "输出文件名（不给则取 URL 末段；不能是绝对路径、不能含 \"..\" 段）")]
     out_name: Option<String>,
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", help = "并发连接数（默认 8）")]
     connections: Option<usize>,
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", help = "原样发送的 Referer 头")]
     referer: Option<String>,
-    #[arg(long, value_name = "COOKIE")]
+    #[arg(long, value_name = "COOKIE", help = "原样发送的 Cookie 头（不区分 http/https，并会写进断点文件）")]
     cookie: Option<String>,
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", help = "从这个文件读请求体（这条路不试探、不读不写断点、不可续传）")]
     data_file: Option<PathBuf>,
-    #[arg(long, value_name = "USER")]
+    #[arg(long, value_name = "USER", help = "Basic 认证的用户名（只在 https 上发送）")]
     user: Option<String>,
-    #[arg(long, value_name = "PASSWORD")]
+    #[arg(long, value_name = "PASSWORD", help = "Basic 认证的口令（只在 https 上发送；http:// 配上它会直接失败）")]
     password: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "仅 Last-Modified 变化时仍可续传（ETag 变了会从头重来）")]
     ignore_mtime: bool,
-    #[arg(long)]
+    #[arg(long, help = "无视断点文件，从头下载")]
     no_resume: bool,
-    #[arg(long, value_name = "HEX")]
+    #[arg(long, value_name = "HEX", help = "下载完成后校验（要 64 个十六进制字符；不匹配则保留文件并报错，不自动删）")]
     sha256: Option<String>,
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", help = "给无限慢重试封顶的重试次数")]
     max_retries: Option<u32>,
-    #[arg(long)]
+    #[arg(long, help = "完成后保留断点文件")]
     keep_state: bool,
-    #[arg(long)]
+    #[arg(long, help = "关掉逐拍进度行（最终摘要与错误照样打印）")]
     quiet: bool,
-    #[arg(long)]
+    #[arg(long, help = "只打印任务摘要后退出，不发送任何请求")]
     no_start: bool,
 }
 
@@ -747,5 +781,76 @@ mod tests {
             ALIASES.iter().find(|(a, _)| *a == "/a").and_then(|(_, t)| *t),
             Some("--no-start")
         );
+    }
+
+    /// **T99-G5b 1c-1：结构针 —— 帮助面每一格都得有说明，别名表真要印出来。**
+    ///
+    /// 这一族的第二课（G5 之后才看得清，也是本发存在的理由）：**名字出现在帮助里 ≠ 帮助教了东西**。
+    /// 既有的进程针 `tests/integration.rs::the_binary_help_prints_no_internal_review_prose` 断的是
+    /// "六条长名在场 ＋ 没有内部措辞"，那种判据对 `c3a3cfd` 那一版帮助（16 条选项全部列出、
+    /// 说明一格都没有）**照样绿** —— 四闸全绿的那一发就是它的活体现场。所以这里断 `Command` 的结构，
+    /// 两个方向都要有牙：
+    /// ① 任何**带长名的参数**（含 clap 自带的 help/version）`get_help()` 必须是 `Some` 且文本非空
+    ///    ⇒ 谁给 `Cli` 加了新选项却没写说明，这里先红；
+    /// ② 下面 `DOCUMENTED_LONGS` 那串长名一条都不许多、一条都不许缺
+    ///    ⇒ 反过来，把选项整条删掉/藏掉让①空转，也红。
+    /// ③ 别名表那五行、"接受并忽略"那一行、"表以外报错"那一行都必须在**渲染出来的**帮助文本里
+    ///    （m2 删掉 `ALIAS_EPILOG` 里 `/d` 那一行，红的就是这一格）。
+    /// 期望值按渲染现场写死，不复用 `ALIAS_EPILOG`（拿被测对象自己当期望值就是恒真）。
+    #[test]
+    fn every_help_entry_carries_an_explanation_and_the_alias_table_is_printed() {
+        use clap::CommandFactory;
+        const DOCUMENTED_LONGS: &[&str] = &[
+            "url",
+            "out-dir",
+            "out-name",
+            "connections",
+            "referer",
+            "cookie",
+            "data-file",
+            "user",
+            "password",
+            "ignore-mtime",
+            "no-resume",
+            "sha256",
+            "max-retries",
+            "keep-state",
+            "quiet",
+            "no-start",
+        ];
+        const PRINTED_ALIAS_LINES: &[&str] = &[
+            "/d → --url",
+            "/p → --out-dir",
+            "/f → --out-name",
+            "/n → --quiet",
+            "/a → --no-start",
+            "/q、/s、/onboot 被接受但不做任何事（v1 没有对应的子系统）",
+            "表以外的斜杠写法会直接报错",
+        ];
+        let mut cmd = Cli::command();
+        // 先渲染：`render_long_help` 会 build，于是 clap 自带的那两条自动参数也进了 `get_arguments()`。
+        let rendered = cmd.render_long_help().to_string();
+        let mut longs: Vec<&str> = Vec::new();
+        for arg in cmd.get_arguments() {
+            let Some(long) = arg.get_long() else { continue };
+            let text = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+            assert!(
+                !text.trim().is_empty(),
+                "--{long} 在帮助里只列了名字、没有说明（名字出现在帮助里 ≠ 帮助教了东西，T99-G5b）：\n{rendered}"
+            );
+            longs.push(long);
+        }
+        for name in DOCUMENTED_LONGS {
+            assert!(
+                longs.contains(name),
+                "帮助面少了 --{name} 这条选项 ⇒ 上面那圈\"每条都有说明\"扫的已经不是完整的面了"
+            );
+        }
+        for line in PRINTED_ALIAS_LINES {
+            assert!(
+                rendered.contains(line),
+                "帮助里少了别名那一句 {line:?}（斜杠写法唯一的去处不该只剩报错信息，T99-G5b 1b）：\n{rendered}"
+            );
+        }
     }
 }

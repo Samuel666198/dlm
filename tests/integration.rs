@@ -4843,6 +4843,12 @@ fn internal_number_shape(text: &str) -> Option<String> {
 /// 新增那一臂同样带正臂（"算得…期望…"那句话必须在），因为删成空字符串也能骗过纯禁字扫描
 /// （**E28⑧-1** 立的形状：负向判据必须与正向对照成对）。
 /// ⚠ 上面 `--help` 那几行既有断言的方向与期望值一个字没动（只有禁串数组搬成了常数）。
+///
+/// **T99-G5b 1c-2 给 `--help` 那一臂又加了一格正臂**（别名 token `/d` 与 `/onboot` 必须在场）：
+/// 六条长名的对照臂只断"名字印出来了"，而 16 条名字全在、说明一格的帮助面在那圈判据下是绿的。
+/// 别名表从"只住在报错里"搬到 `--help` 里之后，这一格才让它红得下来；结构那一维
+/// （每条选项 `get_help()` 非空）住在 `src/cli.rs` 的
+/// `every_help_entry_carries_an_explanation_and_the_alias_table_is_printed`。
 #[test]
 fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     let out = run_dlm(&["--help"])?;
@@ -4858,6 +4864,14 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     // 下面那一串"没印内部措辞"的负向断言就不再是它声称在测的东西。
     for opt in ["--url", "--out-dir", "--out-name", "--connections", "--quiet", "--no-start"] {
         assert!(h.contains(opt), "对照臂：帮助里少了 {opt} —— 此时负向扫描测的已是\"坏帮助\"而非\"禁串\"：{h}");
+    }
+    // **T99-G5b 1c-2**：同一族判据补第二格正臂，因为上面那圈六条只断"名字在场"，而
+    // **名字出现在帮助里 ≠ 帮助教了东西**（`c3a3cfd` 那一版 16 条名字全在、说明一格都没有，
+    // 这一发当时四闸全绿）。这里要的是**斜杠写法也到了交付面**：`/d` 是映射项、`/onboot` 是
+    // "接受并忽略"项，两种各来一条，缺任何一条 ⇒ 别名表只剩报错信息那一个去处。
+    // ⚠ 方向仍是**正向对照**（与下面的禁串扫描成对，E28⑧-1）；既有六条与全部负向判据一字未动。
+    for token in ["/d", "/onboot"] {
+        assert!(h.contains(token), "对照臂：`--help` 里少了别名 token {token:?}（T99-G5b：别名映射必须进帮助面）：{h}");
     }
 
     // 禁串：只有仓库内部才该出现的词，出现在交付给用户的帮助面上就是 E28③ 复发。
