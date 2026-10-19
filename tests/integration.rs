@@ -566,7 +566,7 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
     assert!(!before.is_empty(), "正向臂的请求没落进日志 ⇒ 日志读法本身是坏的");
     assert!(dir.path().join("control.bin").exists(), "对照臂的目标文件要在盘上");
 
-    // ② 被拒的那些：每一支都**真指向本对端** ⇒ 一旦放行，`authorization` 就会落在日志里，
+    // ② 被拒的那些：头 14 支每一支都**真指向本对端** ⇒ 一旦放行，`authorization` 就会落在日志里，
     //    而不是"发不出去所以没证据"。形状来源是 G1b 报告 §6.1 的第三族 + G1/G1b 两族 + 规范对照
     //    + 空 host 两臂（R1 裁定三、G1d 裁定一；那两臂不指向对端，只钉"退 2 且不走进装配"）。
     //    每格 = (形状, 凭据走不走 `--password`)。
