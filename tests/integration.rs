@@ -4726,6 +4726,79 @@ fn the_binary_holds_an_escaping_out_name_at_the_parameter_tier() -> anyhow::Resu
     Ok(())
 }
 
+/// **T99-G5c 第 4 条的进程级一对**：`--out-name` **不给**时，名字由 URL 末段推导，那条路同样停在
+/// **参数层**（退 2 ＋ "参数写错了"），而只是"名字里带点"的正常 URL 照旧走通。
+///
+/// 为什么单元层那三发（`src/task.rs::tests`）不够：G5 那一版漏掉的正是"装配处根本没人再查一次"
+/// 这一格 —— 单元层只能证明 `validate()` 会拒，证明不了这句错误经 `main.rs` 的 `into_task()` 落到
+/// 哪个码、措辞到不到 stderr，更证明不了那个自相矛盾的落点不会先印到用户眼前（E26/C3 把这一族
+/// 判给进程级，E26 的 C1 已经付过一次学费）。
+///
+/// 两臂成对（负向判据必须与正向对照成对，E28⑧-1）：
+/// - 负臂 `--url …/..`（**不给** `--out-name`）⇒ 退 **2** ＋ 措辞点名"**这条 URL 的末段**"而不是
+///   `--out-name`（用户根本没填那一格）＋ **摘要一行都不打**（含"落点："那行）＋ `--out-dir` 里
+///   一个条目都不多；
+/// - 正臂 `--url …/v1.2.bin`（同样不给名字）⇒ 退 **0** ＋ 摘要照打 ＋ 落点那一行是 `--out-dir`
+///   底下的 `v1.2.bin`（这一臂同时钉 m2：把"按整段判"写成"按含 `.` 判"就会红在这里）。
+///
+/// ⚠ 这一对**不改** G5 那一发（`the_binary_holds_an_escaping_out_name_at_the_parameter_tier`）：
+/// 那一头钉的是显式名那一支的**全判据**，这一头钉的是推导名那一支的**越目录那一半** ——
+/// 两分支的是判据宽度，闸与落盘读的名字**仍是同一份**（`Task::effective_name`）。
+/// 夹具不需要对端 ⇒ 两臂都带 `--no-start`（E20④ 的短路在 `engine::run` 之前，一个字节都不上网）。
+#[test]
+fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::Result<()> {
+    let dir = harness::tmp_dir("bin-derived-name")?;
+    let out_dir = dir.path().display().to_string();
+
+    // 负臂：末段就是 `..`，而且用户没给 --out-name。
+    let esc = run_dlm(&[
+        "--url", "http://x.example/..", "--out-dir", &out_dir, "--no-start",
+    ])?;
+    let e = stderr_of(&esc);
+    assert_eq!(
+        esc.status.code(),
+        Some(2),
+        "`--url …/..` 不给 --out-name 也是\"话没说对\"那一档（与 G5 那对同码）：exit={:?}，stderr：{e}",
+        esc.status.code()
+    );
+    assert!(
+        e.contains("参数写错了") && e.contains("这条 URL 的末段"),
+        "参数层措辞 ＋ 说出矛头是这条 URL 的末段（点名 --out-name 会把用户支使去改自己没填过的格子）：{e}"
+    );
+    assert!(
+        !e.contains("--out-name 要的是"),
+        "推导名那一支不许复用显式名那句措辞，否则两条来源又并回一本账：{e}"
+    );
+    let s = stdout_of(&esc);
+    assert!(!s.contains("任务摘要"), "闸在 `into_task()` 里 ⇒ 摘要一行都不该打：{s}");
+    assert!(!s.contains("落点："), "简报实测\"输出目录/落点两行自相矛盾\"的形状不许回来：{s}");
+    assert_eq!(
+        dir.path().read_dir()?.count(),
+        0,
+        "参数层失败之后 --out-dir 里一个条目都不该多（`..` 也不许被当成目录名建出来）"
+    );
+
+    // 正臂（对照）：末段只是带点的正常名字 ⇒ 同一条闸必须放行。
+    let dot = run_dlm(&[
+        "--url", "http://x.example/v1.2.bin", "--out-dir", &out_dir, "--no-start",
+    ])?;
+    assert_eq!(
+        dot.status.code(),
+        Some(0),
+        "对照臂：末段 `v1.2.bin` 不走出目录，必须放行 —— 把它拒了＝按子串判（本发 m2）：exit={:?}，stderr：{}",
+        dot.status.code(),
+        stderr_of(&dot)
+    );
+    let ds = stdout_of(&dot);
+    assert!(ds.contains("任务摘要"), "对照臂的摘要照打（E20④/E23⑥）：{ds}");
+    let landing = ds.lines().find(|l| l.starts_with("落点：")).expect("摘要必须有落点那一行");
+    assert!(
+        landing.contains(&out_dir) && landing.ends_with("v1.2.bin"),
+        "落点那一行必须仍是 --out-dir 底下的 v1.2.bin（闸判的那份名字就是落盘那份）：{landing}"
+    );
+    Ok(())
+}
+
 /// **E26/C5**：`--quiet` 与 `--no-start` **同时**给。行为由两条裁定叠出来，两条在这一格上都有落点：
 /// **E24①** 把 `--quiet` 的语义收窄成"关掉每一拍那一发进度行"（**最终摘要与错误照打**），
 /// **E20④** 把 bit0 的短路放在 `engine::run` **之前** —— 而 `dispatch` 的形状是先读 `quiet()`

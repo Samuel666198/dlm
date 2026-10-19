@@ -233,7 +233,7 @@ pub struct Cli {
     url: String,
     #[arg(long, value_name = "DIR", help = "输出目录（默认当前目录）")]
     out_dir: Option<PathBuf>,
-    #[arg(long, value_name = "NAME", help = "输出文件名（不给则取 URL 末段；不能是绝对路径、不能含 \"..\" 段）")]
+    #[arg(long, value_name = "NAME", help = "输出文件名（不给则取 URL 末段；两者都不许走出 --out-dir）")]
     out_name: Option<String>,
     #[arg(long, value_name = "N", help = "并发连接数（默认 8）")]
     connections: Option<usize>,
