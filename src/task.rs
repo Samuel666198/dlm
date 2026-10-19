@@ -225,8 +225,46 @@ pub(crate) fn url_is_https(url: &str) -> bool {
     canonical_http_authority(url) == Some(true)
 }
 
+/// `--out-name` 那一格会不会把落点带出 `--out-dir`（T99-G5 第 1 条，用户 2026-10-18 裁定＝**拒掉**）。
+///
+/// 危害的来源只有一句实现事实：`Task::target_path()` 是 `self.dir.join(name)`，而 `PathBuf::join`
+/// 遇到**绝对形状**会整份丢掉左半边（`D:\out`.join(`/n`) ＝ `/n`），遇到 `..` 段则在真实文件系统
+/// 解析时往上走一层（`--out-name ../escaped.bin` 的摘要里"输出目录"与"落点"两行自相矛盾）。
+/// 控制员实测：`../x`、`/n` 两族都能出去；而从 URL 末段**推导**的名字带不出这个洞
+/// （`rsplit('/')` 只取最后一段，`…/a/../../evil.bin` 的末段是 `evil.bin`）—— 所以这一闸只管
+/// **用户亲手给的 `name`**，`name == None` 那一路（推导名）根本不进这个函数。
+///
+/// 只禁这两类，**相对子路径照旧允许**（`sub/x.bin` 必须仍放行）：裁的是"不许越出去"，
+/// 不是"不许有子目录"。判据三刀：
+/// 1. 串首是 `/` 或 `\` ⇒ 绝对形状（POSIX 绝对路径／Windows UNC 与根）。
+/// 2. 前两字节是「ASCII 字母 + `:`」（`C:` 形状）⇒ Windows 盘符前缀。
+///    `C:x` 在 Windows 上是"A 盘当前目录里的 x"，同样是"离开 `--out-dir`"的写法，所以只看前两字节、
+///    不要求后面跟分隔符。代价：Unix 上合法文件名 `a:b.txt` 会被多拒一条 —— 方向是多拒（一句可行动的
+///    报错），不是少认，且与"这一族在 Windows 上真是路径"这件事一致。
+/// 3. 按 `/` **与** `\` 两种分隔符切段，任一段恰为 `..` ⇒ 往上走。
+///    分隔符集合带 `\` 是刻意的：闸必须对着**用户脚下这台机器**的最宽解释判，而 Windows 上
+///    `..\x` 就是父目录（少带一个分隔符＝`..\evil.bin` 整串被当成一个文件名放过去，父目录照进）。
+///
+/// **读的是原串、不做归一**：`url_for_gate` 那两刀（tab/LF/CR 与首尾 C0）是给 WHATWG 解析器对齐的，
+/// 文件名侧没有对面那个"吃掉空白与多余斜杠"的解析器可对齐 —— `join` 拿到什么就写什么。
+/// 因此这一闸**不比 `target_path()` 更宽容，也不比它更严**：判的就是 `join` 真会怎么做。
+fn out_name_leaves_out_dir(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.first().is_some_and(|c| *c == b'/' || *c == b'\\') {
+        return true;
+    }
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return true;
+    }
+    name.split(['/', '\\']).any(|seg| seg == "..")
+}
+
 impl Task {
     /// 唯一的校验闸（规则只住这一处，见勘误 E23 附记的纪律）。
+    ///
+    /// **T99-G5 第 1 条加了第五条判据**（`--out-name` 的形状，见 [`out_name_leaves_out_dir`]）：
+    /// 下面那句"四条判据读的都是同一份归一后的串"管的仍是 **URL 那四条**；名字那一条读 `self.name`
+    /// 原串，因为它要对齐的是 `PathBuf::join` 而不是 WHATWG 解析器。规则依旧只住这一处。
     ///
     /// **四条判据读的都是同一份归一后的串**（`url_for_gate`），不是原串：reqwest 走 WHATWG 基本 URL
     /// 解析器，那个解析器会删掉全部 tab/LF/CR 与首尾的 C0 控制符或空格 —— 于是
@@ -276,6 +314,15 @@ impl Task {
              主机名非空且 host 前不带凭据），不接受 `http:/host`、`http:/\\host`、`http:////host` 这类分隔符变体，\
              也不接受 http/https 之外的 scheme 与不写 scheme 的串；`https://`（没有主机名）与 \
              `https://:8443/a.bin`（只有端口、没有主机名）这一族，请在 `://` 之后补上主机名");
+        // 第五条（T99-G5 第 1 条）：前四条管 URL，这一条管 `--out-name`。排在最后**是刻意的**——
+        // 它读的是 `self.name` 而不是归一后的 URL 串，把它插在中间会让"四条判据读同一份串"那句话
+        // 变成需要读者自己分辨的例外。措辞走"参数写错了"那一族 ⇒ 天然落退出码 2（E23⑤：与引擎那句
+        // "校验不符"不同源）。排在最末还有一个可观察的后果：URL 与名字同时写错时，用户先看到 URL 那句。
+        if let Some(name) = &self.name {
+            anyhow::ensure!(!out_name_leaves_out_dir(name),
+                "参数写错了：--out-name 要的是落在 --out-dir 里的名字，\
+                 不能是绝对路径、也不能含 \"..\" 段（要子目录请直接写相对路径，如 sub/x.bin）");
+        }
         Ok(())
     }
     pub fn segmentable(&self) -> bool { self.data_file.is_none() }
@@ -847,5 +894,78 @@ mod tests {
         assert_eq!(x.target_path().file_name().unwrap(), "big.zip");
         x.name = Some("renamed.zip".into());
         assert_eq!(x.target_path().file_name().unwrap(), "renamed.zip");
+    }
+
+    // ---- T99-G5 第 1 条：`--out-name` 不许把落点带出 `--out-dir`（用户 2026-10-18 裁＝拒掉）----
+
+    /// 造一个"URL 干净、只让名字那一格可变"的任务。
+    /// URL 必须干净：不然 `is_err()` 会由前面四条里的某一条交出来，这一发的牙就白装。
+    /// 消息 needle 里额外点名 `--out-name` 也正是为这一句服务的（负向格必须死在**这一条**上）。
+    fn named(url: &str, name: &str) -> Task {
+        Task { name: Some(name.into()), ..t(url) }
+    }
+
+    /// 负向四格（简报点名的四格）＋ 简报在判据里另写明的三种 `..` 形状（`x/..`、单独的 `..`、
+    /// 反斜杠版 `..\x` ⇒ 后者钉"分隔符集合带 `\`"那一刀，摘掉它这一格就绿）。
+    /// 全部要求：`is_err()` 且消息同时含"参数写错了"与"--out-name"（E23⑤ 那一族 ⇒ 退出码 2）。
+    #[test]
+    fn rejects_out_name_that_leaves_the_out_dir() {
+        const SHAPE: &str = "参数写错了";
+        let table: &[(&str, &str)] = &[
+            ("..", "结尾单独一个 `..`：简报判据里点名的形状"),
+            ("../x", "父目录里的一个名字：落在 --out-dir 之外"),
+            ("x/..", "`..` 不在串首也照样是往上走一层"),
+            ("a/../../b", "中间夹着的 `..` 段，切段之后仍然看得见"),
+            (r"..\x", "反斜杠版：Windows 上这是真的父目录，不是名字里的两个点"),
+            ("/abs/x", "串首 `/`：PathBuf::join 会整份丢掉 --out-dir"),
+            (r"C:\x", "盘符 ＋ 反斜杠：Windows 上的绝对路径"),
+            (r"C:x", "只有盘符前缀（没有分隔符）：Windows 上＝该盘当前目录，仍在 --out-dir 之外"),
+        ];
+        for (name, why) in table {
+            let Err(err) = named("https://example.com/a.bin", name).validate() else {
+                panic!("--out-name {name:?}（{why}）必须被闸拒掉，实际放行了");
+            };
+            let msg = err.to_string();
+            assert!(msg.contains(SHAPE), "{name:?} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2），实际：{msg}");
+            assert!(msg.contains("--out-name"), "{name:?} 的消息得点名是哪一格写错了，否则用户没法改：{msg}");
+            assert!(!msg.contains("漏洞") && !msg.contains("exploit"),
+                "这是\"参数写错了\"那一族的措辞，不许升级成安全告警的口吻：{msg}");
+        }
+    }
+
+    /// 正向三格（防"修过头"，简报明令必须有）：这一闸裁的是**越出去**，不是**子目录能力**。
+    /// `sub/x.bin` 必须仍然放行 ⇒ m2 变异（把判据改宽成"任何分隔符都拒"）只能红在这里。
+    #[test]
+    fn allows_relative_out_names_inside_the_out_dir() {
+        for name in ["x.bin", "sub/x.bin", "a%20b.zip"] {
+            let x = named("https://example.com/a.bin", name);
+            assert!(x.validate().is_ok(), "{name:?} 是落在 --out-dir 里的相对名字，不许拒： {:?}",
+                x.validate().err());
+        }
+        // 相对子路径不只是"过闸"，它还得真的落成子目录里（这一句钉的是闸与 target_path 没有分家）。
+        let x = named("https://example.com/a.bin", "sub/x.bin");
+        assert!(x.target_path().to_string_lossy().replace('\\', "/").ends_with("sub/x.bin"),
+            "落点应当是 --out-dir 底下的 sub/x.bin：{}", x.target_path().display());
+    }
+
+    /// 派生名（`--out-name` 不给，从 URL 末段推）的现状四格 ＋ 一格"带洞的 URL 也推不出洞"。
+    /// 本发**不裁"该不该解码 `%20`"**，只把现状钉死（STATUS 那行裁定＝保留现状＋钉用例）。
+    #[test]
+    fn derived_names_from_the_url_take_their_last_segment_only() {
+        let table: &[(&str, &str)] = &[
+            ("https://example.com", "example.com"),
+            ("https://example.com/", "download"),
+            ("https://example.com/q?x=1#f", "q"),
+            // 百分号**原样保留**：这一发不许"顺手解码"（裁的是形状，不是编码）。
+            ("https://example.com/a%20b.zip", "a%20b.zip"),
+            // 对面真给一个长得像穿越的 URL，`rsplit('/')` 只取最后一段 ⇒ 推出来的名字带不出洞。
+            ("https://example.com/a/../../evil.bin", "evil.bin"),
+        ];
+        for (url, want_tail) in table {
+            let x = t(url);
+            assert!(x.validate().is_ok(), "{url} 干净且没给 --out-name，必须放行：{:?}", x.validate().err());
+            let got = x.target_path().file_name().map(|s| s.to_string_lossy().into_owned());
+            assert_eq!(got.as_deref(), Some(*want_tail), "{url} 推导出来的落点末段与现状不符");
+        }
     }
 }

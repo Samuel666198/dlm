@@ -1075,6 +1075,65 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
     Ok(())
 }
 
+/// **T99-G5 第 0 条**：把"`fetch` 那四个落地口只许走统一判据"钉成一根**结构针**（源码文本扫描）。
+///
+/// 为什么这里需要的是一根结构针而不是一台夹具（G1f 的 **m3 实测**）：把 `src/fetch.rs` 的
+/// `run_whole` 落地口退回旧判据（只判 `authority_has_userinfo`）时，本机四闸**全绿、量不出来**；
+/// 同一支变异打在 `src/probe.rs:362` 上是**红**的。原因照实登记在 T99-G1e 报告 §8.4：
+/// `Task::validate()` 先拒"明文 HTTP ＋ 口令"（`src/task.rs:262`），而本对端**不做 TLS** ⇒
+/// "带口令的任务真打穿 `fetch` 那一枪"在这台机器上**造不出夹具**（真 https 是既有的具名欠账）。
+/// 控制员裁定＝**不造不真实的夹具，改为钉结构**（本项目已有同类形状：扫源码文本、禁字、连注释一起扫）。
+///
+/// ## 两条判据必须并联，缺一不可
+/// - **禁字**：`authority_has_userinfo(` 不许再出现在 `src/fetch.rs` 里（那四处只许走
+///   `probe::landed_url_is_refused`）。⚠ 这条只管本文件：`src/probe.rs` 与 `src/task.rs` 里
+///   它**该**出现（统一判据的第一支就是它），所以扫描范围是"那四个落地口住的文件"，不是全树。
+/// - **数次数**：`probe::landed_url_is_refused(` 在该文件**恰好 4 次**（四个口一处一个：
+///   `run_window` 的错误支与落地支 ＋ `run_whole` 的错误支与落地支）。
+///
+/// 为什么要两条一起写（这是本发要的写法，理由得留在树里）：**只数次数**会被"把两处合并成一处、
+/// 另一处直接删掉"骗过（次数照样对得上，但有个口没人守了 —— 合并后另一处若改走 `authority_has_userinfo`
+/// 就没人报警）；**只禁字**会被"改叫别的名字"骗过（在 `fetch` 里再写一份私有判据、或把旧判据换个入口，
+/// 禁字清单看不见它）。两条各挡一种骗法 ⇒ 并联。
+///
+/// ⚠ 计数是**字节串出现次数**，注释里的写法也算：谁在注释里照抄一遍带左括号的调用形状
+/// （`probe::landed_url_is_refused(...)`）这一发就会红 —— 那是刻意的，计数要有唯一含义，
+/// 注释里的形状不许与调用点长得一样（G1f 那两句注释写的是不带左括号的 `` `probe::landed_url_is_refused` ``）。
+///
+/// ⚠ **这根针的失效条件**（不许读成"那四处真能拒"）：它量的是**"有没有人偷偷分家"**，
+/// **不**保证四处真能拒住带口令的落地串 —— 后者仍是 TLS 那一格欠的账（判据本身由
+/// `src/probe.rs` 单元层三臂钉着，进程级只钉得住"无口令不误杀"那一臂）。
+/// 哪天对端能上 TLS、行为夹具补上了，这一发**也不该删**："不分家"与"能拒住"是两件事。
+///
+/// 读文件用运行时 `fs::read_to_string` ＋ `CARGO_MANIFEST_DIR`：不是 `include_str!`，
+/// 更不是把源码抄进测试当字符串 —— 抄一份的针改不动实现，也测不到实现。
+#[test]
+fn the_four_landing_ports_in_fetch_all_go_through_the_unified_criterion() -> anyhow::Result<()> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("fetch.rs");
+    let src = std::fs::read_to_string(&path)
+        .with_context(|| format!("读 {} 的源码文本失败（本发是源码扫描针，读不到就是没有判据）", path.display()))?;
+
+    // 判据一（禁字）：旧判据不许在这文件里再被直接调用。
+    const OLD_CRITERION: &str = "authority_has_userinfo(";
+    if let Some(at) = src.find(OLD_CRITERION) {
+        let line = src[..at].chars().filter(|c| *c == '\n').count() + 1;
+        panic!(
+            "src/fetch.rs:{line} 又直接调 `authority_has_userinfo(` —— 那四个落地口只许走 \
+             `probe::landed_url_is_refused`（T99-G5 第 0 条；这正是 G1f 的 m3 在本机量不出红的形状）"
+        );
+    }
+
+    // 判据二（数次数）：四个口一处一个，多一处少一处都算分家。
+    const UNIFIED: &str = "probe::landed_url_is_refused(";
+    let hits = src.matches(UNIFIED).count();
+    assert_eq!(
+        hits, 4,
+        "src/fetch.rs 里 `probe::landed_url_is_refused(` 应当**恰好 4 次**（run_window 两支 ＋ run_whole 两支），实得 {hits} 次：\
+         少了＝有人把某个落地口退回旧判据或整处删掉，多了＝判据又开了第二个入口（与本条的禁字判据配成一对）"
+    );
+    Ok(())
+}
+
 /// 评审 **I1** 的正面钉：对端**发了** `Accept-Ranges: bytes` 又拿 **200** 回答我们那条 `Range`
 /// ⇒ `accept_ranges` 必须为**假**，且长度**退到 `Content-Length`**（退化读法）。
 ///
@@ -4599,6 +4658,74 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
     Ok(())
 }
 
+/// **T99-G5 第 1 条的进程级一对**：`--out-name` 越目录停在**参数层**（退 2 ＋ "参数写错了"），
+/// 而相对子目录照旧走通。
+///
+/// 为什么单元层那张表（`src/task.rs::tests`）不够：它钉的是闸本身，钉不到"闸交回的那句错误经
+/// `main.rs` 的 `into_task()` 那一支落到**哪个码**、措辞到不到 **stderr**"—— 这正是 E26/C3 把
+/// 这一族判给进程级的原话（`--lib` 全绿而装配处断掉的那种形状，E26 的 C1 已经付过一次学费）。
+/// 而这一发要修的缺陷本来就是**用户看见的那两行**（简报实测：摘要里"输出目录"与"落点"自相矛盾），
+/// 所以正臂断的是那两行重新自洽。
+///
+/// 两臂成对（负向判据必须与正向对照成对，E28⑧-1）：
+/// - 负臂 `../escaped.bin` ⇒ 退 **2** ＋ 点名 `--out-name` ＋ **摘要根本没打**（短路在 `into_task()`）
+///   ＋ 盘上（含上一级目录）没有产物；
+/// - 正臂 `sub/inside.bin` ⇒ 退 **0** ＋ 摘要照打 ＋ 落点那一行仍在 `--out-dir` 底下。
+///
+/// ⚠ 正臂是这一对的牙：没有它，"任何带分隔符的名字都拒"那种改宽（本发的 m2）在这一族上看不出来。
+/// 夹具不需要对端 ⇒ 两臂都带 `--no-start`（E20④ 的短路在 `engine::run` 之前，一个字节都不上网）。
+#[test]
+fn the_binary_holds_an_escaping_out_name_at_the_parameter_tier() -> anyhow::Result<()> {
+    let dir = harness::tmp_dir("bin-out-name")?;
+    let out_dir = dir.path().display().to_string();
+    let url = "http://x.example/A.bin";
+
+    // 负臂：越目录的名字。
+    let esc = run_dlm(&[
+        "--url", url, "--out-dir", &out_dir, "--out-name", "../escaped.bin", "--no-start",
+    ])?;
+    let e = stderr_of(&esc);
+    assert_eq!(
+        esc.status.code(),
+        Some(2),
+        "`--out-name ../escaped.bin` 是\"话没说对\"那一档（E26/C3：与 `--sha256 xyz`、clap 用法错同码）：exit={:?}，stderr：{e}",
+        esc.status.code()
+    );
+    assert!(
+        e.contains("参数写错了") && e.contains("--out-name"),
+        "参数层措辞 ＋ 点名是哪一格写错了，两条都要在（否则用户没法改）：{e}"
+    );
+    assert!(
+        !stdout_of(&esc).contains("任务摘要"),
+        "闸在 `into_task()` 里 ⇒ 摘要一行都不该打，打了就是把那个自相矛盾的落点交到用户眼前：{}",
+        stdout_of(&esc)
+    );
+    assert!(
+        !dir.path().join("escaped.bin").exists() && !dir.path().join("..").join("escaped.bin").exists(),
+        "参数层失败之后磁盘上（含 --out-dir 的上一级）一个字节都不该动过"
+    );
+
+    // 正臂（对照）：相对子目录不是越目录。
+    let sub = run_dlm(&[
+        "--url", url, "--out-dir", &out_dir, "--out-name", "sub/inside.bin", "--no-start",
+    ])?;
+    assert_eq!(
+        sub.status.code(),
+        Some(0),
+        "对照臂：`sub/inside.bin` 落在 --out-dir 底下，必须放行 —— 把它拒了＝没收子目录能力，简报明令不许：exit={:?}，stderr：{}",
+        sub.status.code(),
+        stderr_of(&sub)
+    );
+    let s = stdout_of(&sub);
+    assert!(s.contains("任务摘要"), "对照臂的摘要照打（E20④/E23⑥）：{s}");
+    let landing = s.lines().find(|l| l.starts_with("落点：")).expect("摘要必须有落点那一行");
+    assert!(
+        landing.contains(&out_dir) && landing.contains("sub/inside.bin"),
+        "落点那一行必须仍是 --out-dir 底下的那个子路径（简报实测\"输出目录/落点两行自相矛盾\"的形状不许回来）：{landing}"
+    );
+    Ok(())
+}
+
 /// **E26/C5**：`--quiet` 与 `--no-start` **同时**给。行为由两条裁定叠出来，两条在这一格上都有落点：
 /// **E24①** 把 `--quiet` 的语义收窄成"关掉每一拍那一发进度行"（**最终摘要与错误照打**），
 /// **E20④** 把 bit0 的短路放在 `engine::run` **之前** —— 而 `dispatch` 的形状是先读 `quiet()`
@@ -4680,11 +4807,42 @@ fn counts_long_options(text: &str) -> bool {
     false
 }
 
+/// 用户表面的禁串清单（**E28③**）。这八条是 `--help` 那一臂**原来就有的**，逐字符照旧，
+/// 只是从内联数组搬成常数 —— 搬的理由：下面 T99-G5 第 2 条新加的"真跑一次"那一臂要扫的是
+/// **同一份**清单。两处各写一遍，就是下一次改口只改一半的成因（与 `engine::sha256_mismatch_message`
+/// 收掉那两份字面量同一课）。
+const BANNED_INTERNAL_PROSE: &[&str] =
+    &["勘误", "§", "clap", "别名层", "long_about", "暗道", "into_task", "into_config"];
+
+/// **T99-G5 第 2 条**新加的那一族：内部文档坐标（`spec §6.7` 那半句括注就是它的一个实例）。
+/// 单列一摊而不是直接塞进上面那份，是为了让"哪一条是哪一发加的"在读时仍然可辨；
+/// 两摊在失败文案那一臂上一起扫。`§` 已经在上面那份里，这里补的是`spec`这个**词**。
+const BANNED_DOCUMENT_COORDINATES: &[&str] = &["spec"];
+
+/// 串里有没有「`E` 或 `R` ＋ 一个 ASCII 数字」这种**内部编号形状**（勘误编号 E23② 与
+/// spec 需求编号 R7 的骨架）。命中时交出那两个字符，红时能直接看见现场。
+/// ⚠ 它比上面 `--help` 那一臂内联的那支（只认 `E`）**宽一条**：那一支是既有判据、本发一个字不许动，
+/// 而失败文案这一族要同时挡住 `R7` 这种需求编号 ⇒ 这里认两个字母。两支并存是刻意的。
+fn internal_number_shape(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .windows(2)
+        .find(|w| matches!(w[0], 'E' | 'R') && w[1].is_ascii_digit())
+        .map(|w| w.iter().collect())
+}
+
 /// **E28③ / E27②**：`Cli` 的结构体文档注释曾被 clap derive 当 `long_about` **原样印进 `--help`** ——
 /// 内部勘误论证、漂移过的选项计数、实现纪律（"字段一律私有…暗道"）全到了用户表面。
 /// 这一发就是那条纪律终于立成的**针**：扫真二进制的 `--help` stdout，禁内部词与计数形状。
 /// 负向扫描不带对照臂就是恒真（纪律要求，也是这条勘误自己的立场）⇒ 同一段 stdout 必须**同时**
 /// 证明六条长选项名都在场；哪天帮助面整个坏了，对照臂会先把这一发红掉，而不是让禁串扫描空转。
+///
+/// **T99-G5 第 2 条把它从"只管 `--help`"扩成"也扫一次真跑的 stdout ＋ stderr"**：失败路径这一格
+/// 原本不在任何针的射程里 —— `src/engine.rs` 有两处各抄了同一个字面量，里面带着 `（spec §6.7）`，
+/// 一次 `--sha256` 不符的真跑输出里就印着那个内部坐标。**帮助面干净 ≠ 用户表面干净**。
+/// 新增那一臂同样带正臂（"算得…期望…"那句话必须在），因为删成空字符串也能骗过纯禁字扫描
+/// （**E28⑧-1** 立的形状：负向判据必须与正向对照成对）。
+/// ⚠ 上面 `--help` 那几行既有断言的方向与期望值一个字没动（只有禁串数组搬成了常数）。
 #[test]
 fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     let out = run_dlm(&["--help"])?;
@@ -4703,7 +4861,7 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     }
 
     // 禁串：只有仓库内部才该出现的词，出现在交付给用户的帮助面上就是 E28③ 复发。
-    for banned in ["勘误", "§", "clap", "别名层", "long_about", "暗道", "into_task", "into_config"] {
+    for banned in BANNED_INTERNAL_PROSE {
         assert!(!h.contains(banned), "帮助面不许印 {banned:?}（E28③：内部论证漏到了用户表面）：{h}");
     }
     // 禁形状一：`E` + 数字 —— 勘误编号（E23②、E28③ 这种）的骨架。
@@ -4712,6 +4870,54 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     assert!(!errata_marker, "帮助面不许印\"E+数字\"的勘误编号形状（E28③）：{h}");
     // 禁形状二："<数字> 条长选项" —— 选项计数（`c6ac42e` 纪律：数量不进文档，而这里进的是用户面）。
     assert!(!counts_long_options(&h), "帮助面不许印\"<数字> 条/个长选项\"的计数（E27②：这个数已经错过一次）：{h}");
+
+    // ---- T99-G5 第 2 条：同一族判据扩到**一次真跑的 stdout ＋ stderr** ----
+    // 夹具用现成的形状（`the_binary_maps_ok_to_the_exit_code_…` 的 ③ 那一路）：真下载完成、
+    // 但 `--sha256` 给的是不符的那 64 个 0 ⇒ 引擎那句"sha256 不符…"原样到达用户 stdout。
+    // 对端不需要新形状 ⇒ 本臂不引入桩、不改 `probe-server.mjs`。
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("bin-no-internal-coords")?;
+    let out_dir = dir.path().display().to_string();
+    let len = 64 * 1024u64;
+    let bad = run_dlm(&[
+        "--url", &format!("{base}/sz/{len}"), "--out-dir", &out_dir, "--out-name", "nocoords.bin",
+        "--connections", "2", "--sha256", &"0".repeat(64),
+    ])?;
+    assert_eq!(
+        bad.status.code(),
+        Some(1),
+        "本臂的前提是\"下完了但校验不符\"那一档（`ok = false` ⇒ 退 1）；换了档就是什么都没扫到：exit={:?}，stderr：{}",
+        bad.status.code(),
+        stderr_of(&bad)
+    );
+    let so = stdout_of(&bad);
+    let se = stderr_of(&bad);
+
+    // 正臂（与下面的禁串扫描**成对**，E28⑧-1）：那句话确实到达了用户，三件事一个都不许少 ——
+    // 没有这一臂，"把整句删空"与"把坐标删掉但顺手丢了信息"都能骗过纯禁字扫描。
+    assert!(so.contains("sha256 不符"), "这一臂扫的必须是校验不符那一路的输出：{so}");
+    assert!(
+        so.contains("算得 ") && so.contains("期望 "),
+        "\"算得 … 期望 …\" 那两格必须在场（否则下面那串禁字扫的是空输出）：{so}"
+    );
+    assert!(
+        so.contains("目标文件与断点文件都保留，不自动删"),
+        "「两份文件都保留、不自动删」那句纪律照旧要摆到用户眼前：{so}"
+    );
+
+    // 负臂：失败文案这一族的用户表面（stdout ＋ stderr 一起）不许印内部措辞与文档坐标。
+    let both = format!("{so}{se}");
+    for banned in BANNED_INTERNAL_PROSE.iter().chain(BANNED_DOCUMENT_COORDINATES) {
+        assert!(
+            !both.contains(banned),
+            "真跑一次的用户表面不许印 {banned:?}（T99-G5 第 2 条：用户可见的失败文案里不许有内部文档坐标）：stdout={so} stderr={se}"
+        );
+    }
+    if let Some(hit) = internal_number_shape(&both) {
+        panic!(
+            "真跑一次的用户表面不许印「E/R ＋ 数字」的内部编号形状（命中 {hit:?}）：stdout={so} stderr={se}"
+        );
+    }
     Ok(())
 }
 

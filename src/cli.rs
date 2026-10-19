@@ -559,13 +559,23 @@ mod tests {
         Ok(())
     }
 
+    /// 值位上长得像别名的 token 不许被展开成旗标（E28④ 的骨架）。
+    /// **T99-G5 第 1 条的裁定（控制员）**：新立的 `--out-name` 越目录闸住在 `Task::validate()`，
+    /// 于是这一发原来那两臂（都拿 `--out-name` 的值走 `into_task()`）会被新闸当场拒 ⇒
+    /// 处置＝**降到 parse 层钉性质 ＋ 另起一小臂钉新闸**：本臂真正测的"值位上的 `/f` 不被展开"
+    /// 与"这个名字合不合规"无关，所以期望值从 `Task.name` 改读 `Cli.out_name`（同一件事的同一方向，
+    /// 不是放宽、不是删）；越目录那一格现在由 `into_task()` 拒，那是第 1 条的牙，不是别名层的牙。
     #[test]
     fn a_slash_token_in_value_position_stays_a_value() -> anyhow::Result<()> {
-        let t = task(&["dlm", "--url", "https://x/a.bin", "--out-name", "/f"])?;
-        assert_eq!(t.name.as_deref(), Some("/f"), "POSIX 上 /f 这样的串是合法的**值**，把它展开成别名会把用户的参数吃掉");
-        let c = parse(&["dlm", "--url", "https://x/n", "--out-name", "/d"])?;
-        assert!(!c.quiet(), "`--url`/`--out-name` 都是值位旗标：值位上长得像别名的 /xxx 串不被展开成静默旗标");
-        assert_eq!(c.into_task()?.url, "https://x/n");
+        // 臂 1（parse 层）：`/f` 在值位上是合法的**值**。
+        let c1 = parse(&["dlm", "--url", "https://x/a.bin", "--out-name", "/f"])?;
+        assert_eq!(c1.out_name.as_deref(), Some("/f"), "`/f` 在值位上是合法的**值**，把它展开成别名会把用户的参数吃掉");
+        // 臂 2（parse 层）：`--url`/`--out-name` 都是值位旗标，值位上的 `/d` 既不当静默旗标、也不吃左值。
+        let c2 = parse(&["dlm", "--url", "https://x/n", "--out-name", "/d"])?;
+        assert!(!c2.quiet(), "`--url`/`--out-name` 都是值位旗标：值位上长得像别名的 /xxx 串不被展开成静默旗标");
+        assert_eq!(c2.url, "https://x/n", "值位的 /d 没有把 --url 的值吃掉");
+        // 臂 3（新闸，T99-G5 第 1 条）：越目录的名字由 `Task::validate()` 当场拒，不在 parse 层。
+        assert!(c2.into_task().is_err(), "/d 这种绝对形状的 --out-name 现在必须在 into_task() 就被拒");
         Ok(())
     }
 

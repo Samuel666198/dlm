@@ -897,6 +897,21 @@ fn hash_matches(got: &str, want: &str) -> bool {
     !want.is_empty() && got.eq_ignore_ascii_case(want)
 }
 
+/// `--sha256` 不符那一句**用户可见**文案的唯一出口（T99-G5 第 2 条）。
+///
+/// 为什么要有这个函数：`run_whole_once` 与 `Engine::finish` 以前**各抄了一份同一个字面量**，
+/// 于是那半句 `（spec §6.7）` 出现在两处、一次真跑的 stdout 里就带着一个内部文档坐标
+/// （E28③ 那一族的另一半表面：那根针只管 `--help`，失败路径不在射程里）。
+/// 两处各写一遍就是"下一次改口只改一半"的成因 ⇒ 收成一只出口。
+///
+/// **信息量一个字不许少**：算得什么／期望什么／两份文件都保留不自动删，这三件事照旧要说清
+/// （`tests/integration.rs` 里那根扩过的针的正臂断的就是这句话真的到达用户）。
+/// 被删掉的只有 `（spec §6.7）` 那半句括注 —— 用户不需要去处，出处在文档里（spec 归 spec）。
+/// 这句走"结论"那一档（`ok = false` ⇒ 退出码 1），**不是**"参数写错了"那一族。
+fn sha256_mismatch_message(got: &str, want: &str) -> String {
+    format!("sha256 不符：算得 {got}，期望 {want}。目标文件与断点文件都保留，不自动删")
+}
+
 /// 字节 → 小写十六进制（`hex` crate 不在 spec §9 的白名单里，两行手写）。
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -992,9 +1007,7 @@ fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started:
             }
             Ok(got) if !hash_matches(&got, want) => {
                 ok = false;
-                message = Some(format!(
-                    "sha256 不符：算得 {got}，期望 {want}。目标文件与断点文件都保留，不自动删（spec §6.7）"
-                ));
+                message = Some(sha256_mismatch_message(&got, want));
             }
             Ok(_) => {}
         }
@@ -1590,9 +1603,7 @@ impl Engine {
                 }
                 Ok(got) if !hash_matches(&got, want) => {
                     ok = false;
-                    message = Some(format!(
-                        "sha256 不符：算得 {got}，期望 {want}。目标文件与断点文件都保留，不自动删（spec §6.7）"
-                    ));
+                    message = Some(sha256_mismatch_message(&got, want));
                 }
                 Ok(_) => {}
             }
