@@ -539,7 +539,13 @@ fn a_password_over_plain_http_never_leaves_the_socket() -> anyhow::Result<()> {
 ///
 /// ⚠ 本用例**没有**测到的两支，照实登记在 `t99-G1c-report.md`（不写恒真断言凑数）：
 ///    真 https 上"凭据真上线"那一跳（本仓库的 node 对端不做 TLS），以及**服务器给的**落地 URL
-///    长得不规范那一支（reqwest 交回的 `Url` 永远序列化成规范写法，本机造不出那条夹具）。
+///    长得不规范那一支 —— 原先记在这行里的"reqwest 交回的 `Url` 永远序列化成规范写法，本机造不出
+///    那条夹具"是一句**没有实测支撑的话**，T99-G1e 已把它量清楚并钉成测试
+///    （[`measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations`]）：
+///    对面交回的串**确实**永远是 `http://<非空 authority>/…`（scheme 小写、`://` 恰好一次、
+///    authority 里不会有 `@`）⇒ "非规范形状的落地串"这一支**造不出**；但服务器可以让 `@` 落到
+///    **path** 里（L1/L3/L4 实测两闸都放行、`probe::run` 交回 `Ok`），那一族的后果登记在
+///    `t99-G1e-report.md` §2，不在本用例的射程内。
 #[test]
 fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
@@ -731,6 +737,301 @@ fn an_ordinary_redirect_still_lands_and_is_reported() -> anyhow::Result<()> {
     assert_eq!(r.facts.etag.as_deref(), Some("\"stub\""), "ETag 原样保留，含协议要求的引号");
     assert_eq!(r.facts.total_len, 0, "落地那条是 Content-Length: 0");
     assert!(stub.saw("/landed"), "必须真的跟随了重定向：{:?}", stub.seen());
+    Ok(())
+}
+
+/// **T99-G1e 任务二 + 任务三（本发是量具，不是判据）**：让**服务器**交出简报里那 10 条形状各异的
+/// `Location`，把 reqwest 交回的落地串**钉成手写期望**，并把 `probe::run` 的实际反应照原文登记。
+///
+/// 动机（简报）：`src/probe.rs:196-201` 与上面
+/// `every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire` 那发的表头注释
+/// 都写着"reqwest 交回的 `Url` 永远序列化成规范写法，本机造不出那条夹具"，
+/// 而这句话**从未被实测支撑**。它决定下一发要不要把
+/// 并联闸的第 2 条判据（`canonical_http_authority`）接进 `fetch.rs` 那四处落地检查。
+/// 本发**一行本体都没改**：接不接是控制员看完实测之后的裁定。
+///
+/// ## 实测口径（`--nocapture` 的原文抄在 `t99-G1e-report.md` §1）
+///
+/// * 每一支交回的 URL 都是 `http://127.0.0.1:端口/…` 的**规范序列**（scheme 小写、`://` 恰好一次、
+///   host 非空、authority 里没有 `@`），**除了** L2 那一支 —— 它是唯一被 reqwest 读成 authority
+///   userinfo 的（`http://alice:s3cret@…/landed`，`@` 在 authority 里）。
+/// * 所以：**造不出**"无 `@` 但非规范"的落地串 ⇒ `fetch.rs` 那四处若接并联闸的第 2 条，
+///   在 reqwest 交回的串上是**恒不触发**的一条（简报明令禁止的死分支）。实测唯一被拒的 L2
+///   两闸**都**认得（`@` 在 authority ⇒ 半支 1 也看得见）。
+/// * ⚠ **另有一族本发才看得见、简报表里没有预判的**：L1/L3/L4 那三支的 `@` 被 reqwest **折进
+///   path**（url 2.5.8 `parser.rs:448-459` 的"special relative or authority"分支：同 scheme 且
+///   斜杠少于 2 ⇒ 整串按相对引用解析），落地串是 `http://127.0.0.1:端口/alice:s3cret@…/landed`
+///   —— 形状规范、authority 干净，**两闸都放行**，`probe::run` 实测交回 `Ok`，于是
+///   `alice:s3cret@` 这份凭据串照样落进 `final_url`（⇒ 断点文件、② 的原因串）。
+///   这是**现役闸的真缺陷**，与"半支 2 要不要接进四处"是两条独立的问题，报告 §2 单独标出。
+///   按"已知坏行为不许钉成测试期望"，这三支**只登记反应、不钉 `Ok`**（见 `Read::RegisterOnly`）。
+#[test]
+fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations() -> anyhow::Result<()> {
+    /// 落地串拿到之后**这一支断什么**（任务三的三个口径，外加两支"对面压根没跟"）。
+    #[derive(Copy, Clone)]
+    enum Read {
+        /// 合法的服务器重定向 ⇒ `probe::run` **必须成功**（正向对照臂 = 本发量具的活体针）。
+        Accepted,
+        /// authority 里带 `@` ⇒ `probe::run` 必须 `Err`，措辞含"凭据"与"重定向"且不回显
+        /// （读法照现役的 `a_credentialed_landing_url_is_refused_and_never_echoed`）。
+        RefusedWithCredentials,
+        /// 只钉 reqwest 交回的串，**产品反应照原文打印、不钉期望**（实测是 `Ok`，那是坏行为）。
+        RegisterOnly,
+        /// reqwest 压根不跟：直连就报错 ⇒ 没有落地串，唯一可观察的 URL 是发起请求那一条。
+        NotFollowedWithError,
+        /// reqwest 不跟也不报错：那条 302 原样交回，`resp.url()` 仍是 `/start`。
+        NotFollowedSilently,
+    }
+
+    struct Row {
+        id: &'static str,
+        /// 桩交回的 `Location` **字面量**（简报那张表的原文；`{port}` 由桩换成实际端口）。
+        location: &'static str,
+        /// **手写的**期望 URL 原文（`{a}` 换成对端 authority `127.0.0.1:端口`）。
+        /// 期望值全部由桩自己知道的 authority/端口拼出来，**没有一个字节来自产品函数**
+        /// （`canonical_http_authority` 是 `pub(crate)`，集成测试够不到 —— 这不是巧合，是纪律）。
+        url: &'static str,
+        /// 手写的期望落地请求目标（`{a}` 同上）。`None` = 这一支**不许**有第二条请求打到对端。
+        target: Option<&'static str>,
+        read: Read,
+    }
+
+    const ROWS: [Row; 10] = [
+        Row {
+            id: "L1",
+            location: "http:/alice:s3cret@127.0.0.1:{port}/landed",
+            url: "http://{a}/alice:s3cret@{a}/landed",
+            target: Some("/alice:s3cret@{a}/landed"),
+            read: Read::RegisterOnly,
+        },
+        Row {
+            id: "L2",
+            location: "http:////alice:s3cret@127.0.0.1:{port}/landed",
+            url: "http://alice:s3cret@{a}/landed",
+            target: Some("/landed"),
+            read: Read::RefusedWithCredentials,
+        },
+        Row {
+            id: "L3",
+            location: "http:alice:s3cret@127.0.0.1:{port}/landed",
+            url: "http://{a}/alice:s3cret@{a}/landed",
+            target: Some("/alice:s3cret@{a}/landed"),
+            read: Read::RegisterOnly,
+        },
+        Row {
+            id: "L4",
+            location: "http:/$alice:s3cret@127.0.0.1:{port}/landed",
+            url: "http://{a}/$alice:s3cret@{a}/landed",
+            target: Some("/$alice:s3cret@{a}/landed"),
+            read: Read::RegisterOnly,
+        },
+        Row {
+            id: "L5",
+            location: "ftp://127.0.0.1:{port}/landed",
+            // 对面不跟 ⇒ 唯一可观察的串还是发起请求那条（`ftp://` 从不成为落地串）。
+            url: "http://{a}/start",
+            target: None,
+            read: Read::NotFollowedWithError,
+        },
+        Row {
+            id: "L6",
+            location: "http://127.0.0.1:{port}//landed",
+            url: "http://{a}//landed",
+            target: Some("//landed"),
+            read: Read::Accepted,
+        },
+        Row {
+            id: "L7",
+            location: "HTTP://127.0.0.1:{port}/landed",
+            // 大写 scheme 由对面**小写化**后再交回 ⇒ 落地口永远看不见 `HTTP://` 这种形状。
+            url: "http://{a}/landed",
+            target: Some("/landed"),
+            read: Read::Accepted,
+        },
+        Row {
+            id: "L8",
+            location: "http://127.0.0.1:{port}/landed?a=b\\c",
+            // `\` **留在 query 里**，对面不把它换成 `/` ⇒ 半支 1/半支 2 终止符集合不一致那一族
+            // 在落地口拿不到任何增量（authority 早在第一个 `/` 就切完了）。
+            url: "http://{a}/landed?a=b\\c",
+            target: Some("/landed?a=b\\c"),
+            read: Read::Accepted,
+        },
+        Row {
+            id: "L9",
+            location: "http://:8443/landed",
+            // 空 host 那条对面**解析失败** ⇒ 不跟、不报错，那条 302 原样交回。
+            url: "http://{a}/start",
+            target: None,
+            read: Read::NotFollowedSilently,
+        },
+        Row {
+            id: "L10",
+            location: "http://127.0.0.1:{port}/landed#frag",
+            // fragment **进不了** `resp.url()`（http-1.5.0 `uri/path.rs:28-30` 在建 `Uri` 时
+            // 把 `#` 之后整段截掉）⇒ 它既不会落盘、也进不了 ② 的原因串。
+            url: "http://{a}/landed",
+            target: Some("/landed"),
+            read: Read::Accepted,
+        },
+    ];
+
+    for row in ROWS {
+        let (stub, location) = harness::spawn_raw_redirect_stub(row.location)?;
+        let authority = stub
+            .base()
+            .strip_prefix("http://")
+            .context("harness 的 base 不以 http:// 开头，本发的形状拼不出来")?
+            .to_string();
+        let want_url = row.url.replace("{a}", &authority);
+        let want_target = row.target.map(|t| t.replace("{a}", &authority));
+        let start = format!("{}/start", stub.base());
+
+        eprintln!("\n======== {} ========", row.id);
+        eprintln!("{} 桩交回的 Location 原文：{location}", row.id);
+
+        // ── ① reqwest 直连：它交回的落地串（或它挂在那条错误上的 URL）。
+        let direct = harness::client()?.get(&start).send();
+        match &direct {
+            Ok(resp) => {
+                eprintln!("{} 直连 status={}，resp.url()={}", row.id, resp.status(), resp.url());
+            }
+            Err(err) => {
+                eprintln!("{} 直连报错：{err}", row.id);
+                eprintln!("{} 直连错误链：{err:?}", row.id);
+            }
+        }
+        let observed_url = match &direct {
+            Ok(resp) => resp.url().as_str().to_string(),
+            Err(err) => err.url().map(|u| u.as_str().to_string()).unwrap_or_default(),
+        };
+        // 任务三第 2 条：reqwest 交回的串**从此有测试钉着**（而不是有文档说着）。
+        assert_eq!(
+            observed_url, want_url,
+            "{}：对面交回的串必须等于**手写**期望（这一钉的全部意义就是\"reqwest 序列化出来的一定是这个形状\"）",
+            row.id
+        );
+        match row.read {
+            Read::NotFollowedWithError => {
+                if let Ok(resp) = &direct {
+                    panic!("{}：非 http/https 的 Location 本该让 reqwest 当场报错，实际交回 {}", row.id, resp.status());
+                }
+            }
+            Read::NotFollowedSilently => {
+                let resp = match &direct {
+                    Ok(resp) => resp,
+                    Err(err) => panic!("{}：解析不出的 Location 本该被对面当成\"没有重定向\"原样交回，实际直连报错：{err}", row.id),
+                };
+                assert_eq!(resp.status(), 302, "{}：这一支的状态必须还是那条 302（对面压根没跟）", row.id);
+            }
+            _ => {
+                let resp = match &direct {
+                    Ok(resp) => resp,
+                    Err(err) => panic!("{}：这一支 reqwest 必须真跟随重定向并交回 200，实际直连报错：{err}", row.id),
+                };
+                assert_eq!(resp.status(), 200, "{}：落地那条必须是桩交回的诚实 200", row.id);
+            }
+        }
+        // 假断言防护（读法同现役那发凭据用例）：要么落地那条**真打到**对端，要么**一条都不许多**。
+        match want_target.as_deref() {
+            Some(t) => assert!(
+                stub.saw(t),
+                "{}：对端没收到落地那条（期望目标 {t}）⇒ 本发没测到\"服务器给的落地串\"这一环，实际收到 {:?}",
+                row.id,
+                stub.seen()
+            ),
+            None => assert!(
+                !stub.saw("/landed"),
+                "{}：这一支对面不许跟随那条 Location，实际收到 {:?}",
+                row.id,
+                stub.seen()
+            ),
+        }
+
+        // ── ② 同一条路走 probe::run：每一支都打原文，之后按 `read` 决定钉不钉。
+        let t = Task { url: start.clone(), ..harness::blank_task() };
+        let outcome = probe::run(&t, &harness::client()?, PROBE_READ_BYTES);
+        match &outcome {
+            Ok(r) => eprintln!("{} probe::run Ok：{r:?}", row.id),
+            Err(err) => {
+                eprintln!("{} probe::run Err：{err}", row.id);
+                eprintln!("{} probe::run 错误链：{err:?}", row.id);
+            }
+        }
+        eprintln!("{} 桩收到过的请求目标：{:?}", row.id, stub.seen());
+
+        match row.read {
+            Read::Accepted => {
+                let r = match outcome {
+                    Ok(r) => r,
+                    Err(err) => panic!(
+                        "{}：一条**合法**的服务器重定向必须让 probe::run 成功（正向对照臂 = 本发量具的\
+                         活体针；它红了说明落地闸在误杀合法写法）：{err}",
+                        row.id
+                    ),
+                };
+                assert_eq!(
+                    r.facts.final_url, want_url,
+                    "{}：落进 `ProbeFacts.final_url` 的串必须等于手写期望（它就是会落盘、会进 ② 原因串的那一条）",
+                    row.id
+                );
+                // 变异自证的第二发落点：去掉落地桩那条 200 的 `ETag` ⇒ 下面这几支必须红
+                // （证明本发读的是**落地那条**，不是 `/start` 那条 302）。
+                assert_eq!(
+                    r.facts.etag.as_deref(),
+                    Some("\"stub\""),
+                    "{}：ETag 只能来自落地那条 200（含协议要求的引号）",
+                    row.id
+                );
+                assert_eq!(r.facts.total_len, 0, "{}：落地那条是 Content-Length: 0", row.id);
+                assert!(r.prelude.is_empty(), "{}：落地那条没有体 ⇒ 预读为空", row.id);
+                assert!(
+                    !r.facts.accept_ranges,
+                    "{}：对我们那条 Range 回了 200 ⇒ 头里的 Accept-Ranges 不作数（读法同\
+                     `an_ordinary_redirect_still_lands_and_is_reported`）：{:?}",
+                    row.id, r.facts
+                );
+            }
+            Read::RefusedWithCredentials => {
+                let Err(err) = outcome else {
+                    panic!(
+                        "{}：落地 URL（{want_url}）的 authority 里带着凭据，probe 必须拒绝 —— 这份事实会被落盘并进 ② 的原因串",
+                        row.id
+                    );
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("凭据"), "{}：错误要说清拒的是凭据：{msg}", row.id);
+                assert!(
+                    msg.contains("重定向"),
+                    "{}：错误要说清凭据来自服务器带的路（不是用户自己写的）：{msg}",
+                    row.id
+                );
+                for leak in ["s3cret", "alice", "landed"] {
+                    assert!(
+                        !msg.contains(leak),
+                        "{}：错误里回显了落地 URL 的一部分（{leak}）：{msg}",
+                        row.id
+                    );
+                }
+            }
+            Read::RegisterOnly => {
+                // **这里一条断言都不写，是刻意的**（简报任务三第 3 条末句 + 本项目"已知坏行为
+                // 不许钉成测试期望"的纪律）：实测这三交的的是 `Ok`，而 `final_url` 里带着
+                // `alice:s3cret@` 那段凭据串 —— 那是缺陷，钉成期望就等于替它背书、并且让下一发的
+                // 修必须来改这条断言。反应已按原文打印在上面，报告 §2 照原文登记。
+            }
+            Read::NotFollowedWithError | Read::NotFollowedSilently => {
+                // 对面不跟这条 Location ⇒ 我们读到的只有那条 302/那个错误，**不许**把它当成
+                // "落地成功"收下（两支实测都是 `Err`，措辞不同、打印在上面，本发不钉措辞）。
+                if let Ok(r) = outcome {
+                    panic!(
+                        "{}：对面压根没跟随这条 Location ⇒ 这份\"事实\"来自一条 302 而不是文件，probe 必须报错，实际交回 {r:?}",
+                        row.id
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 
