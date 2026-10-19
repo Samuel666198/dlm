@@ -61,9 +61,10 @@ impl fmt::Debug for Task {
 /// 第 1 步则**整个缺失**。少认的后果是 `get(..7)` 前缀判据与 `scheme_separator_len` 同时认不出 scheme
 /// ⇒ 明文 HTTP 那一支与 userinfo 那一支**两道闸一起恒假**。实测形状与后果记在勘误 **E32**，不复制表格。
 ///
-/// **多认/少认哪个方向危险要记清**：少认＝绕过（要防的就是这一支）；多认＝保守地拒一条本来也走不出
-/// reqwest 的串（可接受）。本函数选的是"照解析器剥"，两边都不多：`U+00A0` / `U+2028` 这类 Unicode 空白
-/// 解析器不剥，我们也不再剥（`trim()` 以前会剥，那是多认支，不算缺陷，但对齐之后没必要留着）。
+/// **多认/少认哪个方向危险要记清**：少认＝绕过（要防的就是这一支）；多认＝保守地多拒一条串，代价只到
+/// 一句报错（可接受）——这类非规范写法现在由 `validate()` 在 CLI 这一路当场以"参数写错了"拒、到不了
+/// reqwest（T99-G1c 反转默认），不再"放过去交给对面报错"。本函数选的是"照解析器剥"，两边都不多：
+/// `U+00A0` / `U+2028` 这类 Unicode 空白解析器不剥，我们也不再剥（`trim()` 以前会剥，那是多认支，不算缺陷，但对齐之后没必要留着）。
 fn url_for_gate(raw: &str) -> String {
     let without_ct = raw
         .chars()
@@ -828,7 +829,7 @@ mod tests {
         const SHAPE: &str = "参数写错了";
         const MISSING: &str = "缺少 URL";
         let rows: &[(&str, bool, Want)] = &[
-            // ① 控制员在 `4fe6a7c` 之后实测出来的第三族（分隔符变体，凭据写在 URL 里）
+            // ① 分隔符变体、凭据写在 URL 里那一族：实测账见计划文末勘误 **E32**
             ("http:/u:PASS@127.0.0.1:8899/x1.bin", false, Refused(SHAPE, None)),
             ("http:/\\u:PASS@127.0.0.1:8899/x2.bin", false, Refused(SHAPE, None)),
             ("http:////u:PASS@127.0.0.1:8899/x3.bin", false, Refused(SHAPE, None)),
