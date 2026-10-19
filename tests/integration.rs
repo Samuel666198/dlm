@@ -1035,6 +1035,46 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
     Ok(())
 }
 
+/// **T99-G1f 的进程级正臂**：对面把 `someone:else@…` 这类**口令形状**的串按相对引用折进
+/// **path**（G1e L1/L3/L4 实测的那一族），而**本任务没有口令** ⇒ 统一判据（三支合取：userinfo／
+/// 形状／本任务口令的字面值）必须**照旧放行**、落地串按原样进 `final_url`。
+///
+/// 这一臂钉两件事：① 新闸不误杀现役路径（第三支是 **task-aware** 的：没有口令就没有内容可判，
+/// "看着像凭据"的自由文本不由我们替用户决定）；② 后来的"顺手修法"——有人若想把落地串里
+/// **任何** `@`／口令形状文本一律拒掉（那是简报明令不做的"形状判据第二版"），这一臂会红。
+///
+/// ⚠ 为什么**没有**同族的进程级反臂与空口令臂（照实登记对简报第 3 条的偏差，理由是实测）：
+/// `Task::validate()` 先拒"明文 HTTP ＋ 口令"（spec §4 / E9），而本对端不做 TLS ⇒ 在这台仪器的
+/// 明文桩上**带口令的任务永远到不了落地闸**——`a_password_over_plain_http_never_leaves_the_socket`
+/// 已经用服务端日志钉过"一个字节都没上网"，简报反臂那句"消息含凭据与重定向"在这种任务上拿不到
+/// （先到的那句是"明文 HTTP 不发送口令"）。第三支真正可达的是 https 侧（口令只在那边上线），
+/// 真 TLS 维持具名欠账。反臂／空口令臂（连同 `!p.is_empty()` 那一刀的 m1 针）因此钉在
+/// `src/probe.rs` 单元层直调 `landed_url_is_refused` / `facts_from_response` 的三发用例里。
+#[test]
+fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_password(
+) -> anyhow::Result<()> {
+    // 量具用现成的（G1e 任务一）：Location 是**字面量**，`{port}` 由桩换成实际端口。
+    let (stub, _location) =
+        harness::spawn_raw_redirect_stub("http:/someone:else@127.0.0.1:{port}/landed")?;
+    let authority = stub
+        .base()
+        .strip_prefix("http://")
+        .context("桩的 base 不以 http:// 开头，期望串拼不出来")?
+        .to_string();
+    // **手写**期望（纪律：没有一个字节来自产品函数）：G1e L1 实测的折入形状，换成别的口令。
+    let want_url = format!("http://{authority}/someone:else@{authority}/landed");
+    let want_target = format!("/someone:else@{authority}/landed");
+
+    let t = Task { url: format!("{}/start", stub.base()), ..harness::blank_task() };
+    let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES).map_err(|err| {
+        anyhow::anyhow!("任务没有口令 ⇒ 第三判据无从开火，这条落地路必须照旧 Ok（正臂红了＝统一判据在误杀）：{err}")
+    })?;
+    assert_eq!(r.facts.final_url, want_url, "落地串必须按原样进 final_url（它就是会落盘、会进 ② 原因串的那一条）");
+    assert_eq!(r.facts.etag.as_deref(), Some("\"stub\""), "ETag 只能来自落地那条 200（证明真跟随了重定向）");
+    assert!(stub.saw(&want_target), "对端没收到落地那条 ⇒ 本发没测到落地这一环，实际收到：{:?}", stub.seen());
+    Ok(())
+}
+
 /// 评审 **I1** 的正面钉：对端**发了** `Accept-Ranges: bytes` 又拿 **200** 回答我们那条 `Range`
 /// ⇒ `accept_ranges` 必须为**假**，且长度**退到 `Content-Length`**（退化读法）。
 ///
