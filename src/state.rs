@@ -14,6 +14,11 @@
 //!    **"少一个字段"挡不住别人写进自由文本里的凭据**（勘误 **E9**）：`--url https://alice:s3cret@x/a.bin`
 //!    会把口令原样带进 `task.url` 与 `validator.final_url`，而本模块删不掉 URL ⇒ 这一支由
 //!    `Task::validate()` 在唯一的校验闸口拒绝（规则只住在那一处，本模块不复述），`from_task` 已调它。
+//!    **这句话还有一半没说完**：`validator.final_url` 除了用户自己写的那条 URL，也可能来自**服务器
+//!    重定向交回的落地串**，那一半不经 `validate()` ⇒ 由 `probe::landed_url_is_refused` 的**第三判据**
+//!    管（内容判据，判据本体住在那一处，本模块不复述）。
+//!    ⚠ 因此"断点文件里永远没有口令"的确切边界是**只认字面值**：对面把口令以 base64 形式或百分号编码
+//!    形式送回时检测不到 —— 这是一条**已登记的 v1 欠账**，不要读成"已经防住"。
 //! 2. **`user`（用户名）照 spec §4 的示例落盘** —— v1 硬规约点名的是口令，不是用户名，示例里也写着
 //!    `"user": null`。`referer`/`cookies` 同理照抄 spec 的形状（cookie 也是凭据，这条风险登记在 Task 1
 //!    的遗留清单里、等 Task 9 议；本模块不擅自给它加规则）。用例 `username_is_persisted_by_ruling`

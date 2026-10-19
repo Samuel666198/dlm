@@ -196,7 +196,8 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
 ///
 /// 1. `task::authority_has_userinfo` —— E9 / Task 5 评审 C3 那一支，**本体一个字没动**；
 /// 2. `task::canonical_http_authority` —— T99-G1c 新立的"只认规范写法"：非规范形状
-///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme、空 host）也拒。
+///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme、空 host）也拒；这里的"空 host"含**只有端口**
+///    那一族（`https://:8443/a.bin`，判据是 authority 首字节为 `:`，T99-G1d **裁定一**）。
 /// 3. **第三支（T99-G1f，内容判据）**：本任务给过 `--password`（`Some(p)` 且 **`p` 非空**）且
 ///    落地串里出现 `p` 的**字面值** ⇒ 拒。判据不是"形状"而是"内容"，位置无关（path/query 都算）。
 ///
@@ -1051,8 +1052,11 @@ mod tests {
     fn the_scheme_predicate_behind_that_gate_reads_every_shape_of_url() {
         // 闸的判据本身（`task::url_is_https`）：大小写、缺 scheme、近似 scheme 都得对上，
         // 否则上面那条用例只会覆盖"写得最规矩的那一条 http"。
-        // 没有合法 scheme 的输入**在这里**断（不在上面那个循环里）：那种 URL 根本建不出 reqwest 的
-        // 请求（"relative URL without a base"），但判据仍然要给假 —— 认不出是 TLS 就不送凭据。
+        // 没有合法 scheme 的输入**在这里**断（不在上面那个循环里）。这一支的理由要说准：CLI 那一行
+        // 不写 scheme 的串已由 `Task::validate()` 当场以"参数写错了"拒掉（T99-G1c 反转默认，退 2），
+        // 到不了发送点，所以这里断的**不是**"对面建不出请求所以无所谓"那一族。判据仍然要给假，
+        // 是因为它是一条 `pub(crate)` 的纯判据，契约不许假设"调用点已经过滤过"，
+        // 而认不出是 TLS 时唯一安全的取法就是不送凭据。
         for url in [
             "x/a.bin",                      // 无 scheme ⇒ 保守那一支
             "alice:s3cret@x/a.bin",         // 无 scheme 且带 userinfo（E9 那边另有其闸，这里照样不是 https）
