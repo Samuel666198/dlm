@@ -229,29 +229,29 @@ pub fn parse_from<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Result<C
     after_help = ALIAS_EPILOG
 )]
 pub struct Cli {
-    #[arg(long, value_name = "URL", help = "要下载的 URL（必填；只接受 http:// 或 https:// 的规范写法）")]
+    #[arg(long, value_name = "URL", help = "下载 URL（必填；仅接受 http://、https:// 规范写法）")]
     url: String,
     #[arg(long, value_name = "DIR", help = "输出目录（默认当前目录）")]
     out_dir: Option<PathBuf>,
-    #[arg(long, value_name = "NAME", help = "输出文件名（不给则取 URL 末段；两者都不许走出 --out-dir）")]
+    #[arg(long, value_name = "NAME", help = "输出文件名（不给取 URL 末段；都不许走出 --out-dir）")]
     out_name: Option<String>,
-    #[arg(long, value_name = "N", help = "并发连接数（默认 8）")]
+    #[arg(long, value_name = "N", help = "并发连接数（默认 8，至少 1）")]
     connections: Option<usize>,
     #[arg(long, value_name = "URL", help = "原样发送的 Referer 头")]
     referer: Option<String>,
-    #[arg(long, value_name = "COOKIE", help = "原样发送的 Cookie 头（不区分 http/https，并会写进断点文件）")]
+    #[arg(long, value_name = "COOKIE", help = "原样发送 Cookie 头（不分 http/https，写入断点文件）")]
     cookie: Option<String>,
-    #[arg(long, value_name = "FILE", help = "从这个文件读请求体（这条路不试探、不读不写断点、不可续传）")]
+    #[arg(long, value_name = "FILE", help = "从这个文件读请求体（不试探、不读写断点、不可续传）")]
     data_file: Option<PathBuf>,
     #[arg(long, value_name = "USER", help = "Basic 认证的用户名（只在 https 上发送）")]
     user: Option<String>,
-    #[arg(long, value_name = "PASSWORD", help = "Basic 认证的口令（只在 https 上发送；http:// 配上它会直接失败）")]
+    #[arg(long, value_name = "PASSWORD", help = "Basic 口令（仅 https 发送；配 http:// 会直接失败）")]
     password: Option<String>,
-    #[arg(long, help = "仅 Last-Modified 变化时仍可续传（ETag 变了会从头重来）")]
+    #[arg(long, help = "仅 Last-Modified 变化时可续传（ETag 变则从头重来）")]
     ignore_mtime: bool,
     #[arg(long, help = "无视断点文件，从头下载")]
     no_resume: bool,
-    #[arg(long, value_name = "HEX", help = "下载完成后校验（要 64 个十六进制字符；不匹配则保留文件并报错，不自动删）")]
+    #[arg(long, value_name = "HEX", help = "完成后校验（需 64 位十六进制；不符保留文件并报错、不自动删）")]
     sha256: Option<String>,
     #[arg(long, value_name = "N", help = "给无限慢重试封顶的重试次数")]
     max_retries: Option<u32>,
