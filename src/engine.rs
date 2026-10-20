@@ -653,7 +653,8 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     let mut sched = Scheduler::resume(facts.total_len, cfg.min_seg, &seed);
     if !facts.accept_ranges {
         // spec §2.2 第二条：对端不认 Range ⇒ 退化。这个开关**只由 `NoRanges` 事件打开**，
-        // 播种门不碰它（E13① 末句）。注意"降级那一支不回连接池"（`src/probe.rs:23-27`）是
+        // 播种门不碰它（E13① 末句）。注意"降级那一支不回连接池"（`src/probe.rs` 模块文档里
+        // "对端无视那条 `Range` ⇒ 那条连接被**拆掉**、不回池复用"那一条）是
         // **推理不是实测** ⇒ 这里当约束用，不许写成断言。
         sched.on(Event::NoRanges);
     }

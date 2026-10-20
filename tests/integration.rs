@@ -848,7 +848,7 @@ fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branc
 /// **T99-G1e 任务二 + 任务三（本发是量具，不是判据）**：让**服务器**交出简报里那 10 条形状各异的
 /// `Location`，把 reqwest 交回的落地串**钉成手写期望**，并把 `probe::run` 的实际反应照原文登记。
 ///
-/// 动机（简报）：`src/probe.rs:196-201` 与上面
+/// 动机（简报）：当时写在 `src/probe.rs` 的 **`landed_url_is_refused` 文档段**里的那一句，与上面
 /// `every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire` 那发的表头注释
 /// 都写着"reqwest 交回的 `Url` 永远序列化成规范写法，本机造不出那条夹具"，
 /// 而这句话**从未被实测支撑**。它决定下一发要不要把
@@ -1225,7 +1225,8 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
 ///   签名的路（给 `RedirectPeer` 加 `port()` 或把模板换成闭包都是扩签名）。
 ///
 /// ## 这一发仍看不见什么（照实登记，含 Q5-2 那一维的降级）
-/// - **`cookie2` 那一格控制员判否，本发没做**（裁定，不是遗漏）：`src/probe.rs:865` 一带只发 `COOKIE`
+/// - **`cookie2` 那一格控制员判否，本发没做**（裁定，不是遗漏）：`src/probe.rs` 的
+///   **`with_contract_headers`** 一带只发 `COOKIE`
 ///   一只头（`--cookie` 那条路），全树没有任何代码路径会发出名为 `cookie2` 的头 ⇒ 在第二跳断
 ///   `!r.has("cookie2")` 是**恒真装饰**（本项目纪律：死分支＝假功能）。
 /// - 因此对面那五只敏感头的覆盖面**只到"我们真会发的那一只头（`Cookie`）"**；表项里其余四只
@@ -1357,8 +1358,9 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
 ///
 /// 为什么这里需要的是一根结构针而不是一台夹具（G1f 的 **m3 实测**）：把 `src/fetch.rs` 的
 /// `run_whole` 落地口退回旧判据（只判 `authority_has_userinfo`）时，本机四闸**全绿、量不出来**；
-/// 同一支变异打在 `src/probe.rs:362` 上是**红**的。原因照实登记在 T99-G1e 报告 §8.4：
-/// `Task::validate()` 先拒"明文 HTTP ＋ 口令"（`src/task.rs:262`），而本对端**不做 TLS** ⇒
+/// 同一支变异打在 `src/probe.rs` 的 **`facts_from_response` 落地支**（那句
+/// `if landed_url_is_refused(final_url, password)`）上是**红**的。原因照实登记在 T99-G1e 报告 §8.4：
+/// `Task::validate()` 先拒"明文 HTTP ＋ 口令"（那一句"明文 HTTP 不发送口令"），而本对端**不做 TLS** ⇒
 /// "带口令的任务真打穿 `fetch` 那一枪"在这台机器上**造不出夹具**（真 https 是既有的具名欠账）。
 /// 控制员裁定＝**不造不真实的夹具，改为钉结构**（本项目已有同类形状：扫源码文本、禁字、连注释一起扫）。
 ///
@@ -1388,12 +1390,17 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
 /// 弱一点也不做重复实现**。这一发把"第二实参文本"这一维钉在 `fetch.rs` 上，与 `probe.rs` 单元层那根
 /// **同族但不同文件**，两根互为对照。
 ///
-/// ⚠ **这根按行判据的两族假红**（**M-4①**，复审点名，代价随此写明）：
+/// ⚠ **这根按行判据的三族假红**（**M-4①** 两族 ＋ **T99-KR Minor 4** 第三族，代价随此写明）：
 /// - 把口令**改名或折进局部变量**（`let pw = task.password.as_deref();` 之后
 ///   `landed_url_is_refused(u, pw)`）⇒ 那一行没有 `password` ⇒ **假红**；
-/// - 把调用点**拆成多行** ⇒ 含函数名那一行不再有第二实参 ⇒ **同样假红**。
+/// - 把调用点**拆成多行** ⇒ 含函数名那一行不再有第二实参 ⇒ **同样假红**；
+/// - **`None` 出现在同一物理行的任何位置**都与第二实参无关：行尾注释写着 `None`、或同一行还有别的
+///   表达式（`let u = head.or(None); probe::landed_url_is_refused(u, task.password.as_deref())`、
+///   同行 `unwrap_or(None)`）⇒ **第三族假红**。今天那 4 行都干净，但这一族与前两族是并列的维护成本。
 ///
-/// ⇒ 这一条判的是"第二实参的**文本**里必须出现 `password`"，**不是**"第二实参在语义上是口令"。
+/// ⇒ 这一条判的是"第二实参的**文本**里必须出现 `password`"，**不是**"第二实参在语义上是口令"；
+/// 反向的语义盲区（`let password = None;` ＋ 下一行传 `password` ⇒ 文本对而语义死）**只有单元层那根**
+/// 按括号深度截实参的针看得见。
 /// 真要改名／折变量／换行，请**连同这根针一起改**，并说明为什么值得（本项目不让针悄悄失效）。
 ///
 /// ⚠ 计数是**字节串出现次数**，注释里的写法也算：谁在注释里照抄一遍带左括号的调用形状
@@ -5328,8 +5335,9 @@ fn internal_number_shape(text: &str) -> Option<String> {
 /// - **第三类豁免（T99-J2 第 3 节 M-5 补登记）：恰好长成提交号的"文件名末段"** —— `abcdef7.bin`、
 ///   `deadbee.tar` 这种「7 位十六进制 ＋ 数字与字母各有」的 stem 与短提交号**同形**，判据只看字符
 ///   形状、看不见"它前面是个 `/` 或后面是个 `.`"。而扫描文本一旦带上**摘要那两格**（`URL：` 与
-///   `落点：`，`src/report.rs:137`／`:142`）就带着文件名末段 —— **实测**：这两格只由 `report::summary`
-///   产出，而它在全树唯一的生产调用点是 `src/main.rs:77`（`--no-start` 那一路，打完即退 0）。
+///   `落点：`，即 **`report::summary`** 里打 `URL：` 与 `落点：` 的那两格）就带着文件名末段 —— **实测**：
+///   这两格只由 `report::summary` 产出，而它在全树唯一的生产调用点是 `main` 里 `--no-start`
+///   那一路（打完即退 0）。
 ///   ⇒ 今天这四面**都**撞不到：① `--help` 是静态文本；② 校验不符那一档走引擎、不打摘要
 ///   （夹具名 `nocoords.bin`）；③④ 别名档与参数档在 CLI 层就退 2、摘要一行都不打（URL 末段 `a.bin`）。
 ///   所以这一类是**将来把 `--no-start` 那一档（或任何打得出落点／对端 URL 的档）请进扫描面时**的假红风险，

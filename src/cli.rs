@@ -673,7 +673,8 @@ mod tests {
         assert_eq!((d.workers, d.max_retries, d.verify_sha256, d.force_fresh), (DEFAULT_CONNECTIONS, None, None, false), "什么都不给时四格各归其位");
         // **T99-J2 第 3 节（Q5-1）**：帮助里那个"默认 N"与实现常数交叉一次（期望值来自**实现常数**、
         // 输入来自**帮助文本**，两份对面互问；这不是"问被测产品自己要"，与 `…_lower_bound_…` 同一立场）。
-        // 不并进来时的实测缺口：把 `src/cli.rs:237` 的"默认 8"改成"默认 9"而实现一字不动，四闸全绿。
+        // 不并进来时的实测缺口：把本文件选项表里 `--connections` 那条 `#[arg(help = …)]` 的"默认 8"
+        // 改成"默认 9"而实现一字不动，四闸全绿。
         assert_eq!(
             number_from_help("connections", "默认"),
             DEFAULT_CONNECTIONS,

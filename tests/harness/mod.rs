@@ -603,7 +603,8 @@ pub fn spawn_redirect_stub(authority_template: &str) -> Result<(Stub, String)> {
 ///
 /// 为什么要它（T99-G1e 简报）：`spawn_redirect_stub` 把 `Location` **拼**成
 /// `http://{authority}/landed`（scheme 与分隔符 `://` 都由函数写死），所以它**造不出**
-/// "服务器交回的 `Location` 本身形状不规范"那一族 —— 而 `src/probe.rs:196-201` 与
+/// "服务器交回的 `Location` 本身形状不规范"那一族 —— 而当时写在 `src/probe.rs` 的
+/// **`landed_url_is_refused` 文档段**（那句"reqwest 交回的 `Url` 永远序列化成规范写法"就是在那里）与
 /// `tests/integration.rs` 那两处文档恰好把这一族说成"本机造不出"。本函数把那一格交给调用方：
 /// 传什么就在这条 302 里回什么，好让"reqwest 交回的落地串长什么样"这件事**由实测决定**。
 ///
