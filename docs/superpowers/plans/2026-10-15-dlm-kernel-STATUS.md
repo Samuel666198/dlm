@@ -26,6 +26,7 @@
 
 **还剩什么（顺序固定）**：**G4**＝`Cargo.lock` 入库（`.gitignore` 删那行 ＋ `git add Cargo.lock`；`reqwest 0.13.5` 这一档与 R15 的信任锚结论只活在这个没入库的文件里）⇒ `.superpowers/` 归档（用户已裁"打包归档再删原件"；⚠ **删原件这一步现在有一个新事实要先摊给用户**：全树 README/`src/`/`tests/` 里有 **34 处**引用指向 `.superpowers/` 里的报告与账本，删了它们就悬空 ⇒ 控制员已停在这里等一句，不擅自删）⇒ 交"我替用户做过的全部裁定"清单（`docs/superpowers/plans/2026-10-18-控制员代裁清单.md`，已并到 10-20，含**撤回**我原先那两条不对称裁定）。
 **仍欠用户一句话的两条**（不要自动执行）：**`git push`**；**`idm-recon` 那台 probe-server 的同源缺陷要不要复测并更正 `idm-recon/docs/25-blackbox-probe.md`**。
+**一处同源文本我没补针**（照实登记，不是漏）：README 选项表里那格"默认 8"（`README.md` 的 `--connections` 那一行）与 `DEFAULT_CONNECTIONS`、`--help` 那句是**三处同源文本**，现在只有后两处绑成了交叉针（`number_from_help("connections", "默认") == DEFAULT_CONNECTIONS`）；README 那一格**不绑**——它是给人读的表，为它开一根"扫 README 文本"的针＝钉措辞而不是钉行为（与本节下面"已判掉的三条"里第 ② 条同一条立场）。代价：改实现默认值时 README 会漂，靠人复查。
 
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
