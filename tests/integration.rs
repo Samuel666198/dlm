@@ -703,7 +703,11 @@ fn a_credentialed_landing_url_is_refused_and_never_echoed() -> anyhow::Result<()
     let msg = err.to_string();
     eprintln!("---- probe 拒绝落地 URL 的错误原文 ----\n{msg}");
     assert!(msg.contains("凭据"), "错误要说清拒的是凭据：{msg}");
-    assert!(msg.contains("重定向"), "错误要说清凭据来自服务器带的路（不是用户自己写的）：{msg}");
+    // 措辞同步（T99-J1 §3，复审 I-3）：旧那句要求 `contains("重定向")`＝替用户断言了一件**没发生**的
+    // 事（这一支命中的是内容形，authority 里也没有 `@`）。现在要求的是"给出两种来源"，
+    // 并把两个假指认点各自钉成负断言 —— 判据方向是**收紧**，不是放宽。
+    assert!(msg.contains("--url") && msg.contains("可能"), "措辞要给出两种来源：{msg}");
+    assert!(!msg.contains("重定向后的地址") && !msg.contains("userinfo") && !msg.contains("主机名前面"), "措辞不许假指认：{msg}");
     for leak in ["s3cret", "alice", "landed"] {
         assert!(!msg.contains(leak), "错误里回显了落地 URL 的一部分（{leak}）：{msg}");
     }
@@ -740,6 +744,107 @@ fn an_ordinary_redirect_still_lands_and_is_reported() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// T99-J1 §1 ＋ §3 的**活体两臂针**（复审 Q5.4 点名"至今无活体夹具"的那一支，本发把它买掉）。
+///
+/// 形状：`--url https://127.0.0.1:<明文 node 对端>/x/<blob>` ＋ `--password hunter2`（± `--user`）。
+/// scheme 是 https ⇒ `Task::validate()` 放行（口令允许上线），而对端只会说明文 HTTP ⇒
+/// TLS 握手当场失败 ⇒ 这一枪走的是 `probe::run` 的**错误支**：那条带凭据形状的地址只存在于
+/// `e.url()` 里。H2 与 HR 两轮都写"进程级买不到"，复审在同一台机器上把它打中了（我复量后照办）；
+/// 成功路径那一半仍然买不到（要活体 https 就得往本机证书存储装本地 CA，那是有主的既有裁定）。
+///
+/// 四臂 + 一反臂：
+/// - 正臂（§1 第二组在**线上仪器**上开火）：用户名 `(len(user)+1) % 3` 取 **1 与 2** 两档，
+///   再加"不给 `--user`"那一档 —— `mod 0` 那一档在旧判据下已经是绿的，拿它当证据＝把 bug 藏进
+///   对照臂，所以它在这里只以**对照**的身份出现（`旧判据撞中=true` 那一格）。
+/// - 措辞臂（§3）：命中的那一句不许断言发生过重定向、不许点 userinfo，而且必须留下**失败阶段**
+///   那一维（错误支追加的那半句）—— 原始错误类别不许整条丢掉。
+/// - 反臂（牙）：同一条串里换成与本任务口令无关的 base64 ⇒ 判据不开火 ⇒ reqwest 的真错误整条打出来
+///   （里面看得见那条 URL —— 这一族是已登记的边界，见 README「凭证与边界」①/②）。
+///   这一臂防的是"判据把连接失败一起吞掉"：只断正臂的那四格挡不住"恒拒"。
+#[test]
+fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branch_and_keeps_the_stage(
+) -> anyhow::Result<()> {
+    let (srv, _base) = harness::spawn()?;
+    let port = srv.port();
+    let client = harness::client()?;
+    const SECRET: &str = "hunter2";
+    // hunter2 的 base64 形状（**手抄**，与 `src/probe.rs` 那两发校准针同一份期望）：mod 0 那一档
+    // 之所以旧判据也撞得中，就是因为口令的这两串里有一串出现在整份凭据对的 base64 里。
+    const OLD_FORM: &str = "aHVudGVyMg";
+
+    // (用户名, 线上那份凭据对 base64("<user>:<口令>") 的值, 这一格钉的是哪一档, 旧判据撞不撞得中)
+    let cases = [
+        (Some("aliceX"), "YWxpY2VYOmh1bnRlcjI=", "mod 1（aliceX:hunter2）", false),
+        (Some("a"), "YTpodW50ZXIy", "mod 2（a:hunter2）", false),
+        (None, "Omh1bnRlcjI=", "不给 --user（:hunter2）", false),
+        (Some("alice"), "YWxpY2U6aHVudGVyMg==", "mod 0 对照（alice:hunter2，旧判据已绿）", true),
+    ];
+    let mut failures: Vec<String> = vec![];
+    for (user, blob, arm, old_hits) in cases {
+        assert_eq!(
+            blob.contains(OLD_FORM),
+            old_hits,
+            "夹具前提：{arm} 这一格的旧判据覆盖写错了（{blob}）"
+        );
+        let url = format!("https://127.0.0.1:{port}/x/{blob}");
+        let t = Task {
+            url,
+            user: user.map(str::to_string),
+            password: Some(SECRET.into()),
+            ..harness::blank_task()
+        };
+        let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
+            failures.push(format!("{arm}：明文对端上 TLS 居然成功了 ⇒ 这一格测的是不存在的形状"));
+            continue;
+        };
+        // 用户看得见的是**整条链**（`src/main.rs` 打的是 `{err:#}`），所以量具也按整条链读。
+        let msg = format!("{err:#}");
+        eprintln!("---- {arm}（--user {user:?}）的原文 ----\n{msg}");
+        if !msg.contains("凭据") || msg.contains("error sending request") {
+            failures.push(format!("{arm}：没被换成那句不回显的拒绝 ⇒ 第二组在活体仪器上没开火：{msg}"));
+            continue;
+        }
+        // 措辞族（§3）：不许假指认，也不许把失败原因整条丢掉。
+        if msg.contains("重定向后的地址") || msg.contains("userinfo") || msg.contains("主机名前面") {
+            failures.push(format!("{arm}：措辞又回去断言了一件没发生的事／一个不存在的形状：{msg}"));
+        }
+        if !msg.contains("--url") {
+            failures.push(format!("{arm}：措辞没给出\"也可能是你自己写的那条\"这一半：{msg}"));
+        }
+        if !msg.contains("失败阶段") {
+            failures.push(format!("{arm}：错误支那半句（失败阶段）没了 ⇒ 真原因又被吞掉：{msg}"));
+        }
+        // 不回显：口令本尊、那份 blob、以及地址的任何片段都不许进这一行。
+        for leak in [SECRET, blob, "127.0.0.1", "http://", "https://", "@"] {
+            if msg.contains(leak) {
+                failures.push(format!("{arm}：拒绝消息回显了 {leak}：{msg}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "错误支那三道臂有 {} 条不合：\n{}", failures.len(), failures.join("\n"));
+
+    // 反臂（牙）：与凭据无关的一段 base64 ⇒ 判据不开火 ⇒ 真错误整条打出来。
+    let plain_blob = "YWJjZA"; // base64("abcd")，本任务口令是 hunter2
+    let url = format!("https://127.0.0.1:{port}/x/{plain_blob}");
+    let t = Task { url: url.clone(), user: Some("aliceX".into()), password: Some(SECRET.into()), ..harness::blank_task() };
+    let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
+        panic!("明文对端上 TLS 不该成功 ⇒ 这一格测的是不存在的形状");
+    };
+    let msg = format!("{err:#}");
+    eprintln!("---- 反臂（没有凭据形状）的原文 ----\n{msg}");
+    assert!(!msg.contains("凭据"), "反臂被判据吞掉了（判据不许把连接失败一起拒掉）：{msg}");
+    assert!(
+        msg.contains("试探请求发不出去") && msg.contains("error sending request"),
+        "这一臂要看得见 reqwest 的真错误（原始错误类别不许丢）：{msg}"
+    );
+    assert!(
+        msg.contains(&url),
+        "已登记的边界：放行路径上 reqwest 的错误文本会整条抄 URL（复审 Q3-3），这一发**不改**它：{msg}"
+    );
+    assert!(!msg.contains(SECRET), "但口令本尊不许从别的路进来：{msg}");
+    Ok(())
+}
+
 /// **T99-G1e 任务二 + 任务三（本发是量具，不是判据）**：让**服务器**交出简报里那 10 条形状各异的
 /// `Location`，把 reqwest 交回的落地串**钉成手写期望**，并把 `probe::run` 的实际反应照原文登记。
 ///
@@ -772,7 +877,8 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
     enum Read {
         /// 合法的服务器重定向 ⇒ `probe::run` **必须成功**（正向对照臂 = 本发量具的活体针）。
         Accepted,
-        /// authority 里带 `@` ⇒ `probe::run` 必须 `Err`，措辞含"凭据"与"重定向"且不回显
+        /// authority 里带 `@` ⇒ `probe::run` 必须 `Err`，措辞含"凭据"并给出两种来源
+        /// （`--url` 与"可能"）且不回显；"重定向后的地址"与 userinfo 那两个假指认点不许出现
         /// （读法照现役的 `a_credentialed_landing_url_is_refused_and_never_echoed`）。
         RefusedWithCredentials,
         /// 只钉 reqwest 交回的串，**产品反应照原文打印、不钉期望**（实测是 `Ok`，那是坏行为）。
@@ -1001,9 +1107,16 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
                 };
                 let msg = err.to_string();
                 assert!(msg.contains("凭据"), "{}：错误要说清拒的是凭据：{msg}", row.id);
+                // 措辞同步（T99-J1 §3）：旧那句断言了"重定向后的地址"，而这一族命中时**可能压根
+                // 没有重定向**、authority 里也没有 `@` ⇒ 换成"给出两种来源"＋两个假指认点的负断言。
                 assert!(
-                    msg.contains("重定向"),
-                    "{}：错误要说清凭据来自服务器带的路（不是用户自己写的）：{msg}",
+                    msg.contains("--url") && msg.contains("可能"),
+                    "{}：措辞要给出两种来源（对面交回的落点 / 你写的 --url）：{msg}",
+                    row.id
+                );
+                assert!(
+                    !msg.contains("重定向后的地址") && !msg.contains("userinfo") && !msg.contains("主机名前面"),
+                    "{}：措辞不许假指认一件没发生的事或一个不存在的形状：{msg}",
                     row.id
                 );
                 for leak in ["s3cret", "alice", "landed"] {
@@ -2295,7 +2408,10 @@ fn a_data_file_task_redirected_onto_a_credentialed_landing_url_is_refused_and_ne
     };
     let msg = err.to_string();
     eprintln!("---- 落地 URL 带凭据那一支（消息照抄，它本身不含任何地址成分）----\n{msg}");
-    assert!(msg.contains("凭据") && msg.contains("重定向"), "措辞要可行动：{msg}");
+    // 措辞同步（T99-J1 §3）：`contains("重定向")` 那半句替用户断言了一件没发生过的事 ⇒ 换成
+    // "给出两种来源"，并把两个假指认点钉成负断言（方向是收紧）。
+    assert!(msg.contains("凭据") && msg.contains("--url") && msg.contains("可能"), "措辞要可行动且给出两种来源：{msg}");
+    assert!(!msg.contains("重定向后的地址") && !msg.contains("userinfo"), "措辞不许假指认：{msg}");
     for leak in ["alice", "s3cret", "@", "http://", "https://"] {
         assert!(!msg.contains(leak), "拒绝文本里出现了 URL 的成分（{leak}）：{msg}");
     }
