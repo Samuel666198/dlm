@@ -2016,7 +2016,7 @@ triage 面＝本文各轮登记的 deferred minor 全集（`E26/C6`、`E28⑧⑨
 - **我简报里的两条前提错，都由执行者/复审实测纠正**：
   ① 我写"`.superpowers/` 被 gitignore ⇒ 用 `git grep` 取不到"——复量真相是**只对一半**：
   `.superpowers/sdd/.gitignore` 写着 `*`（账本 6.2 MB 确实不入库），`git status` 里那条 `?? .superpowers/`
-  来自**我自己**在 `git` 视野内放的 `.superpowers/tmp-rr/peer.js`（RR 那发 C1 实测的一次性对端）。
+  来自**我自己**在 `git` 视野内放的 `.superpowers/tmp-rr/peer.js`（RR 那发 C1 实测的一次性对端）。⚠ 后来想把那只目录整体搬进工作区时 `mv` 报 `Device or resource busy`（**原件被一个活进程占着**）⇒ 没强搬、没去杀那个进程，改为按 md5 复验后把同一份 `peer.js` **复制**进本计划工作区的 `tmp-rr/`（两边逐字节相同：`f406bcd7…`），随归档一起走。
   ⇒ 规矩：**控制员的一次性仪器必须落在本计划工作区目录内**，不在其父级另开目录（执行者没有顺手改根 `.gitignore`，
   这个处置是对的）。
   ② 我写"M-5 那族假红来自四面扫描里有两面会打 `落点：`／对端 URL"——J2 实测：那两格只由 `report::summary`
