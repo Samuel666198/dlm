@@ -603,7 +603,7 @@ mod tests {
     fn a_slash_token_in_value_position_stays_a_value() -> anyhow::Result<()> {
         // 臂 1（parse 层）：`/f` 在值位上是合法的**值**。
         let c1 = parse(&["dlm", "--url", "https://x/a.bin", "--out-name", "/f"])?;
-        assert_eq!(c1.out_name.as_deref(), Some("/f"), "`/f` 在值位上是合法的**值**，把它展开成别名会把用户的参数吃掉");
+        assert_eq!(c1.out_name.as_deref(), Some("/f"), "`/f` 在值位上**不被展开成别名**（它合不合规是落点闸那道另一码事）；把它展开成别名会把用户的参数吃掉");
         // 臂 2（parse 层）：`--url`/`--out-name` 都是值位旗标，值位上的 `/d` 既不当静默旗标、也不吃左值。
         let c2 = parse(&["dlm", "--url", "https://x/n", "--out-name", "/d"])?;
         assert!(!c2.quiet(), "`--url`/`--out-name` 都是值位旗标：值位上长得像别名的 /xxx 串不被展开成静默旗标");

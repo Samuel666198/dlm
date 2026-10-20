@@ -4745,6 +4745,10 @@ fn the_binary_holds_an_escaping_out_name_at_the_parameter_tier() -> anyhow::Resu
 /// 那一头钉的是显式名那一支的**全判据**，这一头钉的是推导名那一支的**越目录那一半** ——
 /// 两分支的是判据宽度，闸与落盘读的名字**仍是同一份**（`Task::effective_name`）。
 /// 夹具不需要对端 ⇒ 两臂都带 `--no-start`（E20④ 的短路在 `engine::run` 之前，一个字节都不上网）。
+///
+/// **T99-H1（复审 C2）在同一发里扩了三段**（不另起炉灶重复钉）：五族 `join` 形状负臂（旧实测退 0，
+/// 现在退 2 且摘要零行）、五个正常形状对照臂（防砸宽）、两格 `--out-name` 盘符臂（钉"显式支吃背板
+/// 之后裁决不变"——这两格 BASE 就拒，背板对显式支是叠层不是补洞，m3 因此不红，照实登记）。
 #[test]
 fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::Result<()> {
     let dir = harness::tmp_dir("bin-derived-name")?;
@@ -4796,6 +4800,79 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
         landing.contains(&out_dir) && landing.ends_with("v1.2.bin"),
         "落点那一行必须仍是 --out-dir 底下的 v1.2.bin（闸判的那份名字就是落盘那份）：{landing}"
     );
+
+    // ---- T99-H1（复审 C2）：`join` 真语义背板的进程级一对 ----
+    // 这五族是控制员与复审者各自实测、本发在 BASE `64e37b8` 的真二进制上复量过的存量缺口：
+    // `--out-dir <目录>` 之下全部退 **0** 且摘要把 `落点：` 打在目录之外（`ensure_parent_dir`
+    // 还会在外面建目录）。闸收口之后每一族必须：退 **2** ＋ stderr 点名"这条 URL 的末段"＋
+    // stdout **一行摘要都不打**（尤其不许再出现 `落点：`）＋ `--out-dir` 里零条目。
+    for tail in [r"C:\evil\p.bin", r"\evil\x$", r"C:x\y", "u:p@x", "C:"] {
+        let url = format!("https://127.0.0.1:1/{tail}");
+        let esc = run_dlm(&["--url", &url, "--out-dir", &out_dir, "--no-start"])?;
+        let e = stderr_of(&esc);
+        assert_eq!(
+            esc.status.code(),
+            Some(2),
+            "H1 背板负臂 `{tail:?}`：`--no-start` 旧实测退 0（摘要都打出去了），收口后必须退 2：exit={:?}，stderr：{e}",
+            esc.status.code()
+        );
+        assert!(
+            e.contains("参数写错了") && e.contains("这条 URL 的末段"),
+            "负臂 `{tail:?}` 要走参数层措辞并点名末段（这五族没有 `--out-name` 可指）：{e}"
+        );
+        let s = stdout_of(&esc);
+        assert!(!s.contains("任务摘要") && !s.contains("落点："),
+            "负臂 `{tail:?}` 摘要一行都不许打——把目录之外的落点印给用户看正是这一族的病：{s}");
+        assert_eq!(
+            dir.path().read_dir()?.count(),
+            0,
+            "负臂 `{tail:?}` 之后 --out-dir 里一个条目都不该多"
+        );
+    }
+
+    // 对照臂（正向，防新背板砸宽）：简报点名的五个正常形状必须照旧退 0、`落点：` 逐字是
+    // --out-dir 底下那个名字。其中 `a...b`、`seg..ment` 钉"按整段判不按子串判"，
+    // `sub%20x.bin` 钉百分号不解码的现状，`data.bin?q=1` 钉 query 先砍——四格各有一支旧变异史。
+    for (url, want) in [
+        ("http://x.example/v1.2.bin", "v1.2.bin"),
+        ("http://x.example/a...b", "a...b"),
+        ("http://x.example/seg..ment", "seg..ment"),
+        ("http://x.example/sub%20x.bin", "sub%20x.bin"),
+        ("http://x.example/data.bin?q=1", "data.bin"),
+    ] {
+        let ok = run_dlm(&["--url", url, "--out-dir", &out_dir, "--no-start"])?;
+        assert_eq!(
+            ok.status.code(),
+            Some(0),
+            "H1 对照臂 `{url}` 必须放行（背板不许砸宽正常名字）：exit={:?}，stderr：{}",
+            ok.status.code(), stderr_of(&ok)
+        );
+        let s = stdout_of(&ok);
+        let landing = s.lines().find(|l| l.starts_with("落点：")).expect("摘要必须有落点那一行");
+        assert!(
+            landing.contains(&out_dir) && landing.ends_with(want),
+            "对照臂 `{url}` 的落点必须逐字是 --out-dir 底下的 `{want}`：{landing}"
+        );
+    }
+
+    // 显式支的一小臂：`--out-name` 给盘符／`\` 打头形状 ⇒ 退 2 ＋点名 --out-name。
+    // ⚠ 如实登记：这两格在 BASE 上就被**全判据**拦着（本发前实测退 2），它们钉的是"显式支
+    // 吃了背板之后裁决不变"（防御纵深的回归钉），**不是**背板独有的功劳——m3（背板只给推导支）
+    // 实测不红在这里，正因如此。
+    for name in [r"C:x\y", r"\evil\x$"] {
+        let esc = run_dlm(&[
+            "--url", "http://x.example/good.bin", "--out-dir", &out_dir, "--out-name", name, "--no-start",
+        ])?;
+        let e = stderr_of(&esc);
+        assert_eq!(
+            esc.status.code(),
+            Some(2),
+            "显式支 `{name:?}` 必须退 2（全判据存量＋并联背板，两支都在）：exit={:?}，stderr：{e}",
+            esc.status.code()
+        );
+        assert!(e.contains("参数写错了") && e.contains("--out-name"),
+            "显式支措辞必须点名 --out-name，否则用户分不清矛头在哪一格：{e}");
+    }
     Ok(())
 }
 
