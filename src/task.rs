@@ -885,7 +885,9 @@ mod tests {
             ("https:/h/a.bin", false, Refused(SHAPE, None)),
             ("https:/\\h/a.bin", false, Refused(SHAPE, None)),
             ("https:////h/a.bin", false, Refused(SHAPE, None)),
-            // 第三族不带凭据的那一半：旧判据连"这是明文 http"都认不出来（`plain_http` 要字面 7 字节）
+            // 上面 ① 那一族不带凭据的那一半：旧判据连"这是明文 http"都认不出来（`plain_http` 要字面 7 字节）
+            // ⚠ 这里原来写作"第三族"（把控制员那轮实测按序号数了一遍）：G6b 把表头那处序号与提交号
+            // 都换成了 ①／②／③ 与勘误编号之后，这个"第三"已经没有可指的编号表了 ⇒ 改指 ① 那一族本身。
             ("http:/h/a.bin", true, Refused(SHAPE, None)),
             // ② G1 那一族（首尾空白）与 G1b 那一族（首尾 C0、串中间 tab/LF/CR）
             ("\u{1}http://u:PASS@h/x", false, Refused(URLINFO, None)),
@@ -1327,11 +1329,14 @@ mod tests {
     /// 两种假红：注释与字符串里的同名 token"——闸的文档注释里本来就写着 `effective_name`，
     /// 整文件 grep 会把注释当调用点）：
     /// 1. `fn validate(` 体内**出现** `self.effective_name()` —— 闸读的是最终生效的那个名字；
-    /// 2. `fn target_path(` 体内**出现** `self.effective_name()` 且**不出现** `rsplit('/')` ——
+    /// 2. `fn target_path(` 体内**出现** `self.effective_name()` 且**不许出现任何切串调用**
+    ///    （`split` 一族／`rfind`／`find(`；T99-H3 第 4 节把这一条从"禁 `rsplit('/')` 一个 token"
+    ///    扩成禁一族，并并联一条"体内只许 `self.dir.join(self.effective_name())` 那一行"的形状判据）——
     ///    落盘不许自己再算一遍（m4 复现实测红在这里，本发的存在证明）；
     /// 3. `fn effective_name(` 体内**出现** `rsplit('/')` —— 末段算法**只住这一处**。没有这一条，
     ///    "禁字＋出现"可以两句一起被掏空：把算法搬进 `target_path`、再删掉这里的，断言 1/2 各自
-    ///    照逻辑仍是绿的（m5 实测红在这里）。
+    ///    照逻辑仍是绿的（m5 实测红在这里）。3b 再拿**同一族**禁字 token 反扫 `effective_name`
+    ///    体内**必须命中**，否则 2 那条扩过面的禁字就可能是拼错的尺子（T99-H3 第 4 节的正向对照）。
     ///
     /// 扫描区按文件里第一个 `#[cfg(test)]` 切断：**这根针自己的文本就带着这些 token**，不切就是
     /// 这种针的第三种假红（针扫到自己），顺手防掉。读文件走运行时 `fs::read_to_string` +
@@ -1395,14 +1400,57 @@ mod tests {
         assert!(target.contains("self.effective_name()"),
             "断言 2a 红：`fn target_path(` 的体内不再读 `self.effective_name()`——这正是 m4 的形状：\
              落盘自己再算一遍末段，两份等价算法各住一处；行为差分对它实测零红（G5c-R2），只有这根针抓得到");
-        assert!(!target.contains("rsplit('/')"),
-            "断言 2b 红：`fn target_path(` 的体内出现了 `rsplit('/')`——落盘在自己算末段，m4 禁的那件事；\
-             末段算法只许住在 `effective_name()` 一处");
+
+        // 断言 2b（**T99-H3 第 4 节把它从"禁一个 token"扩成"禁一族切串调用"**）：
+        // 旧写法只禁 `rsplit('/')` 那一个 token ⇒ 同一份等价末段重算换个拼法就溜过去了：
+        // `split('/').next_back()`、`rfind('/')`、`splitn(...)` 在旧针下三条断言**全绿**（本发实测，
+        // 见报告 m-split-alt）。`substring` 取 "split" 而不是逐个列全：`rsplit`／`splitn`／`rsplitn`／
+        // `split_terminator`／`split_once` 都以它作子串，一条顶一族；`find(` 带左括号是因为要避开
+        // `effective_name` 那种"名字里含 find"的假命中，而切串找位置一定是 `.find(…)` 的调用形状。
+        const TAIL_SPLITTING_TOKENS: &[&str] = &["split", "rfind", "find("];
+        for token in TAIL_SPLITTING_TOKENS {
+            assert!(!target.contains(token),
+                "断言 2b 红：`fn target_path(` 的体内出现了切串调用 `{token}`——落盘在自己算末段\
+                 （m4 禁的那件事，本发只是换了拼法）；末段算法只许住在 `effective_name()` 一处。\
+                 命中现场：{}",
+                target.lines().find(|l| l.contains(token)).unwrap_or_default().trim());
+        }
+
+        // 断言 2c（**T99-H3 第 4 节的第二种写法，与 2b 并联**）：整条函数体除签名与收尾大括号外
+        // **只许那一行**。2b 管"不许出现什么"，这一条管"只许是什么"——把两份算法藏进
+        // `let` 里再返回、或先算一份等价名字再丢掉，2b 靠禁字抓、这条靠形状抓，任何一侧被绕开另一侧还在。
+        let inner: Vec<&str> = target
+            .lines()
+            .skip(1) // 签名那一行（body_of 从它开始收）
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect();
+        assert_eq!(
+            inner,
+            vec!["self.dir.join(self.effective_name())", "}"],
+            "断言 2c 红：`fn target_path(` 的体内不再只有 `self.dir.join(self.effective_name())` 那一行\
+             ——落点出口现在是两份账的读法（H1 的 `lands_inside_out_dir` 也走这只函数，它必须与闸读\
+             同一个 `effective_name()`）。⚠ 这是**形状**判据：把它写成一行式（`{{ … }}` 同行）也要\
+             同步这根针，与断言 3 那条'换名字就换针'的代价同一立场。"
+        );
 
         let effective = body_of(src, "fn effective_name(");
         assert!(effective.contains("rsplit('/')"),
             "断言 3 红：`rsplit('/')` 不在 `fn effective_name(` 的体内了——末段算法被搬走或删掉（m5）。这一条\
              证明断言 2 的禁字不是装饰：把算法搬进 target_path 再删掉这里的，断言 1/2 各自照逻辑仍是绿的");
+
+        // 断言 3b（**2b 的正向对照**，E28⑧-1 那条纪律要求的"负向判据必配正向对照"）：
+        // 同一套禁字 token 拿去扫 `effective_name` 的体内**必须**命中至少一个 —— 末段算法本来就住那儿。
+        // 没有这一格，2b 可以是"token 拼错了一个字母、于是恒不命中"的装饰（与断言 3 用 `rsplit('/')`
+        // 反过来钉住旧 2b 是同一课，只是这次量的是**扩面之后的那一族**）。
+        let hits: Vec<&str> = TAIL_SPLITTING_TOKENS
+            .iter()
+            .filter(|token| effective.contains(*token))
+            .copied()
+            .collect();
+        assert!(!hits.is_empty(),
+            "断言 3b 红：切串 token 清单（{TAIL_SPLITTING_TOKENS:?}）在 `fn effective_name(` 的体内**一个都打不中**\
+             ——那说明断言 2b 扫的是一把自己拼错的尺子，禁字判据已经退化成恒真");
     }
 
     /// **T99-G5d 第 2 件：一发行为差分——对表里每一行，两个**独立观察量**恒等：

@@ -950,7 +950,7 @@ fn build_client() -> Result<Client> {
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_nodelay(true)
         .build()
-        .context("建 reqwest blocking 客户端失败")
+        .context("建 HTTP 客户端失败")
 }
 
 /// 目标文件的父目录。`Store::open` 与 `state::save` 都不建目录（模块文档各自写明"归 cli/engine"）。

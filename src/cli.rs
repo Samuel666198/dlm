@@ -157,9 +157,8 @@ fn expand_idm_aliases<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Resu
         }
         anyhow::ensure!(
             !starts_with_ascii(&arg, b"/"),
-            "未知别名 {}：dlm 的斜杠别名只有 recon C3 表里那八个 —— \
-             /d /p /f /n /a 映射到长选项，/q /s /onboot 接受并忽略；\
-             /h 没有取证支撑，帮助请用 --help（完整的长选项面也在那里）",
+            "未知别名 {}：dlm 认的斜杠写法只有 /d /p /f /n /a（映射到长选项）与 /q /s /onboot\
+             （接受但不做任何事），其余斜杠写法一律不认；完整的长选项面请看 --help",
             arg.display()
         );
         // 值位探测：`--opt=值` 那种写法**不吃**下一个参数，只有裸 `--opt` 才可能进这张表。
@@ -500,15 +499,97 @@ mod tests {
         Ok(())
     }
 
+    /// 从**帮助文本**里把一个数读出来（**T99-H3 第 3 节：交叉针的期望值唯一的来源**）。
+    ///
+    /// 取法：`Cli::command()` → 找到 `get_long() == long` 那条参数 → 取它的 `get_help()` →
+    /// 在里头找 `marker`（如"至少"、"需"），跳过空格后把紧跟的那一串数字读成 `usize`。
+    /// ⚠ 五件事任何一件不成立都**当场 panic**，一条都不许静默跳过（那就是把交叉针做成恒真）：
+    /// 选项在 `Command` 里找不到／那条没有 help／help 里没有 `marker`／`marker` 后面没有数字／
+    /// 那串数字 `parse` 不出来。这一族的"期望值从对面读"与 `src/probe.rs` 的 base64 期望表
+    /// "没有一个期望来自调用被测编码器"同一条立场：**问帮助，不问实现**。
+    fn number_from_help(long: &str, marker: &str) -> usize {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let help = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some(long))
+            .unwrap_or_else(|| panic!("交叉针读不到 --{long}：这条选项已从帮助面上消失"))
+            .get_help()
+            .unwrap_or_else(|| panic!("--{long} 在帮助里没有说明（T99-G5b 那根针管的就是这一格）"))
+            .to_string();
+        let after = help
+            .split_once(marker)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("--{long} 的帮助里找不到 {marker:?}，数没处读：{help}"));
+        let digits: String = after
+            .chars()
+            .skip_while(|c| *c == ' ')
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits
+            .parse::<usize>()
+            .unwrap_or_else(|err| panic!("--{long} 的帮助里 {marker:?} 之后读不出一个数（拿到 {digits:?}）：{err}；原文：{help}"))
+    }
+
+    /// **T99-H3 第 3 节第 1 条**：`--connections` 的**帮助写的数**与**实现拒的数**必须是同一个数。
+    ///
+    /// 扩的是既有这一发（简报明令"别重复钉、别新开平行用例"）：旧写法把 0 与 1 两个数**写死**在
+    /// 测试里 ⇒ 帮助改成"至少 2"、或实现改成拒 `n < 2`，四闸照绿（控制员复量：`grep -rn "至少 1" src/ tests/`
+    /// 三处同源文本、零根针）。现在数从 `number_from_help("connections", "至少")` 读，
+    /// 于是 `N-1` 必须被拒、`N` 必须放行且真的进到 `Config::workers`。
+    /// 两臂各管一侧：只断 `N-1` 被拒的话，"把实现改成什么都拒"也能绿；只断 `N` 放行的话，
+    /// "把实现改成什么都放"也能绿（E28⑧-1 那条纪律在边界针上的样子）。
     #[test]
     fn connections_lower_bound_is_a_parameter_error() -> anyhow::Result<()> {
-        let Err(err) = parse(&["dlm", "--url", "https://x/a", "--connections", "0"]) else {
-            panic!("--connections 0 必须在边界就被拒（E23⑤）");
+        let n = number_from_help("connections", "至少");
+        let below = n
+            .checked_sub(1)
+            .unwrap_or_else(|| panic!("帮助里的下限是 {n}，那 `N-1` 这一臂没有输入可用"));
+        let below_text = below.to_string();
+        let n_text = n.to_string();
+
+        let Err(err) = parse(&["dlm", "--url", "https://x/a", "--connections", &below_text]) else {
+            panic!("--connections {below} 必须在边界就被拒（这个数是**帮助**里那个下限减一，E23⑤）");
         };
         let msg = err.to_string();
         assert!(msg.contains("参数写错了") && msg.contains("--connections"), "{msg}");
-        let c = parse(&["dlm", "--url", "https://x/a", "--connections", "1"])?;
-        assert_eq!(c.into_config().workers, 1, "1 是最小合法值，必须原样进 Config::workers");
+
+        let c = parse(&["dlm", "--url", "https://x/a", "--connections", &n_text])?;
+        assert_eq!(
+            c.into_config().workers, n,
+            "帮助说至少 {n}，那 {n} 就是最小合法值，必须原样进 Config::workers（两侧不同源＝这一发的全部意义）"
+        );
+        Ok(())
+    }
+
+    /// **T99-H3 第 3 节第 2 条**：`--sha256` 同一形状 —— 帮助里"需 **N** 位十六进制"那个数与
+    /// `check_boundaries` 的长度判据绑在一起（`N-1` 位拒、`N` 位放）。
+    ///
+    /// ⚠ 期望值**不许问产品自己要**：这里不调用被测的长度判据去算"该给几位"，输入由测试自己
+    /// 按**读来的那个数**构造（`"0".repeat(n - 1)` 与 `"0".repeat(n)`，全用合法十六进制字符 ⇒
+    /// 红的时候只能是**长度**这一维撞的，不可能是字母表撞的）。既有那圈硬编码用例（32 位／64 个
+    /// `g`／空串／65 位）一字没动，这一格只是把"边界到底在哪一格"从写死改成从帮助读。
+    #[test]
+    fn sha256_length_bound_is_read_from_the_help_not_hardcoded() -> anyhow::Result<()> {
+        let n = number_from_help("sha256", "需");
+        let short = "0".repeat(n - 1);
+        let exact = "0".repeat(n);
+
+        let Err(err) = parse(&["dlm", "--url", "https://x/a", "--sha256", &short]) else {
+            panic!("--sha256 给 {n} 减一（{} 个）位必须被拒（帮助写的就是这个数）", n - 1);
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("参数写错了") && msg.contains("--sha256"),
+            "越界要照参数错说，不许路由成引擎那句\"校验不符\"（E20⑨）：{msg}"
+        );
+
+        let c = parse(&["dlm", "--url", "https://x/a", "--sha256", &exact])?;
+        assert_eq!(
+            c.into_config().verify_sha256.as_deref(),
+            Some(exact.as_str()),
+            "帮助说需 {n} 位，那 {n} 个十六进制字符就是合法值，必须原样交给引擎"
+        );
         Ok(())
     }
 

@@ -1075,6 +1075,118 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
     Ok(())
 }
 
+/// **T99-H3 第 1 节**：把"重定向换 host 时凭据头不上第二跳"从**寄存于对面库**改成**我们的针**。
+///
+/// 这条保证今天住在哪儿？住在对面 `reqwest` 的 `redirect.rs::remove_sensitive_headers`：
+/// 它按 `next.host_str() != previous.host_str() ‖ 端口不同 ‖ scheme 不同` 命中时剥掉
+/// `Authorization`／`Cookie`／`cookie2`／`Proxy-Authorization`／`WWW-Authenticate`。控制员判否了
+/// 复审那条 Critical（"https 被 302 降到 http 会把 Authorization 带到明文线"），但判否**靠的是读对面源码**
+/// ＋ 一次手跑，四闸里当时没有任何东西在守它 ⇒ 对面哪天改了那个条件，我们不会红，用户会。
+/// 本仓库对这类结论的既有口径是"**只在钉死的版本上成立 ⇒ 针 ＋ 版本依赖登记**"，与那张十条
+/// `Location` 表（`measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations`）同族。
+///
+/// ## 两臂都必须在场，而**同 host 那一臂就是这发用例的牙**
+/// 只断"跨 host 的第二跳不许有 Cookie"，把判据写成"任何重定向都不许带 Cookie"照样绿 ——
+/// 那是一根恒剥的装饰针。所以两臂各钉一个方向：
+/// - **跨 host 臂**（`127.0.0.1` → `localhost`，端口与 scheme 都不变）：第二跳**不许**有 `cookie` 头；
+/// - **同 host 臂**（`127.0.0.1` → `127.0.0.1`，与跨 host 臂只差 `Location` 里主机名那一段）：
+///   第二跳**必须有** `cookie` 且值就是那串哨兵。这一臂红得下来，才证明上面那句"不许有"是
+///   **对面按 host 作的区分**，而不是我们把什么都剥掉了。
+///
+/// 两臂另各带一条共同的正臂：第一跳**必须**收到那串哨兵（否则"第二跳没有"就成了"根本没发出去"），
+/// 以及第二跳**必须**真到达过对端（`hop2` 为空时负向断言恒真）。
+///
+/// ## 射程照实登记（两半，不许读成"端到端验过凭据不上明文线"）
+/// - 这一发实测的是**对面那只共享的剥离函数**（`redirect.rs::remove_sensitive_headers`）覆盖面：
+///   `Cookie` 走得到它，`Authorization` 在这台机器上**走不到** —— 明文 http 配 `--password` 被我们自己的
+///   `Task::validate()` 先拒（`a_password_over_plain_http_never_leaves_the_socket` 已经用服务端日志钉过
+///   "一个字节都没上网"），而本机对端不做 TLS ⇒ **"https 任务被 302 降到 http"那一格端到端造不出夹具**，
+///   仍是对面的具名欠账。所以"降级时凭据不上明文线"这句话的真值＝**这一发的机制实测** ＋
+///   **对面源码里 scheme 也是 cross_host 的一支**，两半合起来才成立。
+/// - **版本依赖**：结论只在 `reqwest 0.13.5 / url 2.5.8 / tower-http 0.6.11 / http 1.5.0` 上成立，
+///   与那张十条 `Location` 表**同一族欠账**（登记在 STATUS）⇒ 升级对面任一版本必须两发一起复量。
+/// - **不新增我们自己的重定向策略**（控制员裁定）：自建 `Policy::custom` 要替掉默认的 `limited(10)`，
+///   blast radius 覆盖所有请求（含四场景验收里的重定向那一路），而它要防的那一面实测为零；
+///   对面哪天改了剥离条件，红的是这根针，不是用户。
+#[test]
+fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it() -> anyhow::Result<()> {
+    const SENTINEL: &str = "session=SENTINEL";
+    // 一格 = (臂名, Location 模板, 第二跳该不该带着 Cookie)。两臂**只差 Location 里的主机名**，
+    // 第一跳的 base 由 `RedirectPeer::base()` 恒写成 `127.0.0.1:{port}` ⇒ 差别只剩对面交回的那一段。
+    const ARMS: &[(&str, &str, bool)] = &[
+        ("跨 host（127.0.0.1 → localhost）", "http://localhost:{port}/landed", false),
+        ("同 host（127.0.0.1 → 127.0.0.1）", "http://127.0.0.1:{port}/landed", true),
+    ];
+
+    for (label, location_template, cookie_should_survive) in ARMS {
+        let (stub, landed_location) = harness::spawn_header_recording_redirect_stub(location_template)?;
+        let dir = harness::tmp_dir("h3-redirect-cookie-scope")?;
+        let out_dir = dir.path().display().to_string();
+        let start = format!("{}/start", stub.base());
+        let run = run_dlm(&[
+            "--url", &start, "--out-dir", &out_dir, "--out-name", "h3.bin", "--cookie", SENTINEL,
+        ])
+        .with_context(|| format!("{label}：起真二进制失败"))?;
+        // 跑完这一趟是**两臂共同的前提**：任务被我们自己的闸拒掉时第二跳压根不会发生，
+        // 那时下面三条断言里有两条会退化成"什么都没观察到"。
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{label}：这一臂必须真跑完一趟下载（对端只做重定向，不参与判据）：exit={:?}，stderr={}",
+            run.status.code(),
+            stderr_of(&run)
+        );
+
+        let requests = stub.requests();
+        let hop1: Vec<&harness::ReceivedRequest> =
+            requests.iter().filter(|r| r.target.starts_with("/start")).collect();
+        let hop2: Vec<&harness::ReceivedRequest> =
+            requests.iter().filter(|r| !r.target.starts_with("/start")).collect();
+
+        // 共同正臂 1：哨兵确实上过线 —— 第一跳每一枪都带着它。
+        assert!(!hop1.is_empty(), "{label}：对端一条 /start 都没收到 ⇒ 两臂都没测到东西：{requests:?}");
+        for r in &hop1 {
+            assert_eq!(
+                r.header("cookie"),
+                Some(SENTINEL),
+                "{label}：第一跳的 cookie 必须由我们原样发出去，否则第二跳\"没有它\"是\"没发过\"而不是\"被剥掉\"：{r:?}"
+            );
+        }
+        // 共同正臂 2：重定向**真被跟随过**（这是负向断言的对照臂，缺它整发就是恒真）。
+        assert!(
+            !hop2.is_empty() && stub.saw("/landed"),
+            "{label}：第二跳（落地那条 {landed_location}）压根没到达对端 ⇒ 下面那圈判据扫的是空集合：{requests:?}"
+        );
+        for r in &hop2 {
+            assert!(
+                r.target.starts_with("/landed"),
+                "{label}：落地那一跳的 target 必须是 /landed（其余都是第一跳），实际 {r:?}"
+            );
+            if *cookie_should_survive {
+                assert_eq!(
+                    r.header("cookie"),
+                    Some(SENTINEL),
+                    "{label}：同 host 的重定向**不算跨** ⇒ 对面不许剥 Cookie。这一臂红说明针变成了恒剥装饰：{r:?}"
+                );
+            } else {
+                assert!(
+                    !r.has("cookie"),
+                    "{label}：跨 host 的第二跳不许带 cookie 头（对面 `remove_sensitive_headers` 的覆盖面，\
+                     本发把它钉成我们的针）：{r:?}"
+                );
+            }
+        }
+        // 取证照原文打出来：这两臂的差别只在 Location 的写法上，读的人要能亲眼看见第二跳的头。
+        eprintln!(
+            "{label}：Location={landed_location}，第一跳 {} 枪、第二跳 {} 枪，第二跳 cookie={:?}",
+            hop1.len(),
+            hop2.len(),
+            hop2.iter().map(|r| r.header("cookie").unwrap_or("<无此头>")).collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}
+
 /// **T99-G5 第 0 条**：把"`fetch` 那四个落地口只许走统一判据"钉成一根**结构针**（源码文本扫描）。
 ///
 /// 为什么这里需要的是一根结构针而不是一台夹具（G1f 的 **m3 实测**）：把 `src/fetch.rs` 的
@@ -4957,28 +5069,67 @@ fn counts_long_options(text: &str) -> bool {
     false
 }
 
-/// 用户表面的禁串清单（**E28③**）。这八条是 `--help` 那一臂**原来就有的**，逐字符照旧，
-/// 只是从内联数组搬成常数 —— 搬的理由：下面 T99-G5 第 2 条新加的"真跑一次"那一臂要扫的是
-/// **同一份**清单。两处各写一遍，就是下一次改口只改一半的成因（与 `engine::sha256_mismatch_message`
-/// 收掉那两份字面量同一课）。
-const BANNED_INTERNAL_PROSE: &[&str] =
-    &["勘误", "§", "clap", "别名层", "long_about", "暗道", "into_task", "into_config"];
+/// 用户表面的禁串清单。**T99-H3 第 2 节把它合成同一只**：
+/// 这八条（E28③）＋ `spec`（T99-G5 第 2 条）＋ `recon`／`取证`／`reqwest`（本发）——
+/// 合之前是**两摊**，而两摊扫的面不同（`--help` 那一臂不扫 `spec`），那正是"改口只改一半"的成因：
+/// `c3a3cfd` 收掉 sha256 那句时按清单改了一遍，别名那句里的 `recon C3` 就这么留到了今天。
+/// 分组注释留着是为了"哪一条是哪一发加的"仍然可辨，**不再是"哪一摊扫哪一面"的依据**。
+const BANNED_USER_SURFACE_TERMS: &[&str] = &[
+    // E28③ 原有八条（逐字符照旧）。
+    "勘误", "§", "clap", "别名层", "long_about", "暗道", "into_task", "into_config",
+    // T99-G5 第 2 条：内部文档坐标里那个词（`§` 上面已有）。
+    "spec",
+    // T99-H3 第 2 节：上游取证编号的仓库名、"取证"这个**词**本身、对面库名。
+    // 立这三条的现场就是 `未知别名 /z：… recon C3 表里那八个 … 没有取证支撑` 那句 stderr。
+    "recon", "取证", "reqwest",
+];
 
-/// **T99-G5 第 2 条**新加的那一族：内部文档坐标（`spec §6.7` 那半句括注就是它的一个实例）。
-/// 单列一摊而不是直接塞进上面那份，是为了让"哪一条是哪一发加的"在读时仍然可辨；
-/// 两摊在失败文案那一臂上一起扫。`§` 已经在上面那份里，这里补的是`spec`这个**词**。
-const BANNED_DOCUMENT_COORDINATES: &[&str] = &["spec"];
-
-/// 串里有没有「`E` 或 `R` ＋ 一个 ASCII 数字」这种**内部编号形状**（勘误编号 E23② 与
-/// spec 需求编号 R7 的骨架）。命中时交出那两个字符，红时能直接看见现场。
-/// ⚠ 它比上面 `--help` 那一臂内联的那支（只认 `E`）**宽一条**：那一支是既有判据、本发一个字不许动，
-/// 而失败文案这一族要同时挡住 `R7` 这种需求编号 ⇒ 这里认两个字母。两支并存是刻意的。
+/// 串里有没有「内部编号字母 ＋ 一个 ASCII 数字」这种**内部编号形状**。
+/// 字母面 T99-H3 第 2 节从 `E`／`R` 扩到 `E`／`R`／`C`／`I`／`F`：
+/// 前者是勘误编号（E23②）与 spec 需求编号（R7），后者补的是上游取证表那三族编号
+/// （`C3`＝取证能力表、`I`/`F`＝评审条目）——别名那句用的正是 `C3`，两支旧清单都认不出来。
+/// 命中时交出那两个字符，红时能直接看见现场。
+/// ⚠ 只认**大写**字母打头：用户面上的 `sha256`、`/d`、`v1` 这类小写形状是合法内容，
+///   而内部编号在文档里从来写作大写 ＋ 数字（这一条按实测定：`--help` 全文扫不出任何小写命中、
+///   大写命中的第一发就是本发要抓的那句别名报错）。
 fn internal_number_shape(text: &str) -> Option<String> {
     let chars: Vec<char> = text.chars().collect();
     chars
         .windows(2)
-        .find(|w| matches!(w[0], 'E' | 'R') && w[1].is_ascii_digit())
+        .find(|w| matches!(w[0], 'E' | 'R' | 'C' | 'I' | 'F') && w[1].is_ascii_digit())
         .map(|w| w.iter().collect())
+}
+
+/// 串里有没有**提交号形状**的片段（`4fe6a7c` 那种短十六进制），T99-H3 第 2 节立的第四条模式。
+/// 判据是"按极大段算**恰好 7 个**十六进制字符，且数字与字母**各至少一个**"，三条边界各有理由：
+/// - 极大段 ⇒ 校验摘要（本用例扫的那一路就印着 64 位 sha256）不会被切成 7 格而误报；
+/// - 只含数字的 7 段是**进程号**（临时目录名 `{pid}-{tag}-{n}` 就住在扫描对象的绝对路径里），
+///   只含字母的 7 段是英文单词（`defaced`）——两类都不是提交号；
+/// - 恰好 7 而不是 ≥7：短提交号按惯例 7 位，更长的段属于摘要/哈希那一族，不该由这条管。
+///
+/// 大小写都收（`is_ascii_hexdigit` 两边都认）：提交号本来就有人写大写，这条管的是形状不是排版。
+fn internal_commit_shape(text: &str) -> Option<String> {
+    let is_hex = |c: char| c.is_ascii_hexdigit();
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0usize;
+    while at < chars.len() {
+        if !is_hex(chars[at]) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < chars.len() && is_hex(chars[at]) {
+            at += 1;
+        }
+        let run: String = chars[start..at].iter().collect();
+        if run.len() == 7
+            && run.chars().any(|c| c.is_ascii_digit())
+            && run.chars().any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit())
+        {
+            return Some(run);
+        }
+    }
+    None
 }
 
 /// **E28③ / E27②**：`Cli` 的结构体文档注释曾被 clap derive 当 `long_about` **原样印进 `--help`** ——
@@ -4999,8 +5150,31 @@ fn internal_number_shape(text: &str) -> Option<String> {
 /// 别名表从"只住在报错里"搬到 `--help` 里之后，这一格才让它红得下来；结构那一维
 /// （每条选项 `get_help()` 非空）住在 `src/cli.rs` 的
 /// `every_help_entry_carries_an_explanation_and_the_alias_table_is_printed`。
+///
+/// **T99-H3 第 2 节把这一族收成"一份清单 × 四面扫描"**：
+/// ① 两摊禁串合成 `BANNED_USER_SURFACE_TERMS` 同一只，`--help` 那一臂不再比真跑那一臂少扫几条；
+/// ② 编号形状从 `E`/`R`＋数字扩到 `E`/`R`/`C`/`I`/`F`＋数字（现场是 `recon C3` 那个 `C3`），
+///    另立第四条模式"提交号形状"；③ 扫描面从两面增到**四面**——原来真跑那一臂只跑 sha256 不符
+///    那一档，**别名档与参数档的失败文案从没被任何针扫过**，而 `recon C3` 那句恰恰住在别名档里。
+/// 四面的负向扫描共用同一只 `scan_no_internal_coordinates`，每一面各自带正臂（同一族纪律 E28⑧-1）。
 #[test]
 fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
+    // 一份判据，四个面。参数 = (这一面叫什么, 要扫的 stdout＋stderr 合并串)。
+    let scan_no_internal_coordinates = |label: &str, text: &str| {
+        for banned in BANNED_USER_SURFACE_TERMS {
+            assert!(
+                !text.contains(banned),
+                "{label} 不许印 {banned:?}（E28③ 立、T99-H3 第 2 节把这一条并进来：内部论证与内部坐标漏到用户表面）：{text}"
+            );
+        }
+        if let Some(hit) = internal_number_shape(text) {
+            panic!("{label} 不许印「E/R/C/I/F ＋ 数字」的内部编号形状（命中 {hit:?}，T99-H3 第 2 节扩的就是这一族）：{text}");
+        }
+        if let Some(hit) = internal_commit_shape(text) {
+            panic!("{label} 不许印提交号形状的 7 位十六进制段（命中 {hit:?}，T99-H3 第 2 节新立的第四条模式）：{text}");
+        }
+    };
+
     let out = run_dlm(&["--help"])?;
     assert!(
         out.status.success(),
@@ -5024,15 +5198,10 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
         assert!(h.contains(token), "对照臂：`--help` 里少了别名 token {token:?}（T99-G5b：别名映射必须进帮助面）：{h}");
     }
 
-    // 禁串：只有仓库内部才该出现的词，出现在交付给用户的帮助面上就是 E28③ 复发。
-    for banned in BANNED_INTERNAL_PROSE {
-        assert!(!h.contains(banned), "帮助面不许印 {banned:?}（E28③：内部论证漏到了用户表面）：{h}");
-    }
-    // 禁形状一：`E` + 数字 —— 勘误编号（E23②、E28③ 这种）的骨架。
-    let chars: Vec<char> = h.chars().collect();
-    let errata_marker = chars.windows(2).any(|w| w[0] == 'E' && w[1].is_ascii_digit());
-    assert!(!errata_marker, "帮助面不许印\"E+数字\"的勘误编号形状（E28③）：{h}");
-    // 禁形状二："<数字> 条长选项" —— 选项计数（`c6ac42e` 纪律：数量不进文档，而这里进的是用户面）。
+    // 禁串与编号／提交号形状：走那一面共用的判据（T99-H3 之前这里内联着一支只认 `E` 的窄版本，
+    // 它与真跑那一臂的 `E`/`R` 版本并存＝同一个形状两把尺子；本发把宽的这支合上去，只变严不变宽）。
+    scan_no_internal_coordinates("`--help` 的 stdout", &h);
+    // 计数形状：`<数字> 条长选项`（`c6ac42e` 纪律：数量不进文档，而这里进的是用户面）。
     assert!(!counts_long_options(&h), "帮助面不许印\"<数字> 条/个长选项\"的计数（E27②：这个数已经错过一次）：{h}");
 
     // ---- T99-G5 第 2 条：同一族判据扩到**一次真跑的 stdout ＋ stderr** ----
@@ -5070,18 +5239,51 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     );
 
     // 负臂：失败文案这一族的用户表面（stdout ＋ stderr 一起）不许印内部措辞与文档坐标。
-    let both = format!("{so}{se}");
-    for banned in BANNED_INTERNAL_PROSE.iter().chain(BANNED_DOCUMENT_COORDINATES) {
+    scan_no_internal_coordinates("校验不符那一路真跑一次的用户表面", &format!("{so}{se}"));
+
+    // ---- T99-H3 第 2 节：同一族判据再挂两路现成夹具（**别名档**与**参数档**的失败文案） ----
+    // 为什么这两路必须单独扫：上面那一档走的是引擎那一侧的输出，而别名展开与边界校验都住在
+    // `src/cli.rs`，它们的报错文本此前**从没进过任何针的扫描面** —— `recon C3 表里那八个` 那句
+    // 就正好漏在这一格里（改口那发只改了帮助面）。
+    //
+    // 别名的写法用 `/z`：值位上的 `/f` 不会被展开（`a_slash_token_in_value_position_stays_a_value`
+    // 钉着那一支），所以这里把它放在**旗标位**上；`MSYS2_ARG_CONV_EXCL` 那个坑与本发无关——
+    // `run_dlm` 用 `Command::args` 直接交给进程，不过 shell。
+    let alias = run_dlm(&["--url", "https://example.invalid/a.bin", "--no-start", "/z"])?;
+    assert_eq!(
+        alias.status.code(),
+        Some(2),
+        "本臂的前提是未知别名落在参数层那一档（退 2）；换了档就是扫错了面：exit={:?}，stdout={}",
+        alias.status.code(),
+        stdout_of(&alias)
+    );
+    let alias_text = format!("{}{}", stdout_of(&alias), stderr_of(&alias));
+    // 正臂（两格）：① 这句确实是"未知别名"那句；② **别名清单本身还在**（T99-H3 第 2 节裁的口径：
+    // 那句是现役最有用的半句，改措辞只许删内部坐标、不许把它一起删掉）。
+    assert!(alias_text.contains("未知别名"), "这一臂扫的必须是未知别名那一路的输出：{alias_text}");
+    for token in ["/d", "/p", "/f", "/n", "/a", "/q", "/s", "/onboot"] {
         assert!(
-            !both.contains(banned),
-            "真跑一次的用户表面不许印 {banned:?}（T99-G5 第 2 条：用户可见的失败文案里不许有内部文档坐标）：stdout={so} stderr={se}"
+            alias_text.contains(token),
+            "别名报错里少了 {token:?}：内部坐标可以删，**能用的写法清单不能删**（T99-H3 第 2 节第 1 条）：{alias_text}"
         );
     }
-    if let Some(hit) = internal_number_shape(&both) {
-        panic!(
-            "真跑一次的用户表面不许印「E/R ＋ 数字」的内部编号形状（命中 {hit:?}）：stdout={so} stderr={se}"
-        );
-    }
+    scan_no_internal_coordinates("未知别名那一档的用户表面", &alias_text);
+
+    // 参数档：`--connections 0` 由 `check_boundaries` 当场拒，同样只住在 `src/cli.rs`。
+    let bound = run_dlm(&["--url", "https://example.invalid/a.bin", "--no-start", "--connections", "0"])?;
+    assert_eq!(
+        bound.status.code(),
+        Some(2),
+        "本臂的前提是边界校验那一档（退 2）：exit={:?}，stdout={}",
+        bound.status.code(),
+        stdout_of(&bound)
+    );
+    let bound_text = format!("{}{}", stdout_of(&bound), stderr_of(&bound));
+    assert!(
+        bound_text.contains("参数写错了") && bound_text.contains("--connections"),
+        "这一臂扫的必须是参数层那句（正臂：否则负向扫描扫的是空输出或别的档）：{bound_text}"
+    );
+    scan_no_internal_coordinates("--connections 越界那一档的用户表面", &bound_text);
     Ok(())
 }
 

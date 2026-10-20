@@ -20,6 +20,9 @@
 **G1e 与 G1f 的结论（两发已回，必须一起读——它们把本节原来那条"按实测二选一"的待裁问题关掉了）**：
 - **G1e（量具发，`src/` 零改动，`7312af8`+`c6f7fb5`）**实测十条服务器给的 `Location` ⇒ **一支都造不出"无 `@` 但非规范"的落地串** ⇒ 原计划"把形状检查接进 `src/fetch.rs` 那四处"＝**恒不触发的死分支，不做**。
   这张表只在 **reqwest 0.13.5 / url 2.5.8 / tower-http 0.6.11 / http 1.5.0** 上成立 ⇒ **升级对面任一版本必须复量**（已登记成欠账）。
+- **T99-H3 把同一族欠账的第二根针并进来**（不另立一族）：`tests/integration.rs::a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it`
+  钉的是对面 `redirect.rs::remove_sensitive_headers` 的覆盖面（跨 host／跨端口／跨 scheme 时剥凭据头），**同一组四个对面版本**上才成立 ⇒ 复量清单现在＝那张十条 `Location` 表 ＋ 这一发两臂。
+  射程照实登记：针实测得到 `Cookie`，`Authorization` 那一支本机走不到（明文 http 配口令先被 `Task::validate()` 拒、本机对端不做 TLS）⇒"降级时凭据不上明文线"＝**机制实测 ＋ 对面源码**两半，端到端那一格照旧挂在那条 TLS 欠账上。
 - 同一批测量量出一格真口子：url 2.5.8 的"special relative or authority"分支把 `http:/alice:s3cret@h/landed` 按**相对引用**解析（`@` 连同口令**折进 path**、authority 取本次 origin）⇒ 落地串形状完全规范、两道旧闸都看不见 ⇒ `probe::run` 实测 `Ok`。
   危害＝**我们自己的手把口令形状的东西写回那份号称永不含口令的断点文件**，并被 `src/resume.rs:205-209` 打进 ② 原因串回显终端；`src/state.rs:14-16` 自己写着这一格靠闸兜，可那句话管的只是"用户自己写的 URL"。
 - **G1f（本体发，`006a673`+`1d061ac`）**据此新立第三判据：**落地串含本任务 `--password` 字面值（且非空串）即拒、不回显**；七个落地口收成一条 `probe::landed_url_is_refused(url, password)`，`src/fetch.rs` 四处不再自用半支 1。

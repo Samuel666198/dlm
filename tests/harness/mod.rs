@@ -661,6 +661,94 @@ pub fn spawn_raw_redirect_stub(location: &str) -> Result<(Stub, String)> {
     Ok((Stub { port, seen }, raw_location))
 }
 
+/// **T99-H3 第 1 节**：`GET /start` ⇒ `302` + 调用方给的 `Location`，落地那条 ⇒ 诚实的 200，
+/// 而**每一跳的完整请求头都记下来**（既有两族重定向对端只记请求目标，看不见 `Cookie:`）。
+///
+/// 为什么要有这一只（T99-H3 简报第 1 节）：复审那条 Critical 判否的理由是"对面 reqwest 在跨
+/// host／跨端口／跨 scheme 时把 `Authorization`／`Cookie` 等凭据头剥掉了"——那是**对面库的行为**，
+/// 本仓库四闸里当时没有任何东西在守它。要把它从"寄存于对面"钉成针，取证面必须是
+/// **对端实际收到的那一条条请求**，而我们既有的重定向对端只回答"落地串长什么样"，答不出
+/// "第二跳身上还带着什么头"。
+///
+/// 复用而不是新写：请求的读法走 `read_request_with_body`（与 `spawn_post_stub` 同一只，
+/// 那里已经有一发 `the_harness_range_parser_reads_both_ending_shapes` 的同族校准钉着解析件），
+/// 交回的结构就是既有 `ReceivedRequest`（头名已小写、`has`/`header` 两个读法现成）。
+/// ⚠ **刻意不复用 `spawn_stub` 那族**：它走 `read_request_target`，那条路只读请求行与目标，
+/// 拿不到头；把它改成读全头会牵动它现有 6 发用户（`c6ac42e` 之前那轮"宁可新加一只也不改老的那族"
+/// 同一立场）。也不碰 `probe-server.mjs`（不在本轮授权里，且它从不读请求体）。
+///
+/// `location` 里的 `{port}` 换成本对端**实际拿到**的端口（与 `spawn_raw_redirect_stub` 同一约定），
+/// 其余照抄那一只：host 写法完全由调用方决定，好让"跨 host"与"同 host"两臂只差 `Location` 里
+/// 主机名那一段。响应形状：`/start` 之外的**任何** target 都给同一份诚实 200
+/// （`Content-Length: 0` + `Accept-Ranges: bytes` + `ETag: "stub-h3"`），所以引擎可以在一条连接上
+/// 打第二枪、第三枪而不会撞到 404 —— 每条连接最多服务 8 枪、最多 8 条连接。
+pub fn spawn_header_recording_redirect_stub(location: &str) -> Result<(RedirectPeer, String)> {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .context("记头重定向对端 bind 失败")?;
+    let port = listener.local_addr().context("拿不到记头重定向对端的端口")?.port();
+    let raw_location = location.replace("{port}", &port.to_string());
+    let requests: Arc<Mutex<Vec<ReceivedRequest>>> = Arc::new(Mutex::new(vec![]));
+    let (thread_requests, thread_location) = (Arc::clone(&requests), raw_location.clone());
+    const MAX_CONNECTIONS: usize = 8;
+    const PER_CONNECTION: usize = 8;
+
+    thread::Builder::new()
+        .name("dlm-header-redirect-stub".into())
+        .spawn(move || {
+            for stream in listener.incoming().take(MAX_CONNECTIONS) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                for _ in 0..PER_CONNECTION {
+                    // 收整条请求（请求行 + 全部头 + 按 Content-Length 收 body），这样"第二跳还带着
+                    // Cookie 吗"才是**对端侧**的观察，而不是我们以为我们发出去了什么。
+                    let Some(req) = read_request_with_body(&mut stream) else { break };
+                    let redirecting = req.target.starts_with("/start");
+                    let resp = if redirecting {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {thread_location}\r\nContent-Length: 0\r\n\r\n"
+                        )
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                         Content-Length: 0\r\nAccept-Ranges: bytes\r\nETag: \"stub-h3\"\r\n\r\n"
+                            .to_string()
+                    };
+                    thread_requests.lock().expect("线程侧记录锁").push(req);
+                    if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .context("起记头重定向对端线程失败")?;
+
+    Ok((RedirectPeer { port, requests }, raw_location))
+}
+
+/// 记下**整条请求**的重定向对端句柄。取证面与 `PostPeer` 同形（`requests()` / `saw()`），
+/// 但它的 `requests()` 是"两跳混在一起、按到达顺序"的那一份 ⇒ 用例自己按 target 分跳。
+#[derive(Debug)]
+pub struct RedirectPeer {
+    port: u16,
+    requests: Arc<Mutex<Vec<ReceivedRequest>>>,
+}
+
+impl RedirectPeer {
+    /// 第一跳的 base（**永远写成 `127.0.0.1`**：这一族的"跨/同 host"是拿它跟 `Location` 里那个
+    /// 主机名字符串比出来的，base 这边必须固定成一种写法，否则两臂的差别就不只剩 `Location`）。
+    pub fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn requests(&self) -> Vec<ReceivedRequest> {
+        self.requests.lock().expect("记头对端的记录锁没竞争者").clone()
+    }
+
+    /// 收到过某个前缀的请求吗（"确实跟随了重定向"那一臂用它，别拿 `requests()` 自己拼）。
+    pub fn saw(&self, prefix: &str) -> bool {
+        self.requests().iter().any(|r| r.target.starts_with(prefix))
+    }
+}
+
 /// "说不出长度"的对端：`/no-length` 回 `200` + `Transfer-Encoding: chunked`，
 /// **既没有** `Content-Length` **也没有** `Content-Range`，也不发 `Accept-Ranges`。
 pub fn spawn_lengthless_stub() -> Result<Stub> {
