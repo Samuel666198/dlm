@@ -60,14 +60,22 @@
 //!    **非规范形状**（`http:/host`、`http:\\host`、多斜杠、http/https 之外的 scheme）也拒 ——
 //!    理由与 E9 同一条：这份串会原样落进 `validator.final_url`。
 //!    **T99-G1f 收成一条三支合取的 task-aware 判据**（半支 1 userinfo ｜半支 2 形状｜
-//!    **第三支：落地串里出现本任务 `--password` 的字面值 ⇒ 拒**，`!p.is_empty()` 那一刀不可省）。
+//!    **第三支：落地串里出现本任务 `--password` 的六种形状 ⇒ 拒**；短于 4 字节的口令不比内容，
+//!    下限与理由住在 `carries_our_password` 的文档里）。
 //!    动机与实测口径（半支 2 在落地口恒不触发、`@` 可被对面按相对引用折进 **path**）全写在
-//!    `landed_url_is_refused` 的文档里；七个落地口（本模块 247/259/328 ＋ `fetch` 四处）共用
-//!    这一条判据，`authority_has_userinfo` / `canonical_shape_of` 本体一个字没动，动的是调用点。
+//!    `landed_url_is_refused` 的文档里；七个落地口（本模块 `run()` 的两处 ＋ `facts_from_response`
+//!    一处 ＋ `fetch` 四处：`run_window` 两支 ＋ `run_whole` 两支）共用这一条判据，
+//!    `authority_has_userinfo` / `canonical_http_authority` 本体一个字没动，动的是调用点。
+//!    **T99-H2 §3：同一份内容判据再接到另外两个服务器可控字段上**（`etag` / `last_modified`）。
+//!    `ProbeFacts` 的装填口只有两处 —— `facts_from_response` 与本模块 `empty_file_facts`
+//!    （416 + `bytes */0` 那一支**不调** `facts_from_response`，只把闸接进去会漏掉它）——
+//!    两处各判一次，命中即拒，措辞是同一句 `LANDED_VERIFIER_CREDENTIALS`，同样不回显值。
 //! 6. **验证子按响应头的原样值保存，不归一化**（与 `resume::ProbeFacts` 的文档同一立场）；
 //!    但 `ETag`/`Last-Modified` 里出现**非 UTF-8 字节**时只能记成 `None`：`ProbeFacts` 与断点文件
 //!    都装不下它，`If-Range` 更没有强验证子可用。这不是"忽略噪音"—— 少了一把验证子，
 //!    `resume` 的 ③ 会自动落到 ④ 的长度兜底（Task 5 裁定 2），所以是**降级但可解释**的形状。
+//!    原样装填**之前**还有一道内容闸（T99-H2 §3，见上面第 5 条末段）：这两个字段和落地 URL 一样是
+//!    服务器可控的自由文本，装着本任务口令的六种形状时这份事实不收。
 //! 7. **试探带满 9 项契约头**（`Referer`/`Cookie`/`Authorization: Basic`/`Accept-Encoding: identity`/
 //!    `Accept: */*`）：`resume` 的 ①b 判的是"确认这些字节的请求与这次的请求是不是同一个"，
 //!    如果**第一枪**（定全长与 ETag 的这一枪）与后面几枪带的头不一样，`total_len`/`ETag` 就可能
@@ -172,7 +180,7 @@ impl ProbeResult {
     }
 }
 
-/// 落地 URL 带 userinfo、形状不规范、或**带着本任务口令的字面值**时那句**不回显 URL** 的拒绝
+/// 落地 URL 带 userinfo、形状不规范、或**带着本任务口令的那六种形状**时那句**不回显 URL** 的拒绝
 /// （模块文档第 5 条）。
 /// 两处失败路径共用同一个常量：成功响应里的落地 URL、以及 reqwest 在跟随重定向时失败的
 /// 那个 URL —— 一条规则不该有两个版本的措辞。
@@ -184,11 +192,192 @@ impl ProbeResult {
 ///
 /// `pub(crate)` 是 Task 7 的可见性改动（逻辑一个字没动）：`fetch` 的每一枪也可能被重定向到一条
 /// 带凭据的落地 URL（spec §6.5 + Task 5 评审 C3），同一个闸必须用**同一句**话拒绝。
-/// T99-G1f 之后这一句同样覆盖第三判据（落地串里带着本任务口令的字面值）—— 危害与措辞同源，
-/// 不另起一句。
+/// T99-G1f 之后这一句同样覆盖第三判据（落地串里带着本任务口令）—— 危害与措辞同源，不另起一句。
+/// 它**不**覆盖 `etag` / `last_modified` 那一道：那里被带的不是地址，措辞另有 `LANDED_VERIFIER_CREDENTIALS`。
 pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在主机名前面带着凭据（userinfo 那一段）：\
                                   它会被写进断点文件、并出现在续传冲突的原因里，因此拒绝收下这份事实；\
                                   本消息不回显那条地址";
+
+/// 服务器交回的 `ETag` / `Last-Modified` 里带着本任务口令的那六种形状时那句**不回显值**的拒绝
+/// （T99-H2 §3；模块文档第 5 条末段与第 6 条）。
+///
+/// 为什么不复用 `LANDED_CREDENTIALS`：那句的主语是"重定向后的地址"，而这里被带出口令的是**验证子**
+/// ——`resume` 的 ③ 那句 `ETag 与断点不符（断点 {saved:?} → 现在 {now:?}）` 会把这两个值原样打进
+/// 终端（② 那句打的是落地 URL，归上一句管）。主语错了，用户就会去改 URL 而不是去问服务器。
+/// 与那句同一条纪律：**一个字段值都不抄**，只点名是哪两个字段。
+const LANDED_VERIFIER_CREDENTIALS: &str = "服务器交回的验证子（ETag 或 Last-Modified）里带着本任务的口令：\
+                                  它会被写进断点文件、并出现在续传冲突的原因里，因此拒绝收下这份事实；\
+                                  本消息不回显那两个值";
+
+/// std 字母表（RFC 4648 §4，末两位是 `+` `/`）。
+const STD_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/// url-safe 字母表（RFC 4648 §5，末两位是 `-` `_`）：Basic 口令被塞进 URL 时对面更常给这一份。
+const URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// **内容判据的长度下限（字节数，不是 char 数）**，T99-H2 §2。
+///
+/// 判据从 1 种形状扩到 6 种之后，`--password 1` / `--password abc` 这类短口令会让**几乎每条**
+/// 落地串、每个 `ETag` 都被拒（4 字节的 base64 只有 4～8 个字符，撞进 CDN 路径里那一大片
+/// 十六进制/base64 样子的串是常态），而措辞还是那句"带着凭据"＝误导。
+/// 取 4 的理由（一句话）：**4 字节口令的 std base64 已经是 6 个字符（`YWJjZA==`），
+/// 再短一位（3 字节 ⇒ `YWJj`）就是 CDN 路径里十六进制串最常见的邻居** —— 于是"4 字节"是
+/// "短口令误杀"与"检测面积"的分界，比它短的不比内容。
+/// 短于下限时**只剩 userinfo 与形状那两支**（它们与口令无关，恒在），这一格是**文档化的边界**，
+/// 不是藏起来的宽松：见 `README.md`「凭证与边界」与 `src/state.rs` 模块头第 1 条。
+const PASSWORD_CONTENT_FLOOR: usize = 4;
+
+/// 字节 → base64。`alphabet` 选 std 或 url-safe，`pad` 决定是否补 `=`（四种形状由此两两组合）。
+///
+/// 为什么本仓库自己写一只 base64 编码器：依赖上限钉死在 6 个 crate（用户 2026-10-15 的裁定），
+/// 而这里是**编码**我们手上那份口令、不是解码对面 —— 与 `hex_lower` / 手写 sha256
+/// （`src/engine.rs`）同一先例。旧那句"本仓库无 base64 工具 ⇒ 检测不到"随 T99-H2 §1 作废。
+///
+/// ⚠ 接进判据之前，这只函数先按**已知真值**校准过（RFC 4648 §10 那七例 ＋ 一只独立仪器交的两份
+/// 字母表分家格），校准账与两处校准期间量出的错见 `.superpowers/sdd/…/t99-H2-report.md`；
+/// 盘上的钉子是 `the_base64_helper_is_calibrated_against_rfc_4648_and_a_second_instrument`。
+fn base64_of(bytes: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        // 不足 3 字节的尾巴按 0 补齐算出符号位，**但多出来的符号不发**（这就是 padding 那一档）。
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let group = (b0 << 16) | (b1 << 8) | b2;
+        out.push(alphabet[((group >> 18) & 0b11_1111) as usize] as char);
+        out.push(alphabet[((group >> 12) & 0b11_1111) as usize] as char);
+        match chunk.len() {
+            // 1 字节 ⇒ 只剩 2 个比特，第二个符号已经是补零后的那一档，后面没有第三个符号。
+            1 => {
+                if pad {
+                    out.push_str("==");
+                }
+            }
+            2 => {
+                out.push(alphabet[((group >> 6) & 0b11_1111) as usize] as char);
+                if pad {
+                    out.push('=');
+                }
+            }
+            _ => {
+                out.push(alphabet[((group >> 6) & 0b11_1111) as usize] as char);
+                out.push(alphabet[(group & 0b11_1111) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// 我们手上那份口令的**四种 base64 形状**（std/url-safe × 带/不带 padding）。
+fn password_base64_forms(password: &str) -> [String; 4] {
+    let bytes = password.as_bytes();
+    [
+        base64_of(bytes, STD_ALPHABET, true),
+        base64_of(bytes, STD_ALPHABET, false),
+        base64_of(bytes, URL_ALPHABET, true),
+        base64_of(bytes, URL_ALPHABET, false),
+    ]
+}
+
+/// 一个十六进制字符 → 0～15，不是十六进制 ⇒ `None`。
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 百分号解码，返回**字节**：`%XX`（大小写十六进制都认）→ 一个字节；裸 `%`、`%` 后不足两字符、
+/// `%zz` 这类看不懂的形状**原样保留**，**永不失败**、**永不 panic**。
+///
+/// 为什么是"解码待判串"而不是"按表编码我们的口令"（T99-H2 §1 的裁定）：`url` 那份串里哪些字符会被
+/// 写成 `%XX` 是**对面（和 reqwest）**的决定，手写一张"猜哪些字符会编码"的表迟早与对面分家 ——
+/// 这正是 E32 第 4 条立的规矩（凡与外部解析器共享一个形状判断，就按对面对输入做的事判，别自己猜）。
+/// 解码反过来做只需要 20 行、无需表，而且天然覆盖"对面编码了我们没编码的那一个字符"这一族方向差。
+///
+/// 返回 `Vec<u8>` 而不是 `String`：`%ff` 解出来不是合法 UTF-8，而**判据要的就是字节**
+/// （口令是 UTF-8 字节序列，待判串解码后是一串字节，两侧都在字节平面上比，见 `carries_our_password`）。
+/// `+` **不**解成空格：那是 `application/x-www-form-urlencoded` 的约定，不是百分号编码（RFC 3986）的
+/// 约定，`urllib.parse.unquote` 同一读法；这一族的欠账登记在报告"这发看不见什么"一节。
+fn percent_decoded_bytes(input: &str) -> Vec<u8> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 字节 haystack 里有没有字节 needle（`needle` 为空 ⇒ 假：`windows(0)` 会 panic，而"空口令"本来
+/// 就不该让任何东西被拒 —— 见 `PASSWORD_CONTENT_FLOOR` 那一段）。
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// **内容判据本体**（T99-H2 §1 把 G1f 那句 `url.contains(p)` 换掉的东西）：串里出现了本任务口令的
+/// **六种形状**之一就算带着凭据。位置无关（path、query、fragment、验证子值里都算）。
+///
+/// 六种形状，与"怎么比"一一对应：
+/// 1. **原样**（G1f 现役那一支；`p` 与 haystack 都在字节平面上）；
+/// 2. **对面把口令百分号编码** ⇒ 把待判串解码成字节再比**原样**口令（不猜哪些字符会编码）；
+///    3～6. **对面把我们这份口令按 base64 回显** ⇒ `std`/`url-safe` × 带 padding / 不带 padding 四形，
+///    拿这四个串去比待判串（编码的是**我们手上那份**，不是解对面的码）。
+///
+/// ⚠ **按字节比，不按 char 比**：口令是非 ASCII 时（`--password 中文`）它的 UTF-8 字节序列才是
+/// 会出现在线上的东西，而百分号解码交回的是**字节**（可能不是合法 UTF-8）；两侧统一到字节平面，
+/// 非 ASCII 口令与它 percent-encoded 的形式（`%E4%B8%AD%E6%96%87`）才落在同一格判据上。
+///
+/// **下限**：口令短于 `PASSWORD_CONTENT_FLOOR`（4 字节）时**不比内容**（含空串），只剩调用点那两支
+/// （userinfo／形状）在判 —— 这一格由 `an_empty_or_short_password_compares_no_content_at_all` 钉着
+/// （G1f 的 m1 那发旧针按新语义改写：旧的是"空口令拒一切"，今天的是"空串与 1～3 字节都不比内容"）。
+///
+/// `landed_url_is_refused` 的第三支与 `verifiers_carry_our_password` 用的是**这同一个函数**：
+/// 一条规则不许有两本账（三个服务器可控字段 × 同一份形状集合）。
+fn carries_our_password(haystack: &str, password: Option<&str>) -> bool {
+    let Some(p) = password else { return false };
+    if p.len() < PASSWORD_CONTENT_FLOOR {
+        return false;
+    }
+    let needle = p.as_bytes();
+    if contains_bytes(haystack.as_bytes(), needle) {
+        return true; // 形 1：原样
+    }
+    if contains_bytes(&percent_decoded_bytes(haystack), needle) {
+        return true; // 形 2：对面按百分号编码回显
+    }
+    password_base64_forms(p)
+        .iter()
+        .any(|form| contains_bytes(haystack.as_bytes(), form.as_bytes())) // 形 3～6
+}
+
+/// 两个验证子字段里有没有装着本任务口令的六种形状之一（T99-H2 §3）。
+///
+/// 为什么 `etag` / `last_modified` 要单列一道：它们和 `final_url` 一样是**服务器可控的自由文本**、
+/// 一样原样落进断点文件、一样被 `resume` 的原因串（③ 那句 `{saved:?} → {now:?}`）打回终端。
+/// 形状那两支在它们身上**不成立**（`ETag` 从来不是一条 URL），所以这里只接内容判据。
+/// 装填口两处都判：`facts_from_response`（正常那一支）与 `empty_file_facts`
+/// （416 + `bytes */0` 那一支**不调** `facts_from_response`）。
+fn verifiers_carry_our_password(
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    password: Option<&str>,
+) -> bool {
+    [etag, last_modified]
+        .into_iter()
+        .flatten()
+        .any(|value| carries_our_password(value, password))
+}
 
 /// 落地 URL 的**调用点**判据（T99-G1c §1.2 立的并联闸，T99-G1f 收成三条合取）：任一不过就拒。
 /// 七个落地口（`probe::run` 两处 ＋ `facts_from_response` 一处 ＋ `fetch` 四处）共用**这一条**，
@@ -198,8 +387,9 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
 /// 2. `task::canonical_http_authority` —— T99-G1c 新立的"只认规范写法"：非规范形状
 ///    （`http:/host`、`http:\\host`、多斜杠、其它 scheme、空 host）也拒；这里的"空 host"含**只有端口**
 ///    那一族（`https://:8443/a.bin`，判据是 authority 首字节为 `:`，T99-G1d **裁定一**）。
-/// 3. **第三支（T99-G1f，内容判据）**：本任务给过 `--password`（`Some(p)` 且 **`p` 非空**）且
-///    落地串里出现 `p` 的**字面值** ⇒ 拒。判据不是"形状"而是"内容"，位置无关（path/query 都算）。
+/// 3. **第三支（T99-G1f 立，T99-H2 §1/§2 加宽）**：本任务给过的口令**不少于 4 字节**且落地串里出现
+///    它的**六种形状**之一 ⇒ 拒（判据本体在 `carries_our_password`）。判据不是"形状"而是"内容"，
+///    位置无关（path/query 都算）。
 ///
 /// 第三支为什么必须存在（T99-G1e §1/§2 实测）：对面交回 `Location: http:/alice:s3cret@host/…`
 /// 这类串时，url 2.5.8 按**相对引用**解析 —— `@` 连同 `alice:s3cret` 落进 **path**，落地串形状
@@ -210,9 +400,11 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
 /// 并被 `resume` 的 ② 原因串原样打回终端"（`src/state.rs` 模块头第 1 条那句"这一支由校验闸拒绝"
 /// 管的是用户自己写的 URL，服务器交回的那一半此前没人管）。
 ///
-/// ⚠⚠ **`!p.is_empty()` 那一刀不许省**：`str::contains("")` 恒真 ⇒ 漏了它，"给了空口令"
-/// 会让**每一条**落地 URL 都被拒，等于把下载整条路砸掉，而且是一根恒红的假闸。这一刀由单元用例
-/// `an_empty_password_refuses_no_landing_url_at_all` 钉着（m1 变异：摘掉它 ⇒ 那一发必须红）。
+/// ⚠⚠ **下限那一刀不许省，也不许改回"只判空串"**：`str::contains("")` 恒真 ⇒ 漏了一刀，"给了空口令"
+/// 会让**每一条**落地 URL 都被拒，等于把下载整条路砸掉，而且是一根恒红的假闸；反过来，`--password 1`
+/// 这类 1～3 字节口令若也比内容，判据扩到六形之后会**误杀几乎每条落地串**（措辞还是"带着凭据"＝误导）。
+/// 这一格由单元用例 `an_empty_or_short_password_compares_no_content_at_all` 钉着
+/// （m-floor 变异：把下限改回 `!p.is_empty()` ⇒ 短口令放行那一侧的对照臂必须红）。
 ///
 /// ## 三支在落地口的实测口径（覆盖 T99-G1c 那两句旧话）
 ///
@@ -227,15 +419,18 @@ pub(crate) const LANDED_CREDENTIALS: &str = "服务器重定向后的地址在�
 /// - ⚠ **这整个结论只在这台仪器 ＋ reqwest 0.13.5 / url 2.5.8 / tower-http 0.6.11 / http 1.5.0
 ///   上成立**（L1/L3/L4 的 path 折入分支纯粹是 url crate 的实现分支）——升级对面任一版本
 ///   **必须复量** `tests/integration.rs` 的 `measure_the_landing_strings_…` 那张表。
-/// - 已知检测不到的形式（具名欠账，本仓库无 base64 工具也不加依赖）：对面把口令以 **Basic 的
-///   base64 形式**或**百分号编码形式**回显进 path 时，字面值比对看不见。
+/// - **T99-H2 关掉了这条具名欠账**（旧话："对面把口令以 Basic 的 base64 形式或百分号编码形式回显
+///   进 path 时，字面值比对看不见" ⇒ 现在看得见）。口径要说准：看得见的是**"对面按标准编码我们这份
+///   口令"**（percent / base64 的四种标准形状），**不是**"对面任意变形"（大小写打乱、加盐、二次编码、
+///   `+` 代表空格的表单编码那一族仍然看不见 —— 逐条登记在报告"这发看不见什么"一节）。
+///   ⚠ 归因也要改准：这一族的成因从来不只是"对面怎么编码"，**还有我们自己的手**：
+///   `url` 是 **reqwest 序列化之后**的串，`Location` 里的一个空格落到 `validator.final_url`
+///   已经变成 `%20` ⇒ 口令里只要含空格／`%`／`#`／任何非 ASCII，旧那句 `url.contains(p)` 本来就打不中。
 ///
 /// ⚠ **入参不由我们控制**（是服务器给的），所以这里不做归一之外的任何改写：只判、只拒，
 /// 不改写、不回显。
 pub(crate) fn landed_url_is_refused(url: &str, password: Option<&str>) -> bool {
-    authority_has_userinfo(url)
-        || canonical_http_authority(url).is_none()
-        || password.is_some_and(|p| !p.is_empty() && url.contains(p))
+    authority_has_userinfo(url) || canonical_http_authority(url).is_none() || carries_our_password(url, password)
 }
 
 /// 发**一发**试探请求，取回事实与预读。
@@ -285,7 +480,7 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     // `headers` 与 `final_url` 先取出来：`resp` 随后要被 body 的读取消耗掉（`Read` 要 `&mut`）。
     let headers = resp.headers().clone();
     let final_url = resp.url().clone();
-    // 模块文档第 5 条那道闸（三支合取：userinfo ／形状／本任务口令的字面值），
+    // 模块文档第 5 条那道闸（三支合取：userinfo ／形状／本任务口令的六种形状），
     // 排在**任何**可能复述这条 URL 的消息之前。
     if landed_url_is_refused(final_url.as_str(), task.password.as_deref()) {
         bail!("{LANDED_CREDENTIALS}");
@@ -296,18 +491,10 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     if status == StatusCode::RANGE_NOT_SATISFIABLE {
         let reported = header_text(&headers, CONTENT_RANGE).and_then(|v| content_range_total(&v));
         if range.is_some() && reported == Some(0) {
-            return Ok(ProbeResult {
-                facts: ProbeFacts {
-                    etag: header_text(&headers, ETAG),
-                    last_modified: header_text(&headers, LAST_MODIFIED),
-                    total_len: 0,
-                    final_url: final_url.into(),
-                    // 服务器**按 Range 语义**回答了这一枪（416 是 Range 语义的回答），
-                    // 只是文件恰好为空 —— 这不等于它不认 Range。
-                    accept_ranges: true,
-                },
-                prelude: vec![],
-            });
+            // 这一支**不调** `facts_from_response`，`etag` / `last_modified` 在这里直接装进事实
+            // ⇒ 验证子那道内容闸必须在这里也走一遍（T99-H2 §3；装填口＝ `empty_file_facts`）。
+            return empty_file_facts(&headers, final_url.into(), task.password.as_deref())
+                .map(|facts| ProbeResult { facts, prelude: vec![] });
         }
         bail!(
             "试探请求收到 416（Range Not Satisfiable）：对端报回的总长是 {reported:?}，\
@@ -324,6 +511,34 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     let facts = facts_from_response(status, range.is_some(), &headers, final_url.as_str(), task.password.as_deref())?;
     let prelude = read_bounded(resp, prelude_max)?;
     Ok(ProbeResult { facts, prelude })
+}
+
+/// 416 + `Content-Range: bytes */0` 那一支的**事实装填口**（模块文档第 9 条，评审 **F3** 裁定保留）。
+///
+/// 为什么不就地内联在 `run()` 里（T99-H2 §3 的实测处置）：这一支**不走** `facts_from_response`，
+/// 旧形状是"直接构造 `ProbeFacts`、把 `header_text` 交回的 `etag`/`last_modified` 原样装填"，
+/// 于是只把验证子闸接进 `facts_from_response` 会**漏掉它** —— 那一支同样有这两个字段（不是"根本没有
+/// 那两个值"）。抽成一只函数有两个好处：闸与装填住在一处（漏不得），且这一支的拒与放行能在**单元层**
+/// 真跑（`run()` 那一路要上网，而本机对端只有明文、带口令的任务在 `Task::validate()` 就被拒 ⇒
+/// 进程级造不出"416 + 带口令的 ETag"这一格，见报告"这发看不见什么"）。
+///
+/// `final_url` 不在这里判：`run()` 里更前面那道 `landed_url_is_refused` 已经管住它（这一支的
+/// 落地串与那道闸读的是同一份 `resp.url()`）。
+fn empty_file_facts(headers: &HeaderMap, final_url: String, password: Option<&str>) -> Result<ProbeFacts> {
+    let etag = header_text(headers, ETAG);
+    let last_modified = header_text(headers, LAST_MODIFIED);
+    if verifiers_carry_our_password(etag.as_deref(), last_modified.as_deref(), password) {
+        bail!("{LANDED_VERIFIER_CREDENTIALS}");
+    }
+    Ok(ProbeFacts {
+        etag,
+        last_modified,
+        total_len: 0,
+        final_url,
+        // 服务器**按 Range 语义**回答了这一枪（416 是 Range 语义的回答），
+        // 只是文件恰好为空 —— 这不等于它不认 Range。
+        accept_ranges: true,
+    })
 }
 
 /// **响应头 → `ProbeFacts` 的唯一一份读法**（修复轮 F2 的裁定：`probe` 与 `fetch` 不许各写一个）。
@@ -349,10 +564,16 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
 ///
 /// 落地 URL 那道凭据闸（模块文档第 5 条 / Task 5 评审 **C3** / 勘误 **E9** / T99-G1f 第三判据）
 /// **在本函数里**：它是"事实能不能收下来"的一部分，而 `fetch` 这一枪同样可能被重定向到
-/// 带 userinfo、带口令字面值的落地地址。对 `probe::run` 是幂等的（那边排在更前面），
-/// 对 `fetch::run_whole` 的落地 URL 是与 :1025 双保险里更贴事实装填口的那一道。
+/// 带 userinfo、带着本任务口令六种形状的落地地址。对 `probe::run` 是幂等的（那边排在更前面），
+/// 对 `fetch::run_whole` 的落地 URL 是与它自己那一处 `probe::landed_url_is_refused` 双保险里
+/// 更贴事实装填口的那一道。
 /// `password` 由调用方从手上的 `task` 交进来（`task.password.as_deref()`）：第三判据是
-/// **task-aware** 的——只比对**本任务给过的口令字面值**，不判形状之外的任何"坏味道"。
+/// **task-aware** 的——只比对**本任务给过的那份口令**可能出现的形状，不判形状之外的任何"坏味道"。
+///
+/// **T99-H2 §3 起本函数还多一道闸**：`etag` 与 `last_modified` 各判一次同一份内容判据
+/// （`verifiers_carry_our_password`）。它们也是服务器可控的自由文本、也原样落进断点文件、也会被
+/// `resume` 的 ③ 打进终端 —— 命中即拒，措辞是 `LANDED_VERIFIER_CREDENTIALS`，**不回显那两个值**。
+/// 这一道闸在这里、而不在调用方：`fetch::run_whole` 走的是同一个函数，接一次管两条路。
 pub(crate) fn facts_from_response(
     status: StatusCode,
     asked_for_range: bool,
@@ -362,6 +583,11 @@ pub(crate) fn facts_from_response(
 ) -> Result<ProbeFacts> {
     if landed_url_is_refused(final_url, password) {
         bail!("{LANDED_CREDENTIALS}");
+    }
+    let etag = header_text(headers, ETAG);
+    let last_modified = header_text(headers, LAST_MODIFIED);
+    if verifiers_carry_our_password(etag.as_deref(), last_modified.as_deref(), password) {
+        bail!("{LANDED_VERIFIER_CREDENTIALS}");
     }
     let total_len = total_len(headers, status).with_context(|| {
         // 两种"定不出长度"分开说，因为缺的东西不同（评审 **I2**）：
@@ -378,8 +604,8 @@ pub(crate) fn facts_from_response(
         }
     })?;
     Ok(ProbeFacts {
-        etag: header_text(headers, ETAG),
-        last_modified: header_text(headers, LAST_MODIFIED),
+        etag,
+        last_modified,
         total_len,
         final_url: final_url.to_string(),
         accept_ranges: peer_accepts_ranges(status, asked_for_range, headers),
@@ -771,7 +997,8 @@ mod tests {
         ] {
             assert!(authority_has_userinfo(url), "夹具前提：{url} 的 authority 里有 @");
         }
-        // 那条常量消息是本模块唯一的拒绝文本：它必须说清"凭据"与"重定向"，且不含任何 URL 片段。
+        // 那句常量是**落地 URL** 的拒绝文本（本模块另有 `LANDED_VERIFIER_CREDENTIALS` 管验证子，
+        // T99-H2 §3 —— 两句各自主语不同，都不许带值）：它必须说清"凭据"与"重定向"，且不含任何 URL 片段。
         let msg = LANDED_CREDENTIALS;
         assert!(msg.contains("凭据") && msg.contains("重定向"), "措辞要可行动：{msg}");
         for leak in ["alice", "s3cret", "@", "http://", "https://"] {
@@ -848,23 +1075,456 @@ mod tests {
         assert!(!landed_url_is_refused(land, None), "任务没口令，落地串按形状与 userinfo 判");
     }
 
-    /// 空口令臂：`--password ""` 的库层形状（`Some(String::new())`）＋ 任意**其余都过**的落地串 ⇒
-    /// 照旧放行。这一臂专门钉 `!p.is_empty()`：`str::contains("")` 恒真，摘掉那一刀它必红（m1）。
+    /// 空口令与短口令臂（T99-H2 §2 按新语义改写 G1f 那发 m1 针）：`--password ""` 的库层形状
+    /// （`Some(String::new())`）与 1～3 字节的口令**一律不比内容**，配 4 字节的**正向对照**。
+    ///
+    /// 旧那一钉的是 `!p.is_empty()`（`str::contains("")` 恒真 ⇒ 摘了它每条落地 URL 都被拒）；
+    /// 判据从 1 形扩到 6 形之后，光"非空"挡不住误杀：`--password 1` 的 base64 形状是 `MQ`/`MQ==`，
+    /// 这两个串在 CDN 路径里满地都是 ⇒ 下限那一刀（`PASSWORD_CONTENT_FLOOR`）接管旧的那一刀，
+    /// **空串仍然不比内容**（旧的那一格一个字符没少，m-floor 复旧时短口令臂必红）。
     #[test]
-    fn an_empty_password_refuses_no_landing_url_at_all() {
-        for url in [
-            "http://127.0.0.1:56296/landed",
-            "https://host:8443/a.bin?u=1",
-            "http://127.0.0.1:56296/alice@127.0.0.1:56296/landed",
-        ] {
+    fn an_empty_or_short_password_compares_no_content_at_all() {
+        // 反臂（下限之外都不比内容）：串里就写着那份口令、或写着它的 base64 形状，也照旧放行。
+        for password in ["", "1", "ab", "abc"] {
+            for url in [
+                "http://127.0.0.1:56296/x/abc",
+                "http://127.0.0.1:56296/x/YWJj", // `base64("abc")`：形状在串里也不比
+                "http://127.0.0.1:56296/x/MQ==", // `base64("1")`（带 padding 那一形）
+                "http://127.0.0.1:56296/x/1",
+                "http://127.0.0.1:56296/landed",
+                "https://host:8443/a.bin?u=1",
+                // 旧那发 m1 针的这一格照搬不动（G1e 的 L1 家族：`@` 折在 path 里、形状规范）：
+                // 下限接管旧那一刀之后，这种串在空口令与短口令下仍必须放行。
+                "http://127.0.0.1:56296/alice@127.0.0.1:56296/landed",
+            ] {
+                assert!(
+                    !landed_url_is_refused(url, Some(password)),
+                    "{password:?} 是 {} 字节的短口令 ⇒ 内容判据不该开火（误杀几乎每条落地串，\
+                     而措辞还是\"带着凭据\"）：{url}",
+                    password.len()
+                );
+            }
+        }
+        // 正臂（下限就是 4，不是 5）：4 字节的口令比中即拒。
+        assert!(
+            landed_url_is_refused("http://127.0.0.1:56296/x/abcd", Some("abcd")),
+            "4 字节口令在落地串里被原样带着 ⇒ 必须拒（下限取 4 的钉子在这一格）"
+        );
+        // 下限只管**内容**这一支：userinfo 与形状那两支与口令无关，短口令任务照样拒（不许被"放宽"误伤）。
+        assert!(landed_url_is_refused("https://alice:s3cret@host/x", Some("ab")), "userinfo 那支被下限带走了");
+        assert!(landed_url_is_refused("http:/host/x", Some("")), "形状那支被下限带走了");
+        // char 数不算，**字节数**才算：`中` 是一个 char、三个字节 ⇒ 在下限之外。
+        assert!(
+            !landed_url_is_refused("http://127.0.0.1:56296/中", Some("中")),
+            "`中` 的 UTF-8 长度是 3 字节 ⇒ 与 1～3 字节的 ASCII 口令同一档（下限按字节，见 `PASSWORD_CONTENT_FLOOR`）"
+        );
+        // 对照方向（不许被"修 m-floor"的人顺手放宽）：非空且够长的口令照旧逐字判。
+        assert!(landed_url_is_refused("http://127.0.0.1:56296/x/hunter2", Some("hunter2")));
+    }
+
+    // ---- T99-H2 §1：内容判据的六种形状（编码器与解码器先各自钉死，再进判据）----
+
+    /// **编码器的校准针**：`base64_of` 的输入输出逐字写死，期望值**不问被测函数要**。
+    ///
+    /// 两处来源，都是另一台仪器交回的真值（本仓库另有一发仓库外一次性 `rustc` 探针跑同一张表，
+    /// 账在 `.superpowers/sdd/2026-10-15-dlm-kernel/t99-H2-report.md`）：
+    /// ① RFC 4648 §10 那七例（`""`/`f`/`fo`/`foo`/`foob`/`fooba`/`foobar`）——控制员已用另一台仪器
+    ///    复核过这组期望值属实；② Python `base64.b64encode` / `urlsafe_b64encode` 交的、
+    ///    **两个字母表必须分家**的格子（`ÿÿ`、`testÿ`、`pÿss`：std 给 `/`、url-safe 给 `_`），
+    ///    七例本身全是 ASCII 字母，两个字母表在那一组上同值 ⇒ 只抄七例的话字母表写反了也测不出来
+    ///    （这一格是校准期间新买的，不是装饰）。
+    #[test]
+    fn the_base64_helper_is_calibrated_against_rfc_4648_and_a_second_instrument() {
+        // (输入, std 带 padding, std 不带, url-safe 带, url-safe 不带) —— 22 行 × 4 形逐字写死。
+        const TABLE: &[(&str, &str, &str, &str, &str)] = &[
+            // ① RFC 4648 §10
+            ("", "", "", "", ""),
+            ("f", "Zg==", "Zg", "Zg==", "Zg"),
+            ("fo", "Zm8=", "Zm8", "Zm8=", "Zm8"),
+            ("foo", "Zm9v", "Zm9v", "Zm9v", "Zm9v"),
+            ("foob", "Zm9vYg==", "Zm9vYg", "Zm9vYg==", "Zm9vYg"),
+            ("fooba", "Zm9vYmE=", "Zm9vYmE", "Zm9vYmE=", "Zm9vYmE"),
+            ("foobar", "Zm9vYmFy", "Zm9vYmFy", "Zm9vYmFy", "Zm9vYmFy"),
+            // ② 另一台仪器（Python）交的表：本判据真正会拿到的形状，含长度非 3 的倍数、
+            //    非 ASCII（UTF-8 字节）、以及两个字母表分家的 `/` ↔ `_`。
+            ("1", "MQ==", "MQ", "MQ==", "MQ"),
+            ("abc", "YWJj", "YWJj", "YWJj", "YWJj"),
+            ("abcd", "YWJjZA==", "YWJjZA", "YWJjZA==", "YWJjZA"),
+            ("abcde", "YWJjZGU=", "YWJjZGU", "YWJjZGU=", "YWJjZGU"),
+            ("hunter2", "aHVudGVyMg==", "aHVudGVyMg", "aHVudGVyMg==", "aHVudGVyMg"),
+            ("a b%c#", "YSBiJWMj", "YSBiJWMj", "YSBiJWMj", "YSBiJWMj"),
+            ("中文", "5Lit5paH", "5Lit5paH", "5Lit5paH", "5Lit5paH"),
+            ("ÿ", "w78=", "w78", "w78=", "w78"),
+            ("ÿÿ", "w7/Dvw==", "w7/Dvw", "w7_Dvw==", "w7_Dvw"),
+            ("testÿ", "dGVzdMO/", "dGVzdMO/", "dGVzdMO_", "dGVzdMO_"),
+            ("pÿss", "cMO/c3M=", "cMO/c3M", "cMO_c3M=", "cMO_c3M"),
+            ("secret+val/ue", "c2VjcmV0K3ZhbC91ZQ==", "c2VjcmV0K3ZhbC91ZQ", "c2VjcmV0K3ZhbC91ZQ==", "c2VjcmV0K3ZhbC91ZQ"),
+        ];
+        for (input, std_padded, std_unpadded, url_padded, url_unpadded) in TABLE {
+            let bytes = input.as_bytes();
+            assert_eq!(base64_of(bytes, STD_ALPHABET, true), *std_padded, "std 带 padding：{input:?}");
+            assert_eq!(base64_of(bytes, STD_ALPHABET, false), *std_unpadded, "std 去 padding：{input:?}");
+            assert_eq!(base64_of(bytes, URL_ALPHABET, true), *url_padded, "url-safe 带 padding：{input:?}");
+            assert_eq!(base64_of(bytes, URL_ALPHABET, false), *url_unpadded, "url-safe 去 padding：{input:?}");
+        }
+        // 判据实际消费的是 `password_base64_forms` 那四元组：顺序与内容也要逐字钉一次
+        // （顺序写反＝四个形状里少判两个，表驱动看不出来）。
+        assert_eq!(
+            password_base64_forms("ÿÿ"),
+            ["w7/Dvw==".to_string(), "w7/Dvw".to_string(), "w7_Dvw==".to_string(), "w7_Dvw".to_string()],
+            "四形的顺序：std 带 pad、std 去 pad、url 带 pad、url 去 pad"
+        );
+        assert_eq!(
+            password_base64_forms("hunter2"),
+            [
+                "aHVudGVyMg==".to_string(),
+                "aHVudGVyMg".to_string(),
+                "aHVudGVyMg==".to_string(),
+                "aHVudGVyMg".to_string()
+            ],
+            "ASCII 口令两个字母表同值（这正是七例测不出字母表分家的原因）"
+        );
+    }
+
+    /// **百分号解码器的校准针**（同样逐字写死，期望值来自另一台仪器 `urllib.parse.unquote` 的同一语义）。
+    ///
+    /// 判据要的性质只有两条：**看得懂的 `%XX` 变成一个字节**、**看不懂的一律原样保留且永不失败**
+    /// （待判串是服务器给的自由文本，解码器一旦 panic 就是把 DoS 交给了对面）。
+    /// 返回**字节**：`%ff` 解出来不是合法 UTF-8，而判据比的正是字节。
+    #[test]
+    fn the_percent_decoder_keeps_every_shape_it_cannot_read() {
+        const TABLE: &[(&str, &[u8])] = &[
+            ("a%20b", b"a b"),                    // §1 点名的那一格：空格在线上就是 `%20`
+            ("%68unter2", b"hunter2"),            // 对面把口令**整串**编码
+            ("hunter%32", b"hunter2"),            // 对面只编码了其中一字节
+            ("a%2fb", b"a/b"),
+            ("a%2Fb", b"a/b"),                    // 十六进制大小写都认
+            ("%E4%B8%AD%E6%96%87", "中文".as_bytes()), // 非 ASCII 口令的 UTF-8 字节序列
+            ("%ff", &[0xFF]),                     // 解出来不是合法 UTF-8 ⇒ 只能按字节比
+            ("a%00b", b"a\0b"),
+            ("100%", b"100%"),                    // 裸 `%`：原样
+            ("%", b"%"),
+            ("%2", b"%2"),                        // `%` 后面不足两字符：原样
+            ("%zz", b"%zz"),                      // 不是十六进制：原样
+            ("%%20", b"% "),                      // 第一个 `%` 看不懂就照抄，第二个照常解（与 unquote 同读法）
+            ("%2520", b"%20"),                    // 二次编码只解一层（本发**不**追第二次，见报告）
+            ("+%2B", b"++"),                      // `+` **不**解成空格：那是 form-urlencoded 的约定
+            ("no-percent-here", b"no-percent-here"),
+            ("", b""),
+        ];
+        for (input, want) in TABLE {
+            assert_eq!(percent_decoded_bytes(input), *want, "解码 {input:?}");
+        }
+    }
+
+    /// 六种形状**逐形**都要让落地串被拒。每格的"待判串"里除字面形那一格外都**不含**口令的字面，
+    /// 于是"这一格红"只能归因于被测的那一支 —— 摘掉百分号那支（m-pct）或摘掉 base64 那四支（m-b64）
+    /// 都有**具体格子**红，不是只有"整体变严"。
+    /// 表里每格另带两条**夹具前提**（形状规范、authority 无 `@`）：那两支旧闸不许替被测的那一支开火。
+    #[test]
+    fn the_content_criterion_sees_all_six_shapes_of_our_password_in_a_landing_url() {
+        // (待判串, 本任务口令, 这一格钉的是哪一支)
+        const CELLS: &[(&str, &str, &str)] = &[
+            // 形 1：原样（G1f 现役那一支，保留）。
+            ("http://127.0.0.1:56296/x/hunter2", "hunter2", "形 1 原样"),
+            // 形 2：对面按百分号编码回显 ⇒ 解码待判串再比原样口令。旧那句 `url.contains(p)` 打不中，
+            // 而且 §1 点名的正是这一族的**另一半成因**：口令里只要含空格／`%`／非 ASCII，
+            // reqwest 序列化之后落地串里已经是 `%20`，**对面一个字都没改**也比不中。
+            ("http://127.0.0.1:56296/landed?tok=hunter%32", "hunter2", "形 2 百分号（只编码了一字节）"),
+            ("http://127.0.0.1:56296/%68unter2", "hunter2", "形 2 百分号（整串编码）"),
+            ("http://127.0.0.1:56296/a%20b2", "a b2", "形 2 百分号（空格 → %20，§1 那一句的形状）"),
+            ("http://127.0.0.1:56296/%E4%B8%AD%E6%96%87", "中文", "形 2 百分号 × 非 ASCII（字节平面）"),
+            // 形 3～6：把**我们这份**口令做 std / url-safe × 带 / 不带 padding 四个形状。
+            // `ÿÿ`（UTF-8 四字节）的四个形状两两不同 ⇒ 四支各自有格子，`_` 与 `=` 的差别都量得到。
+            ("http://127.0.0.1:56296/w7/Dvw==", "ÿÿ", "形 3 std 带 padding"),
+            ("http://127.0.0.1:56296/w7/Dvw", "ÿÿ", "形 4 std 去 padding"),
+            ("http://127.0.0.1:56296/w7_Dvw==", "ÿÿ", "形 5 url-safe 带 padding"),
+            ("http://127.0.0.1:56296/w7_Dvw", "ÿÿ", "形 6 url-safe 去 padding"),
+            ("http://127.0.0.1:56296/5Lit5paH", "中文", "形 3～6 × 非 ASCII 口令"),
+        ];
+        for &(url, password, arm) in CELLS {
             assert!(
-                !landed_url_is_refused(url, Some("")),
-                "空口令让 {url} 被拒 ⇒ `!p.is_empty()` 那一刀没了（每条落地 URL 都被拒 = 恒红假闸，下载整条路被砸掉）"
+                canonical_http_authority(url).is_some(),
+                "夹具前提：{url} 必须是规范写法，否则半支 2 会替{arm}开火"
+            );
+            assert!(!authority_has_userinfo(url), "夹具前提：{url} 的 authority 里不许有 @");
+            if !arm.starts_with("形 1") {
+                assert!(!url.contains(password), "夹具前提：{arm} 这一格里不该有口令的字面形：{url}");
+            }
+            assert!(
+                landed_url_is_refused(url, Some(password)),
+                "{arm} 没被拒：本任务口令 {password:?} 就以这一种形状写在落地串里（摘掉那一支＝这一格红）"
             );
         }
-        // 对照方向（不许被"修 m1"的人顺手放宽）：空串不是"没有口令"的另一种写法被特判放行——
-        // 它就是靠 `!p.is_empty()` 这一刀出局；非空口令照旧逐字判。
-        assert!(landed_url_is_refused("http://127.0.0.1:56296/x/hunter2", Some("hunter2")));
+
+        // 对照臂（判据不许变成"看见什么都像凭据"）：这些串里没有本任务口令的任何一种形状。
+        for url in [
+            "http://127.0.0.1:56296/landed",
+            "http://127.0.0.1:56296/w7/Dvw==",     // 是**别的**口令的形状
+            "http://127.0.0.1:56296/YWJjZA==",     // `base64("abcd")`，本任务口令是 hunter2
+            "http://127.0.0.1:56296/a%20b2",       // 百分号形属于别的口令
+            "http://127.0.0.1:56296/normal.bin",
+        ] {
+            assert!(!landed_url_is_refused(url, Some("hunter2")), "第三支不许对 {url} 开火（口令是 hunter2）");
+        }
+    }
+
+    // ---- T99-H2 §3：`etag` / `last_modified` 这两个服务器可控字段也过同一份内容判据 ----
+
+    /// 装填口两处（`facts_from_response` 与 416 那一支 `empty_file_facts`）都必须拒，
+    /// 且消息**不回显那两个值**；正常验证子与短口令必须放行（误杀对照臂）。
+    #[test]
+    fn the_verifier_gate_refuses_facts_whose_etag_or_last_modified_carries_our_password() {
+        let secret = "hunter2";
+        // 落地 URL 干净（两支旧闸都过），只有验证子里带着口令 ⇒ 拒的只能是新那道闸。
+        // (口令, 字段, 值)：值全是 ASCII（`headers()` 那个夹具只装得下合法头值），
+        // 而 `ÿÿ` 这一份口令本身是非 ASCII —— 它的 base64 形状是 ASCII，这正是那四形的用处。
+        for (secret, name, value) in [
+            ("hunter2", "etag", "\"hunter2\""),         // 形 1：字面
+            ("hunter2", "etag", "\"%68unter2\""),       // 形 2：百分号（整串编码）
+            ("hunter2", "etag", "\"a%20hunter2\""),     // 形 2：只有一个空格落到线上成了 %20
+            ("hunter2", "etag", "\"aHVudGVyMg==\""),    // 形 3/4：std（带 pad 的串里同时有去 pad 那一形）
+            ("hunter2", "last-modified", "hunter2-fixed"), // 另一个字段同一条判据
+            ("hunter2", "last-modified", "\"y-aHVudGVyMg\""), // 另一个字段 × base64 去 padding
+            ("ÿÿ", "etag", "\"x-w7_Dvw\""),             // 形 6：url-safe 去 padding（std 那两形看不见 `_`）
+            ("ÿÿ", "last-modified", "w7/Dvw=="),         // 形 3：std 带 padding
+        ] {
+            let h = headers(&[("content-length", "10"), (name, value)]);
+            let Err(err) = facts_from_response(StatusCode::OK, false, &h, "https://host/a.bin", Some(secret)) else {
+                panic!("验证子 {name}={value:?} 里带着本任务口令 ⇒ 这份事实不许收下");
+            };
+            let msg = err.to_string();
+            assert_eq!(msg, LANDED_VERIFIER_CREDENTIALS, "同一句常量，不许有第二个版本：{msg}");
+            assert!(!msg.contains(secret) && !msg.contains(value), "拒绝消息回显了字段值：{msg}");
+            assert!(msg.contains("验证子") && msg.contains("口令"), "措辞要点名是哪两个字段：{msg}");
+            assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
+        }
+
+        // 反方向（误杀对照臂）：**别的**口令的 base64 形状、百分号形状都不该让诚实验证子被拒
+        // （判据是 task-aware 的，不是"这看着像凭据"）。
+        let honest = headers(&[
+            ("content-length", "10"),
+            ("etag", "W/\"YWJjZA==\""), // `base64("abcd")`，本任务口令是 hunter2
+            ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+        ]);
+        let facts = facts_from_response(StatusCode::OK, false, &honest, "https://host/a.bin", Some(secret))
+            .expect("诚实验证子与口令无关，不许误杀");
+        assert_eq!(facts.etag.as_deref(), Some("W/\"YWJjZA==\""), "放行时验证子照旧原样装填（不归一化）");
+        assert_eq!(facts.last_modified.as_deref(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
+
+        // 下限同样管这一支：3 字节口令即使字面撞在 ETag 里也**不比内容**（§2 的口径覆盖三个字段）。
+        let short = headers(&[("content-length", "10"), ("etag", "\"abc\"")]);
+        assert!(facts_from_response(StatusCode::OK, false, &short, "https://host/a.bin", Some("abc")).is_ok());
+        // 没给口令 ⇒ 这一道闸恒不关火（对面爱在 ETag 里放什么放什么）。
+        assert!(facts_from_response(StatusCode::OK, false, &short, "https://host/a.bin", None).is_ok());
+
+        // 416 + `bytes */0` 那一支：它**不调** `facts_from_response`，所以单独钉一次同一道闸。
+        let tainted = headers(&[("content-range", "bytes */0"), ("etag", "\"aHVudGVyMg==\"")]);
+        let Err(err) = empty_file_facts(&tainted, "http://127.0.0.1:56296/sz/0".to_string(), Some(secret)) else {
+            panic!("416 那一支的 ETag 带着本任务口令 ⇒ 不许交回事实（这一支不走 facts_from_response）");
+        };
+        let msg = err.to_string();
+        assert_eq!(msg, LANDED_VERIFIER_CREDENTIALS, "同一句常量，不许有第二个版本：{msg}");
+        assert!(!msg.contains(secret) && !msg.contains("aHVudGVyMg"), "拒绝消息回显了字段值：{msg}");
+
+        // 那一支的**放行形状**一个字节都不许变（模块文档第 9 条的三条并列，与抽出前逐字段同值）：
+        // `total_len` 恒 0、`accept_ranges` 恒 true（解读）、验证子原样。
+        let empty = headers(&[("content-range", "bytes */0"), ("etag", "\"probe-abc\"")]);
+        let facts = empty_file_facts(&empty, "http://127.0.0.1:56296/sz/0".to_string(), Some(secret))
+            .expect("诚实的空文件事实照旧收得下");
+        assert_eq!(
+            facts,
+            ProbeFacts {
+                etag: Some("\"probe-abc\"".into()),
+                last_modified: None,
+                total_len: 0,
+                final_url: "http://127.0.0.1:56296/sz/0".into(),
+                accept_ranges: true,
+            },
+            "抽出这一支是**位置**的改变，不是读法的改变"
+        );
+    }
+
+    // ---- T99-H2 §4：把"七个落地口统一 + 两处装填口都判验证子"从注释变成针 ----
+
+    /// `src/probe.rs` **产品区**的形状针（写法照 `src/task.rs` 那根：切到第一个 `#[cfg(test)]` 之前、
+    /// 跳过以 `//` 开头的行）。
+    ///
+    /// 为什么行为用例不够（本发存在的理由，与 `tests/integration.rs` 那根数 `fetch` 四次的针同源）：
+    /// 现役那根只数 `probe::landed_url_is_refused(` 在 `src/fetch.rs` 恰好 4 次 ＋ 禁旧判据 ——
+    /// **把任一处第二实参换成 `None`，次数不变、禁字不碰、四闸全绿**（m-arg 实测只有本发会红）。
+    /// 本模块这两件事没人钉过：① 三支合取的调用点有几处、每处**有没有把口令交进来**；
+    /// ② 416 那一支（它不调 `facts_from_response`）有没有走验证子闸。
+    ///
+    /// 四条断言：
+    /// 1. `landed_url_is_refused(` 的定义在产品区恰好 1 次、**调用**恰好 3 次（`run()` 两处 ＋
+    ///    `facts_from_response` 一处；`fetch` 那四处由集成层那根管，两条账合起来＝七个落地口）。
+    /// 2. 三处调用的**第二个实参**逐个截出来（按括号深度配到右括号）：必须含 `password` 这个名字、
+    ///    必须不是裸 `None` —— 这就是 m-arg 的靶子，也是"统一判据不许有人少交一份口令"的牙。
+    /// 3. `verifiers_carry_our_password(` 的**调用**恰好 2 次（`facts_from_response` 一处 ＋
+    ///    `empty_file_facts` 一处）：少了＝某一处装填口退回不判验证子。
+    /// 4. 416 那一支（`if status == StatusCode::RANGE_NOT_SATISFIABLE {` 的体内）必须出现
+    ///    `empty_file_facts(`，而 `empty_file_facts` 的体内必须出现验证子闸与那句常量：
+    ///    钉"那一支确实走判据"这件事，因为**这台仪器造不出它的进程级夹具**（带口令的任务在明文对端
+    ///    上先被 `Task::validate()` 拒，见上面 T99-G1f 那段与报告"这发看不见什么"）。
+    #[test]
+    fn the_landing_and_verifier_gates_have_their_documented_call_sites_and_none_of_them_drops_the_password() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("probe.rs");
+        let all = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）", path.display()));
+        let src = match all.find("#[cfg(test)]") {
+            Some(at) => &all[..at],
+            None => panic!("src/probe.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"),
+        };
+        let code_lines = || src.lines().map(str::trim_start).filter(|l| !l.starts_with("//")).collect::<Vec<&str>>();
+        let lines = code_lines();
+
+        // 断言 1：定义一次、调用三次。
+        let call_sites = |token: &str, def_token: &str| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|l| l.contains(token) && !l.contains(def_token))
+                .map(|l| (*l).to_string())
+                .collect()
+        };
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("fn landed_url_is_refused(")).count(),
+            1,
+            "`fn landed_url_is_refused(` 在产品区应当恰好定义一次（两本账）"
+        );
+        let landing_calls = call_sites("landed_url_is_refused(", "fn landed_url_is_refused(");
+        assert_eq!(
+            landing_calls.len(),
+            3,
+            "src/probe.rs 产品区里 `landed_url_is_refused(` 的**调用**应当恰好 3 次（`run()` 两处 ＋ \
+             `facts_from_response` 一处），实得 {} 次：少了＝某个落地口退回旧判据或整处删掉，\
+             多了＝判据又开了第二个入口。逐行：{landing_calls:?}",
+            landing_calls.len()
+        );
+
+        // 断言 2：每处调用的第二个实参必须点名 password，不许是裸 None。
+        for site in &landing_calls {
+            let args = args_after_first_open_paren(site, "landed_url_is_refused(");
+            let second = top_level_args(&args)
+                .get(1)
+                .unwrap_or_else(|| panic!("调用点少了第二个实参（判据签名要两份输入）：{site}"))
+                .trim()
+                .to_string();
+            assert!(
+                second.contains("password"),
+                "落地闸的调用点把第二实参换掉了（{second:?}）⇒ 那一处不再知道本任务的口令，\
+                 内容判据在那一个口上恒假（m-arg 禁的形状）：{site}"
+            );
+            assert_ne!(second, "None", "落地闸的调用点交回裸 `None` ⇒ 同一个口退回只看形状：{site}");
+        }
+
+        // 断言 3：验证子那道闸在两处装填口各判一次。
+        let verifier_calls = call_sites("verifiers_carry_our_password(", "fn verifiers_carry_our_password(");
+        assert_eq!(
+            verifier_calls.len(),
+            2,
+            "`verifiers_carry_our_password(` 的**调用**应当恰好 2 次（`facts_from_response` ＋ \
+             `empty_file_facts`），实得 {} 次：416 那一支不走 `facts_from_response`，\
+             少一次就有一个装填口漏判。逐行：{verifier_calls:?}",
+            verifier_calls.len()
+        );
+
+        // 断言 4：416 那一支确实经由 `empty_file_facts`，而它体内带着验证子闸。
+        let branch = body_of(src, "if status == StatusCode::RANGE_NOT_SATISFIABLE");
+        assert!(
+            branch.contains("empty_file_facts("),
+            "416 + `bytes */0` 那一支不再经由 `empty_file_facts(` ⇒ 那一支的 `etag`/`last_modified` \
+             退回未经任何内容闸直接装填（T99-H2 §3 堵的就是这一格）"
+        );
+        assert_eq!(
+            call_sites("empty_file_facts(", "fn empty_file_facts(").len(),
+            1,
+            "`empty_file_facts(` 的调用应当恰好 1 次（就是 416 那一支）"
+        );
+        let facts_body = body_of(src, "fn empty_file_facts(");
+        assert!(
+            facts_body.contains("verifiers_carry_our_password(") && facts_body.contains("LANDED_VERIFIER_CREDENTIALS"),
+            "`empty_file_facts` 的体内没有验证子闸或没有那句常量 ⇒ 416 那一支的闸被掏空了"
+        );
+    }
+
+    /// 从 `line` 里 `token` 后面的第一个 `(` 起，按括号深度截到配对的右括号，返回**括号内**文本
+    /// （不含那对括号本身）。本针只看产品区那几行形状已知的调用点（不是解析器，与 `task.rs` 那根的
+    /// 按大括号深度同源）。
+    fn args_after_first_open_paren(line: &str, token: &str) -> String {
+        let at = line.find(token).expect("调用点里应当有这只 token");
+        let mut depth = 1i32; // 已经站在 `token` 自己那只左括号里
+        let mut out = String::new();
+        for c in line[at + token.len()..].chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return out;
+                    }
+                }
+                _ => {}
+            }
+            if depth > 0 {
+                out.push(c);
+            }
+        }
+        panic!("调用点的括号没闭合（针的夹具跟不上实现形状）：{line}");
+    }
+
+    /// 按**顶层**逗号切实参（括号、方括号、尖括号、字符串字面量里的逗号不算分隔）。
+    fn top_level_args(args: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut current = String::new();
+        for c in args.chars() {
+            match c {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    current.push(c);
+                }
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    current.push(c);
+                }
+                ',' if depth == 0 => {
+                    out.push(std::mem::take(&mut current));
+                }
+                _ => current.push(c),
+            }
+        }
+        out.push(current);
+        out
+    }
+
+    /// 函数/语句块切片：从含 `head` 的第一行起按**大括号深度**截到闭合，只收非 `//` 开头的行
+    /// （与 `src/task.rs` 那根的 `body_of` 同一写法）。
+    fn body_of(src: &str, head: &str) -> String {
+        let mut body = String::new();
+        let mut depth = 0i32;
+        let mut inside = false;
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if !inside {
+                if !t.contains(head) {
+                    continue;
+                }
+                inside = true;
+            }
+            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            body.push_str(line);
+            body.push('\n');
+            if depth == 0 && body.len() > 1 {
+                break;
+            }
+        }
+        assert!(inside, "产品区里找不到含 `{head}` 的非注释行——本该存在的判据/分支没了");
+        assert_eq!(depth, 0, "`{head}` 的块在大括号深度上没闭合——针的夹具跟不上实现形状");
+        body
     }
 
     // ---- 请求的形状（单元层就看得见，不必打网络）----
