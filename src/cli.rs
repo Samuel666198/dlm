@@ -638,6 +638,14 @@ mod tests {
         Ok(())
     }
 
+    /// `Config` 的四格默认值与显式值各归其位。
+    ///
+    /// **T99-J2 第 3 节（Q5-1）在这里加了一格交叉针**：`--connections` 帮助里"默认 **8**"那个数与
+    /// `src/consts.rs` 的 `DEFAULT_CONNECTIONS` 必须相等。这**不**违反"期望值不许问被测产品自己要"
+    /// —— 这里正是拿一份对面（帮助文本）问另一份（实现常数），与 `connections_lower_bound_is_a_parameter_error`
+    /// 同一立场；此前两侧同源于实现常数 ⇒ 把帮助里的 8 改成 9（纯文案漂移）四闸照绿。
+    /// ⚠ `number_from_help` 只认「marker ＋ 空格 ＋ 十进制」这一种排版，帮助哪天写成 `默认：8`／`≥ 8`
+    /// 它会**当场 panic**（宁可红不静默，与 M-4② 同一立场）。
     #[test]
     fn into_config_fills_exactly_the_four_documented_fields() -> anyhow::Result<()> {
         let c = parse(&[
@@ -663,6 +671,14 @@ mod tests {
         assert_eq!(c.into_task()?.flags, 0);
         let d = parse(&["dlm", "--url", "https://x/a"])?.into_config();
         assert_eq!((d.workers, d.max_retries, d.verify_sha256, d.force_fresh), (DEFAULT_CONNECTIONS, None, None, false), "什么都不给时四格各归其位");
+        // **T99-J2 第 3 节（Q5-1）**：帮助里那个"默认 N"与实现常数交叉一次（期望值来自**实现常数**、
+        // 输入来自**帮助文本**，两份对面互问；这不是"问被测产品自己要"，与 `…_lower_bound_…` 同一立场）。
+        // 不并进来时的实测缺口：把 `src/cli.rs:237` 的"默认 8"改成"默认 9"而实现一字不动，四闸全绿。
+        assert_eq!(
+            number_from_help("connections", "默认"),
+            DEFAULT_CONNECTIONS,
+            "`--connections` 的帮助写的默认值与 `consts::DEFAULT_CONNECTIONS` 必须是同一个数（T99-J2 第 3 节）"
+        );
         Ok(())
     }
 

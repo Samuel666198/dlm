@@ -679,7 +679,10 @@ pub fn spawn_raw_redirect_stub(location: &str) -> Result<(Stub, String)> {
 ///
 /// `location` 里的 `{port}` 换成本对端**实际拿到**的端口（与 `spawn_raw_redirect_stub` 同一约定），
 /// 其余照抄那一只：host 写法完全由调用方决定，好让"跨 host"与"同 host"两臂只差 `Location` 里
-/// 主机名那一段。响应形状：`/start` 之外的**任何** target 都给同一份诚实 200
+/// 主机名那一段。**T99-J2 第 2 节（端口那一臂）**用的是另一形状：先起一只**独立**的落地对端（它自己
+/// 那条 `Location` 模板因此从不执行 —— 引擎在它上面只打 `/landed`），再拿它的 `base()` 拼出本对的
+/// `location`，于是 host 与 scheme 两边相同、**只有端口不同**（`{port}` 换的是各自端口，这条路径
+/// 不需要 `{port}` 模板，那次 `replace` 对已拼好的串是无操作）。**签名一字未改**。响应形状：`/start` 之外的**任何** target 都给同一份诚实 200
 /// （`Content-Length: 0` + `Accept-Ranges: bytes` + `ETag: "stub-h3"`），所以引擎可以在一条连接上
 /// 打第二枪、第三枪而不会撞到 404 —— 每条连接最多服务 8 枪、最多 8 条连接。
 pub fn spawn_header_recording_redirect_stub(location: &str) -> Result<(RedirectPeer, String)> {

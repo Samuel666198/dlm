@@ -1209,6 +1209,30 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
 /// 两臂另各带一条共同的正臂：第一跳**必须**收到那串哨兵（否则"第二跳没有"就成了"根本没发出去"），
 /// 以及第二跳**必须**真到达过对端（`hop2` 为空时负向断言恒真）。
 ///
+/// ## 第三臂：**端口**那一维（**T99-J2 第 2 节**，用例名里的"cross host"从此读作"对面那个 `cross_host` 条件"）
+/// 对面 `remove_sensitive_headers` 的条件是 **host 不同 ‖ 端口不同 ‖ scheme 不同** 三者取一，而这张
+/// `ARMS` 表此前只买了 host 那一维。复审曾登记"端口那一维买不到（要 TLS 或第二个 host）"——**那句是错的**，
+/// 复审一手实测：两只本机明文对端（`127.0.0.1:64375 → 127.0.0.1:64362`）第一跳带 `cookie`、第二跳**没有**
+/// ⇒ 同 host 换端口照样剥，零 TLS、零新件。本发把这一臂补进同一张表：
+/// - 形状：**先**起一只独立的"落地对端"，**再**起重定向对端、`Location` 直接用 `landed.base()` 拼出来
+///   ⇒ host 两边都是 `127.0.0.1`、scheme 都是 `http`、**只有端口不同**；
+/// - 观察面随之换成 **`landed.requests()`**（第二跳到达的是落地那只；第一跳仍一律看重定向那只）；
+/// - ⚠ **不改任何既有签名**：`spawn_header_recording_redirect_stub`／`RedirectPeer`／`base()` 一律照旧
+///   （`RedirectPeer` 不加 `port()`，因为 `base()` 已是 `http://127.0.0.1:{自己的端口}`，拼得出；
+///   不加任何这一发用不到的成员），既有两臂的期望（跨 host 不带／同 host 带）**一字没动**；
+/// - 为什么"先起落地对端"而不是别的做法：`Location` 里的端口只有在那只起来之后才知道，而这只桩的
+///   `{port}` 模板替换用的是**它自己**的端口 ⇒ 想指到"另一只"只剩"先起来再拿 `base()` 拼"这一条不改
+///   签名的路（给 `RedirectPeer` 加 `port()` 或把模板换成闭包都是扩签名）。
+///
+/// ## 这一发仍看不见什么（照实登记，含 Q5-2 那一维的降级）
+/// - **`cookie2` 那一格控制员判否，本发没做**（裁定，不是遗漏）：`src/probe.rs:865` 一带只发 `COOKIE`
+///   一只头（`--cookie` 那条路），全树没有任何代码路径会发出名为 `cookie2` 的头 ⇒ 在第二跳断
+///   `!r.has("cookie2")` 是**恒真装饰**（本项目纪律：死分支＝假功能）。
+/// - 因此对面那五只敏感头的覆盖面**只到"我们真会发的那一只头（`Cookie`）"**；表项里其余四只
+///   （`Authorization`／`cookie2`／`Proxy-Authorization`／`WWW-Authenticate`）**仍无覆盖** ——
+///   `Authorization` 那一支受本机无 TLS 限制，是既有具名欠账。
+/// - **端口那一维只到 `Cookie` 一头**，scheme 那一维（https→http 降级）本机仍造不出夹具。
+///
 /// ## 射程照实登记（两半，不许读成"端到端验过凭据不上明文线"）
 /// - 这一发实测的是**对面那只共享的剥离函数**（`redirect.rs::remove_sensitive_headers`）覆盖面：
 ///   `Cookie` 走得到它，`Authorization` 在这台机器上**走不到** —— 明文 http 配 `--password` 被我们自己的
@@ -1224,15 +1248,38 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
 #[test]
 fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it() -> anyhow::Result<()> {
     const SENTINEL: &str = "session=SENTINEL";
-    // 一格 = (臂名, Location 模板, 第二跳该不该带着 Cookie)。两臂**只差 Location 里的主机名**，
-    // 第一跳的 base 由 `RedirectPeer::base()` 恒写成 `127.0.0.1:{port}` ⇒ 差别只剩对面交回的那一段。
-    const ARMS: &[(&str, &str, bool)] = &[
-        ("跨 host（127.0.0.1 → localhost）", "http://localhost:{port}/landed", false),
-        ("同 host（127.0.0.1 → 127.0.0.1）", "http://127.0.0.1:{port}/landed", true),
+    // 一格 = (臂名, Location 模板, 第二跳该不该带着 Cookie, 要不要先起一只**独立**的落地对端)。
+    // 前两臂**只差 Location 里的主机名**，第一跳的 base 由 `RedirectPeer::base()` 恒写成
+    // `127.0.0.1:{port}` ⇒ 差别只剩对面交回的那一段。第三臂差的是**端口**（T99-J2 第 2 节）：它的
+    // Location 里必须写**另一只**对端的端口，而那只有起来才知道 ⇒ 模板进不了常数表（`{port}` 换的是
+    // 它自己的端口），由第 4 格在循环里现算，`"-"` 那一格因此不参与任何判断。
+    const ARMS: &[(&str, &str, bool, bool)] = &[
+        ("跨 host（127.0.0.1 → localhost）", "http://localhost:{port}/landed", false, false),
+        ("同 host（127.0.0.1 → 127.0.0.1）", "http://127.0.0.1:{port}/landed", true, false),
+        (
+            "跨端口（127.0.0.1 → 127.0.0.1，但落到另一只端口上）",
+            "-",
+            false,
+            true,
+        ),
     ];
 
-    for (label, location_template, cookie_should_survive) in ARMS {
-        let (stub, landed_location) = harness::spawn_header_recording_redirect_stub(location_template)?;
+    for (label, location_template, cookie_should_survive, separate_landing_peer) in ARMS {
+        // 第三臂**先**起落地那只：它自己的 `Location` 模板只是占位（引擎在它上面只打 `/landed`、
+        // 从不打 `/start`，所以它那一圈 302 分支永远不执行），要的是它的 `base()` —— 拿它拼出重定向
+        // 那只要交回的 Location，于是 host 与 scheme 两边都一样、只有端口不同。
+        let landed = if *separate_landing_peer {
+            let (peer, _) =
+                harness::spawn_header_recording_redirect_stub("http://127.0.0.1:{port}/landed")?;
+            Some(peer)
+        } else {
+            None
+        };
+        let template = match &landed {
+            Some(peer) => format!("{}/landed", peer.base()),
+            None => location_template.to_string(),
+        };
+        let (stub, landed_location) = harness::spawn_header_recording_redirect_stub(&template)?;
         let dir = harness::tmp_dir("h3-redirect-cookie-scope")?;
         let out_dir = dir.path().display().to_string();
         let start = format!("{}/start", stub.base());
@@ -1240,7 +1287,7 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
             "--url", &start, "--out-dir", &out_dir, "--out-name", "h3.bin", "--cookie", SENTINEL,
         ])
         .with_context(|| format!("{label}：起真二进制失败"))?;
-        // 跑完这一趟是**两臂共同的前提**：任务被我们自己的闸拒掉时第二跳压根不会发生，
+        // 跑完这一趟是**三臂共同的前提**：任务被我们自己的闸拒掉时第二跳压根不会发生，
         // 那时下面三条断言里有两条会退化成"什么都没观察到"。
         assert_eq!(
             run.status.code(),
@@ -1250,14 +1297,17 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
             stderr_of(&run)
         );
 
-        let requests = stub.requests();
+        // 第一跳一律在**重定向那只**上；第二跳落在谁身上由臂决定（前两臂＝同一只，第三臂＝落地那只）。
+        let hop1_all = stub.requests();
+        let landing_all = landed.as_ref().map(|peer| peer.requests());
+        let hop2_all: &[harness::ReceivedRequest] = landing_all.as_deref().unwrap_or(&hop1_all);
         let hop1: Vec<&harness::ReceivedRequest> =
-            requests.iter().filter(|r| r.target.starts_with("/start")).collect();
+            hop1_all.iter().filter(|r| r.target.starts_with("/start")).collect();
         let hop2: Vec<&harness::ReceivedRequest> =
-            requests.iter().filter(|r| !r.target.starts_with("/start")).collect();
+            hop2_all.iter().filter(|r| !r.target.starts_with("/start")).collect();
 
         // 共同正臂 1：哨兵确实上过线 —— 第一跳每一枪都带着它。
-        assert!(!hop1.is_empty(), "{label}：对端一条 /start 都没收到 ⇒ 两臂都没测到东西：{requests:?}");
+        assert!(!hop1.is_empty(), "{label}：对端一条 /start 都没收到 ⇒ 三臂都没测到东西：{hop1_all:?}");
         for r in &hop1 {
             assert_eq!(
                 r.header("cookie"),
@@ -1266,9 +1316,11 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
             );
         }
         // 共同正臂 2：重定向**真被跟随过**（这是负向断言的对照臂，缺它整发就是恒真）。
+        // `saw` 也要问**落地那只**：第三臂的第二跳压根不经过重定向那只。
         assert!(
-            !hop2.is_empty() && stub.saw("/landed"),
-            "{label}：第二跳（落地那条 {landed_location}）压根没到达对端 ⇒ 下面那圈判据扫的是空集合：{requests:?}"
+            !hop2.is_empty()
+                && landed.as_ref().unwrap_or(&stub).saw("/landed"),
+            "{label}：第二跳（落地那条 {landed_location}）压根没到达对端 ⇒ 下面那圈判据扫的是空集合：{hop2_all:?}"
         );
         for r in &hop2 {
             assert!(
@@ -1279,17 +1331,18 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
                 assert_eq!(
                     r.header("cookie"),
                     Some(SENTINEL),
-                    "{label}：同 host 的重定向**不算跨** ⇒ 对面不许剥 Cookie。这一臂红说明针变成了恒剥装饰：{r:?}"
+                    "{label}：同 host **又同端口**的重定向才算不跨 ⇒ 对面不许剥 Cookie。这一臂红说明针变成了恒剥装饰：{r:?}"
                 );
             } else {
                 assert!(
                     !r.has("cookie"),
-                    "{label}：跨 host 的第二跳不许带 cookie 头（对面 `remove_sensitive_headers` 的覆盖面，\
+                    "{label}：跨 host／跨端口的那一跳不许带 cookie 头（对面 `remove_sensitive_headers` 的覆盖面，\
                      本发把它钉成我们的针）：{r:?}"
                 );
             }
         }
-        // 取证照原文打出来：这两臂的差别只在 Location 的写法上，读的人要能亲眼看见第二跳的头。
+        // 取证照原文打出来：三臂的差别只在 Location 的写法（与第三臂多起了一只对端）上，
+        // 读的人要能亲眼看见第二跳的头 —— 尤其第三臂，它证明"端口那一维"确实有人收到过第二跳。
         eprintln!(
             "{label}：Location={landed_location}，第一跳 {} 枪、第二跳 {} 枪，第二跳 cookie={:?}",
             hop1.len(),
@@ -1309,17 +1362,39 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
 /// "带口令的任务真打穿 `fetch` 那一枪"在这台机器上**造不出夹具**（真 https 是既有的具名欠账）。
 /// 控制员裁定＝**不造不真实的夹具，改为钉结构**（本项目已有同类形状：扫源码文本、禁字、连注释一起扫）。
 ///
-/// ## 两条判据必须并联，缺一不可
+/// ## 三条判据必须并联，缺一不可
 /// - **禁字**：`authority_has_userinfo(` 不许再出现在 `src/fetch.rs` 里（那四处只许走
 ///   `probe::landed_url_is_refused`）。⚠ 这条只管本文件：`src/probe.rs` 与 `src/task.rs` 里
 ///   它**该**出现（统一判据的第一支就是它），所以扫描范围是"那四个落地口住的文件"，不是全树。
 /// - **数次数**：`probe::landed_url_is_refused(` 在该文件**恰好 4 次**（四个口一处一个：
 ///   `run_window` 的错误支与落地支 ＋ `run_whole` 的错误支与落地支）。
+/// - **第二实参的文本**（**T99-J2 第 1 节**）：凡含 `probe::landed_url_is_refused(` 的**那一行**必须同时含
+///   `password`，且不许含 `None`。前两条只钉"有没有人偷偷分家"，**不钉第二实参给了谁** ⇒ 把任一处实参
+///   换成 `None` 时次数仍是 4、禁字仍零命中，四闸**照绿**（控制员在 `bb90e02` 复量：那四处全是单行调用，
+///   `grep -n "landed_url_is_refused(" src/fetch.rs` 恰好四行）。而没被钉住的那一侧恰好是**热路径**
+///   （`run_window` 两支 ＋ `run_whole` 两支）。
 ///
-/// 为什么要两条一起写（这是本发要的写法，理由得留在树里）：**只数次数**会被"把两处合并成一处、
+/// 为什么要三条一起写（这是本发要的写法，理由得留在树里）：**只数次数**会被"把两处合并成一处、
 /// 另一处直接删掉"骗过（次数照样对得上，但有个口没人守了 —— 合并后另一处若改走 `authority_has_userinfo`
 /// 就没人报警）；**只禁字**会被"改叫别的名字"骗过（在 `fetch` 里再写一份私有判据、或把旧判据换个入口，
-/// 禁字清单看不见它）。两条各挡一种骗法 ⇒ 并联。
+/// 禁字清单看不见它）；**只钉前两维**会被"把第二实参换成 `None`"骗过（本发第 3 条补的就是这一维）。
+/// 三条各挡一种骗法 ⇒ 并联。
+///
+/// ## 为什么第三条按**行**判，而不把 `src/probe.rs` 那两根私有解析件抄过来（控制员裁定）
+/// 单元层那根针把调用点的实参拆开逐字比对，靠的是 `src/probe.rs` 的 `mod tests` 里两只私有件
+/// （`args_after_first_open_paren`／`top_level_args`）。集成层是**另一个 crate**，本来就够不到 lib 里
+/// `#[cfg(test)] mod tests` 的私有件 ⇒ 想要同一形状只剩"把两只私有件抄一份过来"，而抄＝**同一逻辑两份
+/// 实现**（评审会按"逐字重复"立案）。本仓库的口径是：**集成层的针与单元层的针各管各的文件，宁可判据
+/// 弱一点也不做重复实现**。这一发把"第二实参文本"这一维钉在 `fetch.rs` 上，与 `probe.rs` 单元层那根
+/// **同族但不同文件**，两根互为对照。
+///
+/// ⚠ **这根按行判据的两族假红**（**M-4①**，复审点名，代价随此写明）：
+/// - 把口令**改名或折进局部变量**（`let pw = task.password.as_deref();` 之后
+///   `landed_url_is_refused(u, pw)`）⇒ 那一行没有 `password` ⇒ **假红**；
+/// - 把调用点**拆成多行** ⇒ 含函数名那一行不再有第二实参 ⇒ **同样假红**。
+///
+/// ⇒ 这一条判的是"第二实参的**文本**里必须出现 `password`"，**不是**"第二实参在语义上是口令"。
+/// 真要改名／折变量／换行，请**连同这根针一起改**，并说明为什么值得（本项目不让针悄悄失效）。
 ///
 /// ⚠ 计数是**字节串出现次数**，注释里的写法也算：谁在注释里照抄一遍带左括号的调用形状
 /// （`probe::landed_url_is_refused(...)`）这一发就会红 —— 那是刻意的，计数要有唯一含义，
@@ -1355,6 +1430,35 @@ fn the_four_landing_ports_in_fetch_all_go_through_the_unified_criterion() -> any
         hits, 4,
         "src/fetch.rs 里 `probe::landed_url_is_refused(` 应当**恰好 4 次**（run_window 两支 ＋ run_whole 两支），实得 {hits} 次：\
          少了＝有人把某个落地口退回旧判据或整处删掉，多了＝判据又开了第二个入口（与本条的禁字判据配成一对）"
+    );
+
+    // 判据三（**T99-J2 第 1 节**）：第二实参的**文本**，以"这一行"为单位。
+    // 前两维量的是"有没有人分家"，这一维量的是"分家之后有没有人把口令摘掉"。
+    let mut call_lines = 0usize;
+    for (idx, line) in src.lines().enumerate() {
+        if !line.contains(UNIFIED) {
+            continue;
+        }
+        call_lines += 1;
+        let lineno = idx + 1;
+        assert!(
+            line.contains("password"),
+            "src/fetch.rs:{lineno} 有 `probe::landed_url_is_refused(` 而这一行不含 `password` —— 第二实参\
+             （本任务的口令）是判据的一半，摘掉它那一口就只查 userinfo／形状、不查我们自己那份凭据。\
+             若是改名／折进局部变量／把调用拆成多行撞的（两族具名假红），请连同这根针一起改并说明值得\
+             的理由（T99-J2 第 1 节）：{line}"
+        );
+        assert!(
+            !line.contains("None"),
+            "src/fetch.rs:{lineno} 把 `None` 写进了 `probe::landed_url_is_refused(` 那一行的实参里 —— \
+             四个落地口的第二实参只许是本任务的口令，给 `None` 等于把那一口的凭据那一支恒关掉\
+             （m-arg-fetch 的形状：前两维都看不出来）：{line}"
+        );
+    }
+    assert_eq!(
+        call_lines, 4,
+        "含 `probe::landed_url_is_refused(` 的**行**应当恰好 4 行，实得 {call_lines} 行：判据二按字节串数、\
+         这一条按行数 —— 两次调用挤进同一行时字节数对得上而按行读法会漏掉一个口（本条把'一行一个口'钉住）"
     );
     Ok(())
 }
@@ -5221,6 +5325,18 @@ fn internal_number_shape(text: &str) -> Option<String> {
 /// - 极大段 ⇒ 校验摘要（本用例扫的那一路就印着 64 位 sha256）不会被切成 7 格而误报；
 /// - 只含数字的 7 段是**进程号**（临时目录名 `{pid}-{tag}-{n}` 就住在扫描对象的绝对路径里），
 ///   只含字母的 7 段是英文单词（`defaced`）——两类都不是提交号；
+/// - **第三类豁免（T99-J2 第 3 节 M-5 补登记）：恰好长成提交号的"文件名末段"** —— `abcdef7.bin`、
+///   `deadbee.tar` 这种「7 位十六进制 ＋ 数字与字母各有」的 stem 与短提交号**同形**，判据只看字符
+///   形状、看不见"它前面是个 `/` 或后面是个 `.`"。而扫描文本一旦带上**摘要那两格**（`URL：` 与
+///   `落点：`，`src/report.rs:137`／`:142`）就带着文件名末段 —— **实测**：这两格只由 `report::summary`
+///   产出，而它在全树唯一的生产调用点是 `src/main.rs:77`（`--no-start` 那一路，打完即退 0）。
+///   ⇒ 今天这四面**都**撞不到：① `--help` 是静态文本；② 校验不符那一档走引擎、不打摘要
+///   （夹具名 `nocoords.bin`）；③④ 别名档与参数档在 CLI 层就退 2、摘要一行都不打（URL 末段 `a.bin`）。
+///   所以这一类是**将来把 `--no-start` 那一档（或任何打得出落点／对端 URL 的档）请进扫描面时**的假红风险，
+///   现在登记而不改判据。
+///   ⚠ 登记而不改：为了少一类假红去限定扫描范围（"只扫某几行"）是**反向**的扩面／缩量权衡 ——
+///   那会把真漏到用户表面的提交号也一并豁免掉，代价比假红大。真撞上时的修法是把夹具名换掉
+///   （或给它加一段非十六进制字符），不是放宽这条模式。
 /// - 恰好 7 而不是 ≥7：短提交号按惯例 7 位，更长的段属于摘要/哈希那一族，不该由这条管。
 ///
 /// 大小写都收（`is_ascii_hexdigit` 两边都认）：提交号本来就有人写大写，这条管的是形状不是排版。
