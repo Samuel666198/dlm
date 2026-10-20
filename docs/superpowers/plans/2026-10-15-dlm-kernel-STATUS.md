@@ -24,8 +24,16 @@
 
 **行号引用这一族今天清了**（KR 的 Important 2）：`src/`、`tests/`、`README.md` 里**指向自家文件**的行号引用全部换成符号指针，共**九处**（`facts_from_response` 的落地支／`Task::validate` 里"明文 HTTP 不发送口令"那一支／`with_contract_headers`／`landed_url_is_refused` 的文档段（两处引用它的）／`report::summary` 那两格 ＋ `main` 里 `--no-start` 那一路／选项表里 `--connections` 那条 `#[arg(help = …)]`／`probe.rs` 模块文档"对端无视 `Range` ⇒ 连接被拆掉"那一条），复验口径＝`grep -rnE "(src|tests)/[a-z_]+\.rs:[0-9]+" src/ tests/ README.md` **零命中**。**对面 crate 里带版本号的行号保留**（`reqwest-0.13.5/src/redirect.rs:239-251`、`url 2.5.8 parser.rs:448-459` 那一族）——那是钉住对面版本的写法，不是会漂移的承诺。⚠ **本文件下面那些已冻结的历史小节里还有若干行号引用**（`src/probe.rs:84-85`、`src/engine.rs:996`、`tests/integration.rs:1947-1951` 等），按本项目"历史小节原文照留、不回改"的纪律**不动**；读它们时按消息文本/符号名去找，别按行号（这条正是 KR 量到的腐坏：写下时的 `probe.rs:362` 今天落在一只解码器的文档行上）。
 
-**还剩什么（顺序固定）**：**G4**＝`Cargo.lock` 入库（`.gitignore` 删那行 ＋ `git add Cargo.lock`；`reqwest 0.13.5` 这一档与 R15 的信任锚结论只活在这个没入库的文件里）⇒ `.superpowers/` 归档（用户已裁"打包归档再删原件"；⚠ **删原件这一步现在有一个新事实要先摊给用户**：全树 README/`src/`/`tests/` 里有 **34 处**引用指向 `.superpowers/` 里的报告与账本，删了它们就悬空 ⇒ 控制员已停在这里等一句，不擅自删）⇒ 交"我替用户做过的全部裁定"清单（`docs/superpowers/plans/2026-10-18-控制员代裁清单.md`，已并到 10-20，含**撤回**我原先那两条不对称裁定）。
-**仍欠用户一句话的两条**（不要自动执行）：**`git push`**；**`idm-recon` 那台 probe-server 的同源缺陷要不要复测并更正 `idm-recon/docs/25-blackbox-probe.md`**。
+**还剩什么（2026-10-20 用户三条已答，逐条按答案办的结果）**：
+- **G4＝已做**（`2a5b6ce`）：`.gitignore` 删掉 `Cargo.lock` 那一行 ＋ 锁入库；入库前 `cargo metadata --locked` 退出码 **0** ⇒ 锁与 `Cargo.toml` 一致，锁里逐字读到那四个对面版本（R15 信任锚结论与两张实测表的共同地基从此随仓库走）。
+- **`.superpowers/` 归档＝按"先搬 zip 进 `archive/`，**原件暂不删**"办**：归档件 `E:\WorkSpace\archive\2026_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`（建件后按 `testzip()` 全 CRC ＋ 逐文件 md5 与盘上原件三方对账；件内带 `MANIFEST.json`）。
+  原件留在 `dlm\.superpowers\sdd\2026-10-15-dlm-kernel\`，理由是你当场选的就是这一档：仓库里 **39 处**引用（README 1／`src/` 5／本文件 18／计划 8／代裁清单 6／设计稿 1）继续指得到东西。
+  ⚠ 两条随之成立的注意事：**① 原件在 git 里是未跟踪的**（`.superpowers/sdd/.gitignore` 写着 `*` ⇒ 账本不入库；`git status` 之所以还显示 `?? .superpowers/`，是我自己放在 `.superpowers/tmp-rr/` 的那只一次性 node 对端，它**此刻被一个活进程占着搬不走**，我没有强搬、也没有去杀那个进程）；**② `git clean -fdx` 会连账一起清** ⇒ 恢复源＝本文件 ＋ `git log` ＋ 归档件。
+- **清单＝已交**：`docs/superpowers/plans/2026-10-18-控制员代裁清单.md`（第六节是 10-19／10-20 这一波的 39 项，含**撤回我自己定的两条**）。
+- **`git push`＝你说先不推** ⇒ 分支 `sdd/dlm-kernel` 继续只在本地、无远程；下一次要推仍然要你单独点头。
+- **`idm-recon` 那份取证文档＝你说不动** ⇒ 那边仓库继续一个字不改；这条从"欠你一句话"改成"**已答：不办**"，dlm 这边不受影响（自己的 harness 早已修，场景 3 走 `/drop/<n>`）。
+
+**没有别的欠账了**：这一波之后仓库侧只剩"要改产品行为/加仪器"的活，而它们全在第 4 节那批**已登记的用户可见限制**里（端到端 TLS 那一格、`T8-R5` 的残余重复流量、Ctrl-C、`--data-file` 形状）。
 **一处同源文本我没补针**（照实登记，不是漏）：README 选项表里那格"默认 8"（`README.md` 的 `--connections` 那一行）与 `DEFAULT_CONNECTIONS`、`--help` 那句是**三处同源文本**，现在只有后两处绑成了交叉针（`number_from_help("connections", "默认") == DEFAULT_CONNECTIONS`）；README 那一格**不绑**——它是给人读的表，为它开一根"扫 README 文本"的针＝钉措辞而不是钉行为（与本节下面"已判掉的三条"里第 ② 条同一条立场）。代价：改实现默认值时 README 会漂，靠人复查。
 
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）

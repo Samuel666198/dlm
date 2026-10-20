@@ -1998,6 +1998,10 @@ triage 面＝本文各轮登记的 deferred minor 全集（`E26/C6`、`E28⑧⑨
 
 **`git push`**（分支 `sdd/dlm-kernel` 全程未 push、无远程）；**`idm-recon` 那台 probe-server 的同源缺陷要不要复测并更正 `idm-recon/docs/25-blackbox-probe.md`**（那边仓库至今一个字没动，我当时给的是提问不是推荐）。
 
+**⑦ 附记（2026-10-20 用户逐条答了，按答案办的结果）**：**`git push`＝先不推**（分支继续只在本地，要推仍需单独点头）；**`idm-recon` 那份取证文档＝不动**（那边仓库一个字不改，这条从"欠一句话"改成"已答：不办"）；
+**`.superpowers/` 归档＝"先搬 zip 进 `archive/`，原件暂不删"**（不是 10-18 那句"打包归档再删原件"的字面执行 —— 因为我归档前量到一个当时不知道的事实：仓库里有 **39 处**引用指向那些文件、按名点名的 **20 个**文件全在 zip 里，删原件＝把 39 句承诺指到一个不在仓库里的路径；摊给你之后你选了"暂不删"）。
+归档件＝`E:\WorkSpacerchive6_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`，校验三件：`testzip()` 全 CRC、逐文件 md5 与盘上原件对账、`MANIFEST.json` 随件走。
+
 ### ⑧ 收口两发（T99-J1／J2）与最后一轮复审（T99-KR）——含我简报里的两处前提错
 
 - **J1 的执行者死于平台硬上限**（`Reached the maximum turn limit (150)`，154 次调用／63 分钟），留下一棵
