@@ -56,6 +56,15 @@
 - **四闸**：`--lib` **246/0**（3.01 s）· `--bins` **3/0** · `integration` **100/0**（63.94 s）· clippy **0**。
 - **边界**：弱 ETag／不带引号的 ETag 不发（退 Last-Modified 或干脆不发）；对端忽略 If-Range 回 200 按"验证器变了"保守处理；`ToEof` 不发。
 
+## 2026-10-21 A2 交付（`--max-speed`）
+
+- **R18**：`--max-speed <BYTES_PER_SECOND>` 是单任务所有连接**合计**的速率上限；0 = 不限；探针预读、窗口请求、`--data-file` 整份请求都过同一只漏桶。
+- **落点**：`src/rate.rs`（`RateLimiter`）／`probe::run_with_limiter`／`fetch::run_window_with_limits`、`run_whole_with_limiter`／`Config.max_speed` ＋ CLI `--max-speed`。
+- **Windows 粒度**：低于 16 ms 的等待不睡（债务留在 `next`），避免 ~15.6 ms 的 sleep 粒度把小块拖慢；长期平均仍由 `next` 约束。
+- **新用例**：6 条 `rate::tests` 单元 ＋ 2 条集成（`a_shared_rate_cap_spans_all_workers`、`the_data_file_route_obeys_the_rate_cap`）。
+- **四闸**：`--lib` **252/0**（3.01 s）· `--bins` **3/0** · `integration` **102/0**（63.71 s）· clippy **0**。
+- **已知边界**：低于约 35 KiB/s 时 4 MiB 窗口会被 120 s 预算切开；`Windowed` 以 `Advanced` 继续，退化 `ToEof` 可能在跳前缀时被判 `Stalled`。配额/择时恢复仍归 A3。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

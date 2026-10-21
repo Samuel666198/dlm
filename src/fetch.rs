@@ -250,6 +250,7 @@ use reqwest::StatusCode;
 
 use crate::consts::{WINDOW_BYTES, WINDOW_MAX_TIMEOUT_SECS, WINDOW_MIN_TIMEOUT_SECS};
 use crate::probe;
+use crate::rate::RateLimiter;
 use crate::resume::ProbeFacts;
 use crate::scheduler::Interval;
 use crate::store::Store;
@@ -779,6 +780,26 @@ pub fn run_window_with_if_range(
     shape: BodyShape,
     if_range: Option<&str>,
 ) -> Result<Outcome> {
+    run_window_with_limits(agent, task, iv, store, rate_bps, total_len, cap, shape, if_range, None)
+}
+
+/// 与 [`run_window`] 相同，但可以带 `If-Range`（R17）和一只共享限速器（R18）。
+///
+/// `limiter` 是单任务所有连接共用的漏桶；这一枪每读一块就 `consume(n)`。`None` = 不限速，
+/// 与既有测试/`--max-speed 0` 逐字节等价。
+#[allow(clippy::too_many_arguments)]
+pub fn run_window_with_limits(
+    agent: &Client,
+    task: &Task,
+    iv: Interval,
+    store: &Store,
+    rate_bps: u64,
+    total_len: u64,
+    cap: &EndCap,
+    shape: BodyShape,
+    if_range: Option<&str>,
+    limiter: Option<&RateLimiter>,
+) -> Result<Outcome> {
     // 与 `probe::run` / `state::Snapshot::from_task` 同一个立场：规则只住在 `Task::validate()` 一处，
     // 但**发请求**这一刻是第二个强制点。明文 HTTP + 口令的任务到不了网络（用例
     // `the_password_gate_is_enforced_before_fetch_touches_the_wire` 用服务端日志钉"拒在上网之前"）。
@@ -903,6 +924,9 @@ pub fn run_window_with_if_range(
                 break;
             }
         };
+        if let Some(limiter) = limiter {
+            limiter.consume(n as u64);
+        }
         let mut slice = &buf[..n];
         if skip > 0 {
             // **流式**丢弃：切掉这一块的前 `skip` 字节，剩下的照常落盘，剩下的 `skip` 由下一块承担。
@@ -1025,6 +1049,17 @@ pub fn run_whole(
     store: &Store,
     rate_bps: u64,
 ) -> Result<(Outcome, Option<ProbeFacts>)> {
+    run_whole_with_limiter(agent, task, store, rate_bps, None)
+}
+
+/// 与 [`run_whole`] 相同，但响应体读取计入 R18 的共享上限。
+pub fn run_whole_with_limiter(
+    agent: &Client,
+    task: &Task,
+    store: &Store,
+    rate_bps: u64,
+    limiter: Option<&RateLimiter>,
+) -> Result<(Outcome, Option<ProbeFacts>)> {
     // 与 `run_window` 同一个第二强制点：口令闸 + E9 的 userinfo 闸都住在 `Task::validate()`。
     task.validate()?;
 
@@ -1085,6 +1120,9 @@ pub fn run_whole(
         match resp.read(&mut buf) {
             Ok(0) => break, // 干净 EOF：框架长度用尽（见下面那条 `bytes != total_len`）
             Ok(n) => {
+                if let Some(limiter) = limiter {
+                    limiter.consume(n as u64);
+                }
                 // 偏移 0 起、按读到多少写多少：本函数没有 `iv`，也没有窗口上界。
                 // `write_at` 失败照 `run_window` 同一立场**往上抛**（半截写不许当进度）。
                 let wrote = store

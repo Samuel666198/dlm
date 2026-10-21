@@ -236,6 +236,8 @@ pub struct Cli {
     out_name: Option<String>,
     #[arg(long, value_name = "N", help = "并发连接数（默认 8，至少 1）")]
     connections: Option<usize>,
+    #[arg(long, value_name = "BYTES_PER_SECOND", default_value_t = 0, help = "所有连接合计的速率上限（字节/秒；0 = 不限）")]
+    max_speed: u64,
     #[arg(long, value_name = "URL", help = "原样发送的 Referer 头")]
     referer: Option<String>,
     #[arg(long, value_name = "COOKIE", help = "原样发送 Cookie 头（不分 http/https，写入断点文件）")]
@@ -273,6 +275,7 @@ impl std::fmt::Debug for Cli {
             .field("out_dir", &self.out_dir)
             .field("out_name", &self.out_name)
             .field("connections", &self.connections)
+            .field("max_speed", &self.max_speed)
             .field("referer", &self.referer)
             .field("cookie", &self.cookie)
             .field("data_file", &self.data_file)
@@ -341,9 +344,10 @@ impl Cli {
         Ok(task)
     }
 
-    /// 交回 `Config`：`--connections`→`workers`、`--max-retries`→`max_retries`、
-    /// `--sha256`→`verify_sha256`、`--no-resume`→`force_fresh` 四格；`min_seg` 保持默认
-    /// （§5 没有它的入口，E20⑥），`on_tick` 留 `None`（进度行的 sink 由 9B-2 挂，E22 第 4 条）。
+    /// 交回 `Config`：`--connections`→`workers`、`--max-speed`→`max_speed`、
+    /// `--max-retries`→`max_retries`、`--sha256`→`verify_sha256`、`--no-resume`→`force_fresh`
+    /// 五格；`min_seg` 保持默认（§5 没有它的入口，E20⑥），`on_tick` 留 `None`
+    /// （进度行的 sink 由 9B-2 挂，E22 第 4 条）。
     ///
     /// 写法是"从 `Config::default()` 起步、只覆盖四格"，为的是让**没被覆盖的两格保持默认**这件事
     /// 不依赖任何注释（**E20⑤** 的教训：`Task` 上那族已删除的常数访问器一旦被人照文档填回 `Config`，
@@ -356,6 +360,7 @@ impl Cli {
         if let Some(connections) = self.connections {
             cfg.workers = connections;
         }
+        cfg.max_speed = self.max_speed;
         cfg.max_retries = self.max_retries;
         cfg.verify_sha256 = self.sha256.clone();
         cfg.force_fresh = self.no_resume;
@@ -647,13 +652,15 @@ mod tests {
     /// ⚠ `number_from_help` 只认「marker ＋ 空格 ＋ 十进制」这一种排版，帮助哪天写成 `默认：8`／`≥ 8`
     /// 它会**当场 panic**（宁可红不静默，与 M-4② 同一立场）。
     #[test]
-    fn into_config_fills_exactly_the_four_documented_fields() -> anyhow::Result<()> {
+    fn into_config_maps_every_documented_field() -> anyhow::Result<()> {
         let c = parse(&[
             "dlm",
             "--url",
             "https://x/a",
             "--connections",
             "3",
+            "--max-speed",
+            "1048576",
             "--max-retries",
             "7",
             "--sha256",
@@ -662,6 +669,7 @@ mod tests {
         ])?;
         let cfg = c.into_config();
         assert_eq!(cfg.workers, 3, "E20⑤：--connections 必须是 Config::workers 的唯一来源，不许被 Task 上任何数吞掉");
+        assert_eq!(cfg.max_speed, 1_048_576, "--max-speed 必须原样进 Config::max_speed");
         assert_eq!(cfg.max_retries, Some(7));
         assert_eq!(cfg.verify_sha256.as_deref(), Some(HEX64));
         assert!(cfg.force_fresh, "--no-resume ⇒ Config::force_fresh（spec §4）");
@@ -670,7 +678,11 @@ mod tests {
         // `into_config` 借 `&self` ⇒ 之后还能 `into_task`（9B-2 要先看 quiet/no_start 再消费）。
         assert_eq!(c.into_task()?.flags, 0);
         let d = parse(&["dlm", "--url", "https://x/a"])?.into_config();
-        assert_eq!((d.workers, d.max_retries, d.verify_sha256, d.force_fresh), (DEFAULT_CONNECTIONS, None, None, false), "什么都不给时四格各归其位");
+        assert_eq!(
+            (d.workers, d.max_speed, d.max_retries, d.verify_sha256, d.force_fresh),
+            (DEFAULT_CONNECTIONS, 0, None, None, false),
+            "什么都不给时五格各归其位（max_speed 默认 0 = 不限）"
+        );
         // **T99-J2 第 3 节（Q5-1）**：帮助里那个"默认 N"与实现常数交叉一次（期望值来自**实现常数**、
         // 输入来自**帮助文本**，两份对面互问；这不是"问被测产品自己要"，与 `…_lower_bound_…` 同一立场）。
         // 不并进来时的实测缺口：把本文件选项表里 `--connections` 那条 `#[arg(help = …)]` 的"默认 8"

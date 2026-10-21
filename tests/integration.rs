@@ -3024,6 +3024,7 @@ fn full_download_is_byte_exact() -> anyhow::Result<()> {
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3201,6 +3202,7 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3388,6 +3390,7 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3544,6 +3547,7 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3714,6 +3718,7 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         max_retries: Some(0),
         verify_sha256: None,
         force_fresh: false,
+        max_speed: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -3732,6 +3737,7 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         max_retries: None,
         verify_sha256: Some(want.clone()),
         force_fresh: false,
+        max_speed: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -3819,6 +3825,7 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3873,6 +3880,7 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             max_retries: None,
             verify_sha256: Some(want.clone()),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3982,6 +3990,7 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
             max_retries: None,
             verify_sha256: Some(want.clone()),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4148,6 +4157,7 @@ fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<
             max_retries: None,
             verify_sha256: Some(want.clone()),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4218,6 +4228,7 @@ fn a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice() -> an
             max_retries: Some(0),
             verify_sha256: None,
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4276,6 +4287,7 @@ fn exhausted_retries_report_failure_with_a_message_and_keep_the_state_file() -> 
             max_retries: Some(0),
             verify_sha256: None,
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4336,6 +4348,7 @@ fn a_corrupt_state_file_is_an_error_while_an_absent_one_is_not() -> anyhow::Resu
         max_retries: None,
         verify_sha256: None,
         force_fresh: false,
+        max_speed: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -4387,6 +4400,7 @@ fn the_fresh_reason_reaches_the_report_for_the_cli_to_print() -> anyhow::Result<
         max_retries: None,
         verify_sha256: Some(harness::expected_sha(len)),
         force_fresh: false,
+        max_speed: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -4445,6 +4459,7 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4536,6 +4551,7 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
             max_retries: None,
             verify_sha256: None,
             force_fresh: false,
+            max_speed: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4647,6 +4663,7 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             on_tick: Some(on_tick),
         },
     )?;
@@ -5733,6 +5750,7 @@ fn scenario_a_fullspeed_48mib_is_byte_exact() -> anyhow::Result<()> {
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             on_tick: None,
         },
     )?;
@@ -5887,6 +5905,7 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
             max_retries: None,
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
+            max_speed: 0,
             // 集成用例一律不挂观察者（与全文件同一口径，9A/E21）。
             on_tick: None,
         },
@@ -6674,6 +6693,7 @@ fn a_resumed_run_fails_cleanly_when_if_range_gets_200_after_the_probe() -> anyho
             max_retries: Some(0),
             verify_sha256: None,
             force_fresh: false,
+            max_speed: 0,
             on_tick: None,
         },
     )?;
@@ -6686,5 +6706,80 @@ fn a_resumed_run_fails_cleanly_when_if_range_gets_200_after_the_probe() -> anyho
     assert_eq!(std::fs::metadata(&target)?.len(), 1, "退化路径不许把 200 的 body 写到偏移 1");
     assert!(state_path.exists(), "断点必须保留");
     drop(peer);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- A2：全任务共享速率上限
+
+/// R18：四连接合计 1 MiB/s。若每条连接各限一份，这条会在 1.5 s 下限之下。
+#[test]
+fn a_shared_rate_cap_spans_all_workers() -> anyhow::Result<()> {
+    let total = 2 * 1024 * 1024u64;
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("a2-shared-cap")?;
+    let t = Task {
+        url: format!("{base}/sz/{total}"),
+        dir: dir.path().to_path_buf(),
+        name: Some("a2.bin".into()),
+        ..harness::blank_task()
+    };
+    let started = Instant::now();
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 4,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: Some(0),
+            verify_sha256: Some(harness::expected_sha(total)),
+            force_fresh: false,
+            max_speed: 1_048_576,
+            on_tick: None,
+        },
+    )?;
+    let elapsed = started.elapsed();
+    assert!(rep.ok, "{:?}", rep.message);
+    assert_eq!(rep.delivered, total, "共享上限不许把字节吃掉");
+    assert!(
+        elapsed >= Duration::from_millis(1500),
+        "四连接各限一份会在这个下限之下（实测 {elapsed:?}）"
+    );
+    Ok(())
+}
+
+/// R18：`--data-file` 那条整份读取也要过同一只限速器。
+#[test]
+fn the_data_file_route_obeys_the_rate_cap() -> anyhow::Result<()> {
+    let body = vec![7u8; 512 * 1024];
+    let peer = harness::spawn_post_stub(None, body.clone())?;
+    let dir = harness::tmp_dir("a2-post-cap")?;
+    let request_body = dir.path().join("request.bin");
+    std::fs::write(&request_body, b"x")?;
+    let t = Task {
+        url: format!("{}/submit", peer.base()),
+        dir: dir.path().to_path_buf(),
+        name: Some("a2-post.bin".into()),
+        data_file: Some(request_body),
+        ..harness::blank_task()
+    };
+    let started = Instant::now();
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 1,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: None,
+            verify_sha256: None,
+            force_fresh: false,
+            max_speed: 512 * 1024,
+            on_tick: None,
+        },
+    )?;
+    let elapsed = started.elapsed();
+    assert!(rep.ok, "{:?}", rep.message);
+    assert_eq!(rep.delivered, body.len() as u64);
+    assert!(
+        elapsed >= Duration::from_millis(700),
+        "整份路径没走共享限速器（实测 {elapsed:?}）"
+    );
     Ok(())
 }

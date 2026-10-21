@@ -158,6 +158,7 @@ use reqwest::header::{
 };
 use reqwest::StatusCode;
 
+use crate::rate::RateLimiter;
 use crate::resume::ProbeFacts;
 use crate::task::{Task, authority_has_userinfo, canonical_http_authority, url_is_https};
 
@@ -631,6 +632,16 @@ pub(crate) fn landed_url_is_refused(url: &str, password: Option<&str>) -> bool {
 /// ⇒ **作废那句**。真要给覆盖口子，得先往 `Config` 加字段（契约变更）并补一条 spec §5 的选项，
 /// 那是独立裁定，不在 v1，也不许由 Task 9 顺手发明。
 pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult> {
+    run_with_limiter(task, agent, prelude_max, None)
+}
+
+/// `run` 的限速版本（R18）：探针预读也计入单任务共享上限。
+pub fn run_with_limiter(
+    task: &Task,
+    agent: &Client,
+    prelude_max: u64,
+    limiter: Option<&RateLimiter>,
+) -> Result<ProbeResult> {
     // 请求边界上的第二道闸：`Task::validate()` 管着"明文 HTTP 不送口令"与 E9 的 userinfo URL。
     // 与 `state::Snapshot::from_task` 同一个立场（落盘点是第二个强制点，这里是**发请求**这个第二强制点），
     // 规则本身只住在 `Task::validate()` 一处。**不加 `.context()`**：anyhow 的 `to_string()` 只显示
@@ -699,7 +710,7 @@ pub fn run(task: &Task, agent: &Client, prelude_max: u64) -> Result<ProbeResult>
     }
 
     let facts = facts_from_response(status, range.is_some(), &headers, final_url.as_str(), task.password.as_deref())?;
-    let prelude = read_bounded(resp, prelude_max)?;
+    let prelude = read_bounded(resp, prelude_max, limiter)?;
     Ok(ProbeResult { facts, prelude })
 }
 
@@ -974,15 +985,30 @@ fn peer_accepts_ranges(status: StatusCode, asked_for_range: bool, headers: &Head
 ///
 /// 这一条是 `Vec` 的内存边界（48 MiB 不许被读进来），也是模块文档第 3 条那支的唯一防线：
 /// 没有 Range 可限时，"读到上限就停"是唯一合法的限量方式。
-fn read_bounded(mut resp: Response, prelude_max: u64) -> Result<Vec<u8>> {
+fn read_bounded(mut resp: Response, prelude_max: u64, limiter: Option<&RateLimiter>) -> Result<Vec<u8>> {
     let mut prelude = Vec::new();
-    match resp.by_ref().take(prelude_max).read_to_end(&mut prelude) {
-        Ok(_) => Ok(prelude),
-        // 带上"已经读到多少"：这一支的排障问题是"对端在预读中途拆了连接"（`/drop/<n>` 的形状），
-        // 断在哪一段直接决定 Task 7 的 `Stalled`/`Failed` 判法。
-        Err(e) => Err(anyhow::Error::new(e)
-            .context(format!("读预读体失败（对端在预读读完之前把连接断了？）已读到 {} 字节", prelude.len()))),
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut remaining = prelude_max;
+    while remaining > 0 {
+        let want = usize::try_from(remaining.min(buf.len() as u64)).expect("不超过缓冲长度");
+        match resp.read(&mut buf[..want]) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Some(limiter) = limiter {
+                    limiter.consume(n as u64);
+                }
+                prelude.extend_from_slice(&buf[..n]);
+                remaining -= n as u64;
+            }
+            // 带上"已经读到多少"：这一支的排障问题是"对端在预读中途拆了连接"（`/drop/<n>` 的形状），
+            // 断在哪一段直接决定 Task 7 的 `Stalled`/`Failed` 判法。
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("读预读体失败（对端在预读读完之前把连接断了？）已读到 {} 字节", prelude.len())));
+            }
+        }
     }
+    Ok(prelude)
 }
 
 #[cfg(test)]

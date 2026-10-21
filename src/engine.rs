@@ -162,6 +162,7 @@ use sha2::{Digest, Sha256};
 use crate::consts::{FAST_RETRY_MAX, FLAG_KEEP_STATE, PROBE_READ_BYTES, SLOW_RETRY_INTERVAL_SECS, STATE_SAVE_MAX_INTERVAL_SECS};
 use crate::fetch::{self, FailKind, Outcome};
 use crate::probe;
+use crate::rate::RateLimiter;
 use crate::resume::{self, Decision};
 use crate::scheduler::{Action, Event, Interval, Scheduler};
 use crate::state::{self, SegView, Snapshot, Stats, Validator};
@@ -226,6 +227,8 @@ pub struct Config {
     pub verify_sha256: Option<String>,
     /// `--no-resume`（spec §4）：无视已存在的断点文件，从 0 开始并覆盖它。
     pub force_fresh: bool,
+    /// R18：单任务所有连接合计的速率上限（字节/秒）；0 = 不限。
+    pub max_speed: u64,
     /// 运行态快照的出口（勘误 **E21** 甲，spec §5 那一行进度缺的就是这个数据面）。
     ///
     /// **默认 `None`** ⇒ 一个观察者都不挂，默认路径与 9A 之前逐字节相同（这是 9A 的验收下限）。
@@ -257,6 +260,7 @@ impl std::fmt::Debug for Config {
             .field("max_retries", &self.max_retries)
             .field("verify_sha256", &self.verify_sha256)
             .field("force_fresh", &self.force_fresh)
+            .field("max_speed", &self.max_speed)
             .field("on_tick", &self.on_tick.as_ref().map(|_| "«观察者»"))
             .finish()
     }
@@ -270,6 +274,7 @@ impl Default for Config {
             max_retries: None,
             verify_sha256: None,
             force_fresh: false,
+            max_speed: 0,
             on_tick: None,
         }
     }
@@ -561,6 +566,8 @@ struct Launch {
     fresh_reason: Option<String>,
     /// R17：这一轮每一条窗口请求要带的 `If-Range`；`None` = 不发。
     if_range: Option<String>,
+    /// R18：探针与所有 worker 共用的漏桶。
+    limiter: Arc<RateLimiter>,
     started: Instant,
 }
 
@@ -592,6 +599,9 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
         return run_whole_once(&task, &cfg, &client, started);
     }
 
+    // R18：一只漏桶被探针与所有 worker 共用；`0` = 不限（consume 立即返回）。
+    let limiter = Arc::new(RateLimiter::new(cfg.max_speed));
+
     let target = task.target_path();
     let state_path = state::path_for(&target);
     ensure_parent_dir(&target)?;
@@ -605,7 +615,7 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     // ② 试探。`total_len` / `accept_ranges` / 验证子只有这里拿得到 —— **E13②** 正是因此判定
     //    简报那个 `Config{resume: Decision}` 站不住：`Fresh` 里一个事实都没有。
     let prelude_max = PROBE_READ_BYTES;
-    let probed = probe::run(&task, &client, prelude_max)?;
+    let probed = probe::run_with_limiter(&task, &client, prelude_max, Some(&limiter))?;
     let facts = probed.facts();
 
     // ③ 判定 ⇒ 执行计划（`Abort` 在这里变成 `Err`，**一个字节都还没碰过**）。
@@ -687,6 +697,7 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
         seed,
         fresh_reason: plan.fresh_reason,
         if_range,
+        limiter,
         started,
     })?;
     // 退化那一枪（`NoRanges`）排在本轮**所有** `Connected` 之前 ⇒ 回放按同一顺序喂才复现得出派发表。
@@ -1003,7 +1014,9 @@ fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started:
     ensure_parent_dir(&target)?;
     // 恒 truncate：这一支没有可读的断点，残留的半截文件不属于本轮任何账。
     let store = Store::open(&target, true)?;
-    let (outcome, facts) = fetch::run_whole(client, task, &store, RATE_UNKNOWN)?;
+    // R18：整份那一枪只有一条连接；`0` = 不限。
+    let limiter = RateLimiter::new(cfg.max_speed);
+    let (outcome, facts) = fetch::run_whole_with_limiter(client, task, &store, RATE_UNKNOWN, Some(&limiter))?;
     // 收尾一次 flush。**E8① 的判据是"收尾调一次、绝不进 `run_window` 的每块循环"，不是"全二进制只有一个调用点"**
     // —— 本文件有两条互斥的出口路线（`data_file` 走这里，多 worker 走 `Engine::run` 收尾那一处），
     // 所以 flush 有两个调用点，每条路线上至多一次（T8 评审 E 第 2 条：原先这两句各写"全场只有这一处"，互为反例）。
@@ -1078,6 +1091,8 @@ struct WorkerSpawn {
     body: fetch::BodyShape,
     /// R17：这一轮每一条窗口请求要带的 `If-Range`；`None` = 不发。一次运行内不变。
     if_range: Option<Arc<str>>,
+    /// R18：所有 worker 共用的漏桶。
+    limiter: Arc<RateLimiter>,
 }
 
 /// 线程心跳：`Drop` 时置假，**包括 panic 展开时**（std 保证 unwind 期间析构）。
@@ -1104,7 +1119,7 @@ impl Drop for Heartbeat {
 /// 重置），所以收紧永远递得给"此刻在途的那一枪"—— 这是 `Retighten` 唯一能兑现的通道：
 /// 那个线程正阻塞在 `resp.read()` 里，除了它自己每块看一眼的格子，外面没有任何东西能插话。
 fn worker_loop(spawn: WorkerSpawn) {
-    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body, if_range } = spawn;
+    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body, if_range, limiter } = spawn;
     let _heartbeat = Heartbeat::new(alive);
     // `recv` Err = 主线程已经交回发送端（引擎退出）⇒ 收工。`Job::Stop` 是正常出口。
     while let Ok(job) = jobs.recv() {
@@ -1113,7 +1128,7 @@ fn worker_loop(spawn: WorkerSpawn) {
             Job::Fetch { iv, rate_bps } => {
                 // `run_window` 里的 `Err` 只有一种来源：`store.write_at` 失败（网络失败它自己折成
                 // `Outcome::Failed`）。所以上抛的就是"落盘坏了"这一件事，主线程据此停整个任务。
-                let outcome = fetch::run_window_with_if_range(
+                let outcome = fetch::run_window_with_limits(
                     &client,
                     &task,
                     iv,
@@ -1123,6 +1138,7 @@ fn worker_loop(spawn: WorkerSpawn) {
                     &cap,
                     body,
                     if_range.as_deref(),
+                    Some(&limiter),
                 );
                 if reports.send(WorkerReport { worker, iv, outcome }).is_err() {
                     break; // 主线程不在了，交回给谁都没意义
@@ -1190,7 +1206,7 @@ impl Engine {
     fn new(launch: Launch) -> Result<Engine> {
         let Launch {
             task, cfg, client, store, sched, total_len, accept_ranges, validator, state_path, stats, seed,
-            fresh_reason, if_range, started,
+            fresh_reason, if_range, limiter, started,
         } = launch;
         let count = cfg.workers;
         // 交快照时要减掉的那个起点必须在 `stats` 被搬进结构体**之前**取（判据③）。
@@ -1225,6 +1241,7 @@ impl Engine {
                 total_len,
                 body,
                 if_range: if_range.clone(),
+                limiter: Arc::clone(&limiter),
             };
             match thread::Builder::new().name(format!("dlm-worker-{worker}")).spawn(move || worker_loop(spawn)) {
                 Ok(handle) => {

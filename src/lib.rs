@@ -3,6 +3,7 @@ pub mod consts;
 pub mod engine;
 pub mod fetch;
 pub mod probe;
+pub mod rate;
 pub mod report;
 pub mod resume;
 pub mod scheduler;
