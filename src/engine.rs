@@ -559,6 +559,8 @@ struct Launch {
     stats: Stats,
     seed: Vec<Interval>,
     fresh_reason: Option<String>,
+    /// R17：这一轮每一条窗口请求要带的 `If-Range`；`None` = 不发。
+    if_range: Option<String>,
     started: Instant,
 }
 
@@ -608,6 +610,9 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
 
     // ③ 判定 ⇒ 执行计划（`Abort` 在这里变成 `Err`，**一个字节都还没碰过**）。
     let plan = plan_from_decision(resume::decide(&task, loaded, &facts))?;
+    // R17：只有续传、只有对端认 Range 时才发 If-Range。值取自断点验证器；强 ETag 优先，
+    // Last-Modified 只在本次没开 `--ignore-mtime` 时用（`resume::if_range_value` 是唯一取值处）。
+    let if_range = if_range_for(plan.resume_validator.as_ref(), facts.accept_ranges, task.ignore_mtime());
     let mut seed = plan.seed;
     let mut stats = plan.stats;
 
@@ -681,6 +686,7 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
         stats,
         seed,
         fresh_reason: plan.fresh_reason,
+        if_range,
         started,
     })?;
     // 退化那一枪（`NoRanges`）排在本轮**所有** `Connected` 之前 ⇒ 回放按同一顺序喂才复现得出派发表。
@@ -700,19 +706,41 @@ struct Plan {
     seed: Vec<Interval>,
     fresh_reason: Option<String>,
     stats: Stats,
+    /// `Resume` 那一支把断点的验证器带进引擎；`Fresh` 为 `None`。
+    /// R17 的 `If-Range` 值从这一份算，不从本轮探针算 —— 探针已经先做过 ③–⑤ 的比对。
+    resume_validator: Option<Validator>,
 }
 
 fn plan_from_decision(decision: Decision) -> Result<Plan> {
     match decision {
         Decision::Abort(why) => bail!("{why}"),
-        Decision::Fresh { reason } => Ok(Plan { truncate: true, seed: vec![], fresh_reason: reason, stats: Stats::default() }),
-        Decision::Resume(snap) => Ok(Plan {
-            truncate: false,
-            seed: snap.segments.iter().map(SegView::interval).collect(),
-            fresh_reason: None,
-            stats: snap.stats,
+        Decision::Fresh { reason } => Ok(Plan {
+            truncate: true,
+            seed: vec![],
+            fresh_reason: reason,
+            stats: Stats::default(),
+            resume_validator: None,
         }),
+        Decision::Resume(snap) => {
+            let Snapshot { validator, segments, stats, .. } = snap;
+            Ok(Plan {
+                truncate: false,
+                seed: segments.iter().map(SegView::interval).collect(),
+                fresh_reason: None,
+                stats,
+                resume_validator: Some(validator),
+            })
+        }
     }
+}
+
+/// R17 的取值入口：Fresh（没有断点验证器）、不认 Range 的对端、没有可用验证器 ⇒ 都不发。
+/// 单独成函数是为了让这三条否定条件各有一格单测，而不是埋在 `run` 的分支里。
+fn if_range_for(resume_validator: Option<&Validator>, accept_ranges: bool, ignore_mtime: bool) -> Option<String> {
+    if !accept_ranges {
+        return None;
+    }
+    resume_validator.and_then(|v| resume::if_range_value(v, ignore_mtime))
 }
 
 /// 完成判定：`is_done()` **且** 落盘量 == 全长。**签名里没有覆盖集那个量**（E7）。
@@ -887,7 +915,7 @@ fn failure_note(kind: &FailKind) -> String {
     match kind {
         FailKind::Http(code) => format!("服务器对这一枪回了 {code}"),
         FailKind::Transport(note) => note.clone(),
-        FailKind::ValidatorChanged => "服务端说的长度/偏移与我们脚下这份不一致（416 或 206 的 Content-Range 对不上）".to_string(),
+        FailKind::ValidatorChanged => "服务端说这份文件已经变了（带 If-Range 的请求回了 200，或 416/206 的范围对不上）".to_string(),
     }
 }
 
@@ -1048,6 +1076,8 @@ struct WorkerSpawn {
     /// 不认 ⇒ `ToEof`。**整个 worker 生命周期里恒定** —— 它由 `ProbeFacts.accept_ranges` 决定，
     /// 而那个事实一次运行之内不变（变了就是 `ValidatorChanged`，走的是另一条路）。
     body: fetch::BodyShape,
+    /// R17：这一轮每一条窗口请求要带的 `If-Range`；`None` = 不发。一次运行内不变。
+    if_range: Option<Arc<str>>,
 }
 
 /// 线程心跳：`Drop` 时置假，**包括 panic 展开时**（std 保证 unwind 期间析构）。
@@ -1074,7 +1104,7 @@ impl Drop for Heartbeat {
 /// 重置），所以收紧永远递得给"此刻在途的那一枪"—— 这是 `Retighten` 唯一能兑现的通道：
 /// 那个线程正阻塞在 `resp.read()` 里，除了它自己每块看一眼的格子，外面没有任何东西能插话。
 fn worker_loop(spawn: WorkerSpawn) {
-    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body } = spawn;
+    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body, if_range } = spawn;
     let _heartbeat = Heartbeat::new(alive);
     // `recv` Err = 主线程已经交回发送端（引擎退出）⇒ 收工。`Job::Stop` 是正常出口。
     while let Ok(job) = jobs.recv() {
@@ -1083,7 +1113,17 @@ fn worker_loop(spawn: WorkerSpawn) {
             Job::Fetch { iv, rate_bps } => {
                 // `run_window` 里的 `Err` 只有一种来源：`store.write_at` 失败（网络失败它自己折成
                 // `Outcome::Failed`）。所以上抛的就是"落盘坏了"这一件事，主线程据此停整个任务。
-                let outcome = fetch::run_window(&client, &task, iv, &store, rate_bps, total_len, &cap, body);
+                let outcome = fetch::run_window_with_if_range(
+                    &client,
+                    &task,
+                    iv,
+                    &store,
+                    rate_bps,
+                    total_len,
+                    &cap,
+                    body,
+                    if_range.as_deref(),
+                );
                 if reports.send(WorkerReport { worker, iv, outcome }).is_err() {
                     break; // 主线程不在了，交回给谁都没意义
                 }
@@ -1150,7 +1190,7 @@ impl Engine {
     fn new(launch: Launch) -> Result<Engine> {
         let Launch {
             task, cfg, client, store, sched, total_len, accept_ranges, validator, state_path, stats, seed,
-            fresh_reason, started,
+            fresh_reason, if_range, started,
         } = launch;
         let count = cfg.workers;
         // 交快照时要减掉的那个起点必须在 `stats` 被搬进结构体**之前**取（判据③）。
@@ -1160,6 +1200,8 @@ impl Engine {
         // 信号只有这一处（`ProbeFacts.accept_ranges`，**E11③** 的行为加权读法）；`run_window` 自己
         // 要到响应头到手才看得见退化，而预算（整请求期限，R7）必须在那之前定 —— 次序见 `fetch::BodyShape`。
         let body = if accept_ranges { fetch::BodyShape::Windowed } else { fetch::BodyShape::ToEof };
+        // R17 的值一次运行内不变；每个 worker 拿一份引用计数克隆，别把 String 复制 N 份。
+        let if_range: Option<Arc<str>> = if_range.map(Arc::<str>::from);
 
         let (reports_tx, reports) = channel::<WorkerReport>();
         let mut jobs = Vec::with_capacity(count);
@@ -1182,6 +1224,7 @@ impl Engine {
                 store: Arc::clone(&store),
                 total_len,
                 body,
+                if_range: if_range.clone(),
             };
             match thread::Builder::new().name(format!("dlm-worker-{worker}")).spawn(move || worker_loop(spawn)) {
                 Ok(handle) => {
@@ -1946,6 +1989,7 @@ mod tests {
             final_url: "http://x/y".into(),
             ignore_mtime: false,
         };
+        let expected_validator = validator.clone();
         // Abort：`Err`，而且**不许**带任何执行意图（调用方在这里连 `Store::open` 都还没走到）。
         let Err(e) = plan_from_decision(Decision::Abort("断点要口令".into())) else {
             panic!("Abort 必须变成 Err");
@@ -1958,6 +2002,7 @@ mod tests {
         assert!(plan.seed.is_empty(), "Fresh 没有可播种的段表");
         assert!(plan.fresh_reason.is_none(), "本来就没有断点 ⇒ 没有需要解释的事");
         assert_eq!(plan.stats, Stats::default());
+        assert!(plan.resume_validator.is_none(), "Fresh 不该带续传验证器");
 
         // Fresh（冲突重来）：原因串必须活着走到 Report（`src/resume.rs` 对 Task 9 的承诺）。
         let plan = plan_from_decision(Decision::Fresh { reason: Some("ETag 变了".into()) }).expect("Fresh 是合法结论");
@@ -1976,6 +2021,33 @@ mod tests {
         assert_eq!(plan.stats.retries, 2, "重试计数是跨轮的账，不能从 0 重数");
         assert_eq!(plan.stats.bytes_delivered, 70);
         assert!(plan.fresh_reason.is_none());
+        assert_eq!(
+            plan.resume_validator.as_ref(),
+            Some(&expected_validator),
+            "Resume 必须把断点验证器带进 Plan（R17 的 If-Range 值从它算）"
+        );
+    }
+
+    #[test]
+    fn if_range_is_absent_for_fresh_runs_and_degraded_peers() {
+        let validator = Validator {
+            etag: Some("\"e\"".into()),
+            last_modified: None,
+            total_len: 100,
+            final_url: "http://x/y".into(),
+            ignore_mtime: false,
+        };
+        assert!(if_range_for(None, true, false).is_none(), "Fresh 没有断点验证器，不许发");
+        assert!(
+            if_range_for(Some(&validator), false, false).is_none(),
+            "不认 Range 的对端回 200 是正常退化，不是验证器变了"
+        );
+        assert_eq!(if_range_for(Some(&validator), true, false).as_deref(), Some("\"e\""));
+        assert_eq!(
+            if_range_for(Some(&validator), true, true).as_deref(),
+            Some("\"e\""),
+            "--ignore-mtime 不压 ETag"
+        );
     }
 
     /// 播种之后的调度器确实**不重下**已确认区间（这条本来由阶段 1 的等价用例钉，这里补的是
@@ -2072,7 +2144,7 @@ mod tests {
     fn failure_note_keeps_the_transporters_words_and_adds_no_truncation() {
         assert_eq!(failure_note(&FailKind::Http(416)), "服务器对这一枪回了 416");
         assert_eq!(failure_note(&FailKind::ValidatorChanged),
-            "服务端说的长度/偏移与我们脚下这份不一致（416 或 206 的 Content-Range 对不上）");
+            "服务端说这份文件已经变了（带 If-Range 的请求回了 200，或 416/206 的范围对不上）");
         // Transport 的载荷**原样**透传：生产侧已经把它压成单行、截到 200 字符、摘掉 URL
         // （`fetch::transport_note` 是唯一的实现）。这里再截一次就会互相吃掉信息（E12⑦），
         // 所以连"看着顺眼一点"的修饰都不许做：载荷里有换行也照原样交回去。

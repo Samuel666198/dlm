@@ -48,6 +48,14 @@
 - **阶段 0 结论**：P0 九项里 8 项有落点、P0-9 是"不复刻 IDM 落后项"；A 路线真缺口只有速率/配额（A16→A2/A3）与队列（A15/P1-15→C1）；B/C 为绿地，B 开工前先用 B0 量浏览器 Native Messaging 契约，不复刻 IDM 私有操作码/管道/端口。
 - **执行方式**：按路线图逐阶段走 spec → plan → 实现；四闸为 floor；不 push。
 
+## 2026-10-21 A1 交付（If-Range）
+
+- **R17**：续传窗口带 `If-Range`；强 ETag 优先，Last-Modified 仅在未开 `--ignore-mtime` 时用；对端回 `200` ⇒ `ValidatorChanged`，一个字节不写；Fresh、不认 Range、`--data-file` 都不发。R9 的"不发 If-Range"半句作废。
+- **落点**：`resume::if_range_value`（取值）／`engine::if_range_for`（发送面）／`fetch::run_window_with_if_range`（带头的窗口入口；原 `run_window` 为 `None` 包装）／`Plan.resume_validator`（断点验证器进引擎）。
+- **新用例**：3 条集成（`a_window_request_carries_the_if_range_value_it_was_given`、`an_if_range_shot_that_gets_200_is_validator_changed_and_writes_nothing`、`a_resumed_run_fails_cleanly_when_if_range_gets_200_after_the_probe`）＋6 条单元。
+- **四闸**：`--lib` **246/0**（3.01 s）· `--bins` **3/0** · `integration` **100/0**（63.94 s）· clippy **0**。
+- **边界**：弱 ETag／不带引号的 ETag 不发（退 Last-Modified 或干脆不发）；对端忽略 If-Range 回 200 按"验证器变了"保守处理；`ToEof` 不发。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

@@ -6573,3 +6573,118 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------- A1：If-Range
+
+/// R17：给了值就逐字上线；这一条只钉头，不钉 200 分支。
+#[test]
+fn a_window_request_carries_the_if_range_value_it_was_given() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let announced = srv.announced()?;
+    let (store, path) = harness::store("a1-if-range-wire.bin")?;
+    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let iv = Interval { start: 0, end: 4095 };
+    let out = fetch::run_window_with_if_range(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        announced.size,
+        &harness::uncapped(),
+        dlm::fetch::BodyShape::Windowed,
+        Some(&announced.etag),
+    )?;
+    assert!(matches!(out, Outcome::Complete | Outcome::Advanced { .. }), "{out:?}");
+    let reqs = srv.requests_at_least(1)?;
+    assert_eq!(reqs[0]["if_range"], announced.etag.as_str(), "If-Range 必须逐字上线");
+    drop(store);
+    std::fs::remove_file(&path)?;
+    Ok(())
+}
+
+/// R17：发了 If-Range 而对端回 200，不许走裁定 6 的退化路径写字节。
+#[test]
+fn an_if_range_shot_that_gets_200_is_validator_changed_and_writes_nothing() -> anyhow::Result<()> {
+    let total = 1024 * 1024u64;
+    let peer = harness::spawn_scripted_peer(total, vec![], harness::Shot::IgnoresRange)?;
+    let base = peer.base();
+    let (store, path) = harness::store("a1-if-range-200.bin")?;
+    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let iv = Interval { start: 0, end: 4095 };
+    let out = fetch::run_window_with_if_range(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        dlm::fetch::BodyShape::Windowed,
+        Some("\"scripted-206\""),
+    )?;
+    assert_eq!(out, Outcome::Failed(FailKind::ValidatorChanged));
+    assert_eq!(store.len()?, 0, "200 到 If-Range 一个字节都不许写");
+    drop(peer);
+    drop(store);
+    std::fs::remove_file(&path)?;
+    Ok(())
+}
+
+/// R17 的引擎级形状：探针先看到旧 ETag 并判 Resume，第一条窗口请求就撞上"变了"的 200。
+/// 目标文件与断点都必须保留，且文件长度不许被退化路径延长。
+#[test]
+fn a_resumed_run_fails_cleanly_when_if_range_gets_200_after_the_probe() -> anyhow::Result<()> {
+    let total = 1024 * 1024u64;
+    let peer = harness::spawn_scripted_peer(
+        total,
+        vec![harness::Shot::Honest, harness::Shot::IgnoresRange],
+        harness::Shot::IgnoresRange,
+    )?;
+    let base = peer.base();
+    let dir = harness::tmp_dir("a1-if-range-run")?;
+    let t = Task {
+        url: format!("{base}/blob"),
+        dir: dir.path().to_path_buf(),
+        name: Some("a1.bin".into()),
+        ..harness::blank_task()
+    };
+    let target = t.target_path();
+    std::fs::write(&target, [0u8])?;
+    let validator = dlm::state::Validator {
+        etag: Some("\"scripted-206\"".into()),
+        last_modified: None,
+        total_len: total,
+        final_url: t.url.clone(),
+        ignore_mtime: false,
+    };
+    let snap = dlm::state::Snapshot::from_task(
+        &t,
+        validator,
+        vec![dlm::state::SegView { start: 0, end: 0 }],
+    )?;
+    let state_path = dlm::state::path_for(&target);
+    dlm::state::save(&state_path, &snap)?;
+
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 1,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: Some(0),
+            verify_sha256: None,
+            force_fresh: false,
+            on_tick: None,
+        },
+    )?;
+    assert!(!rep.ok, "验证器变了必须报未完成");
+    assert!(
+        rep.message.as_deref().unwrap_or("").contains("If-Range"),
+        "文案要点名 If-Range：{:?}",
+        rep.message
+    );
+    assert_eq!(std::fs::metadata(&target)?.len(), 1, "退化路径不许把 200 的 body 写到偏移 1");
+    assert!(state_path.exists(), "断点必须保留");
+    drop(peer);
+    Ok(())
+}

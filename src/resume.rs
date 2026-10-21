@@ -159,7 +159,7 @@
 //! 断点文件里也没有：`TaskView` 少这个字段，E9）。
 
 use crate::probe::carries_our_password;
-use crate::state::{Snapshot, TaskView};
+use crate::state::{Snapshot, TaskView, Validator};
 use crate::task::Task;
 
 /// 试探（Task 6）之后关于远端文件**此刻**的事实，即 ②③④⑤ 的比对面。
@@ -202,6 +202,27 @@ pub enum Decision {
     /// 拒绝开工：断点需要口令而本次没给。调用方应报错退出，**不要**退化成"从头下载"
     /// （从头下也要同一个口令才拿得到资源，悄悄重下等于把用户的凭据要求吞掉）。
     Abort(String),
+}
+
+/// 这一轮续传该发的 `If-Range` 值；`None` = 不发（退回探针先比、窗口照常的旧路径）。
+///
+/// 强 ETag 优先：RFC 9110 的 If-Range 只接受强验证器，`W/"..."` 与不带引号的串都不发。
+/// Last-Modified 只在本次**没开** `--ignore-mtime` 时用 —— 开了还发它，等于让对端按时间戳
+/// 把"用户明确说可以忽略"的变化重新判成重来。
+pub fn if_range_value(validator: &Validator, ignore_mtime: bool) -> Option<String> {
+    if let Some(etag) = validator.etag.as_deref() {
+        let etag = etag.trim();
+        if etag.len() >= 2 && etag.starts_with('"') && etag.ends_with('"') {
+            return Some(etag.to_string());
+        }
+    }
+    if !ignore_mtime && let Some(lm) = validator.last_modified.as_deref() {
+        let lm = lm.trim();
+        if !lm.is_empty() {
+            return Some(lm.to_string());
+        }
+    }
+    None
 }
 
 /// 纯函数判定。`existing` = `state::load(state::path_for(&task.target_path()))?` 的结果，
@@ -1139,5 +1160,38 @@ mod tests {
         // 边界：0 字节的资源 + 空段表也能续（别让"长度为 0"退化成"肯定不符"）。
         let empty = snap(val_opt(None, None, 0, URL));
         assert!(matches!(decide(&task_plain(), Some(empty), &facts(None, None, 0, URL, false)), Decision::Resume(_)));
+    }
+
+    // ---- A1：If-Range 取值（R17）----
+
+    #[test]
+    fn if_range_prefers_a_strong_etag() {
+        let v = val_opt(Some("\"abc\""), Some("Wed, 21 Oct 2015 07:28:00 GMT"), 100, URL);
+        assert_eq!(if_range_value(&v, false).as_deref(), Some("\"abc\""));
+        assert_eq!(if_range_value(&v, true).as_deref(), Some("\"abc\""), "ETag 不受 ignore_mtime 豁免");
+    }
+
+    #[test]
+    fn if_range_falls_back_to_last_modified_only_without_ignore_mtime() {
+        let v = val_opt(None, Some("Wed, 21 Oct 2015 07:28:00 GMT"), 100, URL);
+        assert_eq!(if_range_value(&v, false).as_deref(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
+        assert_eq!(if_range_value(&v, true), None, "开了 --ignore-mtime 就不许再按时间戳问对端");
+    }
+
+    #[test]
+    fn if_range_rejects_weak_or_unquoted_etags_and_uses_the_fallback() {
+        let v = val_opt(Some("W/\"weak\""), Some("LM"), 100, URL);
+        assert_eq!(if_range_value(&v, false).as_deref(), Some("LM"), "弱 ETag 不能用，退 Last-Modified");
+        let no_lm = val_opt(Some("W/\"weak\""), None, 100, URL);
+        assert_eq!(if_range_value(&no_lm, false), None, "弱 ETag 不能单独当 If-Range");
+        let unquoted = val_opt(Some("abc"), None, 100, URL);
+        assert_eq!(if_range_value(&unquoted, false), None, "不带引号的 ETag 不是强验证器");
+    }
+
+    #[test]
+    fn if_range_is_none_without_a_usable_validator() {
+        let v = val_opt(None, None, 100, URL);
+        assert_eq!(if_range_value(&v, false), None);
+        assert_eq!(if_range_value(&v, true), None);
     }
 }

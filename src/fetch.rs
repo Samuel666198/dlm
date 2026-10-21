@@ -245,7 +245,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::{Body, Client, Request};
-use reqwest::header::{CONTENT_RANGE, RANGE};
+use reqwest::header::{CONTENT_RANGE, IF_RANGE, RANGE};
 use reqwest::StatusCode;
 
 use crate::consts::{WINDOW_BYTES, WINDOW_MAX_TIMEOUT_SECS, WINDOW_MIN_TIMEOUT_SECS};
@@ -602,8 +602,17 @@ fn is_read_timeout(err: &std::io::Error) -> bool {
 ///
 /// **只服务可分段的形状**：`GET` + 一条 `Range`。带请求体的任务由 `build_body_request` 那一条负责，
 /// 而 `run_window` 在走到这里**之前**就把那种任务拒了（F1 的裁定）。
-fn build_request(agent: &Client, task: &Task, range: &str, budget: Duration) -> Result<Request> {
-    let req = agent.get(&task.url).header(RANGE, range).timeout(budget);
+fn build_request(
+    agent: &Client,
+    task: &Task,
+    range: &str,
+    budget: Duration,
+    if_range: Option<&str>,
+) -> Result<Request> {
+    let mut req = agent.get(&task.url).header(RANGE, range).timeout(budget);
+    if let Some(value) = if_range {
+        req = req.header(IF_RANGE, probe::header_value(value, "If-Range")?);
+    }
     probe::with_contract_headers(req, task)?
         .build()
         .context("窗口请求拼不出来（URL 不合法？）")
@@ -737,6 +746,9 @@ fn cap_allows(cap_end: u64, cursor: u64, shot_start: u64) -> bool {
 /// 函数看完响应头自己定，见 [`BodyShape`] 的文档（预算是**整请求**期限，必须在上网之前定）。
 /// 第八个参数踩了 clippy 的 `too_many_arguments` 门槛（>7）：`#[allow]` 在这里比把七个参数打散成
 /// 一个 `Options` 更诚实 —— 那会重写三十多处既有用例的调用形状，而派发点名"既有判据方向一条不许动"。
+/// 不带 `If-Range` 的窗口入口：与 [`run_window_with_if_range`] 传 `None` 逐字等价。
+///
+/// 保留这一层是因为既有调用点三十多处（多数在测试里）；R17 只让引擎走新入口。
 #[allow(clippy::too_many_arguments)]
 pub fn run_window(
     agent: &Client,
@@ -747,6 +759,25 @@ pub fn run_window(
     total_len: u64,
     cap: &EndCap,
     shape: BodyShape,
+) -> Result<Outcome> {
+    run_window_with_if_range(agent, task, iv, store, rate_bps, total_len, cap, shape, None)
+}
+
+/// 与 [`run_window`] 相同，但可以带一条 `If-Range`（R17）。
+///
+/// `Some` 时这一枪带 `If-Range`；对端回 `200` 不再走裁定 6 的退化路径，而是
+/// `Outcome::Failed(FailKind::ValidatorChanged)` —— 一个字节都不写。原因见设计稿 §10 R17。
+#[allow(clippy::too_many_arguments)]
+pub fn run_window_with_if_range(
+    agent: &Client,
+    task: &Task,
+    iv: Interval,
+    store: &Store,
+    rate_bps: u64,
+    total_len: u64,
+    cap: &EndCap,
+    shape: BodyShape,
+    if_range: Option<&str>,
 ) -> Result<Outcome> {
     // 与 `probe::run` / `state::Snapshot::from_task` 同一个立场：规则只住在 `Task::validate()` 一处，
     // 但**发请求**这一刻是第二个强制点。明文 HTTP + 口令的任务到不了网络（用例
@@ -774,7 +805,7 @@ pub fn run_window(
 
     // 这一枪的形状在**上网之前**就定完：`Range`、整请求期限、读上界（[`plan_shot`]）。
     let plan = plan_shot(iv, total_len, rate_bps, shape);
-    let req = build_request(agent, task, &plan.range, plan.budget)?;
+    let req = build_request(agent, task, &plan.range, plan.budget, if_range)?;
     let mut resp = match agent.execute(req) {
         Ok(resp) => resp,
         Err(e) => {
@@ -799,6 +830,11 @@ pub fn run_window(
     }
 
     let status = resp.status();
+    // R17：发了 If-Range 还回 200 ⇒ 对端说验证器变了（或不支持 If-Range）。这一枪一个字节都不许写；
+    // 它不是裁定 6 的退化路径（那条只在**没发** If-Range 时成立）。
+    if status == StatusCode::OK && if_range.is_some() {
+        return Ok(Outcome::Failed(FailKind::ValidatorChanged));
+    }
     if status == StatusCode::RANGE_NOT_SATISFIABLE {
         // 裁定 2：**不是**"看到 416 就完事"。分母与我们这份 `total_len` 不一致（或取不到）就说明
         // 服务端长度在我们脚下变了 ⇒ `ValidatorChanged`，让重试上限介入（E7 的 2026-10-16 追加段）。
@@ -1434,7 +1470,7 @@ mod tests {
         t.user = Some("alice".into());
         t.password = Some("hunter2".into());
         let budget = window_budget(131_072);
-        let req = build_request(&agent, &t, "bytes=100-200", budget).unwrap();
+        let req = build_request(&agent, &t, "bytes=100-200", budget, None).unwrap();
 
         assert_eq!(
             req.method(),
@@ -1464,9 +1500,30 @@ mod tests {
         let agent = Client::builder().build().unwrap();
         let mut t = task("http://example.com/a.bin");
         t.user = Some("alice".into());
-        let req = build_request(&agent, &t, "bytes=0-", Duration::from_secs(15)).unwrap();
+        let req = build_request(&agent, &t, "bytes=0-", Duration::from_secs(15), None).unwrap();
         assert!(req.headers().get("authorization").is_none(), "明文 socket 上半副凭据也不许出去");
         assert_eq!(req.headers().get(RANGE).unwrap(), "bytes=0-");
+    }
+
+    #[test]
+    fn the_if_range_header_is_attached_only_when_a_value_is_given() {
+        let agent = Client::builder().build().unwrap();
+        let t = task("https://example.com/a.bin");
+        let none = build_request(&agent, &t, "bytes=0-99", Duration::from_secs(15), None).unwrap();
+        assert!(none.headers().get(IF_RANGE).is_none(), "Fresh/无验证器时不许凭空带 If-Range");
+
+        let some = build_request(
+            &agent,
+            &t,
+            "bytes=0-99",
+            Duration::from_secs(15),
+            Some("\"abc\""),
+        )
+        .unwrap();
+        assert_eq!(some.headers().get(IF_RANGE).unwrap(), "\"abc\"");
+
+        let bad = build_request(&agent, &t, "bytes=0-99", Duration::from_secs(15), Some("bad\nvalue"));
+        assert!(bad.is_err(), "头里装不下的值要报错，不许 panic、不许静默丢掉");
     }
 
     // ---- 对外形状（plan 第 765–767 行的 Produces） ----

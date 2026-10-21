@@ -876,7 +876,7 @@ pub(crate) fn with_contract_headers(req: RequestBuilder, task: &Task) -> Result<
 
 /// `String` → `HeaderValue`，错误里点名是哪个字段，但**不抄值**（`Cookie`/`Referer` 都可能带着凭据，
 /// 把它们抄进消息等于替它们再多开一条外传通道 —— 与 Task 5 的 ①b 同一条纪律）。
-fn header_value(value: &str, field: &'static str) -> Result<HeaderValue> {
+pub(crate) fn header_value(value: &str, field: &'static str) -> Result<HeaderValue> {
     HeaderValue::from_str(value)
         .with_context(|| format!("{field} 里有 HTTP 头装不下的字符，请求发不出去（值不回显）"))
 }
