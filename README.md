@@ -3,7 +3,7 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 只做内核与命令行。不做守护进程、浏览器扩展、GUI、站点抓取。
+v1 只做内核与命令行；v2 B1 起加最小 Native Messaging 扩展（只做 ping/pong），B2 接下载。不做守护进程、GUI、站点抓取。
 
 ```
 cargo build                     # 工具链由 rust-toolchain.toml 钉为 msvc
@@ -181,6 +181,22 @@ bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；�
 `完成后动作未执行：下载未完成`。计划任务不做在前台 CLI：它移到 C1 队列（进程内等待会占住终端，
 系统计划任务会写系统状态）；阻止休眠也不做。
 
+## 浏览器 Native Messaging（B1）
+
+最小闭环：宿主 `com.dlm.host` + 一个 MV3 扩展，只做 `ping` → `pong`，不接下载。
+安装/卸载/手动加载见 [`browser/README.md`](browser/README.md)。宿主 `dlm-native-host` 走 stdio，
+4 字节本机序帧、1 MiB 上限；扩展固定 key/ID，权限只有 `nativeMessaging` + `storage`。
+
+浏览器验收（不在 Rust 四闸内）：
+
+```bash
+node browser/test/native-ping.mjs
+node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+Edge 155 实测通过；Chrome 155 的 `--load-extension` 被忽略，需在 `chrome://extensions` 手动加载
+`browser/extension`。B2 才加动态端口 + 令牌 + 任务投递。
+
 ## v1 已知限制（都不是"偷偷没做"，做过裁定并写进勘误）
 
 | 限制 | 出处 |
@@ -196,7 +212,7 @@ bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；�
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
-不做且不在 v1 计划：内核/驱动拦截、浏览器扩展与 Native Messaging、守护进程与本地监听、站点抓取与镜像、
+不做且不在 v1 计划：内核/驱动拦截、浏览器下载接管/站点抓取（B1 只有 ping/pong，B2 接下载）、守护进程与本地监听、
 配额式限速（到量暂停/择时恢复）、GUI、动作链/计划任务/阻止休眠（`open`／`run`／`shutdown` 已做）。
 
 ## 测试与验收

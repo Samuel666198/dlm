@@ -369,3 +369,16 @@ R19 里"shutdown 在解析期直接拒绝"那半句作废，其余不变。
 - **未复量**：限速档与续传档本轮没跑；旧 12.8%–20.8% 只作 v1 历史读数。
 - 不改 scheduler 的外部动作形状（`Assign`/`Retighten`/`Idle`）；旧 midpoint/floor 判据不放宽。
 
+**R22（B1，2026-10-22）：Native Messaging 最小闭环 `com.dlm.host`；只做 ping/pong，不接下载。**
+- **宿主**：`dlm-native-host.exe`，stdin/stdout 上 4 字节本机序长度 + UTF-8 JSON；单帧上限 1 MiB；
+  `ping`/`hello`/未知 op/坏 JSON 都有可读响应；诊断只走 stderr。
+- **扩展**：MV3，固定 `key` 决定 ID `fkebhmogekekphpcggaclfgpfmofhdjk`；权限只 `nativeMessaging` + `storage`；
+  content script 把 pong/错误显示在页面右下角，并 `sendMessage({op:"wake"})` 主动唤醒 service worker。
+- **注册**：HKCU `Google\Chrome\NativeMessagingHosts\com.dlm.host` 与
+  `Microsoft\Edge\NativeMessagingHosts\com.dlm.host` → `%LOCALAPPDATA%\dlm\native-host\com.dlm.host.json`；
+  manifest 的 `allowed_origins` 固定扩展 ID。安装/卸载脚本在 `browser/native-host/`。
+- **验收**：宿主直接帧往返（ping/未知 op）；Edge 155 真浏览器往返，页面显示
+  `dlm native: pong com.dlm.host v0.1.0`，截图/日志在 `docs/evidence/2026-10-22-b1-native-ping.*`。
+  Chrome 155 的 `--load-extension` 被忽略（页面无扩展元素），手动加载未测，不是宿主问题。
+- **不做**：动态端口/令牌、下载投递、页面挂钩、Firefox/Opera 扩展；这些归 B2。
+

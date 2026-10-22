@@ -3,6 +3,7 @@ pub mod cli;
 pub mod consts;
 pub mod engine;
 pub mod fetch;
+pub mod native;
 pub mod probe;
 pub mod rate;
 pub mod report;

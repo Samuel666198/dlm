@@ -99,6 +99,15 @@
 - **未取证**：Q-B1 操作码语义（不阻塞自建协议）；Q-B2 的端口已量到，`POST /open/1` 协议帧未取证。
 - **证据**：[`../../evidence/2026-10-22-native-messaging-recon.md`](../../evidence/2026-10-22-native-messaging-recon.md)。无代码改动；四闸 **259/3/106/clippy 0**（63.92 s，复跑）。
 
+## 2026-10-22 B1 交付（Native Messaging 最小闭环）
+
+- **宿主**：`src/native.rs` + `src/bin/dlm-native-host.rs`；4 字节本机序长度、1 MiB 上限、`ping`/`hello`/未知 op/坏 JSON。
+- **扩展**：`browser/extension` MV3，固定 key/ID `fkebhmogekekphpcggaclfgpfmofhdjk`；`nativeMessaging`+`storage`；`wake` + 1500 ms 重连；content script 显示状态。
+- **注册**：HKCU Chrome/Edge `com.dlm.host` → `%LOCALAPPDATA%\dlm\native-host\com.dlm.host.json`；安装/卸载脚本在 `browser/native-host/`。
+- **验收**：`native-ping.mjs` 真宿主帧往返通过；**Edge 155** 真浏览器 `dlm native: pong com.dlm.host v0.1.0`，截图/日志在 `docs/evidence/2026-10-22-b1-native-ping.*`；Chrome 155 的 `--load-extension` 被忽略（手动加载未测，不是宿主问题）。
+- **四闸**：`--lib` **266/0**（3.02 s）· `--bins` **3/0 + 0/0**（新 bin 无测试）· `integration` **106/0**（64.05 s）· clippy **0**。
+- **未做**：动态端口/令牌、下载投递、页面挂钩（B2）；Firefox/Opera 扩展未做。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。
