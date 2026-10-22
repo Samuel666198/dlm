@@ -90,6 +90,15 @@
 - **四闸**：`--lib` **259/0**（3.01 s）· `--bins` **3/0** · `integration` **106/0**（63.87 s）· clippy **0**。
 - **未复量**：限速档、续传档的 dup；旧 12.8%–20.8% 只作 v1 历史。
 
+## 2026-10-22 B0 交付（Native Messaging 取证）
+
+- **注册表**：Chrome HKCU/HKLM、Edge HKCU、Firefox HKCU；Chrome/Edge 共用 `IDMMsgHost.json`，Firefox 用 `IDMMsgHostMoz.json`。
+- **宿主**：`IDMMsgHost.exe` 6.38.20.9；`IDMan.exe` 6.42.42.2；`IDMIntegrator64.exe` 6.41.23.1。
+- **现役扩展**：Chrome **6.42.64 / MV3**、Edge **6.43.1 / MV2**；均 `connectNative("com.tonec.idm")`、1500 ms 退避、opcode 14–19。
+- **本地监听**：动态 `127.0.0.1:51122` / `50627`，属主 `IDMIntegrator64.exe`；`1001` 只是扩展里的固定候选。
+- **未取证**：Q-B1 操作码语义（不阻塞自建协议）；Q-B2 的端口已量到，`POST /open/1` 协议帧未取证。
+- **证据**：[`../../evidence/2026-10-22-native-messaging-recon.md`](../../evidence/2026-10-22-native-messaging-recon.md)。无代码改动；四闸 **259/3/106/clippy 0**（63.92 s，复跑）。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。
