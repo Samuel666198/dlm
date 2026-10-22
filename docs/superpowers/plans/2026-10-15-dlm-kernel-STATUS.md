@@ -117,6 +117,17 @@
 - **四闸**：`--lib` **270/0**（3.01 s）· `--bins` **3/0 + 0/0** · `integration` **106/0**（64.52 s）· clippy **0**。
 - **未做**：本地监听/令牌（B10）、页面挂钩/DNR/代理/媒体（B3）、队列（C1）；一任务一进程是临时形态。
 
+## 2026-10-22 C0–C3 交付（本地 Web UI + 队列）
+
+- **C0 裁定**：本地 Web UI，零新 crate；不选 eframe/Tauri/Win32（破依赖上限或引入 webview/构建链）。没有原生窗口。
+- **C1 队列**：`src/queue.rs`；`queued/running/paused/done/failed`、原子写、重启 `running→paused`、从 `.dlm.json` 读进度、`start_at`（A3b 移入）。
+- **C2/C3**：`src/gui.rs` + `src/bin/dlm-gui.rs`；只绑 `127.0.0.1` + token；API `/api/tasks`、`add`、`pause|resume|remove`、`log`；内嵌单页 UI（textContent）；一任务一进程 `dlm --quiet`；队列**不存 Cookie**。
+- **验收**：integration `gui_queue_adds_and_finishes_a_download`（真 `dlm-gui`、node `/sz/65536`、add→done→65536 B；`start_at` 保持 queued；pause/resume/remove）；Chrome 155 真浏览器 UI 截图/日志在 `docs/evidence/2026-10-22-c3-gui.*`。
+- **四闸**：`--lib` **278/0**（3.01 s）· `--bins` **3/0 + 0/0**（新 bin 无测试）· `integration` **107/0**（64.43 s）· clippy **0**。
+- **口径收窄**：路线图 C3 原写"分类规则＋更新检查"；C 的 spec §1/§6 把 C3 定为**交互**（添加/暂停/恢复/删除/日志/起始时间）。分类规则未做；更新检查要访问外网，需单独点头 ⇒ 两者仍未做。
+- **未做**：原生 GUI、Windows 服务/开机自启、队列 Cookie/认证（继续走 B2）、B3 媒体嗅探、A5 IDM 断点兼容。
+- **文档**：spec `docs/superpowers/specs/2026-10-22-dlm-product-ui-design.md`；plan `docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md`；证据 `docs/evidence/2026-10-22-c3-gui.md`。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

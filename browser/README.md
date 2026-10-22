@@ -1,4 +1,4 @@
-# dlm Native Messaging 宿主（B1）
+# dlm Native Messaging 宿主（B1/B2）
 
 宿主名 `com.dlm.host`；Chrome/Edge 扩展 ID 固定为 `fkebhmogekekphpcggaclfgpfmofhdjk`（扩展 manifest 里的 `key` 决定）。
 B1 只做 `{"op":"ping"}` → `{"op":"pong",...}`，不接下载。
@@ -58,7 +58,8 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
   日志到 `%LOCALAPPDATA%\dlm\native-host\jobs`。
 - 验收：`node browser/test/verify-native-download.mjs`（Edge 155 实测：dlm 请求带 `sid=42`/Referer/UA 空，
   落盘文件等于页面；截图/日志在 `docs/evidence/2026-10-22-b2-browser-download.*`）。
-- 一任务一进程是 B2 的临时形态；C1 队列会替换入口，协议不变。页面挂钩/DNR/代理/媒体嗅探不在 B2。
+- 一任务一进程是 B2 的形态；C 的队列（`dlm-gui`）目前**不接**浏览器投递，两者是独立入口。
+  页面挂钩/DNR/代理/媒体嗅探不在 B2。
 
 ## 手动加载
 
@@ -67,6 +68,8 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 
 ## 安全边界
 
-- 宿主只读 stdin、写 stdout 帧；诊断走 stderr；只认 ping/hello，其余回 `error`。
-- 没有本地监听、没有下载投递、没有页面挂钩；这些是 B2。
-- 扩展权限只有 `nativeMessaging` + `storage`；content script 只显示状态。
+- 宿主只读 stdin、写 stdout 帧；诊断走 stderr。B1 只认 `ping`/`hello`；B2 增加 `download`
+  （只接 `http/https`，spawn `dlm`，Cookie 走 `--cookie-stdin`）；不执行任意命令、没有本地监听。
+- B2 扩展权限：`nativeMessaging` + `storage` + `contextMenus` + `cookies`，`host_permissions: <all_urls>`；
+  content script 显示状态并提供页面按钮。
+- 页面挂钩/DNR/代理/媒体嗅探不在 B2。

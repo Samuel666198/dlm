@@ -3,7 +3,8 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 只做内核与命令行；v2 B1/B2 已加最小 Native Messaging 扩展与浏览器直接投递（右键/页面按钮，URL+Referer+Cookie）。不做守护进程、GUI、站点抓取。
+v1 是内核与命令行；v2 已加 B1/B2 浏览器投递（最小 Native Messaging 扩展）与 C1–C3 本地 Web UI
+（`dlm-gui`：任务队列 + 环回 HTTP + 内嵌单页）。不做原生 GUI、Windows 服务、守护进程、站点抓取。
 
 ```
 cargo build                     # 工具链由 rust-toolchain.toml 钉为 msvc
@@ -184,9 +185,10 @@ bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；�
 
 ## 浏览器 Native Messaging（B1/B2）
 
-最小闭环：宿主 `com.dlm.host` + 一个 MV3 扩展，只做 `ping` → `pong`，不接下载。
+B1 的最小闭环：宿主 `com.dlm.host` + 一个 MV3 扩展，只做 `ping` → `pong`，不接下载。
 安装/卸载/手动加载见 [`browser/README.md`](browser/README.md)。宿主 `dlm-native-host` 走 stdio，
-4 字节本机序帧、1 MiB 上限；扩展固定 key/ID，权限只有 `nativeMessaging` + `storage`。
+4 字节本机序帧、1 MiB 上限；扩展固定 key/ID（B1 阶段权限只有 `nativeMessaging` + `storage`，
+B2 扩到 `contextMenus` + `cookies` + `<all_urls>`）。
 
 浏览器验收（不在 Rust 四闸内）：
 
@@ -196,17 +198,52 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 ```
 
 Edge 155 实测通过；Chrome 155 的 `--load-extension` 被忽略，需在 `chrome://extensions` 手动加载
-`browser/extension`。B2 才加动态端口 + 令牌 + 任务投递。
+`browser/extension`。
 
-**B2 起**：右键链接/图片/音视频或页面右下角 `dlm ↓` 把 `url/referer/cookie` 交给宿主；宿主 spawn
+**B2**：右键链接/图片/音视频或页面右下角 `dlm ↓` 把 `url/referer/cookie` 交给宿主；宿主 spawn
 一个 `dlm`（一任务一进程，不排队），Cookie 走 `--cookie-stdin`，不写命令行、不写任务日志。
-浏览器验收：
+B2 **没有**本地监听/令牌，也不是队列（队列与环回 HTTP 在 C 的 `dlm-gui`，见下节）。浏览器验收：
 
 ```bash
 node browser/test/verify-native-download.mjs
 ```
 
-页面挂钩、DNR、代理读取、媒体嗅探不在 B2；本地监听/令牌也还没做。
+页面挂钩、DNR、代理读取、媒体嗅探不在 B2。
+
+## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
+
+**C0 裁定**：本地 Web UI，零新 crate（默认依赖仍是 6 个）。没有原生窗口；浏览器打开页面即可。
+
+```bash
+cargo build --bins
+target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<token>
+```
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `--port <PORT>` | `0` | `0` 选临时端口；只绑 `127.0.0.1` |
+| `--queue <FILE>` | `%LOCALAPPDATA%\dlm\queue.json` | 队列持久化（临时文件 + rename） |
+| `--out-dir <DIR>` | `%USERPROFILE%\Downloads` | 落盘目录 |
+| `--log-dir <DIR>` | `%LOCALAPPDATA%\dlm\gui\logs` | 每个任务一份日志 |
+| `--dlm <EXE>` | 与 `dlm-gui` 同目录的 `dlm.exe` | 子进程 |
+| `--concurrency <N>` | `2` | 同时跑几个任务 |
+| `--token <T>` | 随机 | 只用于测试；正常用打印出来的 URL |
+
+- **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
+- **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志。
+- **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
+- **安全**：只绑 `127.0.0.1`；所有页面/API 都要求 `?t=<token>`；UI 用 `textContent` 插入数据；日志 API 只读 log 目录内文件、最多 64 KiB 尾。
+- **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 要等也得让 `dlm-gui` 一直开着。
+- **不做**：原生 GUI、分类规则、更新检查（要访问外网，需单独点头）、队列 Cookie。
+
+验收（不在 Rust 四闸内，需真浏览器）：
+
+```bash
+cargo test --test integration              # 含 gui_queue_adds_and_finishes_a_download
+node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截图
+```
+
+证据：[`docs/evidence/2026-10-22-c3-gui.md`](docs/evidence/2026-10-22-c3-gui.md)（真浏览器截图与日志）。
 
 ## v1 已知限制（都不是"偷偷没做"，做过裁定并写进勘误）
 
@@ -223,18 +260,19 @@ node browser/test/verify-native-download.mjs
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
-不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递）、
-守护进程与本地监听、配额式限速（到量暂停/择时恢复）、GUI、动作链/计划任务/阻止休眠
-（`open`／`run`／`shutdown` 已做）。
+不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递，B3 未做）、
+原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、分类规则/更新检查、
+动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
+C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 
 ## 测试与验收
 
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 240 通过
+cargo test --lib                            # 278 通过（含队列/UI 纯函数）
 cargo test --bins                           # 3 通过（装配层的退出档只有这一层看得见）
-cargo test --test integration               # 97 通过（真发 HTTP，对端是自己写的 node 服务器）
+cargo test --test integration               # 107 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
 ```
 
@@ -248,6 +286,8 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | 位置 | 是什么 |
 |---|---|
 | [`docs/superpowers/specs/2026-10-15-dlm-kernel-design.md`](docs/superpowers/specs/2026-10-15-dlm-kernel-design.md) | 设计稿（模块划分、常量、断点结构、CLI、错误处理、测试策略）。**§10 是勘误节：实测推翻的东西在这里，正文不回改** |
+| [`docs/superpowers/specs/2026-10-22-dlm-product-ui-design.md`](docs/superpowers/specs/2026-10-22-dlm-product-ui-design.md) | C0–C3 产品层设计（本地 Web UI、队列、HTTP/UI、安全边界） |
+| [`docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md`](docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md) | C1–C3 实现计划（已交付） |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md`](docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) | 执行状态：进度表、当前基线、恢复步骤、下游必守的裁定、挂账的 minor、等用户点头的事 |
 | `docs/evidence/` | 一次性实测记录（数字都来自真跑） |

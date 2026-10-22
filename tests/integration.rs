@@ -6879,3 +6879,188 @@ fn residual_duplicate_traffic_is_bounded_by_one_chunk_per_retighten() -> anyhow:
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------- C1–C3 队列 + 本地 UI
+
+/// 启一个真的 `dlm-gui`，走 HTTP API：添加 → done → 落盘；再验 start_at 排队与 pause/resume/remove。
+#[test]
+fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let (srv, node_base) = harness::spawn()?;
+    let dir = harness::tmp_dir("gui-queue")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-test-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--concurrency",
+                "2",
+                "--token",
+                token,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let add_body = serde_json::json!({
+        "url": format!("{node_base}/sz/65536"),
+        "name": "gui.bin",
+        "referer": null,
+        "start_at": null,
+    });
+    let resp = client
+        .post(format!("{gui_base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(add_body.to_string())
+        .send()?;
+    let add_reply: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(add_reply["ok"], true, "{add_reply}");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let task_id = loop {
+        let resp = client.get(format!("{gui_base}/api/tasks?t={token}")).send()?;
+        let text = resp.text()?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        if let Some(task) = tasks.iter().find(|t| t["name"] == "gui.bin") {
+            match task["status"].as_str() {
+                Some("done") => break task["id"].as_str().context("task id")?.to_string(),
+                Some("failed") => {
+                    let log = client
+                        .get(format!(
+                            "{gui_base}/api/log?id={}&t={token}",
+                            task["id"].as_str().unwrap_or("")
+                        ))
+                        .send()?
+                        .text()?;
+                    panic!("gui task failed: {task}; log={log}");
+                }
+                _ => {}
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("gui task didn't finish: {text}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let target = out_dir.join("gui.bin");
+    assert_eq!(std::fs::metadata(&target).context("下载文件不存在")?.len(), 65536);
+    let job_log = std::fs::read_to_string(log_dir.join(format!("{task_id}.log")))?;
+    assert!(job_log.contains("下载已完成"), "job log: {job_log}");
+
+    // 计划任务：start_at 在未来 ⇒ 保持 queued；pause/resume/remove 走同一条 API。
+    let sched_body = serde_json::json!({
+        "url": format!("{node_base}/sz/1024"),
+        "name": "later.bin",
+        "referer": null,
+        "start_at": dlm::queue::now_secs() + 3600,
+    });
+    let resp = client
+        .post(format!("{gui_base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(sched_body.to_string())
+        .send()?;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"], true);
+
+    let later_id = loop {
+        let resp = client.get(format!("{gui_base}/api/tasks?t={token}")).send()?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&resp.text()?)?;
+        if let Some(task) = tasks.iter().find(|t| t["name"] == "later.bin") {
+            assert_eq!(task["status"], "queued", "未来 start_at 不该启动: {task}");
+            break task["id"].as_str().context("later id")?.to_string();
+        }
+        if Instant::now() > deadline {
+            panic!("scheduled task didn't appear");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    for (api, want) in [("pause", "paused"), ("resume", "queued")] {
+        let resp = client
+            .post(format!("{gui_base}/api/{api}?t={token}"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"id": later_id}).to_string())
+            .send()?;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"], true);
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let tasks: Vec<serde_json::Value> =
+                serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+            if tasks.iter().find(|t| t["id"] == later_id.as_str()).is_some_and(|t| t["status"] == want) {
+                break;
+            }
+            if Instant::now() > until {
+                panic!("{api} didn't reach {want}: {tasks:?}");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let resp = client
+        .post(format!("{gui_base}/api/remove?t={token}"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": later_id}).to_string())
+        .send()?;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"], true);
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let tasks: Vec<serde_json::Value> =
+            serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+        if tasks.iter().all(|t| t["id"] != later_id.as_str()) {
+            break;
+        }
+        if Instant::now() > until {
+            panic!("removed task still listed: {tasks:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    drop(srv);
+    Ok(())
+}
