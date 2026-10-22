@@ -108,6 +108,15 @@
 - **四闸**：`--lib` **266/0**（3.02 s）· `--bins` **3/0 + 0/0**（新 bin 无测试）· `integration` **106/0**（64.05 s）· clippy **0**。
 - **未做**：动态端口/令牌、下载投递、页面挂钩（B2）；Firefox/Opera 扩展未做。
 
+## 2026-10-22 B2 交付（浏览器直接投递）
+
+- **R23**：右键/页面 `dlm ↓` 把 `url/referer/cookie` 交给宿主；宿主 spawn dlm；Cookie 走 `--cookie-stdin`（不进命令行/job log）。
+- **宿主**：`src/host.rs` 的 `download`；配置 `DLM_NATIVE_CONFIG` → `%LOCALAPPDATA%\dlm\native-host\config.json` → 默认；日志 `jobs/<id>.log`。
+- **扩展**：`contextMenus`+`cookies`+`host_permissions:<all_urls>`；页面按钮与右键同一个 `page-download`；accepted/error 显示在页面。
+- **实测**：Edge 155；dlm 请求带 `sid=42`/Referer/UA 空；落盘 156 B 等于页面；截图/日志在 `docs/evidence/2026-10-22-b2-browser-download.*`。
+- **四闸**：`--lib` **270/0**（3.01 s）· `--bins` **3/0 + 0/0** · `integration` **106/0**（64.52 s）· clippy **0**。
+- **未做**：本地监听/令牌（B10）、页面挂钩/DNR/代理/媒体（B3）、队列（C1）；一任务一进程是临时形态。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

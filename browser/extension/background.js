@@ -1,5 +1,5 @@
-// B1 最小 Native Messaging 长连接：ping 一次，把 pong/错误写进 storage。
-// 不做页面挂钩、不接下载；这些归 B2。
+// B2：Native Messaging 长连接 + 右键菜单/页面按钮投递。
+// 只把 url/referer/cookie 交给宿主；页面挂钩、DNR、代理读取不在这一版。
 
 const HOST = "com.dlm.host";
 let port = null;
@@ -19,10 +19,22 @@ function connect() {
   }
 
   port.onMessage.addListener((msg) => {
-    store({ lastPong: msg, lastError: null, at: Date.now() });
-    chrome.action.setBadgeText({ text: "OK" });
-    chrome.action.setBadgeBackgroundColor({ color: "#2e7d32" });
-    console.log("dlm native pong", msg);
+    if (msg && msg.op === "accepted") {
+      store({ lastJob: msg, lastError: null });
+      chrome.action.setBadgeText({ text: "↓" });
+      chrome.action.setBadgeBackgroundColor({ color: "#1565c0" });
+      console.log("dlm job accepted", msg);
+    } else if (msg && msg.op === "error") {
+      store({ lastPong: null, lastError: msg.message || "native host error" });
+      chrome.action.setBadgeText({ text: "!" });
+      chrome.action.setBadgeBackgroundColor({ color: "#c62828" });
+      console.error("dlm native error", msg.message);
+    } else {
+      store({ lastPong: msg, lastError: null, at: Date.now() });
+      chrome.action.setBadgeText({ text: "OK" });
+      chrome.action.setBadgeBackgroundColor({ color: "#2e7d32" });
+      console.log("dlm native pong", msg);
+    }
   });
 
   port.onDisconnect.addListener(() => {
@@ -38,12 +50,63 @@ function connect() {
   port.postMessage({ op: "ping" });
 }
 
+function submitTask(task) {
+  if (!port) connect();
+  if (!port) {
+    store({ lastJob: null, lastError: "native host unavailable" });
+    return;
+  }
+  port.postMessage(task);
+}
+
+function cookieHeader(url) {
+  return new Promise((resolve) => {
+    chrome.cookies.getAll({ url }, (cookies) => {
+      if (chrome.runtime.lastError) {
+        resolve("");
+        return;
+      }
+      resolve((cookies || []).map((c) => `${c.name}=${c.value}`).join("; "));
+    });
+  });
+}
+
+function submitPage(url, referer) {
+  if (!/^https?:\/\//i.test(url || "")) {
+    store({ lastJob: null, lastError: "only http/https URLs can be sent to dlm" });
+    return;
+  }
+  cookieHeader(url).then((cookie) => {
+    submitTask({ op: "download", url, referer: referer || url, cookie });
+  });
+}
+
+function installMenu() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "dlm-download",
+      title: "Download with dlm",
+      contexts: ["link", "image", "video", "audio"],
+    });
+  });
+}
+
 connect();
-chrome.runtime.onInstalled.addListener(connect);
+chrome.runtime.onInstalled.addListener(() => {
+  installMenu();
+  connect();
+});
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.op === "wake") connect();
+  if (msg && msg.op === "page-download") submitPage(msg.url, msg.referer);
   sendResponse({ ok: true });
+});
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== "dlm-download") return;
+  const url = info.linkUrl || info.srcUrl;
+  if (!url) return;
+  submitPage(url, info.pageUrl || (tab && tab.url) || url);
 });
 chrome.action.onClicked.addListener(() => {
   if (port) port.postMessage({ op: "ping" });

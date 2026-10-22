@@ -3,7 +3,7 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 只做内核与命令行；v2 B1 起加最小 Native Messaging 扩展（只做 ping/pong），B2 接下载。不做守护进程、GUI、站点抓取。
+v1 只做内核与命令行；v2 B1/B2 已加最小 Native Messaging 扩展与浏览器直接投递（右键/页面按钮，URL+Referer+Cookie）。不做守护进程、GUI、站点抓取。
 
 ```
 cargo build                     # 工具链由 rust-toolchain.toml 钉为 msvc
@@ -34,6 +34,7 @@ POSIX 长选项为主，IDM 的斜杠别名在**进解析器之前就地替换�
 | `--connections <N>` | — | 默认 8 |
 | `--max-speed <BYTES/S>` | — | 所有连接**合计**的速率上限（字节/秒；0 = 不限） |
 | `--referer <URL>` / `--cookie <C>` | — | 原样带上 |
+| `--cookie-stdin` | — | 从 stdin 读 Cookie 头（与 `--cookie` 互斥；避免出现在命令行/进程列表） |
 | `--data-file <FILE>` | — | 请求体从文件读，见下面"带请求体那条路" |
 | `--user <U>` / `--password <P>` | — | `Authorization: Basic`；**只在 https 上发** |
 | `--ignore-mtime` | — | 仅 `Last-Modified` 变了可续；`ETag` 变了仍从头重来 |
@@ -181,7 +182,7 @@ bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；�
 `完成后动作未执行：下载未完成`。计划任务不做在前台 CLI：它移到 C1 队列（进程内等待会占住终端，
 系统计划任务会写系统状态）；阻止休眠也不做。
 
-## 浏览器 Native Messaging（B1）
+## 浏览器 Native Messaging（B1/B2）
 
 最小闭环：宿主 `com.dlm.host` + 一个 MV3 扩展，只做 `ping` → `pong`，不接下载。
 安装/卸载/手动加载见 [`browser/README.md`](browser/README.md)。宿主 `dlm-native-host` 走 stdio，
@@ -196,6 +197,16 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 
 Edge 155 实测通过；Chrome 155 的 `--load-extension` 被忽略，需在 `chrome://extensions` 手动加载
 `browser/extension`。B2 才加动态端口 + 令牌 + 任务投递。
+
+**B2 起**：右键链接/图片/音视频或页面右下角 `dlm ↓` 把 `url/referer/cookie` 交给宿主；宿主 spawn
+一个 `dlm`（一任务一进程，不排队），Cookie 走 `--cookie-stdin`，不写命令行、不写任务日志。
+浏览器验收：
+
+```bash
+node browser/test/verify-native-download.mjs
+```
+
+页面挂钩、DNR、代理读取、媒体嗅探不在 B2；本地监听/令牌也还没做。
 
 ## v1 已知限制（都不是"偷偷没做"，做过裁定并写进勘误）
 
@@ -212,8 +223,9 @@ Edge 155 实测通过；Chrome 155 的 `--load-extension` 被忽略，需在 `ch
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
-不做且不在 v1 计划：内核/驱动拦截、浏览器下载接管/站点抓取（B1 只有 ping/pong，B2 接下载）、守护进程与本地监听、
-配额式限速（到量暂停/择时恢复）、GUI、动作链/计划任务/阻止休眠（`open`／`run`／`shutdown` 已做）。
+不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递）、
+守护进程与本地监听、配额式限速（到量暂停/择时恢复）、GUI、动作链/计划任务/阻止休眠
+（`open`／`run`／`shutdown` 已做）。
 
 ## 测试与验收
 

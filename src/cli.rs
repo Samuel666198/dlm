@@ -25,8 +25,10 @@
 //!   `{e:?}` 不该把口令交给日志。刻意只动 `Debug`，`PartialEq`/`Eq` 的语义一个字没改。
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::Parser;
 
 use crate::actions::CompletionAction;
@@ -243,6 +245,8 @@ pub struct Cli {
     referer: Option<String>,
     #[arg(long, value_name = "COOKIE", help = "原样发送 Cookie 头（不分 http/https，写入断点文件）")]
     cookie: Option<String>,
+    #[arg(long, conflicts_with = "cookie", help = "从 stdin 读 Cookie 头（避免出现在命令行/进程列表）")]
+    cookie_stdin: bool,
     #[arg(long, value_name = "FILE", help = "从这个文件读请求体（不试探、不读写断点、不可续传）")]
     data_file: Option<PathBuf>,
     #[arg(long, value_name = "USER", help = "Basic 认证的用户名（只在 https 上发送）")]
@@ -281,6 +285,7 @@ impl std::fmt::Debug for Cli {
             .field("max_speed", &self.max_speed)
             .field("referer", &self.referer)
             .field("cookie", &self.cookie)
+            .field("cookie_stdin", &self.cookie_stdin)
             .field("data_file", &self.data_file)
             .field("user", &self.user)
             // 掩码而不是省略：读日志的人要能看出"这条命令带了口令"。
@@ -295,6 +300,13 @@ impl std::fmt::Debug for Cli {
             .field("on_complete", &self.on_complete)
             .finish()
     }
+}
+
+fn cookies_from_stdin<R: Read>(input: &mut R) -> anyhow::Result<Option<String>> {
+    let mut raw = String::new();
+    input.read_to_string(&mut raw).context("读 --cookie-stdin 失败")?;
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    Ok(if trimmed.is_empty() { None } else { Some(trimmed.to_string()) })
 }
 
 impl Cli {
@@ -336,10 +348,15 @@ impl Cli {
         if self.keep_state {
             flags |= FLAG_KEEP_STATE;
         }
+        let cookies = if self.cookie_stdin {
+            cookies_from_stdin(&mut std::io::stdin())?
+        } else {
+            self.cookie
+        };
         let task = Task {
             url: self.url,
             referer: self.referer,
-            cookies: self.cookie,
+            cookies,
             data_file: self.data_file,
             user: self.user,
             password: self.password,
@@ -927,6 +944,7 @@ mod tests {
             "max-speed",
             "referer",
             "cookie",
+            "cookie-stdin",
             "data-file",
             "user",
             "password",
@@ -976,8 +994,22 @@ mod tests {
     }
 
     #[test]
-    fn on_complete_parses_open_run_and_shutdown_and_rejects_bad_values() -> anyhow::Result<()> {
-        assert_eq!(
+    fn cookie_stdin_trims_and_conflicts_with_cookie() -> anyhow::Result<()> {
+        let mut input = std::io::Cursor::new(b"sid=42\r\n".to_vec());
+        assert_eq!(cookies_from_stdin(&mut input)?.as_deref(), Some("sid=42"));
+
+        let mut empty = std::io::Cursor::new(b"\r\n".to_vec());
+        assert_eq!(cookies_from_stdin(&mut empty)?, None);
+
+        assert!(
+            parse(&["dlm", "--url", "https://x/a", "--cookie", "a=b", "--cookie-stdin"]).is_err(),
+            "--cookie 与 --cookie-stdin 必须互斥"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn on_complete_parses_open_run_and_shutdown_and_rejects_bad_values() -> anyhow::Result<()> {        assert_eq!(
             parse(&["dlm", "--url", "https://x/a", "--on-complete", "open"])?.action(),
             Some(&CompletionAction::Open)
         );

@@ -382,3 +382,16 @@ R19 里"shutdown 在解析期直接拒绝"那半句作废，其余不变。
   Chrome 155 的 `--load-extension` 被忽略（页面无扩展元素），手动加载未测，不是宿主问题。
 - **不做**：动态端口/令牌、下载投递、页面挂钩、Firefox/Opera 扩展；这些归 B2。
 
+**R23（B2，2026-10-22）：浏览器直接投递 `download`；Cookie 走 stdin，不进命令行/任务日志。**
+- **宿主 `download`**：`url`／`referer`／`cookie`／`name`；只接受 `http://`/`https://`；每次下载
+  spawn 一个 `dlm`（B2 临时形态，不排队）；stdout/stderr 进 `jobs/<id>.log`；回 `accepted`/`error`。
+- **Cookie**：dlm 新增 `--cookie-stdin`（与 `--cookie` 互斥）；宿主把 Cookie 写进 child stdin，
+  **不进命令行、不进 job log**。断点文件仍按既有设计存 `task.cookies`（B2 不改这条边界）。
+- **扩展**：`contextMenus` + `cookies` + `host_permissions:["<all_urls>"]`；右键 link/image/video/audio；
+  页面 `dlm ↓` 按钮走同一条 `page-download`；accepted/error 显示在页面状态。
+- **不做**：本地 HTTP 监听/令牌（B10）、页面挂钩/DNR/代理读取（B3）、媒体嗅探（B3）、队列（C1）。
+  C1 把"一任务一进程"换成队列时协议不变。
+- **实测**：Edge 155，本地页 `/b2file.html` 设 `sid=42`；点 `dlm ↓`；服务端看到 dlm 请求
+  `Cookie: sid=42`、`Referer: <page>`、**UA 空**；落盘 156 B 等于页面；截图/日志在
+  `docs/evidence/2026-10-22-b2-browser-download.*`。
+

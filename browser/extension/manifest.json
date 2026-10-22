@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "B1: ping the dlm native messaging host and show the pong on every page.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1FspEKfO9G+GhHKTPI3pEtGmIB9DSeL+/B0FqRLjsiiKbvYqS2DFqAZEV8mfo/r/LQxHtYzhU34sddjOad7cvSKvKG/iAyAtLysLKM8prkD2qpISPY3PLxf5v33/Zy+CQcu7apbK99ntiX30ZiBxKexlM1hyIWGCg+FOMoTuTTfAskuLhXB8WUd1HTemY7zidw5diBADiQW8LLfCf7jyA+iBy3RPFj4F8LE2kNBftvGge6WdnbMDvvuxI9Pn6L2XW2qsusZPQ9QMFdUgCT3YnfJw9N5UBmCZJac5uXptYDbvYqHX982cKMMn7WdcVqa6r2x0hDlT5FX9yeKf5ugmIQIDAQAB",
-  "permissions": ["nativeMessaging", "storage"],
+  "permissions": ["nativeMessaging", "storage", "contextMenus", "cookies"],
+  "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "dlm native ping" },
   "content_scripts": [

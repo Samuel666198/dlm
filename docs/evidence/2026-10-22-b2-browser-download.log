@@ -1,0 +1,12 @@
+browser=Edg/155.0.4283.62
+page=http://127.0.0.1:60337/b2file.html
+dlm=E:\WorkSpace\projects\tool\dlm\target\debug\dlm.exe
+status=dlm job: 1792659129-1
+file=C:\Users\ROG\AppData\Local\Temp\dlm-b2-aHoUMv\dl\b2file.html bytes=156 equals_page=true
+file_sha256=a0ab1379171f0d92d6af08bd5b36a7c9b963e1465e2d07cc63385ebdc1caf25d
+requests=[{"url":"/b2file.html","cookie":"","referer":"","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0"},{"url":"/favicon.ico","cookie":"sid=42","referer":"http://127.0.0.1:60337/b2file.html","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0"},{"url":"/b2file.html","cookie":"sid=42","referer":"http://127.0.0.1:60337/b2file.html","ua":""}]
+job_log=下载已完成  目标：C:\Users\ROG\AppData\Local\Temp\dlm-b2-aHoUMv\dl\b2file.html  全长 156 B，落盘 156 B，归属已定 156 B
+这个断点文件从建立起一共重试 0 次，归属之外可能被重下 0 B
+用时 11 ms
+
+screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-22-b2-browser-download.png

@@ -48,6 +48,18 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 ⚠ Chrome 对 `--load-extension` 有版本/策略限制；脚本带了
 `--disable-features=DisableLoadExtensionCommandLineSwitch`，若仍不加载，换 Edge。
 
+## B2：浏览器直接投递
+
+- 右键 `link`/`image`/`video`/`audio` → `Download with dlm`；或页面右下角 `dlm ↓` 把当前页交给 dlm。
+- 扩展读 `chrome.cookies.getAll(url)` 并连同 `url/referer` 发给宿主；宿主 spawn 一个 dlm，
+  Cookie 走 `--cookie-stdin`（不进命令行/任务日志）。
+- 宿主配置（可选）：`%LOCALAPPDATA%\dlm\native-host\config.json`，字段 `dlm_exe`、`download_dir`、`log_dir`；
+  测试用 `DLM_NATIVE_CONFIG` 覆盖。默认 dlm.exe 与宿主同目录、下载到 `%USERPROFILE%\Downloads`、
+  日志到 `%LOCALAPPDATA%\dlm\native-host\jobs`。
+- 验收：`node browser/test/verify-native-download.mjs`（Edge 155 实测：dlm 请求带 `sid=42`/Referer/UA 空，
+  落盘文件等于页面；截图/日志在 `docs/evidence/2026-10-22-b2-browser-download.*`）。
+- 一任务一进程是 B2 的临时形态；C1 队列会替换入口，协议不变。页面挂钩/DNR/代理/媒体嗅探不在 B2。
+
 ## 手动加载
 
 `chrome://extensions` → 开发者模式 → 加载已解压的扩展 → 选 `browser/extension`。扩展动作徽标应为 `OK`，
