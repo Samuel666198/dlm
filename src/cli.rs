@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use crate::actions::CompletionAction;
 use crate::consts::{FLAG_ADD_ONLY, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
 use crate::engine::Config;
 use crate::task::Task;
@@ -262,6 +263,8 @@ pub struct Cli {
     quiet: bool,
     #[arg(long, help = "只打印任务摘要后退出，不发送任何请求")]
     no_start: bool,
+    #[arg(long, value_name = "ACTION", help = "完成后动作：open 或 run:<exe>（程序收到落点路径作为第一个参数）")]
+    on_complete: Option<CompletionAction>,
 }
 
 /// 手写 `Debug`（**E9** 给 `Task` 的那份立场在这里同样成立）：`Cli` 是 `parse_from` 的返回值，
@@ -289,6 +292,7 @@ impl std::fmt::Debug for Cli {
             .field("keep_state", &self.keep_state)
             .field("quiet", &self.quiet)
             .field("no_start", &self.no_start)
+            .field("on_complete", &self.on_complete)
             .finish()
     }
 }
@@ -305,6 +309,11 @@ impl Cli {
     /// 这一位"，**E20④**）⇒ 这一格是给 9B-2 在进入 `run` **之前**短路用的；进了 `run` 就一定上网。
     pub fn no_start(&self) -> bool {
         self.no_start
+    }
+
+    /// `--on-complete`：完成后动作（R19）。`main` 在下载成功后消费它。
+    pub fn action(&self) -> Option<&CompletionAction> {
+        self.on_complete.as_ref()
     }
 
     /// 交回 `Task`（C2 那九项契约 + `flags`）。
@@ -915,6 +924,7 @@ mod tests {
             "out-dir",
             "out-name",
             "connections",
+            "max-speed",
             "referer",
             "cookie",
             "data-file",
@@ -927,6 +937,7 @@ mod tests {
             "keep-state",
             "quiet",
             "no-start",
+            "on-complete",
         ];
         const PRINTED_ALIAS_LINES: &[&str] = &[
             "/d → --url",
@@ -962,5 +973,21 @@ mod tests {
                 "帮助里少了别名那一句 {line:?}（斜杠写法唯一的去处不该只剩报错信息，T99-G5b 1b）：\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn on_complete_parses_open_and_run_and_rejects_bad_values() -> anyhow::Result<()> {
+        assert_eq!(
+            parse(&["dlm", "--url", "https://x/a", "--on-complete", "open"])?.action(),
+            Some(&CompletionAction::Open)
+        );
+        let run = parse(&["dlm", "--url", "https://x/a", "--on-complete", "run:C:\\tools\\scan.exe"])?;
+        assert_eq!(run.action(), Some(&CompletionAction::Run("C:\\tools\\scan.exe".into())));
+
+        let err = parse(&["dlm", "--url", "https://x/a", "--on-complete", "wat"]).unwrap_err();
+        assert!(format!("{err:#}").contains("open"), "错误要指可用值：{err:#}");
+        let shutdown = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown"]).unwrap_err();
+        assert!(format!("{shutdown:#}").contains("单独点头"));
+        Ok(())
     }
 }

@@ -65,6 +65,14 @@
 - **四闸**：`--lib` **252/0**（3.01 s）· `--bins` **3/0** · `integration` **102/0**（63.71 s）· clippy **0**。
 - **已知边界**：低于约 35 KiB/s 时 4 MiB 窗口会被 120 s 预算切开；`Windowed` 以 `Advanced` 继续，退化 `ToEof` 可能在跳前缀时被判 `Stalled`。配额/择时恢复仍归 A3。
 
+## 2026-10-21 A3a 交付（完成后动作）
+
+- **R19**：`--on-complete open|run:<exe>`；只在下完且校验通过后执行；动作失败只警告、不改退出码；`!ok` 只打"未执行"。
+- **落点**：`src/actions.rs`（`CompletionAction`／`ActionPlan`／`plan`／`execute`）／CLI `--on-complete`／`main` 在 `finish` 后执行。
+- **新用例**：5 条 `actions::tests` 单元 ＋ 1 条 CLI 解析 ＋ 2 条二进制（成功＋动作失败仍退 0；失败下载不执行动作）。
+- **四闸**：`--lib` **258/0**（3.01 s）· `--bins` **3/0** · `integration` **104/0**（64.04 s）· clippy **0**。
+- **未做**：`shutdown`（参数层直接拒绝，需单独点头）、计划任务、阻止休眠、多动作链；归 A3b。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

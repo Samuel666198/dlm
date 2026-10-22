@@ -63,6 +63,8 @@ fn dispatch() -> Result<u8> {
     // `quiet()` / `no_start()` 先读：`into_task()` 会**消费** `Cli`（**E23⑦** 交回两件东西的形状）。
     let quiet = cli.quiet();
     let no_start = cli.no_start();
+    // R19：完成后动作也是"消费 Cli 之前"取走的一格；它不进 Task/Config，也不参与续传比对。
+    let action = cli.action().cloned();
     let mut cfg = cli.into_config();
     let task = match cli.into_task() {
         Ok(task) => task,
@@ -87,7 +89,18 @@ fn dispatch() -> Result<u8> {
     }
 
     let rep = engine::run(&task, cfg)?;
-    Ok(finish(&rep, &task, quiet))
+    let code = finish(&rep, &task, quiet);
+    if let Some(action) = action.as_ref() {
+        if rep.ok {
+            // R19：动作失败只警告，不改下载结果/退出码（"动作失败不许掩盖下载结果"）。
+            if let Err(err) = dlm::actions::execute(&dlm::actions::plan(action, &task.target_path())) {
+                eprintln!("警告：完成后动作失败：{err:#}");
+            }
+        } else {
+            eprintln!("完成后动作未执行：下载未完成");
+        }
+    }
+    Ok(code)
 }
 
 /// 结果行 + 退出码。**这一层是把"有没有下完"折成码的唯一位置**（**E20⑦**：非零档的判据只有 `!ok`，

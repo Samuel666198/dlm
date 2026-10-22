@@ -6783,3 +6783,48 @@ fn the_data_file_route_obeys_the_rate_cap() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------- A3a：完成后动作
+
+/// R19：动作失败只警告，下载成功的退出码仍是 0。
+#[test]
+fn a_completion_action_failure_does_not_change_a_successful_exit_code() -> anyhow::Result<()> {
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("a3-action-fail")?;
+    let dir_text = dir.path().to_str().context("临时目录不是 UTF-8")?;
+    let out = run_dlm(&[
+        "--url", &format!("{base}/sz/65536"),
+        "--out-dir", dir_text,
+        "--out-name", "a3.bin",
+        "--quiet",
+        "--on-complete", "run:dlm-no-such-completion-action-exe",
+    ])?;
+    assert_eq!(out.status.code(), Some(0), "动作失败不许改下载成功档：{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("完成后动作失败"), "{}", stderr_of(&out));
+    Ok(())
+}
+
+/// R19：下载没成（这里用 sha256 不符）时，动作根本不执行。
+#[test]
+fn a_failed_download_does_not_run_the_completion_action() -> anyhow::Result<()> {
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("a3-action-skip")?;
+    let dir_text = dir.path().to_str().context("临时目录不是 UTF-8")?;
+    let zeros = "0".repeat(64);
+    let out = run_dlm(&[
+        "--url", &format!("{base}/sz/65536"),
+        "--out-dir", dir_text,
+        "--out-name", "a3.bin",
+        "--quiet",
+        "--sha256", zeros.as_str(),
+        "--on-complete", "run:dlm-no-such-completion-action-exe",
+    ])?;
+    assert_eq!(out.status.code(), Some(1), "校验不符仍是下载失败档：{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("完成后动作未执行"), "{}", stderr_of(&out));
+    assert!(
+        !stderr_of(&out).contains("完成后动作失败"),
+        "动作根本没该启动：{}",
+        stderr_of(&out)
+    );
+    Ok(())
+}
