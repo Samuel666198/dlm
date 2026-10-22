@@ -82,6 +82,14 @@
 - **新用例**：`actions::tests` 增 shutdown 解析/计划；二进制 `bare_shutdown_is_a_parameter_error_and_never_reaches_the_wire`（退 2、不上网、不关机）。
 - **四闸**：`--lib` **259/0**（3.01 s）· `--bins` **3/0** · `integration` **105/0**（63.96 s）· clippy **0**。
 
+## 2026-10-21 A4 交付（块级光标劈分）
+
+- **R21**：`split_tail` 的切点基于 worker **每写一块**更新的光标；engine 在 `Connected` 前同步，每次 `Retighten` 的重复 ≤ 一块（64 KiB）。
+- **实测**（48 MiB、8 worker、全速）：`duplicated` 9,012,699 B（17.2%）/ 54 次收紧 → **319,799 B（0.63%）/ 32 次**；上界 2,097,152 B。
+- **新用例**：`residual_duplicate_traffic_is_bounded_by_one_chunk_per_retighten`；既有 midpoint/floor 判据全部保留。
+- **四闸**：`--lib` **259/0**（3.01 s）· `--bins` **3/0** · `integration` **106/0**（63.87 s）· clippy **0**。
+- **未复量**：限速档、续传档的 dup；旧 12.8%–20.8% 只作 v1 历史。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

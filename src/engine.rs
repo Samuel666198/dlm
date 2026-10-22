@@ -150,7 +150,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1093,6 +1093,8 @@ struct WorkerSpawn {
     if_range: Option<Arc<str>>,
     /// R18：所有 worker 共用的漏桶。
     limiter: Arc<RateLimiter>,
+    /// A4/R21：这一枪写到哪（含端点）。worker 每写一块更新，engine 在下次 `Connected` 前读它。
+    progress: Arc<AtomicU64>,
 }
 
 /// 线程心跳：`Drop` 时置假，**包括 panic 展开时**（std 保证 unwind 期间析构）。
@@ -1119,7 +1121,7 @@ impl Drop for Heartbeat {
 /// 重置），所以收紧永远递得给"此刻在途的那一枪"—— 这是 `Retighten` 唯一能兑现的通道：
 /// 那个线程正阻塞在 `resp.read()` 里，除了它自己每块看一眼的格子，外面没有任何东西能插话。
 fn worker_loop(spawn: WorkerSpawn) {
-    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body, if_range, limiter } = spawn;
+    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body, if_range, limiter, progress } = spawn;
     let _heartbeat = Heartbeat::new(alive);
     // `recv` Err = 主线程已经交回发送端（引擎退出）⇒ 收工。`Job::Stop` 是正常出口。
     while let Ok(job) = jobs.recv() {
@@ -1139,6 +1141,7 @@ fn worker_loop(spawn: WorkerSpawn) {
                     body,
                     if_range.as_deref(),
                     Some(&limiter),
+                    Some(&progress),
                 );
                 if reports.send(WorkerReport { worker, iv, outcome }).is_err() {
                     break; // 主线程不在了，交回给谁都没意义
@@ -1174,6 +1177,10 @@ struct Engine {
     /// 与 `alive` 同一地位（每 worker 一格、随 `Engine` 生灭）；`dispatch` 在发下一枪之前重置它，
     /// 所以"帽只降不升"这条纪律的作用域是**一枪之内**（跨枪重置是主线程自己写的，不会与 worker 抢）。
     caps: Vec<Arc<fetch::EndCap>>,
+    /// A4/R21：每 worker 一格块级光标（含端点）；worker 每写一块更新。
+    progress: Vec<Arc<AtomicU64>>,
+    /// 已经喂给调度器的光标值；避免同一条 `Progress` 重复喂。
+    synced_progress: Vec<u64>,
     /// 调度器此刻认给每个 worker 的区间（`Retighten` 会就地改它）。**不是第二本覆盖账**：
     /// 它只回答"这一枪的字节该不算作重复的那条边界在哪"，覆盖集永远只有 `snapshot_intervals()`。
     current: Vec<Option<Interval>>,
@@ -1225,10 +1232,12 @@ impl Engine {
         let mut alive = Vec::with_capacity(count);
         // 终点帽一格一个 worker（**E14**①）：初值就是"外面没有帽"，`dispatch` 每次发枪前重置。
         let mut caps = Vec::with_capacity(count);
+        let mut progresses = Vec::with_capacity(count);
         for worker in 0..count {
             let (tx, rx) = channel::<Job>();
             let flag = Arc::new(AtomicBool::new(true));
             let cap = Arc::new(fetch::EndCap::new(fetch::NO_END_CAP));
+            let progress = Arc::new(AtomicU64::new(fetch::NO_PROGRESS));
             let spawn = WorkerSpawn {
                 worker,
                 jobs: rx,
@@ -1242,6 +1251,7 @@ impl Engine {
                 body,
                 if_range: if_range.clone(),
                 limiter: Arc::clone(&limiter),
+                progress: Arc::clone(&progress),
             };
             match thread::Builder::new().name(format!("dlm-worker-{worker}")).spawn(move || worker_loop(spawn)) {
                 Ok(handle) => {
@@ -1249,6 +1259,7 @@ impl Engine {
                     handles.push(handle);
                     alive.push(flag);
                     caps.push(cap);
+                    progresses.push(progress);
                 }
                 Err(e) => {
                     // 收回已起的线程：它们要么阻塞在 `recv`（`Stop` 立刻生效），要么在跑一枪（有窗口预算封顶）。
@@ -1283,6 +1294,8 @@ impl Engine {
             workers: vec![idle; count],
             alive,
             caps,
+            progress: progresses,
+            synced_progress: vec![fetch::NO_PROGRESS; count],
             current: vec![None; count],
             trace: Vec::new(),
             fresh_reason,
@@ -1346,6 +1359,8 @@ impl Engine {
     /// `Event::Connected` 那一支把 `dispatch` 的结果交回来，其余各支一律返回空表），
     /// 所以"worker 空出来了"必须重发这个事件，而不是等调度器主动派。
     fn ping_free_workers(&mut self) -> Option<Stop> {
+        // A4/R21：先把在途 worker 的块级光标同步给调度器，再让 Connected 决定劈分。
+        self.sync_in_flight_progress();
         for worker in 0..self.workers.len() {
             if self.workers[worker].state != WorkerState::Idle {
                 continue;
@@ -1378,6 +1393,23 @@ impl Engine {
         None
     }
 
+    /// A4/R21：把在途 worker 的块级光标喂给调度器。只喂新值 —— `Progress` 只前进，
+    /// 同一个值再喂一次没有信息，还会把 trace 撑大。
+    fn sync_in_flight_progress(&mut self) {
+        for w in 0..self.progress.len() {
+            if self.current[w].is_none() {
+                continue;
+            }
+            let abs_end = self.progress[w].load(Ordering::Acquire);
+            if abs_end == fetch::NO_PROGRESS || abs_end == self.synced_progress[w] {
+                continue;
+            }
+            self.synced_progress[w] = abs_end;
+            self.record(TraceStep::Fed(Event::Progress { worker: w, abs_end }));
+            self.sched.on(Event::Progress { worker: w, abs_end });
+        }
+    }
+
     /// 把一枪交给 worker。发不出去 = 那个线程已经不在了。
     ///
     /// **顺序是判据的一部分**：先把终点帽重置成"外面没有帽"，再 `send`。
@@ -1388,6 +1420,8 @@ impl Engine {
     fn dispatch(&mut self, worker: usize, iv: Interval) -> Option<Stop> {
         let rate = running_rate_bytes_per_sec(self.run_delivered, self.started.elapsed());
         self.caps[worker].store(fetch::NO_END_CAP, Ordering::Release);
+        self.progress[worker].store(fetch::NO_PROGRESS, Ordering::Release);
+        self.synced_progress[worker] = fetch::NO_PROGRESS;
         if self.jobs[worker].send(Job::Fetch { iv, rate_bps: rate }).is_err() {
             return Some(Stop::WorkerGone { worker: Some(worker) });
         }
@@ -2382,6 +2416,8 @@ mod tests {
             workers: vec![WorkerCtl { state: WorkerState::Idle, attempt: 0 }],
             alive: vec![Arc::new(AtomicBool::new(true))],
             caps: vec![Arc::new(fetch::EndCap::new(fetch::NO_END_CAP))],
+            progress: vec![Arc::new(AtomicU64::new(fetch::NO_PROGRESS))],
+            synced_progress: vec![fetch::NO_PROGRESS],
             current: vec![None],
             trace: vec![TraceStep::Seeded(vec![])],
             fresh_reason: None,

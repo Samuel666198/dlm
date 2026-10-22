@@ -6837,3 +6837,45 @@ fn bare_shutdown_is_a_parameter_error_and_never_reaches_the_wire() -> anyhow::Re
     assert!(stderr_of(&out).contains("延迟"), "{}", stderr_of(&out));
     Ok(())
 }
+
+// ---------------------------------------------------------------- A4：分裂的重复上界
+
+/// A4 的第一条硬判据：每次 `Retighten` 最多让 incumbent 多读一块（64 KiB）。
+/// 这条先量现状；切点落到 worker 已经读过的位置时它会红。
+#[test]
+fn residual_duplicate_traffic_is_bounded_by_one_chunk_per_retighten() -> anyhow::Result<()> {
+    let len = 48 * 1024 * 1024u64;
+    let (_srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("a4-dup-bound")?;
+    let t = Task {
+        url: format!("{base}/blob"),
+        dir: dir.path().to_path_buf(),
+        name: Some("a4.bin".into()),
+        ..harness::blank_task()
+    };
+    let rep = dlm::engine::run(
+        &t,
+        dlm::engine::Config {
+            workers: 8,
+            min_seg: dlm::consts::MIN_SEGMENT_BYTES,
+            max_retries: Some(0),
+            verify_sha256: Some(harness::expected_sha(len)),
+            force_fresh: false,
+            max_speed: 0,
+            on_tick: None,
+        },
+    )?;
+    let tightened = rep.tightened().len() as u64;
+    let bound = tightened * dlm::fetch::CHUNK_BYTES as u64;
+    assert!(rep.ok, "{:?}", rep.message);
+    assert_eq!(rep.delivered, len);
+    assert!(!rep.tightened().is_empty(), "8 个 worker 该至少有几次收紧；没有就说明这条判据空转");
+    assert!(
+        rep.duplicated <= bound,
+        "duplicated={} 超过 tightened={} × 64 KiB = {}：切点落到了 worker 已经读过的位置",
+        rep.duplicated,
+        tightened,
+        bound
+    );
+    Ok(())
+}

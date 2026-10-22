@@ -261,7 +261,8 @@ use crate::task::Task;
 /// 为什么固定而不是"读满窗口为止"：窗口最多 `WINDOW_BYTES` = 4 MiB，一次 `read` 就要一个这么大的
 /// 缓冲 ⇒ 每个 worker 常驻 4 MiB（8 个 worker 就是 32 MiB），而且 `write_at` 的临界区会被一次
 /// 巨大的拷贝占住。64 KiB 的粒度让"读一块、写一块、放锁"交替进行。
-const CHUNK_BYTES: usize = 64 * 1024;
+/// 一枪的读块大小。A4 的"每次 `Retighten` 重复 ≤ 一块"里的"一块"就是它。
+pub const CHUNK_BYTES: usize = 64 * 1024;
 
 /// `FailKind::Transport` 那句原因的**长度上界**（字符数，不是字节数 —— 勘误 **E12**⑦）。
 ///
@@ -700,6 +701,9 @@ pub type EndCap = AtomicU64;
 /// "外面没有帽"的那个值：`run_window` 只会把自己的窗口终点降进去，读满一个窗口照旧。
 pub const NO_END_CAP: u64 = u64::MAX;
 
+/// 进度原子格的"还没写过任何字节"哨兵。不能拿 0 当哨兵：字节 0 写完也是 0。
+pub const NO_PROGRESS: u64 = u64::MAX;
+
 /// 把终点帽**往下**调（勘误 **E14**① 的原话是 `fetch_max`；能让"只降不升"成立的原语是
 /// `fetch_min` —— `fetch_max` 是单调**升**，按字面写会把那条性质反过来，详见下面与模块文档）。
 ///
@@ -780,13 +784,17 @@ pub fn run_window_with_if_range(
     shape: BodyShape,
     if_range: Option<&str>,
 ) -> Result<Outcome> {
-    run_window_with_limits(agent, task, iv, store, rate_bps, total_len, cap, shape, if_range, None)
+    run_window_with_limits(agent, task, iv, store, rate_bps, total_len, cap, shape, if_range, None, None)
 }
 
-/// 与 [`run_window`] 相同，但可以带 `If-Range`（R17）和一只共享限速器（R18）。
+/// 与 [`run_window`] 相同，但可以带 `If-Range`（R17）、一只共享限速器（R18）和一块
+/// **块级光标**（A4/R21）。
 ///
 /// `limiter` 是单任务所有连接共用的漏桶；这一枪每读一块就 `consume(n)`。`None` = 不限速，
 /// 与既有测试/`--max-speed 0` 逐字节等价。
+///
+/// `progress` 是这一枪写到哪的**含端点**绝对偏移（每写一块更新）；engine 在下次 `Connected`
+/// 前把它喂给调度器，`split_tail` 的切点就不会落到 worker 已经读过的位置。
 #[allow(clippy::too_many_arguments)]
 pub fn run_window_with_limits(
     agent: &Client,
@@ -799,6 +807,7 @@ pub fn run_window_with_limits(
     shape: BodyShape,
     if_range: Option<&str>,
     limiter: Option<&RateLimiter>,
+    progress: Option<&AtomicU64>,
 ) -> Result<Outcome> {
     // 与 `probe::run` / `state::Snapshot::from_task` 同一个立场：规则只住在 `Task::validate()` 一处，
     // 但**发请求**这一刻是第二个强制点。明文 HTTP + 口令的任务到不了网络（用例
@@ -949,6 +958,10 @@ pub fn run_window_with_limits(
         // 今天 `wrote <= take <= CHUNK_BYTES` 远不到 `u64` 的上界，可一旦哪里算错了，debug 构建会
         // panic（release 构建会**绕回 0**，然后从文件开头重写下整段）。这一条不改变任何可达行为。
         cursor = cursor.saturating_add(wrote as u64);
+        if let Some(progress) = progress && wrote > 0 {
+            // 含端点的"已写到哪"；engine 在下次 Connected 前读它，split_tail 就不会切到光标后面。
+            progress.store(cursor - 1, Ordering::Release);
+        }
     }
 
     let bytes = written(iv, cursor);

@@ -358,3 +358,14 @@ R19 里"shutdown 在解析期直接拒绝"那半句作废，其余不变。
 - **计划任务**：不塞进前台 CLI（进程内等待占住终端；系统计划任务会写系统状态），移到 **C1 队列**。
 - **阻止休眠**：不做（要 Win32 FFI，且不是 CLI 内核的核心；用户可用系统电源计划）。
 
+**R21（A4，2026-10-21）：劈分切点基于块级光标；每次 `Retighten` 的重复不超过一块（64 KiB）。**
+- 调度器 `split_tail` 仍是"剩余尾巴的中点"，但 `Active.written` 不再只靠每枪结束的 `Progress`：
+  worker **每写一块**把含端点光标放进 `AtomicU64`（`fetch::NO_PROGRESS` 哨兵），engine 在每次
+  `ping_free_workers` / `Connected` 前用 `sync_in_flight_progress` 把它喂给 scheduler。
+- 结果：切点不会落到 worker 已经读过的位置；incumbent 在 cap 生效前最多多读一块 ⇒
+  `Report::duplicated ≤ tightened × CHUNK_BYTES`。
+- **实测**（48 MiB、8 worker、全速）：`duplicated` 9,012,699 B（17.2%）/ 54 次收紧 →
+  **319,799 B（0.63%）/ 32 次**；硬上界 32 × 64 KiB = 2,097,152 B。
+- **未复量**：限速档与续传档本轮没跑；旧 12.8%–20.8% 只作 v1 历史读数。
+- 不改 scheduler 的外部动作形状（`Assign`/`Retighten`/`Idle`）；旧 midpoint/floor 判据不放宽。
+
