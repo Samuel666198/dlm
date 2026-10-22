@@ -6828,3 +6828,12 @@ fn a_failed_download_does_not_run_the_completion_action() -> anyhow::Result<()> 
     );
     Ok(())
 }
+
+/// R20：`shutdown` 不带延迟在参数层就被拒，绝不上网、绝不关机。
+#[test]
+fn bare_shutdown_is_a_parameter_error_and_never_reaches_the_wire() -> anyhow::Result<()> {
+    let out = run_dlm(&["--url", "https://example.invalid/a", "--quiet", "--on-complete", "shutdown"])?;
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("延迟"), "{}", stderr_of(&out));
+    Ok(())
+}

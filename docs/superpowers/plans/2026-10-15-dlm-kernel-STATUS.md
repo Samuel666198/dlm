@@ -73,6 +73,15 @@
 - **四闸**：`--lib` **258/0**（3.01 s）· `--bins` **3/0** · `integration` **104/0**（64.04 s）· clippy **0**。
 - **未做**：`shutdown`（参数层直接拒绝，需单独点头）、计划任务、阻止休眠、多动作链；归 A3b。
 
+## 2026-10-21 A3b 交付（shutdown；计划任务移到 C1）
+
+- **R20**：`--on-complete shutdown:<seconds>`（最少 60 秒）；计划 `shutdown.exe /s /t N`；执行前打
+  `警告：将在 N 秒后关机；取消请运行 shutdown /a`；R19 的"shutdown 拒绝"半句作废。
+- **计划任务移到 C1**：前台 CLI 进程内等待占住终端，系统计划任务写系统状态；C1 的队列项才是起始时间/时间窗的落点。
+- **阻止休眠不做**：要 Win32 FFI，且不是 CLI 内核的核心。
+- **新用例**：`actions::tests` 增 shutdown 解析/计划；二进制 `bare_shutdown_is_a_parameter_error_and_never_reaches_the_wire`（退 2、不上网、不关机）。
+- **四闸**：`--lib` **259/0**（3.01 s）· `--bins` **3/0** · `integration` **105/0**（63.96 s）· clippy **0**。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

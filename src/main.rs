@@ -92,6 +92,9 @@ fn dispatch() -> Result<u8> {
     let code = finish(&rep, &task, quiet);
     if let Some(action) = action.as_ref() {
         if rep.ok {
+            if let dlm::actions::CompletionAction::Shutdown { delay_secs } = action {
+                eprintln!("警告：将在 {delay_secs} 秒后关机；取消请运行 shutdown /a");
+            }
             // R19：动作失败只警告，不改下载结果/退出码（"动作失败不许掩盖下载结果"）。
             if let Err(err) = dlm::actions::execute(&dlm::actions::plan(action, &task.target_path())) {
                 eprintln!("警告：完成后动作失败：{err:#}");

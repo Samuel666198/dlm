@@ -976,18 +976,22 @@ mod tests {
     }
 
     #[test]
-    fn on_complete_parses_open_and_run_and_rejects_bad_values() -> anyhow::Result<()> {
+    fn on_complete_parses_open_run_and_shutdown_and_rejects_bad_values() -> anyhow::Result<()> {
         assert_eq!(
             parse(&["dlm", "--url", "https://x/a", "--on-complete", "open"])?.action(),
             Some(&CompletionAction::Open)
         );
         let run = parse(&["dlm", "--url", "https://x/a", "--on-complete", "run:C:\\tools\\scan.exe"])?;
         assert_eq!(run.action(), Some(&CompletionAction::Run("C:\\tools\\scan.exe".into())));
+        let shutdown = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown:60"])?;
+        assert_eq!(shutdown.action(), Some(&CompletionAction::Shutdown { delay_secs: 60 }));
 
         let err = parse(&["dlm", "--url", "https://x/a", "--on-complete", "wat"]).unwrap_err();
         assert!(format!("{err:#}").contains("open"), "错误要指可用值：{err:#}");
-        let shutdown = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown"]).unwrap_err();
-        assert!(format!("{shutdown:#}").contains("单独点头"));
+        let bare = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown"]).unwrap_err();
+        assert!(format!("{bare:#}").contains("延迟"));
+        let too_soon = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown:59"]).unwrap_err();
+        assert!(format!("{too_soon:#}").contains("60"));
         Ok(())
     }
 }

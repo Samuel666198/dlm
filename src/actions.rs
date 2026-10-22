@@ -15,6 +15,8 @@ pub enum CompletionAction {
     Open,
     /// `<exe> <落点>`。
     Run(PathBuf),
+    /// `shutdown.exe /s /t <delay_secs>`；最少 60 秒（防误触）。
+    Shutdown { delay_secs: u64 },
 }
 
 impl FromStr for CompletionAction {
@@ -23,14 +25,23 @@ impl FromStr for CompletionAction {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
             "open" => Ok(Self::Open),
-            "shutdown" => {
-                Err("shutdown 需要单独点头，本版未启用；可用 open 或 run:<exe>".into())
+            "shutdown" => Err("shutdown 必须带延迟，例如 shutdown:60（至少 60 秒）".into()),
+            _ => {
+                if let Some(secs) = raw.strip_prefix("shutdown:") {
+                    let delay_secs = secs
+                        .parse::<u64>()
+                        .map_err(|_| "shutdown:<秒数> 必须是十进制整数".to_string())?;
+                    if delay_secs < 60 {
+                        return Err("shutdown 延迟至少 60 秒（防误触）；例如 shutdown:60".into());
+                    }
+                    return Ok(Self::Shutdown { delay_secs });
+                }
+                match raw.strip_prefix("run:") {
+                    Some(exe) if !exe.trim().is_empty() => Ok(Self::Run(PathBuf::from(exe))),
+                    Some(_) => Err("完成后动作 run: 后面必须跟一个程序路径".into()),
+                    None => Err("完成后动作只认 open、run:<exe> 或 shutdown:<秒数>".into()),
+                }
             }
-            _ => match raw.strip_prefix("run:") {
-                Some(exe) if !exe.trim().is_empty() => Ok(Self::Run(PathBuf::from(exe))),
-                Some(_) => Err("完成后动作 run: 后面必须跟一个程序路径".into()),
-                None => Err("完成后动作只认 open 或 run:<exe>".into()),
-            },
         }
     }
 }
@@ -51,6 +62,14 @@ pub fn plan(action: &CompletionAction, file: &Path) -> ActionPlan {
             program: exe.clone(),
             args: vec![file.to_path_buf()],
         },
+        CompletionAction::Shutdown { delay_secs } => ActionPlan {
+            program: PathBuf::from("shutdown.exe"),
+            args: vec![
+                PathBuf::from("/s"),
+                PathBuf::from("/t"),
+                PathBuf::from(delay_secs.to_string()),
+            ],
+        },
     }
 }
 
@@ -68,20 +87,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_open_and_run() {
+    fn parses_open_run_and_shutdown() {
         assert_eq!("open".parse::<CompletionAction>().unwrap(), CompletionAction::Open);
         assert_eq!(
             "run:C:\\tools\\scan.exe".parse::<CompletionAction>().unwrap(),
             CompletionAction::Run("C:\\tools\\scan.exe".into())
         );
+        assert_eq!(
+            "shutdown:60".parse::<CompletionAction>().unwrap(),
+            CompletionAction::Shutdown { delay_secs: 60 }
+        );
     }
 
     #[test]
-    fn rejects_empty_run_unknown_values_and_shutdown() {
+    fn rejects_empty_run_unknown_values_and_bad_shutdown() {
         assert!("run:".parse::<CompletionAction>().unwrap_err().contains("run:"));
         assert!("wat".parse::<CompletionAction>().unwrap_err().contains("open"));
-        let shutdown = "shutdown".parse::<CompletionAction>().unwrap_err();
-        assert!(shutdown.contains("单独点头"), "shutdown 要明说未启用，不许静默忽略：{shutdown}");
+        let bare = "shutdown".parse::<CompletionAction>().unwrap_err();
+        assert!(bare.contains("延迟"), "shutdown 必须明说要带延迟：{bare}");
+        let too_soon = "shutdown:59".parse::<CompletionAction>().unwrap_err();
+        assert!(too_soon.contains("60"), "低于 60 秒要拒绝并写出下限：{too_soon}");
+        let not_a_number = "shutdown:soon".parse::<CompletionAction>().unwrap_err();
+        assert!(not_a_number.contains("十进制"), "{not_a_number}");
     }
 
     #[test]
@@ -99,6 +126,17 @@ mod tests {
         );
         assert_eq!(plan.program, PathBuf::from("C:\\tools\\scan.exe"));
         assert_eq!(plan.args, vec![PathBuf::from("D:/dl/a.bin")]);
+    }
+
+    #[test]
+    fn shutdown_plan_is_shutdown_exe_with_the_delay() {
+        let plan = plan(&CompletionAction::Shutdown { delay_secs: 60 }, Path::new("D:/dl/a.bin"));
+        assert_eq!(plan.program, PathBuf::from("shutdown.exe"));
+        assert_eq!(
+            plan.args,
+            vec![PathBuf::from("/s"), PathBuf::from("/t"), PathBuf::from("60")]
+        );
+        assert_eq!(plan.args.len(), 3, "shutdown 不接受落点参数");
     }
 
     #[test]
