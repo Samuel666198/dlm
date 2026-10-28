@@ -15,7 +15,7 @@ function render(items) {
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "这个页面还没有检测到媒体。播放视频或展开播放列表后再看。";
+    empty.textContent = "这个页面还没有检测到下载。播放视频、展开播放列表或找下载链接后再看。";
     list.appendChild(empty);
     return;
   }

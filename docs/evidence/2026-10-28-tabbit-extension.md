@@ -30,10 +30,16 @@
 
 - 重启 Tabbit 后打开 `https://example.com/`：
   - `#dlm-submit` 存在；
-  - `#dlm-native-status` = `dlm native: pong com.dlm.host v0.1.0`。
-- 本地页面请求 `/stream.m3u8`：
-  - 页面出现 `媒体 1`；
-  - 扩展面板列出该 HLS URL（未实际再点下载，Edge 端已验过 `stream.ts = AAABBB`）。
+  - 扩展徽标 `OK`，`#dlm-native-status` = `dlm native: pong com.dlm.host v0.1.0`。
+- 本地页面请求 `/stream.m3u8` 且带一个 `/tabbit-file.bin` 文件链接：
+  - 页面出现 `下载 2`；
+  - 扩展面板列出 `stream.m3u8`（HLS）与 `tabbit-file.bin`（文件）。
+- 点文件条目：`%USERPROFILE%\Downloads\tabbit-file.bin` **4 B** = `FILE`；
+- 点 HLS 条目：`%USERPROFILE%\Downloads\stream.ts` **6 B** = `AAABBB`；
+- 截图：`docs/evidence/2026-10-28-tabbit-file-panel.png`。
+
+**注意**：扩展文件更新后必须完全退出 Tabbit（`Stop-Process -Name 'Tabbit Browser'`）再从未改过的快捷方式启动；
+仅关闭窗口或再次点快捷方式不会重新加载已解压扩展，面板仍是旧代码。
 
 ## 注意
 

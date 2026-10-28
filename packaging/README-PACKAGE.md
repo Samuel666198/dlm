@@ -5,7 +5,7 @@
 - `dlm.exe`：下载内核 + CLI（分段、续传、HLS、校验、完成后动作）
 - `dlm-gui.exe`：本地 Web UI + 任务队列（只监听 `127.0.0.1`）
 - `dlm-native-host.exe`：浏览器 Native Messaging 宿主
-- `browser/extension/`：Chrome/Edge MV3 扩展（右键/页面按钮/媒体嗅探）
+- `browser/extension/`：Chrome/Edge MV3 扩展（右键/页面按钮/媒体与文件嗅探）
 - `install.ps1` / `uninstall.ps1`：用户级安装/卸载（HKCU，不需要管理员）
 
 ## 安装
@@ -33,7 +33,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 - 浏览器右键链接/图片/音视频：Download with dlm
 - 页面右下角 `dlm`：投递当前页
-- 页面右下角 `媒体 N`：查看嗅探到的 HLS/媒体直链，逐条下载
+- 页面右下角 `下载 N`：查看嗅探到的 HLS/媒体/文件链接，逐条下载
 - 本地队列：`dlm-gui` 页面添加 URL，可设配额、分类目录、完成后动作
 
 ## 数据位置
@@ -56,5 +56,5 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 - 这是 Windows x64 MSVC release 构建；不包含 Electron/Node 运行时。
 - 扩展需要手动“加载已解压”，Chrome/Edge 不允许普通用户静默 sideload。
-- HLS 直链由扩展嗅探后走 `dlm --hls`；DASH/DRM 暂不支持。
+- HLS 直链由扩展嗅探后走 `dlm --hls`；普通文件链接按队列/直连规则投递；DASH/DRM 暂不支持。
 - 原生 GUI 目前是 Web UI 的 app 模式窗口（`--open`），不是原生控件。

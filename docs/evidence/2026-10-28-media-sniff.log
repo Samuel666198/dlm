@@ -1,7 +1,8 @@
 browser=Edg/156.0.4314.50
-page=http://127.0.0.1:61051/page.html
+page=http://127.0.0.1:61367/page.html
 dlm=E:\WorkSpace\projects\tool\dlm\target\debug\dlm.exe
-media_button=媒体 1
-media_items=["http://127.0.0.1:61051/stream.m3u8"]
-file=C:\Users\ROG\AppData\Local\Temp\dlm-media-Fa94nM\dl\stream.ts bytes=6
+media_button=下载 2
+media_items=["http://127.0.0.1:61367/file.bin","http://127.0.0.1:61367/stream.m3u8"]
+file=C:\Users\ROG\AppData\Local\Temp\dlm-media-jIhhcQ\dl\stream.ts bytes=6
+plain_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-jIhhcQ\dl\file.bin bytes=4
 screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-28-media-sniff.png

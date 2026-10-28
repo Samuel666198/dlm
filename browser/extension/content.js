@@ -19,9 +19,9 @@ function ensureBox() {
   const mediaButton = document.createElement("button");
   mediaButton.id = "dlm-media-count";
   mediaButton.type = "button";
-  mediaButton.textContent = "媒体 0";
+  mediaButton.textContent = "下载 0";
   mediaButton.hidden = true;
-  mediaButton.title = "查看页面里检测到的媒体";
+  mediaButton.title = "查看页面里检测到的下载";
   mediaButton.setAttribute(
     "style",
     "padding:8px 10px;font:12px/1.2 monospace;color:#fff;background:#0f766e;border:0;border-radius:4px;cursor:pointer"
@@ -58,7 +58,7 @@ function ensureBox() {
     "position:fixed;right:12px;bottom:56px;z-index:2147483647;width:min(360px,calc(100vw - 24px));max-height:45vh;overflow:auto;background:#111820;color:#e8eef7;border:1px solid #2a3644;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,.35);font:12px/1.45 monospace"
   );
   const head = document.createElement("div");
-  head.textContent = "检测到的媒体";
+  head.textContent = "检测到的下载";
   head.setAttribute("style", "padding:9px 11px;border-bottom:1px solid #263342;color:#9fb0c3;font-size:11px");
   const list = document.createElement("div");
   list.id = "dlm-media-list";
@@ -76,7 +76,7 @@ function renderMedia(items) {
   if (!button || !panel || !list) return;
   const rows = Array.isArray(items) ? items : [];
   button.hidden = rows.length === 0;
-  button.textContent = "媒体 " + rows.length;
+  button.textContent = "下载 " + rows.length;
   if (!rows.length) panel.hidden = true;
   list.replaceChildren();
   for (const item of rows) {
@@ -116,10 +116,49 @@ function renderMedia(items) {
   }
 }
 
+const FILE_LINK_RE = /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab|pdf|docx?|xlsx?|pptx?|txt|md|epub|mobi|csv|exe|msi|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4[av]|mp3|flac|wav|aac|ogg|opus|wma|jpg|jpeg|png|gif|bmp|webp|svg|tiff?|heic|ts|bin)(?:$|[?#])/i;
+
+function collectFileLinks() {
+  const seen = new Set();
+  const out = [];
+  for (const a of document.querySelectorAll("a[href]")) {
+    let url = null;
+    try {
+      url = new URL(a.getAttribute("href"), location.href);
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/i.test(url.protocol)) continue;
+    if (!FILE_LINK_RE.test(url.pathname)) continue;
+    if (seen.has(url.href)) continue;
+    seen.add(url.href);
+    out.push({ url: url.href, kind: "file", at: Date.now() });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+function mergeItems(a, b) {
+  const seen = new Set();
+  const out = [];
+  for (const item of [...(a || []), ...(b || [])]) {
+    if (!item || !item.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    out.push(item);
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+
 function refreshMedia() {
+  const local = collectFileLinks();
+  chrome.runtime.sendMessage({ op: "page-links", items: local }, () => void chrome.runtime.lastError);
   chrome.runtime.sendMessage({ op: "media-list" }, (reply) => {
-    if (chrome.runtime.lastError) return;
-    renderMedia(reply && reply.items);
+    if (chrome.runtime.lastError) {
+      renderMedia(local);
+      return;
+    }
+    renderMedia(mergeItems(reply && reply.items, local));
   });
 }
 

@@ -187,10 +187,22 @@
 - **四闸**：`--lib` **307/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（65.07 s）· clippy **0**。
 - **未做**：DASH/DRM、Firefox/Opera 包、自动下载。
 
+## 2026-10-28 B3b-lite 文件嗅探增量
+
+- **扩展**（0.2.1）：`webRequest.onHeadersReceived` 认 `Content-Disposition: attachment` 与
+  octet-stream/zip/pdf/rar/7z/msi/apk 等二进制响应；`content.js` 每 1.5 s 扫页面 `a[href]` 的常见文件后缀，
+  `page-links` 并入同一份列表；面板从“媒体 N”改为“下载 N”，条目分 HLS/文件。
+  每 tab 仍去重、上限 40；普通文件不带 Cookie 时按 B10 进队列，带 Cookie/GUI 不可达走直连。
+- **真浏览器**：Edge 156 与 Tabbit 1.18（Chromium 154）本地页面均显示 `下载 2`；
+  点文件落盘 4 B = `FILE`，点 HLS 落盘 6 B = `AAABBB`。
+- **四闸**：`--lib` **307/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（纯扩展/文档改动）。
+- **未做**：DASH/DRM、Firefox/Opera 包、自动下载。
+
 ## 2026-10-28 Windows x64 便携包
 
 - **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
-  （**6,590,625 B**，sha256 `2267d4d84d82e62534166c1f14a96a4246cbb9fc9ee9316275d26f0f48104c94`）。
+  （**6,592,380 B**，sha256 `25ae1a56c71a40bc74e616cd11ae80de74e0a91164a1778b1fdfedac4f997a04`；
+  2026-10-28 晚随扩展 0.2.1 重建）。
 - **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
   `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
 - **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，

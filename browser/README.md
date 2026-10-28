@@ -59,7 +59,7 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 验收：`node browser/test/verify-native-download.mjs`（Edge 155 实测：dlm 请求带 `sid=42`/Referer/UA 空，
   落盘文件等于页面；截图/日志在 `docs/evidence/2026-10-22-b2-browser-download.*`）。
 - 一任务一进程是 B2 直连的形态；无 Cookie 的公开直链在 `dlm-gui` 开着时由 B10 交给队列。
-  页面挂钩/DNR/代理不在 B2；媒体嗅探见 B3b。
+  页面挂钩/DNR/代理不在 B2；媒体/文件嗅探见 B3b。
 
 ## B10：无 Cookie 投递进队列
 
@@ -72,20 +72,27 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
   杀 GUI 后回退直连再落盘 65536 B；证据在 `docs/evidence/2026-10-27-quota-queue-b10.*`）。
 - 端点文件含 token，和"能直接 spawn dlm"同一信任边界；不自动拉起 GUI。
 
-## B3b：媒体嗅探
+## B3b：媒体与文件嗅探
 
-- `webRequest`（只读）监听当前标签页的 `.m3u8` 与媒体直链；每 tab 去重、最多 20 条，
-  `storage.session` 跨 service worker 保存。
-- 页面右下角出现“媒体 N”面板；点条目的“下载”发送 `page-download`，HLS 带 `hls:true`。
-- 工具栏 popup 显示宿主状态与当前标签页媒体列表。
-- 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）。
+- `webRequest`（只读）监听当前标签页的 `.m3u8`、媒体直链，以及普通文件：
+  - `onBeforeRequest` 认 `.m3u8` 与媒体后缀；
+  - `onHeadersReceived` 认 `Content-Disposition: attachment` 和
+    `application/octet-stream`/zip/pdf/msdownload/7z/rar/msi/apk 等二进制响应；
+  - 页面 `content.js` 每 1.5 s 扫一次 `a[href]` 的常见文件后缀（zip/rar/pdf/docx/exe/msi/apk/图片…），
+    通过 `page-links` 并入同一份列表。
+- 每 tab 去重、最多 40 条，`storage.session` 跨 service worker 保存。
+- 页面右下角出现“下载 N”面板（标签 HLS/文件）；点条目的“下载”发送 `page-download`，HLS 带 `hls:true`。
+- 工具栏 popup 显示宿主状态与当前标签页的下载列表。
+- 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；
+  普通文件不带 Cookie 时按 B10 进队列（GUI 开着），带 Cookie 或 GUI 不可达时直连。
 - 验收：
 
 ```bash
 node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 ```
 
-证据：`docs/evidence/2026-10-28-media-sniff.*`（本地页面请求 HLS → 面板 → 点击 → `stream.ts` = `AAABBB`）。
+证据：`docs/evidence/2026-10-28-media-sniff.*`（本地页面请求 HLS + 文件链接 → 面板 `下载 2` → 点击 →
+`stream.ts` = `AAABBB`、`file.bin` = `FILE`；Tabbit 实测见 `2026-10-28-tabbit-extension.md`）。
 DASH（`.mpd`）暂不列；不做音视频合并。
 
 ## 手动加载
@@ -100,7 +107,7 @@ DASH（`.mpd`）暂不列；不做音视频合并。
   队列 `/api/add`。不执行任意命令；宿主自身没有本地监听（队列端口属于 `dlm-gui`）。
 - B2/B3b 扩展权限：`nativeMessaging` + `storage` + `contextMenus` + `cookies` + `webRequest`，
   `host_permissions: <all_urls>`；content script 显示状态、页面按钮和媒体面板。
-- 页面挂钩/DNR/代理不在 B2/B10；媒体嗅探只到 HLS/直链，DASH/DRM 未做。
+- 页面挂钩/DNR/代理不在 B2/B10；媒体/文件嗅探只到 HLS/直链/文件链接，DASH/DRM 未做。
 
 ## Tabbit Browser（本机 1.18）
 

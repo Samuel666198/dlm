@@ -1,7 +1,7 @@
-// B2/B10/B3b：Native Messaging 长连接 + 右键/页面投递 + 媒体嗅探。
+// B2/B10/B3b：Native Messaging 长连接 + 右键/页面投递 + 媒体/文件嗅探。
 // 只把 url/referer/cookie 交给宿主；页面挂钩、DNR、代理读取不在这一版。
 // B10：宿主对无 Cookie 的公开直链优先交给 dlm-gui 队列，回执用 mode 区分 queue/direct。
-// B3b：webRequest 只读嗅探 .m3u8/媒体直链；HLS 强制直连 dlm --hls。
+// B3b：webRequest 只读嗅探 .m3u8/媒体直链/附件与二进制响应；HLS 强制直连 dlm --hls。
 
 const HOST = "com.dlm.host";
 const MEDIA_KEY = "mediaByTab";
@@ -49,17 +49,39 @@ function mediaKind(details) {
   return null;
 }
 
+function addMedia(tabId, url, kind) {
+  if (tabId == null || tabId < 0 || !/^https?:\/\//i.test(url || "")) return false;
+  const list = mediaByTab.get(tabId) || [];
+  if (list.some((item) => item.url === url)) return false;
+  list.push({ url, kind: kind === "hls" ? "hls" : "file", at: Date.now() });
+  while (list.length > 40) list.shift();
+  mediaByTab.set(tabId, list);
+  return true;
+}
+
 function noteMedia(details) {
   if (!details || details.tabId < 0) return;
   const kind = mediaKind(details);
   if (!kind) return;
   mediaReady.then(() => {
-    const list = mediaByTab.get(details.tabId) || [];
-    if (list.some((item) => item.url === details.url)) return;
-    list.push({ url: details.url, kind, at: Date.now() });
-    while (list.length > 20) list.shift();
-    mediaByTab.set(details.tabId, list);
-    saveMedia();
+    if (addMedia(details.tabId, details.url, kind)) saveMedia();
+  });
+}
+
+function noteAttachment(details) {
+  if (!details || details.tabId < 0) return;
+  const headers = details.responseHeaders || [];
+  const header = (name) => {
+    const found = headers.find((h) => String(h.name || "").toLowerCase() === name);
+    return found ? String(found.value || "") : "";
+  };
+  const disposition = header("content-disposition");
+  const contentType = header("content-type");
+  const attachment = /attachment/i.test(disposition);
+  const binary = /^(application\/(octet-stream|zip|pdf|x-msdownload|x-7z-compressed|x-rar-compressed|x-msi)|application\/vnd\.android\.package-archive)/i.test(contentType);
+  if (!attachment && !binary) return;
+  mediaReady.then(() => {
+    if (addMedia(details.tabId, details.url, "file")) saveMedia();
   });
 }
 
@@ -67,6 +89,14 @@ chrome.webRequest.onBeforeRequest.addListener(noteMedia, {
   urls: ["<all_urls>"],
   types: ["media", "xmlhttprequest", "other"],
 });
+chrome.webRequest.onHeadersReceived.addListener(
+  noteAttachment,
+  {
+    urls: ["<all_urls>"],
+    types: ["main_frame", "sub_frame", "object", "xmlhttprequest", "other"],
+  },
+  ["responseHeaders"]
+);
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   mediaReady.then(() => {
@@ -176,6 +206,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.op === "wake") connect();
   if (msg && msg.op === "page-download") {
     submitPage(msg.url, msg.referer, !!msg.hls);
+  }
+  if (msg && msg.op === "page-links") {
+    const tabId = sender.tab && sender.tab.id;
+    const items = Array.isArray(msg.items) ? msg.items : [];
+    mediaReady.then(() => {
+      let changed = false;
+      for (const item of items) {
+        if (item && typeof item.url === "string" && addMedia(tabId, item.url, "file")) changed = true;
+      }
+      if (changed) saveMedia();
+      sendResponse({ ok: true });
+    });
+    return true;
   }
   if (msg && msg.op === "media-list") {
     mediaReady.then(() => {

@@ -1,4 +1,4 @@
-// B3b-lite 真浏览器验收：页面请求 .m3u8 → 扩展媒体面板出现 → 点击下载 → 宿主直连 dlm --hls。
+// B3b-lite 真浏览器验收：页面请求 .m3u8 + 文件链接 → 扩展“下载”面板出现 → 分别点击 → 宿主落盘。
 //
 // 用法：node browser/test/verify-media-sniff.mjs [--browser edge.exe]
 // 前置：cargo build --bin dlm --bin dlm-native-host && install.ps1
@@ -30,6 +30,7 @@ if (!fs.existsSync(dlmExe)) throw new Error(`missing dlm.exe: ${dlmExe}`);
 const pageHtml = '<!doctype html><html><head><meta charset="utf-8"><title>dlm media</title></head>' +
   '<body><h1>dlm media sniff</h1><p>点击按钮请求一个 HLS 播放列表。</p>' +
   '<button id="load-media">加载媒体</button>' +
+  '<a id="file-link" href="/file.bin">下载文件</a>' +
   '<script>document.getElementById("load-media").onclick = () => fetch("/stream.m3u8").catch(() => {});</script></body></html>';
 const playlist = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n#EXT-X-ENDLIST\n';
 const server = http.createServer((req, res) => {
@@ -51,6 +52,11 @@ const server = http.createServer((req, res) => {
   if (req.url === '/seg2.ts') {
     res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Content-Length': 3 });
     res.end('BBB');
+    return;
+  }
+  if (req.url === '/file.bin') {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': 4 });
+    res.end('FILE');
     return;
   }
   res.writeHead(404, { 'Content-Length': 0 });
@@ -155,22 +161,32 @@ try {
   let mediaText = '';
   for (let i = 0; i < 80; i++) {
     mediaText = (await evalText("document.querySelector('#dlm-media-count')?.textContent || ''")) || '';
-    if (mediaText.startsWith('媒体 1') || mediaText.startsWith('媒体 2')) break;
+    if (mediaText.startsWith('下载 2')) break;
     await sleep(250);
   }
   log += `media_button=${mediaText}\n`;
-  if (!mediaText.startsWith('媒体 ')) throw new Error('没有检测到媒体');
-  if (mediaText === '媒体 0') throw new Error('媒体计数为 0');
+  if (!mediaText.startsWith('下载 ')) throw new Error('没有检测到下载条目');
+  if (mediaText === '下载 0') throw new Error('下载计数为 0');
 
   await evalText("document.querySelector('#dlm-media-count').click(); true");
   const panel = await evalText("(!document.querySelector('#dlm-media-panel')?.hidden)");
-  if (!panel) throw new Error('媒体面板没有打开');
+  if (!panel) throw new Error('下载面板没有打开');
   const items = await evalText("Array.from(document.querySelectorAll('#dlm-media-list .url')).map(e=>e.textContent)");
   log += `media_items=${JSON.stringify(items)}\n`;
   if (!items || !items.some((u) => u.includes('/stream.m3u8'))) {
-    throw new Error(`媒体面板没有 HLS 条目：${JSON.stringify(items)}`);
+    throw new Error(`下载面板没有 HLS 条目：${JSON.stringify(items)}`);
   }
-  await evalText("Array.from(document.querySelectorAll('#dlm-media-list button')).find((b)=>b.textContent==='下载').click(); true");
+  if (!items.some((u) => u.includes('/file.bin'))) {
+    throw new Error(`下载面板没有文件链接：${JSON.stringify(items)}`);
+  }
+  const clickedHls = await evalText(`(() => {
+    const rows = [...document.querySelectorAll('#dlm-media-list > div')];
+    const row = rows.find((r) => (r.querySelector('.url')?.textContent || '').includes('/stream.m3u8'));
+    if (!row) return false;
+    row.querySelector('button')?.click();
+    return true;
+  })()`);
+  if (!clickedHls) throw new Error('下载面板里没有可点的 HLS 条目');
 
   const file = path.join(downloadDir, 'stream.ts');
   let bytes = -1;
@@ -185,6 +201,26 @@ try {
   if (bytes !== 6) throw new Error(`HLS 没有落成 AAABBB：${bytes}`);
   const body = fs.readFileSync(file, 'utf8');
   if (body !== 'AAABBB') throw new Error(`HLS 内容不对：${JSON.stringify(body)}`);
+
+  const clickedFile = await evalText(`(() => {
+    const rows = [...document.querySelectorAll('#dlm-media-list > div')];
+    const row = rows.find((r) => (r.querySelector('.url')?.textContent || '').includes('/file.bin'));
+    if (!row) return false;
+    row.querySelector('button')?.click();
+    return true;
+  })()`);
+  if (!clickedFile) throw new Error('下载面板里没有可点的 file.bin');
+  const filePath = path.join(downloadDir, 'file.bin');
+  let fileBytes = -1;
+  for (let i = 0; i < 120; i++) {
+    if (fs.existsSync(filePath)) {
+      fileBytes = fs.statSync(filePath).size;
+      if (fileBytes === 4) break;
+    }
+    await sleep(100);
+  }
+  log += `plain_file=${filePath} bytes=${fileBytes}\n`;
+  if (fileBytes !== 4) throw new Error(`普通文件没有落成 FILE：${fileBytes}`);
 
   const shot = await cdp('Page.captureScreenshot', { format: 'png' });
   fs.mkdirSync(path.dirname(out), { recursive: true });

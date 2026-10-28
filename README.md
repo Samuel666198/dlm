@@ -3,7 +3,7 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 是内核与命令行；v2 已加 B1/B2/B10/B3b 浏览器投递（无 Cookie 的公开直链可进队列，页面媒体嗅探）与 C1–C3 本地 Web UI
+v1 是内核与命令行；v2 已加 B1/B2/B10/B3b 浏览器投递（无 Cookie 的公开直链可进队列，页面媒体/文件嗅探）与 C1–C3 本地 Web UI
 （`dlm-gui`：任务队列、全局固定窗口配额、完成后动作、环回 HTTP + 内嵌单页）。不做原生 GUI、Windows 服务、守护进程、站点抓取。
 
 ```
@@ -211,7 +211,7 @@ B2 **没有**本地监听/令牌，也不是队列（队列与环回 HTTP 在 C 
 node browser/test/verify-native-download.mjs
 ```
 
-页面挂钩、DNR、代理读取不在 B2；媒体嗅探由 B3b-lite 的扩展面板负责（见下）。
+页面挂钩、DNR、代理读取不在 B2；媒体与文件嗅探由 B3b-lite 的扩展面板负责（见下）。
 
 **B10**：无 Cookie 的公开直链，在 `dlm-gui` 开着时优先交给队列（回执 `mode:"queue"` + `id`）；
 带 Cookie 的下载仍走 B2 直连（队列不存 Cookie）；GUI 不可达或端点文件不存在 ⇒ 回退直连；
@@ -226,9 +226,11 @@ node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Mi
 
 证据：[`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md)。
 
-**B3b-lite 媒体嗅探**：扩展用 `webRequest`（只读）监听当前标签页的 `.m3u8` 与媒体直链，
-页面右下角出现“媒体 N”面板，工具栏 popup 也能看；点“下载”把 URL 交给宿主，HLS 强制直连
-`dlm --hls`（队列不接不可续传的 HLS）。只列 HLS/直链，不列 DASH，不自动下载。浏览器验收：
+**B3b-lite 媒体与文件嗅探**：扩展用 `webRequest`（只读）监听当前标签页的 `.m3u8`、媒体直链，
+以及普通文件——页面里 `a[href]` 命中常见文件后缀的链接、响应头带 `Content-Disposition: attachment`
+或 `application/octet-stream`/zip/pdf/rar/7z/msi/apk 等二进制的请求。页面右下角出现“下载 N”面板
+（标签 HLS/文件），工具栏 popup 也能看；点“下载”把 URL 交给宿主：HLS 强制直连 `dlm --hls`
+（队列不接不可续传的 HLS），普通文件按 B10 规则走队列或直连。只列这些，不列 DASH，不自动下载。浏览器验收：
 
 ```bash
 node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -249,7 +251,7 @@ target/debug/dlm.exe --url https://example.com/master.m3u8 --hls --out-dir D:/dl
 - 同源分片沿用 Referer/Cookie/Basic；**跨 host 分片不带这些凭据**。
 - `--max-speed` 可叠加；`--sha256` 在合并完成后校验；`--data-file`/`--max-bytes` 与 `--hls` 互斥。
 - **不做** DASH、DRM、队列 HLS。浏览器里的 HLS/媒体直链由 B3b-lite 扩展嗅探并直连 `--hls`；
-  直接投递 `.m3u8` 到队列仍按普通文件处理。
+  普通文件链接由同一面板交给队列/直连；直接投递 `.m3u8` 到队列仍按普通文件处理。
 
 ## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
 
@@ -320,7 +322,7 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
 不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/站点抓取（B1/B2 已有直接 URL 投递；
-B3a 已有 HLS 直链，B3b-lite 已有扩展媒体面板；DASH/DRM 未做）、
+B3a 已有 HLS 直链，B3b-lite 已有扩展媒体/文件面板；DASH/DRM 未做）、
 原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、自动更新、
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
