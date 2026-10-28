@@ -128,6 +128,25 @@
 - **未做**：原生 GUI、Windows 服务/开机自启、队列 Cookie/认证（继续走 B2）、B3 媒体嗅探、A5 IDM 断点兼容。
 - **文档**：spec `docs/superpowers/specs/2026-10-22-dlm-product-ui-design.md`；plan `docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md`；证据 `docs/evidence/2026-10-22-c3-gui.md`。
 
+## 2026-10-27 A16 配额 / 队列动作 / B10 交付
+
+- **内核**：`--max-bytes`（0=不限；与 `--data-file` 互斥）；预算按"预读基数 + 已交付 + 在途预占"记账，
+  派枪折成终点帽；到量 `Stop::BudgetReached`、`Report.budget_reached`、退 **3**（下完仍 0）。
+- **队列**：`QuotaState` 全局固定窗口；按覆盖量增量采样（500 ms）、`reserved` 预占、`hold_until`；
+  退出码 3 回 `Queued`，窗口重置后自动续传；`/api/quota`；UI 配额摘要与等待提示；
+  `dlm-gui --quota/--quota-window/--endpoint`，参数错退 2。
+- **队列动作**：`open` / `run:<exe>` 入队；`shutdown` 在 `/api/add` 拒绝；`/api/add` 返回 `id`；
+  子进程参数由 `child_args` 统一构造；日志跨轮 append。
+- **B10**：`dlm-gui` 原子写端点文件；宿主无 Cookie 先入队，带 Cookie/不可达回退 B2 直连，
+  队列明确拒绝不回退，响应超时不重复下载；扩展显示 `mode`。
+- **四闸**：`--lib` **294/0**（3.01 s）· `--bins` **4/0** · `integration` **113/0**（64.24 s）· clippy **0**。
+- **真浏览器**：Edge 156，无 Cookie 页面队列落盘 65536 B；杀 GUI 后同一页回退直连再落盘 65536 B。
+  证据 `docs/evidence/2026-10-27-quota-queue-b10.*`。
+- **与计划的偏差**：计划里的 `--quota 65536`/`/sz/131072` 与"配额下限取 PROBE_READ_BYTES"冲突
+  （131072 B 在预读就被整份读回，没有可停的枪）；实际用 `--quota 262144 --quota-window 2` +
+  `/sz/524288`，日志能看到预算停住。B10 浏览器验收用新脚本（B2 的页面带 Cookie，无法演无 Cookie 入队）。
+- **未做**：分类规则、更新检查（要外网，需单独点头）、B3、A5、原生 GUI/Windows 服务、队列 Cookie。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

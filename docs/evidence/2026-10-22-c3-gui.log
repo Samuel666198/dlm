@@ -1,6 +1,6 @@
-browser=Chrome/155.0.8059.85
-gui=http://127.0.0.1:58223/?t=gui-test-token
-file_url=http://127.0.0.1:58222/gui.bin
-tasks="gui.bin — done\nhttp://127.0.0.1:58222/gui.bin\n65536 / 65536 B · exit 0\n日志\n删除"
-file=C:\Users\ROG\AppData\Local\Temp\dlm-c3-JiBxWK\dl\gui.bin bytes=65536
+browser=Chrome/156.0.8078.48
+gui=http://127.0.0.1:64555/?t=gui-test-token
+file_url=http://127.0.0.1:64554/gui.bin
+tasks="gui.bin — done\nhttp://127.0.0.1:64554/gui.bin\n65536 / 65536 B · exit 0\n日志\n删除"
+file=C:\Users\ROG\AppData\Local\Temp\dlm-c3-UwYyhW\dl\gui.bin bytes=65536
 screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-22-c3-gui.png

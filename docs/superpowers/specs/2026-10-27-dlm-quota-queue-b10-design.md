@@ -1,6 +1,6 @@
 # dlm A16 配额恢复 · 队列完成后动作 · B10 浏览器投递入队（设计）
 
-**状态**：设计待实现（2026-10-27）
+**状态**：已实现（2026-10-27；四闸 294/4/113/clippy 0；Edge 156 真浏览器 queue/direct 验收）
 **上游**：路线图 [`../plans/2026-10-21-三路路线图.md`](../plans/2026-10-21-三路路线图.md)、能力对照表 [`../../evidence/2026-10-21-idm能力对照表.md`](../../evidence/2026-10-21-idm能力对照表.md)
 **用户裁定（2026-10-27）**：
 1. A16 配额＝**全局配额、固定窗口**（队列级，不是每任务）。
@@ -249,13 +249,13 @@ pub struct QuotaState {
 
 - CLI：`--max-bytes` 进 `Config.max_bytes`；与 `--data-file` 同给 ⇒ 参数错误 2。
 - 引擎单测：单 worker、注入小预算 ⇒ 停在 `Stop::BudgetReached`，`Report.budget_reached` 为真，落盘字节 ≤ 预算 + 一块。
-- 集成：`--connections 1 --max-bytes 65536` 对 `/sz/131072` ⇒ 退 3、断点在、目标文件只到预算附近；再跑一次不带预算 ⇒ 退 0、文件 131072 B。
+- 集成：`--connections 1 --max-bytes 524288` 对 `/sz/1048576` ⇒ 退 3、断点在、目标文件落在预算 + 一块之内；再跑一次不带预算 ⇒ 退 0、文件 1048576 B。（原稿写 65536/131072，但 131072 在预读阶段就被整份读回，没有可停的枪；改为高于 `PROBE_READ_BYTES` 的组合。）
 - 装配层：`main::finish` 把 `budget_reached && !ok` 映成 3；任务在预算内完成仍映 0。
 
 **队列（`src/queue.rs` / `src/gui.rs` / `tests/integration.rs`）**
 
 - 单测：旧 `queue.json` 无新字段可读；`quota_tick` 推进窗口并清零；`quota_charge`/`quota_hold` 往返；切片分配函数（含“剩余只够一个槽位”的分支）。
-- 集成：`dlm-gui --quota 65536 --quota-window 2 --concurrency 1` 添加 `/sz/131072` ⇒ 先出现退出码 3 / `hold_until`，窗口重置后自动续传至 `done`，文件 131072 B。
+- 集成：`dlm-gui --quota 262144 --quota-window 2 --concurrency 1` 添加 `/sz/524288` ⇒ 先出现退出码 3 / `hold_until`，窗口重置后自动续传至 `done`，文件 524288 B。（原稿 65536 低于 `PROBE_READ_BYTES`，按本 spec §2.6 的参数下限会被拒。）
 - 负数/边界：`--quota-window 0` 配启用配额 ⇒ 参数错误；`--quota 0` ⇒ 关闭并清 `hold_until`。
 
 **队列动作**

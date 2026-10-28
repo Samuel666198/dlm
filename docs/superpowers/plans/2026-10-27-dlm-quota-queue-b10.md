@@ -1,6 +1,6 @@
 # dlm A16 配额 · 队列动作 · B10 投递入队 Implementation Plan
 
-**状态**：待实现（2026-10-27）
+**状态**：已交付（2026-10-27；四闸 294/4/113/clippy 0；Edge 156 真浏览器 queue/direct 验收）。
 **Spec**：[`../specs/2026-10-27-dlm-quota-queue-b10-design.md`](../specs/2026-10-27-dlm-quota-queue-b10-design.md)
 **目标**：按 spec 落三件事——内核字节预算 + 队列全局固定窗口配额、队列 `open`/`run:<exe>`、B10 无 Cookie 浏览器投递进队列（带 Cookie / GUI 不可达回退 B2）。
 
@@ -323,3 +323,14 @@
 - `queue.json` 旧文件可直接读；旧 CLI/GUI 调用方式不变。
 - README/STATUS/路线图/能力表/证据五处同步。
 - 未 push；没有新增直接依赖。
+
+## 交付附记（2026-10-27）
+
+- 计划 Task 2 的 `--quota 65536` / `/sz/131072` 与 spec 的"配额下限取 `PROBE_READ_BYTES`"冲突：
+  131072 B 文件在预读阶段就被整份读回并落盘，引擎没有可停的枪。实际集成用例改为
+  `--quota 262144 --quota-window 2` + `/sz/524288`，日志能看到至少一轮预算停住。
+- Task 1 的 `/sz/131072` + `--max-bytes 65536` 同理；实际用 `/sz/1048576` + `--max-bytes 524288`。
+- B10 浏览器验收用新脚本 `browser/test/verify-queue-download.mjs`：B2 的页面带 `sid=42` Cookie，
+  天然走直连，无法同时演"无 Cookie 入队"；新脚本用无 Cookie 页面覆盖 queue → 杀 GUI → direct 两种模式。
+- `queue::set_quota` 只在额度/窗口真的变化时重置窗口；同参数重启保留 `used`/`window_started_at`。
+- 队列任务日志改为 append，跨窗口/暂停保留历史（否则预算停止那一轮的结论话会被下一轮覆盖）。

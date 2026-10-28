@@ -3,8 +3,8 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 是内核与命令行；v2 已加 B1/B2 浏览器投递（最小 Native Messaging 扩展）与 C1–C3 本地 Web UI
-（`dlm-gui`：任务队列 + 环回 HTTP + 内嵌单页）。不做原生 GUI、Windows 服务、守护进程、站点抓取。
+v1 是内核与命令行；v2 已加 B1/B2/B10 浏览器投递（无 Cookie 的公开直链可进队列）与 C1–C3 本地 Web UI
+（`dlm-gui`：任务队列、全局固定窗口配额、完成后动作、环回 HTTP + 内嵌单页）。不做原生 GUI、Windows 服务、守护进程、站点抓取。
 
 ```
 cargo build                     # 工具链由 rust-toolchain.toml 钉为 msvc
@@ -21,6 +21,7 @@ target/debug/dlm.exe --url https://example.com/big.iso --out-dir D:/dl
 | `0` | 下载完成；`--help`/`--version`；`--no-start`（只登记、不发请求） |
 | `1` | 跑到一个结论但**没下完**（退避到顶、校验不符、对端把体掐断、整份那一枪没拿全） |
 | `2` | 参数档：本 CLI 的边界形状校验失败，**且** clap 自己的用法错误（同码不同源，措辞不同：前者是"参数写错了"，后者由 clap 交回） |
+| `3` | `--max-bytes` 到量且没下完：断点保留，再跑一次会继续；任务在预算内下完仍退 0 |
 
 ## 选项
 
@@ -34,6 +35,7 @@ POSIX 长选项为主，IDM 的斜杠别名在**进解析器之前就地替换�
 | `--out-name <NAME>` | `/f` | 不给则取 URL 末段 |
 | `--connections <N>` | — | 默认 8 |
 | `--max-speed <BYTES/S>` | — | 所有连接**合计**的速率上限（字节/秒；0 = 不限） |
+| `--max-bytes <BYTES>` | — | 本次运行最多新交付的字节数（0 = 不限；到量即停并保留断点；与 `--data-file` 互斥） |
 | `--referer <URL>` / `--cookie <C>` | — | 原样带上 |
 | `--cookie-stdin` | — | 从 stdin 读 Cookie 头（与 `--cookie` 互斥；避免出现在命令行/进程列表） |
 | `--data-file <FILE>` | — | 请求体从文件读，见下面"带请求体那条路" |
@@ -210,6 +212,19 @@ node browser/test/verify-native-download.mjs
 
 页面挂钩、DNR、代理读取、媒体嗅探不在 B2。
 
+**B10**：无 Cookie 的公开直链，在 `dlm-gui` 开着时优先交给队列（回执 `mode:"queue"` + `id`）；
+带 Cookie 的下载仍走 B2 直连（队列不存 Cookie）；GUI 不可达或端点文件不存在 ⇒ 回退直连；
+队列明确拒绝 ⇒ 报错、不重复下载；请求已发出但响应超时 ⇒ 报
+"队列响应超时，未重复下载"（不直连，避免重复）。端点文件是
+`%LOCALAPPDATA%\dlm\gui\endpoint.json`（`port/token/pid/started_at`），由 `dlm-gui` 原子写，
+可用 `--endpoint` 覆盖；它含 token，和"能直接 spawn dlm"是同一信任边界。浏览器验收：
+
+```bash
+node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+证据：[`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md)。
+
 ## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
 
 **C0 裁定**：本地 Web UI，零新 crate（默认依赖仍是 6 个）。没有原生窗口；浏览器打开页面即可。
@@ -228,12 +243,17 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 | `--dlm <EXE>` | 与 `dlm-gui` 同目录的 `dlm.exe` | 子进程 |
 | `--concurrency <N>` | `2` | 同时跑几个任务 |
 | `--token <T>` | 随机 | 只用于测试；正常用打印出来的 URL |
+| `--quota <BYTES>` | 沿用队列 | 每窗口全局字节上限（0 = 关闭；至少 236032，首轮预读要计入） |
+| `--quota-window <SECS>` | `3600`（或队列里的值） | 固定窗口秒数；给 `--quota-window` 前必须先有额度 |
+| `--endpoint <FILE>` | `%LOCALAPPDATA%\dlm\gui\endpoint.json` | B10 端点文件；写失败只警告、浏览器回退直连 |
 
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
-- **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志。
+- **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。超出上界最多并发数 × 64 KiB。
+- **完成后动作**：队列只接 `open` 与 `run:<exe>`（与 CLI 同形，由子进程执行）；`shutdown` 在 API 层拒绝——队列可能同时完成多个任务，关机副作用不可控。
+- **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志（日志跨轮 append）。
 - **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
 - **安全**：只绑 `127.0.0.1`；所有页面/API 都要求 `?t=<token>`；UI 用 `textContent` 插入数据；日志 API 只读 log 目录内文件、最多 64 KiB 尾。
-- **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 要等也得让 `dlm-gui` 一直开着。
+- **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。
 - **不做**：原生 GUI、分类规则、更新检查（要访问外网，需单独点头）、队列 Cookie。
 
 验收（不在 Rust 四闸内，需真浏览器）：
@@ -256,6 +276,10 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | 416 不是无条件"标完成"：只有 `Content-Range: bytes */<len>` 里的 `len` 等于我们手里的总长才认 | spec §10 R10 |
 | 断点保存的节奏**等于一枪收尾的节奏**（那句"每 5 秒兜底"是合取条件，从不单独生效）⇒ 开跑十几秒内被硬杀，断点里只有初始那一格种子 | spec §10 R14 |
 | v2 起每次 `Retighten` 的重复 ≤ 一块（64 KiB）：48 MiB、8 worker、全速实测 `duplicated` **319,799 B（0.63%）/ 32 次收紧**，上界 2,097,152 B；限速/续传档未复量，旧 12.8%–20.8% 只作 v1 历史 | spec §10 R21 / 计划 E14、E31 |
+| `--max-bytes` 按本次运行的新交付字节计：新建任务首轮预读计入，续传预读不计；到量最多再落一块（64 KiB），并发 N 时上界 N×64 KiB | spec §2.2/R24 |
+| 队列配额按断点覆盖量增量采样（500 ms 一拍）：暂停/崩溃前最后一拍之后在途、尚未写进断点的字节不计入本窗，续传时重新计入；系统时钟回拨会延后固定窗口 | spec §2.1/§2.7 |
+| 队列配额与 `--max-speed` 是两件事；队列暂不透传限速 | spec §2.7 |
+| B10 端点文件含 token，位于用户目录；同用户进程可读，与"能直接 spawn dlm"同一信任边界；GUI 被硬杀会留下陈旧端点文件，宿主按"连不上 ⇒ 回退"容忍 | spec §4.5 |
 | 重跳上限靠 HTTP 客户端默认继承，本 CLI 未显式设置 | — |
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
@@ -270,9 +294,9 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 278 通过（含队列/UI 纯函数）
-cargo test --bins                           # 3 通过（装配层的退出档只有这一层看得见）
-cargo test --test integration               # 107 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列端到端）
+cargo test --lib                            # 294 通过（含队列/配额/UI 纯函数）
+cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
+cargo test --test integration               # 113 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
 ```
 
@@ -288,6 +312,9 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/superpowers/specs/2026-10-15-dlm-kernel-design.md`](docs/superpowers/specs/2026-10-15-dlm-kernel-design.md) | 设计稿（模块划分、常量、断点结构、CLI、错误处理、测试策略）。**§10 是勘误节：实测推翻的东西在这里，正文不回改** |
 | [`docs/superpowers/specs/2026-10-22-dlm-product-ui-design.md`](docs/superpowers/specs/2026-10-22-dlm-product-ui-design.md) | C0–C3 产品层设计（本地 Web UI、队列、HTTP/UI、安全边界） |
 | [`docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md`](docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md) | C1–C3 实现计划（已交付） |
+| [`docs/superpowers/specs/2026-10-27-dlm-quota-queue-b10-design.md`](docs/superpowers/specs/2026-10-27-dlm-quota-queue-b10-design.md) | A16 配额 / 队列动作 / B10 设计（已交付） |
+| [`docs/superpowers/plans/2026-10-27-dlm-quota-queue-b10.md`](docs/superpowers/plans/2026-10-27-dlm-quota-queue-b10.md) | A16 / 队列动作 / B10 实现计划 |
+| [`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md) | 本轮证据（真浏览器 queue/direct、四闸） |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md`](docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) | 执行状态：进度表、当前基线、恢复步骤、下游必守的裁定、挂账的 minor、等用户点头的事 |
 | `docs/evidence/` | 一次性实测记录（数字都来自真跑） |
