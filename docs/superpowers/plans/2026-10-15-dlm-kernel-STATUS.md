@@ -187,6 +187,19 @@
 - **四闸**：`--lib` **307/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（65.07 s）· clippy **0**。
 - **未做**：DASH/DRM、Firefox/Opera 包、自动下载。
 
+## 2026-10-28 Windows x64 便携包
+
+- **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
+  （**6,590,625 B**，sha256 `2267d4d84d82e62534166c1f14a96a4246cbb9fc9ee9316275d26f0f48104c94`）。
+- **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
+  `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
+- **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，
+  创建开始菜单 `dlm-gui.exe --open` 快捷方式；卸载保留队列/日志/下载。
+- **冒烟**：包内 `dlm --version`/`--help`、`dlm-gui --help`、native host ping、packaged GUI HTTP 200；
+  三个 PS1 通过 PowerShell parser。**没有执行 install.ps1**（会写 HKCU/Start Menu），只做语法检查。
+- **四闸**：仍 `--lib` **307/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（本轮纯打包，无 Rust 改动）。
+- **注意**：扩展仍需浏览器开发者模式手动“加载已解压”；zip 在 `target/` 下，不入库。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

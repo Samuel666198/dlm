@@ -325,6 +325,23 @@ B3a 已有 HLS 直链，B3b-lite 已有扩展媒体面板；DASH/DRM 未做）�
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 
+## 打包（Windows x64）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
+```
+
+产物是 `target/package/dlm-<version>-win-x64.zip`（版本从 `Cargo.toml` 读）。包内：
+
+- `dlm.exe`、`dlm-gui.exe`、`dlm-native-host.exe`（release）；
+- `browser/extension`（Chrome/Edge MV3）；
+- `install.ps1` / `uninstall.ps1`：复制到 `%LOCALAPPDATA%\dlm`、注册 HKCU Native Messaging、
+  创建开始菜单快捷方式；卸载保留队列/日志/下载文件；
+- `START-HERE.txt` / `README-PACKAGE.md`。
+
+扩展仍需在浏览器开发者模式里“加载已解压”。打包脚本与安装器说明见
+[`packaging/README.md`](packaging/README.md)。zip 在 `target/` 下，不入库。
+
 ## 测试与验收
 
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
@@ -357,6 +374,9 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/superpowers/specs/2026-10-28-media-sniff-design.md`](docs/superpowers/specs/2026-10-28-media-sniff-design.md) | B3b-lite 媒体嗅探设计 |
 | [`docs/superpowers/plans/2026-10-28-media-sniff.md`](docs/superpowers/plans/2026-10-28-media-sniff.md) | B3b-lite 媒体嗅探计划 |
 | [`docs/evidence/2026-10-28-media-sniff.md`](docs/evidence/2026-10-28-media-sniff.md) | B3b-lite 媒体嗅探证据 |
+| [`packaging/build-package.ps1`](packaging/build-package.ps1) | Windows x64 release zip 打包脚本 |
+| [`packaging/install.ps1`](packaging/install.ps1) | 包内用户级安装器（HKCU） |
+| [`docs/evidence/2026-10-28-package.md`](docs/evidence/2026-10-28-package.md) | 便携包产物、hash 与冒烟记录 |
 | [`docs/superpowers/specs/2026-10-28-b3a-hls-design.md`](docs/superpowers/specs/2026-10-28-b3a-hls-design.md) | B3a HLS 直链设计 |
 | [`docs/superpowers/plans/2026-10-28-b3a-hls.md`](docs/superpowers/plans/2026-10-28-b3a-hls.md) | B3a HLS 直链计划 |
 | [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |

@@ -1,0 +1,30 @@
+dlm Windows x64 portable package
+===============================
+
+1. Extract this zip to any folder.
+2. Open PowerShell in this folder and run:
+
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+
+   This installs dlm to %LOCALAPPDATA%\dlm, registers the browser
+   native-messaging host, and creates a Start Menu shortcut.
+
+3. Open Chrome/Edge extensions page, enable Developer mode, and load
+   the unpacked extension from:
+
+   %LOCALAPPDATA%\dlm\extension
+
+4. Start dlm from the Start Menu, or run:
+
+   %LOCALAPPDATA%\dlm\bin\dlm-gui.exe --open
+
+5. Browser: right-click a link/image/video, use the page "dlm" button,
+   or click the "media N" panel for detected HLS/media URLs.
+
+Data locations:
+  queue/config/logs  %LOCALAPPDATA%\dlm
+  browser jobs       %LOCALAPPDATA%\dlm\native-host\jobs
+  downloads          %USERPROFILE%\Downloads (default) or --out-dir
+
+Uninstall:
+  powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
