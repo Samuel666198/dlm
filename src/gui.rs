@@ -436,6 +436,30 @@ fn tick(
     let now = queue::now_secs();
     changed |= store.quota_tick(now);
 
+    // 上一轮因预算退出、而本窗剩余仍不足一轮预读的任务：明确进入配额等待，别每 500 ms 空转。
+    if let Some(quota) = store.quota() {
+        let reserved_total = reserved.values().copied().fold(0u64, u64::saturating_add);
+        let available = quota.limit.saturating_sub(quota.used).saturating_sub(reserved_total);
+        if available < MIN_QUOTA_SLICE
+            && let Some(reset) = store.quota_next_reset()
+        {
+            let waiting: Vec<String> = store
+                .tasks()
+                .iter()
+                .filter(|t| {
+                    t.status == TaskStatus::Queued
+                        && t.exit_code == Some(3)
+                        && t.hold_until.is_none()
+                        && t.start_at.is_none_or(|s| s <= now)
+                })
+                .map(|t| t.id.clone())
+                .collect();
+            for id in waiting {
+                changed |= store.quota_hold(&id, reset);
+            }
+        }
+    }
+
     // 4) 派发。
     while children.len() < config.concurrency {
         let next = store
@@ -456,26 +480,8 @@ fn tick(
             let reserved_total = reserved.values().copied().fold(0u64, u64::saturating_add);
             let available = quota.limit.saturating_sub(quota.used).saturating_sub(reserved_total);
             let free_slots = (config.concurrency - children.len()).max(1);
-            let slice = quota_slice(available, free_slots);
-            if slice.is_none() {
-                if let Some(reset) = store.quota_next_reset() {
-                    let waiting: Vec<String> = store
-                        .tasks()
-                        .iter()
-                        .filter(|t| {
-                            t.status == TaskStatus::Queued
-                                && t.start_at.is_none_or(|s| s <= now)
-                                && t.hold_until.is_none()
-                        })
-                        .map(|t| t.id.clone())
-                        .collect();
-                    for id in waiting {
-                        changed |= store.quota_hold(&id, reset);
-                    }
-                }
-                break;
-            }
-            slice
+            let Some(slice) = quota_slice(available, free_slots) else { break };
+            Some(slice)
         } else {
             None
         };
