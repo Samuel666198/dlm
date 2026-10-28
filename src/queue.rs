@@ -311,6 +311,22 @@ pub fn validate_on_complete(raw: &str) -> Result<Option<String>> {
     }
 }
 
+/// 按文件名扩展名归类（C3）。只影响 UI 标签/筛选，不改变落盘目录。
+pub fn category_for(name: &str) -> &'static str {
+    let Some((_, ext)) = name.rsplit_once('.') else { return "other" };
+    match ext.to_ascii_lowercase().as_str() {
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "ts"
+        | "m2ts" | "3gp" => "video",
+        "mp3" | "flac" | "wav" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" => "audio",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "iso" | "cab" => "archive",
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "epub"
+        | "mobi" | "csv" => "document",
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "tif" | "tiff" | "heic" => "image",
+        "exe" | "msi" | "apk" | "dmg" | "pkg" | "deb" | "rpm" | "appimage" => "program",
+        _ => "other",
+    }
+}
+
 pub fn validate_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         bail!("文件名不能为空");
@@ -428,6 +444,24 @@ mod tests {
         .unwrap();
         assert_eq!(progress(&dir, "a.bin"), (Some(100), Some(20)));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn category_rules_are_extension_based_and_default_to_other() {
+        let table: &[(&str, &str)] = &[
+            ("movie.MP4", "video"),
+            ("song.flac", "audio"),
+            ("pack.tar.gz", "archive"),
+            ("manual.pdf", "document"),
+            ("photo.jpeg", "image"),
+            ("setup.exe", "program"),
+            ("file.bin", "other"),
+            ("no-extension", "other"),
+            ("trailing.", "other"),
+        ];
+        for (name, want) in table {
+            assert_eq!(category_for(name), *want, "{name}");
+        }
     }
 
     #[test]

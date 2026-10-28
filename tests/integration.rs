@@ -6997,7 +6997,10 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
         let tasks: Vec<serde_json::Value> = serde_json::from_str(&text)?;
         if let Some(task) = tasks.iter().find(|t| t["name"] == "gui.bin") {
             match task["status"].as_str() {
-                Some("done") => break task["id"].as_str().context("task id")?.to_string(),
+                Some("done") => {
+                    assert_eq!(task["category"], "other", "gui.bin 没有已知扩展名：{task}");
+                    break task["id"].as_str().context("task id")?.to_string();
+                }
                 Some("failed") => {
                     let log = client
                         .get(format!(
@@ -7545,5 +7548,98 @@ fn host_to_queue_end_to_end() -> anyhow::Result<()> {
     assert_eq!(std::fs::metadata(out_dir.join("65536"))?.len(), 65_536);
     let queue_text = std::fs::read_to_string(&queue)?;
     assert!(!queue_text.to_ascii_lowercase().contains("cookie"), "队列文件不许出现 Cookie：{queue_text}");
+    Ok(())
+}
+
+/// C3：`dlm-gui --update-url` 后台检查一次本地清单，`/api/update` 暴露结果；不访问公网。
+#[test]
+fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let manifest = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let manifest_port = manifest.local_addr()?.port();
+    let manifest_handle = std::thread::spawn(move || {
+        let (mut stream, _) = manifest.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"version":"99.0.0","url":"https://example.invalid/dl","notes":"local"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let dir = harness::tmp_dir("gui-update")?;
+    let queue = dir.path().join("queue.json");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-update-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                dir.path().join("dl").to_str().context("out dir utf8")?,
+                "--log-dir",
+                dir.path().join("logs").to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--token",
+                token,
+                "--update-url",
+                &format!("http://127.0.0.1:{manifest_port}/manifest.json"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let update = loop {
+        let r = client.get(format!("{gui_base}/api/update?t={token}")).send();
+        if let Ok(resp) = r
+            && resp.status().is_success()
+        {
+            let value: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+            if value["checked_at"].is_number() {
+                break value;
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("update check didn't finish");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    manifest_handle.join().unwrap();
+    assert_eq!(update["enabled"], true, "{update}");
+    assert_eq!(update["latest"], "99.0.0", "{update}");
+    assert_eq!(update["available"], true, "{update}");
+    assert_eq!(update["notes"], "local", "{update}");
     Ok(())
 }

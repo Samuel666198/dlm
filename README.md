@@ -246,15 +246,18 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 | `--quota <BYTES>` | 沿用队列 | 每窗口全局字节上限（0 = 关闭；至少 236032，首轮预读要计入） |
 | `--quota-window <SECS>` | `3600`（或队列里的值） | 固定窗口秒数；给 `--quota-window` 前必须先有额度 |
 | `--endpoint <FILE>` | `%LOCALAPPDATA%\dlm\gui\endpoint.json` | B10 端点文件；写失败只警告、浏览器回退直连 |
+| `--update-url <URL>` | 不检查 | 可选的更新清单 URL（只接受 http/https）；不给就不发任何外网请求 |
 
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
 - **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。停止粒度按每个任务 dlm 的 worker 算：越过帽最多每个 worker 一块（64 KiB）。
+- **分类**：按文件名扩展名自动归为 video/audio/archive/document/image/program/other，UI 显示并在顶部筛选；**不改变落盘目录**（分类子目录留作后续）。
+- **更新检查**：默认关闭；`--update-url <URL>` 给清单后启动时后台 GET 一次（10 秒超时），`/api/update` 给 `{enabled,current,latest,available,url,notes,checked_at,error}`；只通知，不自动下载安装。没有硬编码更新服务器。
 - **完成后动作**：队列只接 `open` 与 `run:<exe>`（与 CLI 同形，由子进程执行）；`shutdown` 在 API 层拒绝——队列可能同时完成多个任务，关机副作用不可控。
 - **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志（日志跨轮 append）。
 - **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
 - **安全**：只绑 `127.0.0.1`；所有页面/API 都要求 `?t=<token>`；UI 用 `textContent` 插入数据；日志 API 只读 log 目录内文件、最多 64 KiB 尾。
 - **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。
-- **不做**：原生 GUI、分类规则、更新检查（要访问外网，需单独点头）、队列 Cookie。
+- **不做**：原生 GUI、分类子目录、自动下载/安装更新、队列 Cookie。
 
 验收（不在 Rust 四闸内，需真浏览器）：
 
@@ -280,12 +283,14 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | 队列配额按断点覆盖量增量采样（500 ms 一拍）：暂停/崩溃前最后一拍之后在途、尚未写进断点的字节不计入本窗，续传时重新计入；系统时钟回拨会延后固定窗口 | spec §2.1/§2.7 |
 | 队列配额与 `--max-speed` 是两件事；队列暂不透传限速 | spec §2.7 |
 | B10 端点文件含 token，位于用户目录；同用户进程可读，与"能直接 spawn dlm"同一信任边界；GUI 被硬杀会留下陈旧端点文件，宿主按"连不上 ⇒ 回退"容忍 | spec §4.5 |
+| 更新检查默认关闭；只有给了 `--update-url` 才发一次 GET，清单须含 `version`/`latest`；只通知，不自动下载安装；外部请求走系统代理环境 | C3 spec §2 |
+| 分类只按文件名扩展名打标签/筛选，不建分类子目录，不改变落盘路径 | C3 spec §1 |
 | 重跳上限靠 HTTP 客户端默认继承，本 CLI 未显式设置 | — |
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
 不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递，B3 未做）、
-原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、分类规则/更新检查、
+原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、分类子目录/自动更新、
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 
@@ -294,9 +299,9 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 294 通过（含队列/配额/UI 纯函数）
+cargo test --lib                            # 297 通过（含队列/配额/分类/更新/UI 纯函数）
 cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
-cargo test --test integration               # 113 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递端到端）
+cargo test --test integration               # 114 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
 ```
 
@@ -314,7 +319,10 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md`](docs/superpowers/plans/2026-10-22-C1-C3-product-ui.md) | C1–C3 实现计划（已交付） |
 | [`docs/superpowers/specs/2026-10-27-dlm-quota-queue-b10-design.md`](docs/superpowers/specs/2026-10-27-dlm-quota-queue-b10-design.md) | A16 配额 / 队列动作 / B10 设计（已交付） |
 | [`docs/superpowers/plans/2026-10-27-dlm-quota-queue-b10.md`](docs/superpowers/plans/2026-10-27-dlm-quota-queue-b10.md) | A16 / 队列动作 / B10 实现计划 |
-| [`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md) | 本轮证据（真浏览器 queue/direct、四闸） |
+| [`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md) | A16/B10 证据（真浏览器 queue/direct、四闸） |
+| [`docs/superpowers/specs/2026-10-28-c3-categories-update-design.md`](docs/superpowers/specs/2026-10-28-c3-categories-update-design.md) | C3 分类规则与更新检查设计 |
+| [`docs/superpowers/plans/2026-10-28-c3-categories-update.md`](docs/superpowers/plans/2026-10-28-c3-categories-update.md) | C3 分类规则与更新检查计划 |
+| [`docs/evidence/2026-10-28-c3-categories-update.md`](docs/evidence/2026-10-28-c3-categories-update.md) | C3 分类/更新证据 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md`](docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) | 执行状态：进度表、当前基线、恢复步骤、下游必守的裁定、挂账的 minor、等用户点头的事 |
 | `docs/evidence/` | 一次性实测记录（数字都来自真跑） |

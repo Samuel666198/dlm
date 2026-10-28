@@ -39,6 +39,35 @@ pub struct GuiConfig {
     pub quota_window_secs: Option<u64>,
     /// B10：浏览器投递发现的端点文件。
     pub endpoint: PathBuf,
+    /// C3：更新清单 URL；`None` = 不检查、不发任何外网请求。
+    pub update_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateView {
+    pub enabled: bool,
+    pub current: String,
+    pub latest: Option<String>,
+    pub available: bool,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    pub checked_at: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl UpdateView {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            current: env!("CARGO_PKG_VERSION").to_string(),
+            latest: None,
+            available: false,
+            url: None,
+            notes: None,
+            checked_at: None,
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +106,7 @@ pub struct TaskView {
     pub start_at: Option<u64>,
     pub hold_until: Option<u64>,
     pub on_complete: Option<String>,
+    pub category: &'static str,
 }
 
 impl TaskView {
@@ -112,6 +142,7 @@ impl TaskView {
             start_at: task.start_at,
             hold_until: task.hold_until,
             on_complete: task.on_complete.clone(),
+            category: queue::category_for(&task.name),
         }
     }
 }
@@ -141,8 +172,22 @@ pub fn run(config: GuiConfig) -> Result<()> {
     }
     let snapshot = Arc::new(Mutex::new(snapshot_of(&store, &config.out_dir)));
     let quota_snapshot = Arc::new(Mutex::new(quota_view(&store, queue::now_secs())));
+    let update_snapshot = Arc::new(Mutex::new(UpdateView::disabled()));
     let http_snapshot = Arc::clone(&snapshot);
     let http_quota = Arc::clone(&quota_snapshot);
+    let http_update = Arc::clone(&update_snapshot);
+    if let Some(url) = config.update_url.clone() {
+        let snapshot = Arc::clone(&update_snapshot);
+        std::thread::Builder::new()
+            .name("dlm-gui-update".into())
+            .spawn(move || {
+                let view = check_update(&url);
+                if let Ok(mut guard) = snapshot.lock() {
+                    *guard = view;
+                }
+            })
+            .context("启动更新检查线程失败")?;
+    }
     let (tx, rx) = mpsc::channel();
     let runner_cfg = config.clone();
     std::thread::Builder::new()
@@ -166,9 +211,18 @@ pub fn run(config: GuiConfig) -> Result<()> {
         let tx = tx.clone();
         let snapshot = Arc::clone(&http_snapshot);
         let quota_snapshot = Arc::clone(&http_quota);
+        let update_snapshot = Arc::clone(&http_update);
         let log_dir = config.log_dir.clone();
         std::thread::spawn(move || {
-            let _ = handle_http(&mut stream, &token, &tx, &snapshot, &quota_snapshot, &log_dir);
+            let _ = handle_http(
+                &mut stream,
+                &token,
+                &tx,
+                &snapshot,
+                &quota_snapshot,
+                &update_snapshot,
+                &log_dir,
+            );
         });
     }
     let _ = fs::remove_file(&config.endpoint);
@@ -223,6 +277,83 @@ fn quota_view(store: &QueueStore, now: u64) -> Option<QuotaView> {
             q.resets_at()
         },
     })
+}
+
+fn version_key(raw: &str) -> Vec<u64> {
+    raw.trim_start_matches(['v', 'V'])
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn version_is_newer(current: &str, latest: &str) -> bool {
+    version_key(latest) > version_key(current)
+}
+
+fn check_update(url: &str) -> UpdateView {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let fail = |error: String| UpdateView {
+        enabled: true,
+        current: current.clone(),
+        latest: None,
+        available: false,
+        url: None,
+        notes: None,
+        checked_at: Some(queue::now_secs()),
+        error: Some(error),
+    };
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
+    if reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"))
+    {
+        builder = builder.no_proxy();
+    }
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(err) => return fail(format!("{err}")),
+    };
+    let response = match client.get(url).send() {
+        Ok(response) => response,
+        Err(err) => return fail(format!("{err}")),
+    };
+    if !response.status().is_success() {
+        return fail(format!("HTTP {}", response.status()));
+    }
+    let text = match response.text() {
+        Ok(text) => text,
+        Err(err) => return fail(format!("读更新清单失败：{err}")),
+    };
+    let value: Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(err) => return fail(format!("清单 JSON 解析失败：{err}")),
+    };
+    let Some(latest) = value
+        .get("version")
+        .or_else(|| value.get("latest"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+    else {
+        return fail("更新清单缺 version/latest".to_string());
+    };
+    UpdateView {
+        enabled: true,
+        current: current.clone(),
+        available: version_is_newer(&current, &latest),
+        latest: Some(latest),
+        url: value.get("url").and_then(Value::as_str).map(str::to_string),
+        notes: value.get("notes").and_then(Value::as_str).map(str::to_string),
+        checked_at: Some(queue::now_secs()),
+        error: None,
+    }
 }
 
 fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<()> {
@@ -566,6 +697,7 @@ fn handle_http(
     tx: &Sender<Ticket>,
     snapshot: &Arc<Mutex<Vec<TaskView>>>,
     quota_snapshot: &Arc<Mutex<Option<QuotaView>>>,
+    update_snapshot: &Arc<Mutex<UpdateView>>,
     log_dir: &Path,
 ) -> io::Result<()> {
     let request = match read_request(stream) {
@@ -591,6 +723,14 @@ fn handle_http(
                 Some(q) => serde_json::to_vec(&q).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec()),
                 None => br#"{"enabled":false}"#.to_vec(),
             };
+            respond(stream, 200, "application/json", &body)
+        }
+        ("GET", "/api/update") => {
+            let update = update_snapshot
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_else(|_| UpdateView::disabled());
+            let body = serde_json::to_vec(&update).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec());
             respond(stream, 200, "application/json", &body)
         }
         ("POST", "/api/add") => {
@@ -789,6 +929,7 @@ h1{font-size:20px;margin:0 0 16px}
 form{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:8px;margin-bottom:16px}
 .quota{font-size:13px;color:#374151;background:#e8edf5;border-radius:6px;padding:8px 10px;margin-bottom:12px}
 #exe{grid-column:span 2;display:none}
+#filter{margin-bottom:12px;font:13px/1.4 inherit;padding:6px 8px;border:1px solid #c9ced6;border-radius:6px;background:#fff}
 input,button{font:13px/1.4 inherit;padding:8px 10px;border:1px solid #c9ced6;border-radius:6px;background:#fff}
 button{background:#1565c0;color:#fff;border:0;cursor:pointer}
 button.secondary{background:#e8edf5;color:#1b1f24}
@@ -804,6 +945,17 @@ pre{background:#0f172a;color:#dbeafe;padding:12px;border-radius:8px;overflow:aut
 </style></head><body>
 <h1>dlm 任务队列</h1>
 <div id="quota" class="quota">配额未启用</div>
+<div id="update" class="quota">更新检查未启用</div>
+<select id="filter" title="按分类筛选">
+  <option value="">全部分类</option>
+  <option value="video">视频</option>
+  <option value="audio">音频</option>
+  <option value="archive">压缩包</option>
+  <option value="document">文档</option>
+  <option value="image">图片</option>
+  <option value="program">程序</option>
+  <option value="other">其他</option>
+</select>
 <form id="add">
   <input id="url" placeholder="https://example.com/file.bin" required>
   <input id="name" placeholder="文件名（自动从 URL 填）" required>
@@ -825,9 +977,12 @@ const token = new URLSearchParams(location.search).get('t') || '';
 const api = (path, opts) => fetch(path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(token), opts);
 const $ = (id) => document.getElementById(id);
 const urlInput = $('url'), nameInput = $('name'), actionSelect = $('action'), exeInput = $('exe');
+const filterSelect = $('filter');
+const CAT_NAMES = {video:'视频', audio:'音频', archive:'压缩包', document:'文档', image:'图片', program:'程序', other:'其他'};
 actionSelect.addEventListener('change', () => {
   exeInput.style.display = actionSelect.value === 'run' ? 'block' : 'none';
 });
+filterSelect.addEventListener('change', () => load());
 urlInput.addEventListener('change', () => {
   if (nameInput.value) return;
   try {
@@ -856,6 +1011,7 @@ function row(t) {
   const meta = document.createElement('div'); meta.className = 'meta';
   meta.textContent = (t.delivered || 0) + ' / ' + (t.total_len == null ? '?' : t.total_len) + ' B' +
     (t.pid ? ' · pid ' + t.pid : '') + (t.exit_code == null ? '' : ' · exit ' + t.exit_code) +
+    (t.category ? ' · ' + (CAT_NAMES[t.category] || t.category) : '') +
     (t.on_complete ? ' · ' + t.on_complete : '');
   const actions = document.createElement('div'); actions.className = 'actions';
   const mk = (label, fn, secondary) => {
@@ -875,9 +1031,14 @@ async function load() {
     const r = await api('/api/tasks');
     if (!r.ok) throw new Error(await r.text());
     const tasks = await r.json();
+    const shown = filterSelect.value ? tasks.filter((t) => t.category === filterSelect.value) : tasks;
     const box = $('tasks'); box.replaceChildren();
-    if (!tasks.length) { const p = document.createElement('p'); p.textContent = '队列为空'; box.appendChild(p); }
-    for (const t of tasks) box.appendChild(row(t));
+    if (!shown.length) {
+      const p = document.createElement('p');
+      p.textContent = filterSelect.value ? '该分类没有任务' : '队列为空';
+      box.appendChild(p);
+    }
+    for (const t of shown) box.appendChild(row(t));
   } catch (e) {
     $('log').textContent = '刷新失败：' + e.message;
   }
@@ -890,6 +1051,17 @@ async function loadQuota() {
     const mib = (n) => (n / 1048576).toFixed(1);
     const mins = Math.max(0, Math.ceil((q.resets_at - Date.now() / 1000) / 60));
     el.textContent = '配额 ' + mib(q.used) + ' / ' + mib(q.limit) + ' MiB · ' + mins + ' 分钟后重置';
+  } catch {}
+}
+async function loadUpdate() {
+  try {
+    const u = await (await api('/api/update')).json();
+    const el = $('update');
+    if (!u.enabled) { el.textContent = '更新检查未启用'; return; }
+    if (u.error) { el.textContent = '更新检查失败：' + u.error; return; }
+    el.textContent = u.available
+      ? '有新版本 ' + u.latest + '（当前 ' + u.current + '）'
+      : '已是最新（' + u.current + '）';
   } catch {}
 }
 $('add').addEventListener('submit', async (e) => {
@@ -917,8 +1089,10 @@ $('add').addEventListener('submit', async (e) => {
 });
 setInterval(load, 1000);
 setInterval(loadQuota, 1000);
+setInterval(loadUpdate, 5000);
 load();
 loadQuota();
+loadUpdate();
 </script></body></html>"##;
 
 #[cfg(test)]
@@ -990,6 +1164,45 @@ mod tests {
             child_args(&task, Path::new("D:/dl"), Some(4096)).into_iter().map(|s| s.to_string_lossy().to_string()).collect();
         assert!(with_action.windows(2).any(|w| w[0] == "--on-complete" && w[1] == "open"));
         assert!(with_action.windows(2).any(|w| w[0] == "--max-bytes" && w[1] == "4096"));
+    }
+
+    #[test]
+    fn version_comparison_is_numeric_by_dotted_segment() {
+        assert!(!version_is_newer("0.1.0", "0.1.0"));
+        assert!(version_is_newer("0.1.0", "0.1.1"));
+        assert!(version_is_newer("0.1.0", "0.10.0"), "10 > 1，不是字符串比较");
+        assert!(version_is_newer("0.9.9", "0.10.0"));
+        assert!(version_is_newer("0.9.0", "v1.0"));
+        assert!(!version_is_newer("1.0.0", "0.99.99"), "远端更旧不算新版本");
+        assert!(!version_is_newer("1.0.0", "not-a-version"));
+    }
+
+    #[test]
+    fn update_check_reads_a_local_manifest() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = r#"{"version":"99.0.0","url":"https://example.invalid/dl","notes":"test"}"#;
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let view = check_update(&format!("http://127.0.0.1:{port}/update.json"));
+        handle.join().unwrap();
+        assert!(view.enabled, "{view:?}");
+        assert_eq!(view.latest.as_deref(), Some("99.0.0"));
+        assert!(view.available, "99.0.0 应比当前版本新：{view:?}");
+        assert_eq!(view.url.as_deref(), Some("https://example.invalid/dl"));
+        assert_eq!(view.notes.as_deref(), Some("test"));
+        assert!(view.error.is_none(), "{view:?}");
+        assert!(view.checked_at.is_some());
     }
 
     #[test]

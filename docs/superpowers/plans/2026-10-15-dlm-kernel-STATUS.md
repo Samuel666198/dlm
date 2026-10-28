@@ -147,6 +147,21 @@
   `/sz/524288`，日志能看到预算停住。B10 浏览器验收用新脚本（B2 的页面带 Cookie，无法演无 Cookie 入队）。
 - **未做**：分类规则、更新检查（要外网，需单独点头）、B3、A5、原生 GUI/Windows 服务、队列 Cookie。
 
+## 2026-10-28 C3 分类与更新检查交付
+
+- **分类**：`queue::category_for` 按扩展名归 video/audio/archive/document/image/program/other；
+  `TaskView.category` 出现在 `/api/tasks`；UI 显示分类并在顶部筛选。**不改变落盘目录**。
+- **更新检查**：`dlm-gui --update-url <URL>`（只收 http/https）启动时后台 GET 一次清单
+  `{version|latest,url?,notes?}`，`/api/update` 返回 `{enabled,current,latest,available,url,notes,checked_at,error}`；
+  UI 显示有新版本/已是最新/未启用/失败。默认关闭，无硬编码更新服务器，只通知不自动安装。
+- **测试**：`category_rules_are_extension_based_and_default_to_other`、
+  `version_comparison_is_numeric_by_dotted_segment`、`update_check_reads_a_local_manifest`、
+  `gui_update_check_exposes_a_local_manifest`；GUI 端到端任务 JSON 断 `category=other`。
+- **四闸**：`--lib` **297/0**（3.01 s）· `--bins` **4/0** · `integration` **114/0**（64.63 s）· clippy **0**。
+- **真浏览器**：Chrome 156 回归 `verify-gui.mjs`，任务行显示分类"其他"，落盘 65536 B；
+  截图/日志 `docs/evidence/2026-10-22-c3-gui.*`。
+- **未做**：分类子目录、自动下载/安装更新、B3、A5、原生 GUI/Windows 服务、队列 Cookie。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。
