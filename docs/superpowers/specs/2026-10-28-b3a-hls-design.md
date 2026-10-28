@@ -1,6 +1,6 @@
 # B3a 最小 HLS 直链下载（设计）
 
-**状态**：已实现（2026-10-28；四闸 305/4/117/clippy 0）
+**状态**：已实现（2026-10-28；四闸 306/4/117/clippy 0）
 **范围**：只做 CLI 直链 `--hls`；不接队列/浏览器嗅探，不做 DASH/DRM。
 
 ## 1. 入口
@@ -18,7 +18,8 @@
 
 - 读 m3u8 文本（保留相对 URL 的基准）：
   - master：`#EXT-X-STREAM-INF:BANDWIDTH=n` 后的 URI，选 BANDWIDTH 最大者；无 BANDWIDTH 取第一。
-  - media：`#EXTINF` 后的 URI 为分片；`#EXT-X-MAP:URI="…"` 的初始化段先下。
+  - media：`#EXTINF` 后的 URI 为分片；`#EXT-X-MAP:URI="…"` 的初始化段先下；
+    `#EXT-X-BYTERANGE` 与 `#EXT-X-MAP` 的 BYTERANGE 用 `Range` 请求，要求 206。
   - `#EXT-X-KEY:METHOD=NONE` 放行；其它 KEY（AES-128/SAMPLE-AES）⇒ 明确报“加密 HLS 不支持”。
   - 没有分片 ⇒ 报错；`#EXT-X-ENDLIST` 不强制（VOD 列表照下）。
 - 所有 URI 用 `Url::join` 解析；跨 host 的分片请求**不带** Cookie/Auth/Referer（防凭据外泄）；
@@ -36,7 +37,7 @@
 
 ## 4. 验收
 
-- 单测：master 选最高带宽、相对 URI、`#EXT-X-KEY` 拒绝、默认输出名。
+- 单测：master 选最高带宽、相对 URI、`#EXT-X-KEY` 拒绝、BYTERANGE 解析、默认输出名。
 - 集成：本机 node 对端提供 master/media + 三个分片，`--hls` 合并后逐字节等于期望；
   `--data-file`/`--max-bytes` 同给退 2；加密 KEY 退 1 且不落完整文件。
 - 四闸；README/STATUS/路线图/能力表/证据。

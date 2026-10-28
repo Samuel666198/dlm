@@ -167,12 +167,14 @@
 
 - **入口**：`--hls`（bit3 `FLAG_HLS`）；不按扩展名自动识别，队列/浏览器投递的 `.m3u8` 仍按普通文件处理。
 - **`src/hls.rs`**：master 选 `BANDWIDTH` 最大变体；media `#EXTINF` 分片、`#EXT-X-MAP` 初始化段；
-  相对 URI；拒绝加密 KEY 与 `#EXT-X-BYTERANGE`；顺序写一个输出文件。
-- **边界**：不写 `.dlm.json`、不可续传；失败保留半截文件；跨 host 分片不带 Cookie/Auth/Referer；
+  相对 URI；拒绝加密 KEY；支持 `#EXT-X-BYTERANGE`/byte-range map；顺序写一个输出文件。
+- **边界**：不写 `.dlm.json`、不可续传；失败保留已完成的半截文件；跨 host 分片不带 Cookie/Auth/Referer；
   与 `--data-file`/`--max-bytes` 互斥；`--max-speed` 可叠加；`--sha256` 合并后校验。
-- **测试**：HLS 单测 6 条（master/相对 URI/加密/BYTERANGE/默认名/跨源凭据）＋集成 3 条
+- **测试**：HLS 单测 7 条（master/相对 URI/加密/BYTERANGE 解析/Range 206/默认名/跨源凭据）＋集成 3 条
   （master→media→三片顺序合并、加密拒绝、参数层拒绝零请求）。
-- **四闸**：`--lib` **305/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.83 s）· clippy **0**。
+- **真实公网**：Apple bipbop fMP4 240p（BYTERANGE+map）⇒ 退 0、27,672,619 B、16 s、ffprobe 610 s；
+  Mux 流在本机分片超时（外部 CDN 边界）。
+- **四闸**：`--lib` **306/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.59 s）· clippy **0**。
 - **未做**：DASH、DRM、浏览器媒体嗅探、队列 HLS、断点续传。
 
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）

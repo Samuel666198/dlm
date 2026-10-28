@@ -235,7 +235,8 @@ target/debug/dlm.exe --url https://example.com/master.m3u8 --hls --out-dir D:/dl
 ```
 
 - 支持 master（选 `BANDWIDTH` 最大变体）与 media 播放列表、相对 URI、`#EXT-X-MAP` 初始化段。
-- `#EXT-X-KEY:METHOD=NONE` 放行；其他 KEY（AES-128/SAMPLE-AES）和 `#EXT-X-BYTERANGE` 明确拒绝。
+- `#EXT-X-KEY:METHOD=NONE` 放行；其他 KEY（AES-128/SAMPLE-AES）明确拒绝。`#EXT-X-BYTERANGE` 与
+  `#EXT-X-MAP` 的 byte-range 都支持（fMP4 单文件分片）；`--out-name` 建议给 `.mp4`。
 - 分片按顺序写入一个输出文件；默认名把 `.m3u8` 换成 `.ts`。**不写断点、不可续传**，失败保留半截文件。
 - 同源分片沿用 Referer/Cookie/Basic；**跨 host 分片不带这些凭据**。
 - `--max-speed` 可叠加；`--sha256` 在合并完成后校验；`--data-file`/`--max-bytes` 与 `--hls` 互斥。
@@ -303,7 +304,7 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | B10 端点文件含 token，位于用户目录；同用户进程可读，与"能直接 spawn dlm"同一信任边界；GUI 被硬杀会留下陈旧端点文件，宿主按"连不上 ⇒ 回退"容忍 | spec §4.5 |
 | 更新检查默认关闭；只有给了 `--update-url` 才发一次 GET，清单须含 `version`/`latest`；只通知，不自动下载安装；外部请求走系统代理环境 | C3 spec §2 |
 | 分类只按文件名扩展名打标签/筛选；`--category-dirs` 才建 `out-dir/<category>/` 子目录，默认不改落盘路径 | C3 spec §1 |
-| HLS 只做明文 m3u8（master/media、相对 URI、EXT-X-MAP）；拒绝加密 KEY 与 BYTERANGE；**不可续传**，失败保留半截文件；跨 host 分片不带 Cookie/Auth/Referer | B3a spec |
+| HLS 只做明文 m3u8（master/media、相对 URI、EXT-X-MAP、BYTERANGE）；拒绝加密 KEY；**不可续传**，失败保留已完成的半截文件；跨 host 分片不带 Cookie/Auth/Referer | B3a spec |
 | 重跳上限靠 HTTP 客户端默认继承，本 CLI 未显式设置 | — |
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
@@ -319,7 +320,7 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 305 通过（含队列/配额/分类/更新/HLS/UI 纯函数）
+cargo test --lib                            # 306 通过（含队列/配额/分类/更新/HLS/UI 纯函数）
 cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
 cargo test --test integration               # 117 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查/HLS 端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
