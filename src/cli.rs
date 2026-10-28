@@ -32,7 +32,7 @@ use anyhow::Context;
 use clap::Parser;
 
 use crate::actions::CompletionAction;
-use crate::consts::{FLAG_ADD_ONLY, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
+use crate::consts::{FLAG_ADD_ONLY, FLAG_HLS, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
 use crate::engine::Config;
 use crate::task::Task;
 
@@ -196,6 +196,16 @@ fn check_boundaries(cli: &Cli) -> anyhow::Result<()> {
              字节预算无处停；要么去掉 --max-bytes，要么改成可分段下载"
         );
     }
+    if cli.hls {
+        anyhow::ensure!(
+            cli.data_file.is_none(),
+            "参数写错了：--hls 不走带请求体的 POST；--data-file 与 --hls 不能同给"
+        );
+        anyhow::ensure!(
+            cli.max_bytes == 0,
+            "参数写错了：--hls 是顺序拼接、不做字节预算断点；--max-bytes 与 --hls 不能同给"
+        );
+    }
     Ok(())
 }
 
@@ -275,6 +285,8 @@ pub struct Cli {
     quiet: bool,
     #[arg(long, help = "只打印任务摘要后退出，不发送任何请求")]
     no_start: bool,
+    #[arg(long, help = "把 URL 当作 HLS 播放列表，顺序下载分片并合并（不做 DASH/DRM/嗅探）")]
+    hls: bool,
     #[arg(long, value_name = "ACTION", help = "完成后动作：open 或 run:<exe>（程序收到落点路径作为第一个参数）")]
     on_complete: Option<CompletionAction>,
 }
@@ -306,6 +318,7 @@ impl std::fmt::Debug for Cli {
             .field("keep_state", &self.keep_state)
             .field("quiet", &self.quiet)
             .field("no_start", &self.no_start)
+            .field("hls", &self.hls)
             .field("on_complete", &self.on_complete)
             .finish()
     }
@@ -356,6 +369,9 @@ impl Cli {
         }
         if self.keep_state {
             flags |= FLAG_KEEP_STATE;
+        }
+        if self.hls {
+            flags |= FLAG_HLS;
         }
         let cookies = if self.cookie_stdin {
             cookies_from_stdin(&mut std::io::stdin())?
@@ -767,6 +783,39 @@ mod tests {
             "0",
         ])?;
         assert_eq!(zero.into_config().max_bytes, 0, "显式 0 = 不限，不是互斥");
+        Ok(())
+    }
+
+    #[test]
+    fn hls_sets_its_flag_and_is_refused_with_body_or_byte_budget() -> anyhow::Result<()> {
+        let c = parse(&["dlm", "--url", "https://x/a.m3u8", "--hls"])?;
+        assert_eq!(c.into_task()?.flags & FLAG_HLS, FLAG_HLS);
+
+        let with_body = match parse(&[
+            "dlm",
+            "--url",
+            "https://x/a.m3u8",
+            "--hls",
+            "--data-file",
+            "body.bin",
+        ]) {
+            Ok(_) => panic!("--hls 配 --data-file 必须拒"),
+            Err(err) => err,
+        };
+        assert!(format!("{with_body:#}").contains("--hls"));
+
+        let with_budget = match parse(&[
+            "dlm",
+            "--url",
+            "https://x/a.m3u8",
+            "--hls",
+            "--max-bytes",
+            "1",
+        ]) {
+            Ok(_) => panic!("--hls 配 --max-bytes 必须拒"),
+            Err(err) => err,
+        };
+        assert!(format!("{with_budget:#}").contains("--hls"));
         Ok(())
     }
 

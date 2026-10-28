@@ -10,3 +10,5 @@ pub const STATE_SAVE_MAX_INTERVAL_SECS: u64 = 5;
 pub const FLAG_ADD_ONLY: u32 = 1 << 0;
 pub const FLAG_IGNORE_MTIME: u32 = 1 << 1;
 pub const FLAG_KEEP_STATE: u32 = 1 << 2;
+/// B3a：`--hls`，把 URL 当作 HLS 播放列表（只影响这一次运行的分流，不参与续传比对）。
+pub const FLAG_HLS: u32 = 1 << 3;

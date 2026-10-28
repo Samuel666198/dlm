@@ -7643,3 +7643,152 @@ fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
     assert_eq!(update["notes"], "local", "{update}");
     Ok(())
 }
+
+/// B3a：本机 HLS stub。返回 (port, stop flag, join handle)；线程非阻塞轮询，测试结束停。
+fn hls_stub(routes: &'static [(&'static str, &'static str)]) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        while !stop_thread.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let request = String::from_utf8_lossy(&buf);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("")
+                        .split('?')
+                        .next()
+                        .unwrap_or("");
+                    let (status, body) = match routes.iter().find(|(route, _)| *route == path) {
+                        Some((_, body)) => ("200 OK", *body),
+                        None => ("404 Not Found", ""),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (port, stop, handle)
+}
+
+#[test]
+fn hls_downloads_master_playlist_segments_in_order() -> anyhow::Result<()> {
+    let (port, stop, handle) = hls_stub(&[
+        (
+            "/master.m3u8",
+            "#EXTM3U\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=100\nlow.m3u8\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=900\nhigh.m3u8\n",
+        ),
+        (
+            "/high.m3u8",
+            "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n\
+             #EXTINF:1,\na.ts\n#EXTINF:2,\nsub/b.ts\n#EXTINF:3,\nc.ts\n",
+        ),
+        ("/a.ts", "alpha"),
+        ("/sub/b.ts", "beta"),
+        ("/c.ts", "gamma"),
+    ]);
+    let dir = harness::tmp_dir("hls")?;
+    let out = run_dlm(&[
+        "--url",
+        &format!("http://127.0.0.1:{port}/master.m3u8"),
+        "--hls",
+        "--out-dir",
+        &dir.path().to_string_lossy(),
+        "--out-name",
+        "hls.ts",
+        "--quiet",
+    ])?;
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    handle.join().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    let bytes = std::fs::read(dir.path().join("hls.ts"))?;
+    assert_eq!(bytes, b"alphabetagamma");
+    Ok(())
+}
+
+#[test]
+fn hls_rejects_encrypted_playlists() -> anyhow::Result<()> {
+    let (port, stop, handle) = hls_stub(&[(
+        "/enc.m3u8",
+        "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n#EXTINF:1,\na.ts\n",
+    )]);
+    let dir = harness::tmp_dir("hls-enc")?;
+    let out = run_dlm(&[
+        "--url",
+        &format!("http://127.0.0.1:{port}/enc.m3u8"),
+        "--hls",
+        "--out-dir",
+        &dir.path().to_string_lossy(),
+        "--out-name",
+        "enc.ts",
+        "--quiet",
+    ])?;
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    handle.join().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
+    assert!(
+        stdout_of(&out).contains("加密 HLS"),
+        "stdout={} stderr={}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    Ok(())
+}
+
+#[test]
+fn hls_is_refused_with_data_file_or_max_bytes() -> anyhow::Result<()> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    listener.set_nonblocking(true)?;
+    let dir = harness::tmp_dir("hls-args")?;
+    let body = dir.path().join("body.txt");
+    std::fs::write(&body, b"a=1")?;
+    let out_dir = dir.path().to_string_lossy().to_string();
+    let base_url = format!("http://127.0.0.1:{port}/master.m3u8");
+    for (label, extra) in [
+        ("data-file", vec!["--data-file", body.to_str().context("body utf8")?]),
+        ("max-bytes", vec!["--max-bytes", "1"]),
+    ] {
+        let mut args = vec![
+            "--url",
+            base_url.as_str(),
+            "--hls",
+            "--out-dir",
+            out_dir.as_str(),
+            "--out-name",
+            "x.ts",
+        ];
+        args.extend(extra);
+        let out = run_dlm(&args)?;
+        assert_eq!(out.status.code(), Some(2), "{label}: {}", stderr_of(&out));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(listener.accept().is_err(), "参数层拒绝时不许发 HLS 请求");
+    Ok(())
+}

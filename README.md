@@ -48,10 +48,11 @@ POSIX 长选项为主，IDM 的斜杠别名在**进解析器之前就地替换�
 | `--quiet` | `/n` | 关掉逐拍进度行；**最终摘要与错误照打** |
 | `--no-start` | `/a` | 打印任务摘要后退出 0，一个字节都不许多打 |
 | `--on-complete <ACTION>` | — | 完成后动作：`open`、`run:<exe>`、`shutdown:<秒数>`（至少 60）；失败只警告、不改退出码 |
+| `--hls` | — | 把 URL 当作 HLS 播放列表，顺序下载分片并合并；不做 DASH/DRM/嗅探，不可续传；与 `--data-file`/`--max-bytes` 互斥 |
 | — | `/q` `/s` `/onboot` | 接受并忽略（v1 没有对应子系统） |
 
 `flags` 位义是**自定义的**（IDM 的 `lFlags` 语义未取证）：bit0 只入队不下、bit1 忽略 Last-Modified、
-bit2 完成后保留断点。摘要按**位名**列举，掩码数字不印；本版不认识的位若被置上，那一格会明说"另有本版不认识的位"，
+bit2 完成后保留断点、bit3 HLS 顺序下载。摘要按**位名**列举，掩码数字不印；本版不认识的位若被置上，那一格会明说"另有本版不认识的位"，
 不静默丢掉。
 
 ## 进度行
@@ -225,6 +226,21 @@ node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Mi
 
 证据：[`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md)。
 
+## HLS 直链（B3a）
+
+`--hls` 是显式开关，不按扩展名自动识别：
+
+```bash
+target/debug/dlm.exe --url https://example.com/master.m3u8 --hls --out-dir D:/dl --out-name movie.ts
+```
+
+- 支持 master（选 `BANDWIDTH` 最大变体）与 media 播放列表、相对 URI、`#EXT-X-MAP` 初始化段。
+- `#EXT-X-KEY:METHOD=NONE` 放行；其他 KEY（AES-128/SAMPLE-AES）和 `#EXT-X-BYTERANGE` 明确拒绝。
+- 分片按顺序写入一个输出文件；默认名把 `.m3u8` 换成 `.ts`。**不写断点、不可续传**，失败保留半截文件。
+- 同源分片沿用 Referer/Cookie/Basic；**跨 host 分片不带这些凭据**。
+- `--max-speed` 可叠加；`--sha256` 在合并完成后校验；`--data-file`/`--max-bytes` 与 `--hls` 互斥。
+- **不做** DASH、DRM、浏览器媒体嗅探、队列 HLS。队列/浏览器投递的 `.m3u8` 仍按普通文件处理。
+
 ## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
 
 **C0 裁定**：本地 Web UI，零新 crate（默认依赖仍是 6 个）。没有原生窗口；浏览器打开页面即可。
@@ -285,11 +301,13 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | B10 端点文件含 token，位于用户目录；同用户进程可读，与"能直接 spawn dlm"同一信任边界；GUI 被硬杀会留下陈旧端点文件，宿主按"连不上 ⇒ 回退"容忍 | spec §4.5 |
 | 更新检查默认关闭；只有给了 `--update-url` 才发一次 GET，清单须含 `version`/`latest`；只通知，不自动下载安装；外部请求走系统代理环境 | C3 spec §2 |
 | 分类只按文件名扩展名打标签/筛选，不建分类子目录，不改变落盘路径 | C3 spec §1 |
+| HLS 只做明文 m3u8（master/media、相对 URI、EXT-X-MAP）；拒绝加密 KEY 与 BYTERANGE；**不可续传**，失败保留半截文件；跨 host 分片不带 Cookie/Auth/Referer | B3a spec |
 | 重跳上限靠 HTTP 客户端默认继承，本 CLI 未显式设置 | — |
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
-不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递，B3 未做）、
+不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递；
+B3 只做了 B3a 的 HLS 直链，DASH/DRM/嗅探未做）、
 原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、分类子目录/自动更新、
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
@@ -299,9 +317,9 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 297 通过（含队列/配额/分类/更新/UI 纯函数）
+cargo test --lib                            # 304 通过（含队列/配额/分类/更新/HLS/UI 纯函数）
 cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
-cargo test --test integration               # 114 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查端到端）
+cargo test --test integration               # 117 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查/HLS 端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
 ```
 
@@ -323,6 +341,9 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/superpowers/specs/2026-10-28-c3-categories-update-design.md`](docs/superpowers/specs/2026-10-28-c3-categories-update-design.md) | C3 分类规则与更新检查设计 |
 | [`docs/superpowers/plans/2026-10-28-c3-categories-update.md`](docs/superpowers/plans/2026-10-28-c3-categories-update.md) | C3 分类规则与更新检查计划 |
 | [`docs/evidence/2026-10-28-c3-categories-update.md`](docs/evidence/2026-10-28-c3-categories-update.md) | C3 分类/更新证据 |
+| [`docs/superpowers/specs/2026-10-28-b3a-hls-design.md`](docs/superpowers/specs/2026-10-28-b3a-hls-design.md) | B3a HLS 直链设计 |
+| [`docs/superpowers/plans/2026-10-28-b3a-hls.md`](docs/superpowers/plans/2026-10-28-b3a-hls.md) | B3a HLS 直链计划 |
+| [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md`](docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) | 执行状态：进度表、当前基线、恢复步骤、下游必守的裁定、挂账的 minor、等用户点头的事 |
 | `docs/evidence/` | 一次性实测记录（数字都来自真跑） |

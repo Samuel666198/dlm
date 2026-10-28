@@ -4,6 +4,7 @@ pub mod consts;
 pub mod engine;
 pub mod fetch;
 pub mod gui;
+pub mod hls;
 pub mod host;
 pub mod native;
 pub mod probe;

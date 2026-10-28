@@ -130,7 +130,7 @@ fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
     // ⚠ **不取"这一趟实际收到过几发 tick"**：**E22③** 禁止 CLI 把"收到过 tick"当证据/依赖，
     // 而数发数要给 `tick_sink` 加内部可变性 —— 那条路 **E26/C6** 已经明否。
     // 退出码**不看这一位**：唯一的输入还是 `outcome` 交回的布尔（**E20⑦**）。
-    if !quiet && task.segmentable() {
+    if !quiet && task.segmentable() && !task.hls() {
         println!();
     }
     println!("{line}");

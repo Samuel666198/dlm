@@ -457,6 +457,11 @@ impl Task {
     pub fn target_path(&self) -> PathBuf {
         self.dir.join(self.effective_name())
     }
+
+    /// B3a：这一任务走 HLS 顺序下载，不走分段引擎。
+    pub fn hls(&self) -> bool {
+        self.flags & crate::consts::FLAG_HLS != 0
+    }
     /// 这个名字与 `--out-dir` 拼出来的落点，真落在目录里吗？**按 `join` 的真语义判，不按段名列举判**（T99-H1）。
     ///
     /// 一旦 `join` 丢掉左半边（绝对路径、盘符、`\` 打头换根），前缀关系立刻断 ⇒ 一次夹完五族形状

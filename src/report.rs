@@ -21,7 +21,7 @@
 //! - [`outcome`]：`Report` 的最终结果 —— 跨断点文件那两本账在这里才有归宿（**E20⑧/E25⑥**），
 //!   带 `--data-file` 的那一支恒 0 因而整格不出现。
 
-use crate::consts::{FLAG_ADD_ONLY, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
+use crate::consts::{FLAG_ADD_ONLY, FLAG_HLS, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
 use crate::engine::{Report, RunSnapshot};
 use crate::task::Task;
 
@@ -35,7 +35,7 @@ const ABSENT: &str = "（未给）";
 /// spec §5 的 flags 表**只定义了这三位**（bit0/bit1/bit2，**E20③** 数得出来就是三个）。
 /// 摘要那一格要靠它把"本版不认识但确实置起了"的位区分出来 —— 静默丢掉会变成
 /// "摘要说没置、断点文件里却置了"。
-const KNOWN_FLAGS: u32 = FLAG_ADD_ONLY | FLAG_IGNORE_MTIME | FLAG_KEEP_STATE;
+const KNOWN_FLAGS: u32 = FLAG_ADD_ONLY | FLAG_IGNORE_MTIME | FLAG_KEEP_STATE | FLAG_HLS;
 
 /// 字节 → 一位小数的 MiB 数字（不含单位；**E25①**）。
 ///
@@ -199,6 +199,9 @@ fn flags_cell(flags: u32) -> String {
     }
     if flags & FLAG_KEEP_STATE != 0 {
         named.push("bit2 完成后保留断点");
+    }
+    if flags & FLAG_HLS != 0 {
+        named.push("bit3 HLS 顺序下载");
     }
     if flags & !KNOWN_FLAGS != 0 {
         named.push("另有本版不认识的位（不显示其值）");

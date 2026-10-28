@@ -595,8 +595,12 @@ struct Launch {
 /// **一发都没有**，那条路的权威只有这里交回的 [`Report`]。
 pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     task.validate()?;
-    ensure!(cfg.workers >= 1, "workers 至少要是 1（给了 {}）：没有 worker 就下不动任何东西", cfg.workers);
     let started = Instant::now();
+    // B3a：HLS 是顺序拼接，不进分段引擎（CLI 已把 --data-file/--max-bytes 与 --hls 设为互斥）。
+    if task.hls() {
+        return crate::hls::run(task, &cfg, started);
+    }
+    ensure!(cfg.workers >= 1, "workers 至少要是 1（给了 {}）：没有 worker 就下不动任何东西", cfg.workers);
     let client = Arc::new(build_client()?);
     let task = Arc::new(task.clone());
 
@@ -948,7 +952,7 @@ fn failure_note(kind: &FailKind) -> String {
 
 /// `--sha256` 那道闸的比对（spec §6.7）：**大小写不敏感、允许首尾空白**。
 /// 期望串为空（用户给了 `--sha256 ""`）时**永不放行**：一条恒真的闸比没有闸更坏。
-fn hash_matches(got: &str, want: &str) -> bool {
+pub(crate) fn hash_matches(got: &str, want: &str) -> bool {
     let want = want.trim();
     !want.is_empty() && got.eq_ignore_ascii_case(want)
 }
@@ -964,7 +968,7 @@ fn hash_matches(got: &str, want: &str) -> bool {
 /// （`tests/integration.rs` 里那根扩过的针的正臂断的就是这句话真的到达用户）。
 /// 被删掉的只有 `（spec §6.7）` 那半句括注 —— 用户不需要去处，出处在文档里（spec 归 spec）。
 /// 这句走"结论"那一档（`ok = false` ⇒ 退出码 1），**不是**"参数写错了"那一族。
-fn sha256_mismatch_message(got: &str, want: &str) -> String {
+pub(crate) fn sha256_mismatch_message(got: &str, want: &str) -> String {
     format!("sha256 不符：算得 {got}，期望 {want}。目标文件与断点文件都保留，不自动删")
 }
 
@@ -993,14 +997,14 @@ fn sha256_of_reader(reader: &mut impl Read) -> Result<String> {
     Ok(hex_lower(&hasher.finalize()))
 }
 
-fn sha256_of_path(path: &Path) -> Result<String> {
+pub(crate) fn sha256_of_path(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).with_context(|| format!("打开目标文件算 sha256 失败：{}", path.display()))?;
     sha256_of_reader(&mut file)
 }
 
 /// 建引擎级客户端。形状与 `tests/harness/mod.rs` 的 `client()` 一致，且**刻意**没有
 /// `Connection: close` / `pool_max_idle_per_host(0)`（R5 / E2 / STATUS 第 3 条）。
-fn build_client() -> Result<Client> {
+pub(crate) fn build_client() -> Result<Client> {
     Client::builder()
         .timeout(CLIENT_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
