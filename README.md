@@ -270,6 +270,7 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
 - **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。停止粒度按每个任务 dlm 的 worker 算：越过帽最多每个 worker 一块（64 KiB）。
 - **分类**：按文件名扩展名自动归为 video/audio/archive/document/image/program/other，UI 显示并在顶部筛选；默认**不改变落盘目录**；`--category-dirs` 打开后落点变成 `out-dir/<category>/<name>`（任务名里带相对子路径，dlm 的落点闸照旧）。
+- **UI**：单列任务流 + 顶部配额/更新状态；点任务从右侧滑出详情与日志，添加任务用弹窗；不引入前端依赖，页面由 `dlm-gui` 直接内嵌。
 - **更新检查**：默认关闭；`--update-url <URL>` 给清单后启动时后台 GET 一次（10 秒超时），`/api/update` 给 `{enabled,current,latest,available,url,notes,checked_at,error}`；只通知，不自动下载安装。没有硬编码更新服务器。
 - **完成后动作**：队列只接 `open` 与 `run:<exe>`（与 CLI 同形，由子进程执行）；`shutdown` 在 API 层拒绝——队列可能同时完成多个任务，关机副作用不可控。
 - **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志（日志跨轮 append）。

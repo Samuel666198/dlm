@@ -21,7 +21,13 @@
   轮询 `/api/update` 直到 `checked_at`，断 `enabled/latest=99.0.0/available/notes`。
 - 没有公网请求；不启用时 UI 显示“更新检查未启用”。
 
-## 3. 真浏览器回归
+## 3. UI 重做（2026-10-28）
+
+- 轻量单列任务流：去掉常驻侧栏/检查器；配额与更新收进顶栏；详情与日志由右侧抽屉承载。
+- 接口与字段不变；`src/ui.html` 通过 `include_str!` 进入 `dlm-gui`，无前端依赖/CDN。
+- Chrome 156 回归通过；截图/日志见 `2026-10-22-c3-gui.*`。
+
+## 4. 真浏览器回归
 
 Chrome 156，`verify-gui.mjs`：
 

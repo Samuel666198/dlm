@@ -142,29 +142,29 @@ try {
 
   // 页面加载与表单出现
   for (let i = 0; i < 80; i++) {
-    if (await evalText("!!document.querySelector('#add button')")) break;
+    if (await evalText("!!document.querySelector('#add button[type=submit]')")) break;
     await sleep(250);
   }
-  if (!(await evalText("!!document.querySelector('#add button')"))) {
+  if (!(await evalText("!!document.querySelector('#add button[type=submit]')"))) {
     throw new Error('GUI 页面没加载出添加表单');
   }
 
   await evalText(`(() => {
     document.querySelector('#url').value = ${JSON.stringify(fileUrl)};
     document.querySelector('#name').value = 'gui.bin';
-    document.querySelector('#add button').click();
+    document.querySelector('#add button[type=submit]').click();
     return true;
   })()`);
 
   let text = '';
   for (let i = 0; i < 100; i++) {
     text = (await evalText("Array.from(document.querySelectorAll('.task')).map(e => e.innerText).join('\\n')")) || '';
-    if (text.includes('gui.bin') && text.includes('done')) break;
+    if (text.includes('gui.bin') && text.includes('已完成')) break;
     await sleep(250);
   }
   log += `tasks=${JSON.stringify(text)}\n`;
-  if (!(text.includes('gui.bin') && text.includes('done'))) {
-    throw new Error(`任务没到 done：${text || '(no task rows)'}`);
+  if (!(text.includes('gui.bin') && text.includes('已完成'))) {
+    throw new Error(`任务没到已完成：${text || '(no task rows)'}`);
   }
 
   const file = path.join(downloadDir, 'gui.bin');
