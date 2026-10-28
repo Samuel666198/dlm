@@ -6,7 +6,9 @@
 ## 1. 分类规则
 
 - 按**文件名扩展名**自动归类：`video` / `audio` / `archive` / `document` / `image` / `program` / `other`。
-- 只作为 `TaskView.category` 暴露给 UI，不改变下载目录（避免静默改落盘路径；分类子目录留作后续）。
+- 默认只作为 `TaskView.category` 暴露给 UI，不改变下载目录。
+- `--category-dirs` 打开后，入队时把任务名写成 `<category>/<name>`（分类名只来自 `category_for`，
+  用户不能传目录）；落点变成 `out-dir/<category>/<name>`，仍过 dlm 的相对子路径/落点闸。
 - 规则住 `queue::category_for` 一处；`TaskView` 与 UI 共用；未知/无扩展名 ⇒ `other`。
 - UI：任务行显示分类，顶部下拉筛选；不影响现有 API 数组形状（只加字段）。
 
@@ -29,4 +31,4 @@
 - `queue::category_for` 表驱动单测；`TaskView.category` 出现在 API；UI 筛选不影响任务操作。
 - `check_update` 对本地 stub 解析版本并判定；`version_is_newer` 表驱动。
 - 旧 `queue.json` 直接可读；四闸全绿；Chrome/Edge 真浏览器回归现有 UI。
-- 不做：分类子目录、自动更新、B3/A5、原生 GUI、队列 Cookie。
+- 不做：自动更新、DASH、A5、原生 GUI、队列 Cookie。

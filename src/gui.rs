@@ -41,6 +41,10 @@ pub struct GuiConfig {
     pub endpoint: PathBuf,
     /// C3：更新清单 URL；`None` = 不检查、不发任何外网请求。
     pub update_url: Option<String>,
+    /// C3：按分类建子目录（默认关；关时只打标签/筛选）。
+    pub category_dirs: bool,
+    /// 启动后用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件）。
+    pub open: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,8 +206,12 @@ pub fn run(config: GuiConfig) -> Result<()> {
     if let Err(err) = write_endpoint(&config.endpoint, &endpoint) {
         eprintln!("警告：写端点文件失败：{err:#}（浏览器投递会回退直连）");
     }
-    println!("dlm-gui listening on http://127.0.0.1:{port}/?t={token}");
+    let url = format!("http://127.0.0.1:{port}/?t={token}");
+    println!("dlm-gui listening on {url}");
     io::stdout().flush().ok();
+    if config.open {
+        open_app_window(&url);
+    }
 
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -356,6 +364,36 @@ fn check_update(url: &str) -> UpdateView {
     }
 }
 
+/// 用浏览器的 app 模式开一个没有地址栏的窗口；找不到 Edge/Chrome 就交给系统默认浏览器。
+/// 这不是原生控件，只是把现有 Web UI 装进一个窗口外壳。
+fn open_app_window(url: &str) {
+    #[cfg(windows)]
+    {
+        let candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        ];
+        if let Some(browser) = candidates.iter().find(|p| Path::new(p).exists())
+            && Command::new(browser).arg(format!("--app={url}")).spawn().is_ok()
+        {
+            return;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if Command::new("open").arg(url).spawn().is_ok() {
+            return;
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if Command::new("xdg-open").arg(url).spawn().is_ok() {
+            return;
+        }
+    }
+    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+}
+
 fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("建端点目录失败：{}", parent.display()))?;
@@ -420,7 +458,8 @@ fn apply(
 ) -> bool {
     match ticket {
         Ticket::Add { url, name, referer, start_at, on_complete, reply } => {
-            match store.add(&url, &name, referer, start_at, on_complete, &config.log_dir) {
+            let category = config.category_dirs.then(|| queue::category_for(&name));
+            match store.add(&url, &name, referer, start_at, on_complete, category, &config.log_dir) {
                 Ok(task) => {
                     let _ = reply.send(Ok(task.id));
                     true

@@ -40,6 +40,8 @@ fn parse() -> Result<GuiConfig> {
         quota_window_secs: None,
         endpoint: local_app_data().join("dlm").join("gui").join("endpoint.json"),
         update_url: None,
+        category_dirs: false,
+        open: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -64,9 +66,11 @@ fn parse() -> Result<GuiConfig> {
                 }
                 config.update_url = Some(raw);
             }
+            "--category-dirs" => config.category_dirs = true,
+            "--open" => config.open = true,
             "--help" | "-h" => {
                 println!(
-                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL]"
+                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open]"
                 );
                 std::process::exit(0);
             }

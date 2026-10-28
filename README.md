@@ -263,17 +263,19 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 | `--quota-window <SECS>` | `3600`（或队列里的值） | 固定窗口秒数；给 `--quota-window` 前必须先有额度 |
 | `--endpoint <FILE>` | `%LOCALAPPDATA%\dlm\gui\endpoint.json` | B10 端点文件；写失败只警告、浏览器回退直连 |
 | `--update-url <URL>` | 不检查 | 可选的更新清单 URL（只接受 http/https）；不给就不发任何外网请求 |
+| `--category-dirs` | 关 | 按分类把落点放进 `out-dir/<category>/`；默认只打标签/筛选、不改落盘路径 |
+| `--open` | 关 | 启动后用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件） |
 
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
 - **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。停止粒度按每个任务 dlm 的 worker 算：越过帽最多每个 worker 一块（64 KiB）。
-- **分类**：按文件名扩展名自动归为 video/audio/archive/document/image/program/other，UI 显示并在顶部筛选；**不改变落盘目录**（分类子目录留作后续）。
+- **分类**：按文件名扩展名自动归为 video/audio/archive/document/image/program/other，UI 显示并在顶部筛选；默认**不改变落盘目录**；`--category-dirs` 打开后落点变成 `out-dir/<category>/<name>`（任务名里带相对子路径，dlm 的落点闸照旧）。
 - **更新检查**：默认关闭；`--update-url <URL>` 给清单后启动时后台 GET 一次（10 秒超时），`/api/update` 给 `{enabled,current,latest,available,url,notes,checked_at,error}`；只通知，不自动下载安装。没有硬编码更新服务器。
 - **完成后动作**：队列只接 `open` 与 `run:<exe>`（与 CLI 同形，由子进程执行）；`shutdown` 在 API 层拒绝——队列可能同时完成多个任务，关机副作用不可控。
 - **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志（日志跨轮 append）。
 - **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
 - **安全**：只绑 `127.0.0.1`；所有页面/API 都要求 `?t=<token>`；UI 用 `textContent` 插入数据；日志 API 只读 log 目录内文件、最多 64 KiB 尾。
-- **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。
-- **不做**：原生 GUI、分类子目录、自动下载/安装更新、队列 Cookie。
+- **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。`--open` 只是用浏览器 app 模式开一个窗口，不是原生控件。
+- **不做**：原生 GUI、自动下载/安装更新、队列 Cookie。
 
 验收（不在 Rust 四闸内，需真浏览器）：
 
@@ -300,7 +302,7 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | 队列配额与 `--max-speed` 是两件事；队列暂不透传限速 | spec §2.7 |
 | B10 端点文件含 token，位于用户目录；同用户进程可读，与"能直接 spawn dlm"同一信任边界；GUI 被硬杀会留下陈旧端点文件，宿主按"连不上 ⇒ 回退"容忍 | spec §4.5 |
 | 更新检查默认关闭；只有给了 `--update-url` 才发一次 GET，清单须含 `version`/`latest`；只通知，不自动下载安装；外部请求走系统代理环境 | C3 spec §2 |
-| 分类只按文件名扩展名打标签/筛选，不建分类子目录，不改变落盘路径 | C3 spec §1 |
+| 分类只按文件名扩展名打标签/筛选；`--category-dirs` 才建 `out-dir/<category>/` 子目录，默认不改落盘路径 | C3 spec §1 |
 | HLS 只做明文 m3u8（master/media、相对 URI、EXT-X-MAP）；拒绝加密 KEY 与 BYTERANGE；**不可续传**，失败保留半截文件；跨 host 分片不带 Cookie/Auth/Referer | B3a spec |
 | 重跳上限靠 HTTP 客户端默认继承，本 CLI 未显式设置 | — |
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
@@ -308,7 +310,7 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 
 不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递；
 B3 只做了 B3a 的 HLS 直链，DASH/DRM/嗅探未做）、
-原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、分类子目录/自动更新、
+原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、自动更新、
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 
@@ -317,7 +319,7 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 304 通过（含队列/配额/分类/更新/HLS/UI 纯函数）
+cargo test --lib                            # 305 通过（含队列/配额/分类/更新/HLS/UI 纯函数）
 cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
 cargo test --test integration               # 117 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查/HLS 端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::actions::CompletionAction;
@@ -255,6 +255,7 @@ impl QueueStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         url: &str,
@@ -262,6 +263,7 @@ impl QueueStore {
         referer: Option<String>,
         start_at: Option<u64>,
         on_complete: Option<String>,
+        category: Option<&str>,
         log_dir: &Path,
     ) -> Result<Task> {
         let lower = url.to_ascii_lowercase();
@@ -269,6 +271,16 @@ impl QueueStore {
             bail!("只接受 http/https URL");
         }
         validate_name(name)?;
+        let stored_name = match category.filter(|c| !c.is_empty()) {
+            Some(category) => {
+                ensure!(
+                    category.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                    "分类目录名不合法"
+                );
+                format!("{category}/{name}")
+            }
+            None => name.to_string(),
+        };
         let now = now_secs();
         let seq = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -276,7 +288,7 @@ impl QueueStore {
         let task = Task {
             id: id.clone(),
             url: url.to_string(),
-            name: name.to_string(),
+            name: stored_name,
             referer: referer.filter(|s| !s.trim().is_empty()),
             status: TaskStatus::Queued,
             pid: None,
@@ -400,7 +412,7 @@ mod tests {
     fn add_save_load_roundtrip() {
         let (dir, mut store) = temp_queue("roundtrip");
         let task = store
-            .add("https://example.com/a.bin", "a.bin", Some("https://example.com/".into()), None, None, &dir)
+            .add("https://example.com/a.bin", "a.bin", Some("https://example.com/".into()), None, None, None, &dir)
             .unwrap();
         store.save().unwrap();
         let loaded = QueueStore::load(store.path().to_path_buf()).unwrap();
@@ -414,7 +426,7 @@ mod tests {
     #[test]
     fn running_becomes_paused_on_recovery() {
         let (dir, mut store) = temp_queue("recover");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
         store.find_mut(&task.id).unwrap().status = TaskStatus::Running;
         store.find_mut(&task.id).unwrap().pid = Some(1234);
         assert!(store.recover_running());
@@ -426,10 +438,10 @@ mod tests {
     #[test]
     fn rejects_bad_urls_and_names() {
         let (dir, mut store) = temp_queue("bad");
-        assert!(store.add("file:///x", "a.bin", None, None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "../a", None, None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "a/b", None, None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "a:b", None, None, None, &dir).is_err());
+        assert!(store.add("file:///x", "a.bin", None, None, None, None, &dir).is_err());
+        assert!(store.add("https://example.com/a", "../a", None, None, None, None, &dir).is_err());
+        assert!(store.add("https://example.com/a", "a/b", None, None, None, None, &dir).is_err());
+        assert!(store.add("https://example.com/a", "a:b", None, None, None, None, &dir).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -467,7 +479,7 @@ mod tests {
     #[test]
     fn remove_returns_the_task() {
         let (dir, mut store) = temp_queue("remove");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
         assert_eq!(store.remove(&task.id).unwrap().id, task.id);
         assert!(store.find(&task.id).is_none());
         let _ = fs::remove_dir_all(dir);
@@ -495,7 +507,7 @@ mod tests {
     #[test]
     fn quota_window_resets_and_releases_holds() {
         let (dir, mut store) = temp_queue("quota");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
         assert!(store.set_quota(1_000, 10));
         assert!(store.quota_start(100));
         assert!(store.quota_charge(600));
@@ -512,7 +524,7 @@ mod tests {
     #[test]
     fn quota_charge_and_disable_roundtrip() {
         let (dir, mut store) = temp_queue("quota-off");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
         assert!(!store.quota_charge(5), "没启用时不计账");
         assert!(store.set_quota(1_000, 10));
         assert!(store.quota_start(100));
@@ -552,6 +564,18 @@ mod tests {
     }
 
     #[test]
+    fn category_dirs_prefix_the_stored_name_without_letting_users_choose_it() {
+        let (dir, mut store) = temp_queue("category-dir");
+        let task = store
+            .add("https://example.com/a.mp4", "a.mp4", None, None, None, Some("video"), &dir)
+            .unwrap();
+        assert_eq!(task.name, "video/a.mp4");
+        assert_eq!(target_path(&dir, &task.name), dir.join("video").join("a.mp4"));
+        assert!(store.add("https://example.com/a", "a", None, None, None, Some("../evil"), &dir).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn on_complete_survives_a_queue_roundtrip() {
         let (dir, mut store) = temp_queue("action");
         let task = store
@@ -561,6 +585,7 @@ mod tests {
                 None,
                 None,
                 Some("open".to_string()),
+                None,
                 &dir,
             )
             .unwrap();

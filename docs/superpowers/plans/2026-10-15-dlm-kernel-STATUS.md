@@ -150,7 +150,8 @@
 ## 2026-10-28 C3 分类与更新检查交付
 
 - **分类**：`queue::category_for` 按扩展名归 video/audio/archive/document/image/program/other；
-  `TaskView.category` 出现在 `/api/tasks`；UI 显示分类并在顶部筛选。**不改变落盘目录**。
+  `TaskView.category` 出现在 `/api/tasks`；UI 显示分类并在顶部筛选。默认不改落盘目录；
+  `--category-dirs` 打开后任务名写成 `<category>/<name>`，落点进 `out-dir/<category>/`。
 - **更新检查**：`dlm-gui --update-url <URL>`（只收 http/https）启动时后台 GET 一次清单
   `{version|latest,url?,notes?}`，`/api/update` 返回 `{enabled,current,latest,available,url,notes,checked_at,error}`；
   UI 显示有新版本/已是最新/未启用/失败。默认关闭，无硬编码更新服务器，只通知不自动安装。
@@ -160,7 +161,7 @@
 - **四闸**：`--lib` **297/0**（3.01 s）· `--bins` **4/0** · `integration` **114/0**（64.63 s）· clippy **0**。
 - **真浏览器**：Chrome 156 回归 `verify-gui.mjs`，任务行显示分类"其他"，落盘 65536 B；
   截图/日志 `docs/evidence/2026-10-22-c3-gui.*`。
-- **未做**：分类子目录、自动下载/安装更新、B3、A5、原生 GUI/Windows 服务、队列 Cookie。
+- **未做**：自动下载/安装更新、B3b DASH/嗅探、A5、原生 GUI/Windows 服务、队列 Cookie。
 
 ## 2026-10-28 B3a HLS 直链交付
 
@@ -171,7 +172,7 @@
   与 `--data-file`/`--max-bytes` 互斥；`--max-speed` 可叠加；`--sha256` 合并后校验。
 - **测试**：HLS 单测 6 条（master/相对 URI/加密/BYTERANGE/默认名/跨源凭据）＋集成 3 条
   （master→media→三片顺序合并、加密拒绝、参数层拒绝零请求）。
-- **四闸**：`--lib` **304/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.93 s）· clippy **0**。
+- **四闸**：`--lib` **305/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.83 s）· clippy **0**。
 - **未做**：DASH、DRM、浏览器媒体嗅探、队列 HLS、断点续传。
 
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）

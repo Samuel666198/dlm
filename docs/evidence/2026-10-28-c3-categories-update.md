@@ -34,7 +34,11 @@ file=…\dl\gui.bin bytes=65536
 
 ## 4. 边界
 
-- 分类只打标签/筛选，不建分类子目录、不改落盘路径。
+- 默认只打标签/筛选、不改落盘路径；`--category-dirs` 打开后任务名写成 `<category>/<name>`，
+  落点进 `out-dir/<category>/`。手动实测：`movie.mp4` ⇒ `queue.name=video/movie.mp4`，
+  文件落在 `out/video/movie.mp4`（1024 B）。
+- `--open` 用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件）；四闸不启动浏览器，
+  因此这一项只做编译/静态检查，未做真人窗口走查。
 - 更新检查只通知，不下载/安装；无硬编码更新服务器；`--update-url` 只收 http/https。
 - 外部请求 10 秒超时；本机 loopback 清单测试走 `no_proxy`。
-- 未做：分类子目录、自动更新、B3、A5、原生 GUI/Windows 服务、队列 Cookie。
+- 未做：自动更新、B3b DASH/嗅探、A5、原生 GUI/Windows 服务、队列 Cookie。
