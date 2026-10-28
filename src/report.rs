@@ -309,6 +309,7 @@ mod tests {
             retries,
             elapsed: Duration::from_millis(1500),
             ok,
+            budget_reached: false,
             trace: vec![TraceStep::Seeded(vec![Interval { start: 0, end: 5 }])],
             fresh_reason: fresh.map(str::to_string),
             message: msg.map(str::to_string),

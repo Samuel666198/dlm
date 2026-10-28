@@ -3025,6 +3025,7 @@ fn full_download_is_byte_exact() -> anyhow::Result<()> {
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3203,6 +3204,7 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3391,6 +3393,7 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3548,6 +3551,7 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3719,6 +3723,7 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         verify_sha256: None,
         force_fresh: false,
         max_speed: 0,
+        max_bytes: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -3738,6 +3743,7 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         verify_sha256: Some(want.clone()),
         force_fresh: false,
         max_speed: 0,
+        max_bytes: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -3826,6 +3832,7 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3881,6 +3888,7 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             verify_sha256: Some(want.clone()),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -3991,6 +3999,7 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
             verify_sha256: Some(want.clone()),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4158,6 +4167,7 @@ fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<
             verify_sha256: Some(want.clone()),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4229,6 +4239,7 @@ fn a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice() -> an
             verify_sha256: None,
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4288,6 +4299,7 @@ fn exhausted_retries_report_failure_with_a_message_and_keep_the_state_file() -> 
             verify_sha256: None,
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4349,6 +4361,7 @@ fn a_corrupt_state_file_is_an_error_while_an_absent_one_is_not() -> anyhow::Resu
         verify_sha256: None,
         force_fresh: false,
         max_speed: 0,
+        max_bytes: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -4401,6 +4414,7 @@ fn the_fresh_reason_reaches_the_report_for_the_cli_to_print() -> anyhow::Result<
         verify_sha256: Some(harness::expected_sha(len)),
         force_fresh: false,
         max_speed: 0,
+        max_bytes: 0,
         // 9A（勘误 E21）新增的字段：同上，只补结构体字面量，不改任何判据。
         on_tick: None,
     };
@@ -4460,6 +4474,7 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4552,6 +4567,7 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
             verify_sha256: None,
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 9A（勘误 E21）新增的字段：集成用例一律不挂观察者（`on_tick` 的形状由 `src/engine.rs`
             // 的 `mod tests` 钉）。这里只是补齐结构体字面量，任何既有断言一个字都没动。
             on_tick: None,
@@ -4664,6 +4680,7 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             on_tick: Some(on_tick),
         },
     )?;
@@ -5751,6 +5768,7 @@ fn scenario_a_fullspeed_48mib_is_byte_exact() -> anyhow::Result<()> {
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             on_tick: None,
         },
     )?;
@@ -5906,6 +5924,7 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             // 集成用例一律不挂观察者（与全文件同一口径，9A/E21）。
             on_tick: None,
         },
@@ -6694,6 +6713,7 @@ fn a_resumed_run_fails_cleanly_when_if_range_gets_200_after_the_probe() -> anyho
             verify_sha256: None,
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             on_tick: None,
         },
     )?;
@@ -6733,6 +6753,7 @@ fn a_shared_rate_cap_spans_all_workers() -> anyhow::Result<()> {
             verify_sha256: Some(harness::expected_sha(total)),
             force_fresh: false,
             max_speed: 1_048_576,
+            max_bytes: 0,
             on_tick: None,
         },
     )?;
@@ -6771,6 +6792,7 @@ fn the_data_file_route_obeys_the_rate_cap() -> anyhow::Result<()> {
             verify_sha256: None,
             force_fresh: false,
             max_speed: 512 * 1024,
+            max_bytes: 0,
             on_tick: None,
         },
     )?;
@@ -6862,6 +6884,7 @@ fn residual_duplicate_traffic_is_bounded_by_one_chunk_per_retighten() -> anyhow:
             verify_sha256: Some(harness::expected_sha(len)),
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             on_tick: None,
         },
     )?;
@@ -7062,5 +7085,98 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
     }
 
     drop(srv);
+    Ok(())
+}
+
+/// A16：真二进制的第三档退出码。首轮预算到量 ⇒ 3 且断点在；不带预算再跑 ⇒ 0 且字节完整。
+///
+/// 预算取 512 KiB（高于首轮预读 236032 B）：低于预读时，预读本身就把额度花光，
+/// 文件会停在预读那一截 —— 那是 spec 里"配额下限取 PROBE_READ_BYTES"要挡的形状，
+/// 不是这条用例要演的"引擎按帽停枪"。
+#[test]
+fn the_binary_stops_at_the_byte_budget_and_resumes_to_completion() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("byte-budget")?;
+    let len = 1_048_576u64;
+    let out_dir = dir.path().to_string_lossy().to_string();
+    let url = format!("{base}/sz/{len}");
+    let budget = 524_288u64;
+
+    let first = run_dlm(&[
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "budget.bin",
+        "--connections",
+        "1",
+        "--max-bytes",
+        &budget.to_string(),
+        "--quiet",
+    ])?;
+    assert_eq!(
+        first.status.code(),
+        Some(3),
+        "预算到量且没下完必须退 3；stdout={} stderr={}",
+        stdout_of(&first),
+        stderr_of(&first)
+    );
+    let target = dir.path().join("budget.bin");
+    let state = dlm::state::path_for(&target);
+    let stopped = std::fs::metadata(&target)?.len();
+    assert!(stopped > 236_032, "预读之后的引擎字节也要落盘：{stopped}");
+    assert!(
+        stopped <= budget + 65_536,
+        "越过帽的最多一整块（64 KiB）：stopped={stopped} budget={budget}"
+    );
+    assert!(state.exists(), "预算停住时必须保留断点：{}", state.display());
+    assert!(srv.requests()?.len() >= 2, "至少试探 + 一枪");
+
+    let second = run_dlm(&[
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "budget.bin",
+        "--connections",
+        "1",
+        "--quiet",
+    ])?;
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "续传那轮必须下完；stdout={} stderr={}",
+        stdout_of(&second),
+        stderr_of(&second)
+    );
+    assert_eq!(std::fs::metadata(&target)?.len(), len);
+    assert_eq!(harness::sha256_of(&target)?, harness::expected_sha(len));
+    Ok(())
+}
+
+/// A16：带体任务与字节预算互斥，必须在发请求之前以参数码拒掉。
+#[test]
+fn max_bytes_with_data_file_is_a_parameter_error() -> anyhow::Result<()> {
+    let (srv, base) = harness::spawn()?;
+    let dir = harness::tmp_dir("byte-budget-data")?;
+    let body = dir.path().join("body.txt");
+    std::fs::write(&body, b"a=1")?;
+    let out = run_dlm(&[
+        "--url",
+        &format!("{base}/sz/1024"),
+        "--out-dir",
+        &dir.path().to_string_lossy(),
+        "--out-name",
+        "x.bin",
+        "--max-bytes",
+        "1",
+        "--data-file",
+        &body.to_string_lossy(),
+    ])?;
+    assert_eq!(out.status.code(), Some(2), "应停在参数层：{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("--max-bytes"), "{}", stderr_of(&out));
+    assert!(srv.requests()?.is_empty(), "参数层拒绝时一个请求都不许发");
     Ok(())
 }

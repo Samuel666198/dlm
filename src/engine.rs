@@ -229,6 +229,8 @@ pub struct Config {
     pub force_fresh: bool,
     /// R18：单任务所有连接合计的速率上限（字节/秒）；0 = 不限。
     pub max_speed: u64,
+    /// A16：本次运行最多新交付的字节数；0 = 不限。到量只停当前运行，断点保留。
+    pub max_bytes: u64,
     /// 运行态快照的出口（勘误 **E21** 甲，spec §5 那一行进度缺的就是这个数据面）。
     ///
     /// **默认 `None`** ⇒ 一个观察者都不挂，默认路径与 9A 之前逐字节相同（这是 9A 的验收下限）。
@@ -261,6 +263,7 @@ impl std::fmt::Debug for Config {
             .field("verify_sha256", &self.verify_sha256)
             .field("force_fresh", &self.force_fresh)
             .field("max_speed", &self.max_speed)
+            .field("max_bytes", &self.max_bytes)
             .field("on_tick", &self.on_tick.as_ref().map(|_| "«观察者»"))
             .finish()
     }
@@ -275,6 +278,7 @@ impl Default for Config {
             verify_sha256: None,
             force_fresh: false,
             max_speed: 0,
+            max_bytes: 0,
             on_tick: None,
         }
     }
@@ -415,6 +419,9 @@ pub struct Report {
     pub elapsed: Duration,
     /// 本次运行有没有把活干完。**非零退出码的判据就是这个布尔取反（`!ok`）**，不是别的字段是不是 `Some`。
     pub ok: bool,
+    /// A16：本次运行是不是因为 `--max-bytes` 到量而停（且没下完）。装配层据此映射退出码 3；
+    /// 预算内正常下完时它保持假、`ok` 为真。
+    pub budget_reached: bool,
     pub trace: Vec<TraceStep>,
     pub fresh_reason: Option<String>,
     /// 一句给人看的话。**它不是失败信号**：`ok = true` 时它也可以是 `Some`（"下载已完成，但…"），
@@ -488,6 +495,8 @@ impl Report {
 enum Stop {
     /// 调度器说没活可派了、也没有任何一枪在途或退避中。
     Done,
+    /// `--max-bytes` 到量：本次运行不再派新枪，断点保留，下次运行继续。
+    BudgetReached,
     /// `--max-retries` 封顶 ⇒ 整任务失败（**E13④**：`next_retry_delay` 给 `None` 就是这一支）。
     RetriesExhausted { worker: usize, attempted: u32 },
     /// 有 worker 线程已经不在了（崩了，或者全部崩了导致通道断开）⇒ 它手上那一枪永远不会交回
@@ -642,6 +651,7 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     // 其中 `prelude_max = consts::PROBE_READ_BYTES`（引擎直接取常数，`Task` 上没有这个旋钮）；
     // 反复续传会按轮累积，
     // 而 `stats` 本身也跨轮读回来接着加（见字段文档末段）。
+    let mut prelude_written = 0u64;
     if plan.truncate && !probed.prelude.is_empty() {
         let take = probed.prelude.len().min(facts.total_len as usize);
         if take > 0 {
@@ -649,6 +659,7 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
             if wrote > 0 {
                 stats.bytes_delivered = stats.bytes_delivered.saturating_add(wrote as u64);
                 seed.push(Interval { start: 0, end: wrote as u64 - 1 });
+                prelude_written = wrote as u64;
             }
         }
     }
@@ -700,6 +711,11 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
         limiter,
         started,
     })?;
+    // A16：新建任务首轮预读确实落盘并进覆盖集 ⇒ 它要计入本次运行的字节预算。续传的预读不落盘、
+    // 不进账（见上面那段长注释），所以 `budget_base` 只在 `Fresh` 那一支取非零。
+    if plan.truncate {
+        engine.budget_base = prelude_written;
+    }
     // 退化那一枪（`NoRanges`）排在本轮**所有** `Connected` 之前 ⇒ 回放按同一顺序喂才复现得出派发表。
     if !engine.accept_ranges {
         engine.record(TraceStep::Fed(Event::NoRanges));
@@ -1063,6 +1079,7 @@ fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started:
         retries: 0,
         elapsed: started.elapsed(),
         ok,
+        budget_reached: false,
         // `trace` 留空：这条链接里没有调度器，没有任何事件被喂出去；硬造一条 `Dispatched`
         // 会让阶段 5 拿一个**没带 Range 的 POST** 去比对区间。
         trace: vec![],
@@ -1188,6 +1205,15 @@ struct Engine {
     fresh_reason: Option<String>,
     /// 本轮自己交出去的字节（速率用它算，不把上一轮的 `stats.bytes_delivered` 混进来）。
     run_delivered: u64,
+    /// A16：每个 worker 当前那一枪**预占**的字节预算；枪收尾即归零。与 `run_delivered` 分开算，
+    /// 否则并发时后面的 worker 会把同一份额度再借一遍。
+    budget_share: Vec<u64>,
+    /// A16：新建任务时预读落盘的那批字节（续传的预读不计数）。它不在 `run_delivered` 里 ——
+    /// 后者继续只服务速率计算（`RunSnapshot::instant_bytes_per_sec` 的分母）。
+    budget_base: u64,
+    /// A16：额度已经分不出来（或 `run_delivered + budget_base` 已到顶）。置真后只收在途结论，
+    /// 不再向调度器要 Assign/Retighten。
+    budget_exhausted: bool,
     last_save: Instant,
     last_tick: Instant,
     /// 上一**拍**交快照的时刻（勘误 **E21** 判据④的分母来源）。
@@ -1300,6 +1326,9 @@ impl Engine {
             trace: Vec::new(),
             fresh_reason,
             run_delivered: 0,
+            budget_share: vec![0; count],
+            budget_base: 0,
+            budget_exhausted: false,
             last_save: now,
             last_tick: now,
             // 快照的两个锚点都从"主循环开工"起算（判据④的第一拍没有上一拍，就用这个锚点），
@@ -1361,6 +1390,12 @@ impl Engine {
     fn ping_free_workers(&mut self) -> Option<Stop> {
         // A4/R21：先把在途 worker 的块级光标同步给调度器，再让 Connected 决定劈分。
         self.sync_in_flight_progress();
+        // A16：额度分不出来时**连 `Connected` 都不喂** —— 调度器一旦 `Assign` 就会把区间记在
+        // 某个 worker 名下，而我们不发枪 ⇒ 那段会永远"在途"。宁可这一拍不派，等在途收尾。
+        if self.cfg.max_bytes > 0 && self.budget_available() == 0 {
+            self.budget_exhausted = true;
+            return None;
+        }
         for worker in 0..self.workers.len() {
             if self.workers[worker].state != WorkerState::Idle {
                 continue;
@@ -1419,7 +1454,29 @@ impl Engine {
     /// 用 `Release`/`Acquire` 这一对，不靠"大概看得见"）。
     fn dispatch(&mut self, worker: usize, iv: Interval) -> Option<Stop> {
         let rate = running_rate_bytes_per_sec(self.run_delivered, self.started.elapsed());
-        self.caps[worker].store(fetch::NO_END_CAP, Ordering::Release);
+        let mut cap = fetch::NO_END_CAP;
+        if self.cfg.max_bytes > 0 {
+            if self.budget_exhausted {
+                return None;
+            }
+            let available = self.budget_available();
+            if available == 0 {
+                self.budget_exhausted = true;
+                return None;
+            }
+            let free_slots = self
+                .workers
+                .iter()
+                .filter(|ctl| ctl.state == WorkerState::Idle)
+                .count()
+                .max(1) as u64;
+            // 至少给 1 字节；再夹到这一枪自己的区间长度 —— 预占超过它实际能交付的量会让
+            // 其它 worker 在这段时间里白等一份用不掉的额度。
+            let share = (available / free_slots).max(1).min(iv.len());
+            self.budget_share[worker] = share;
+            cap = iv.start.saturating_add(share.saturating_sub(1)).min(iv.end);
+        }
+        self.caps[worker].store(cap, Ordering::Release);
         self.progress[worker].store(fetch::NO_PROGRESS, Ordering::Release);
         self.synced_progress[worker] = fetch::NO_PROGRESS;
         if self.jobs[worker].send(Job::Fetch { iv, rate_bps: rate }).is_err() {
@@ -1433,6 +1490,19 @@ impl Engine {
 
     fn any_in_flight(&self) -> bool {
         self.workers.iter().any(|ctl| matches!(ctl.state, WorkerState::Busy | WorkerState::Backoff { .. }))
+    }
+
+    /// A16：本次运行已经用掉的配额（预读基数 + 已交付 + 在途预占）。
+    fn budget_spent(&self) -> u64 {
+        self.budget_share
+            .iter()
+            .fold(self.run_delivered.saturating_add(self.budget_base), |acc, share| {
+                acc.saturating_add(*share)
+            })
+    }
+
+    fn budget_available(&self) -> u64 {
+        self.cfg.max_bytes.saturating_sub(self.budget_spent())
     }
 
     /// 标着"在途"但心跳已消失的 worker：那一枪永远不会交回结论。
@@ -1541,7 +1611,11 @@ impl Engine {
                 return stop;
             }
             // 没人在途、也没人在退避 ⇒ 调度器给不出活（`dispatch` 在有活时绝不回 `Idle`）⇒ 收工。
+            // A16：预算到量而任务还没下完 ⇒ 这一次运行是"停住"不是"失败"；下完则 `Done` 优先。
             if !self.any_in_flight() {
+                if self.budget_exhausted && !self.sched.is_done() {
+                    return Stop::BudgetReached;
+                }
                 return Stop::Done;
             }
             if let Some(stop) = self.save_if_due() {
@@ -1578,6 +1652,10 @@ impl Engine {
         self.stats.bytes_delivered = self.stats.bytes_delivered.saturating_add(landed);
         self.stats.bytes_duplicated = self.stats.bytes_duplicated.saturating_add(duplicated);
         self.run_delivered = self.run_delivered.saturating_add(landed);
+        self.budget_share[worker] = 0;
+        if self.cfg.max_bytes > 0 && self.budget_spent() >= self.cfg.max_bytes {
+            self.budget_exhausted = true;
+        }
         for event in events {
             self.record(TraceStep::Fed(event));
             self.sched.on(event);
@@ -1631,6 +1709,7 @@ impl Engine {
     fn finish(&mut self, stop: Stop) -> Result<Report> {
         let dead_workers = self.stop_and_join();
         let target = self.store.final_path().to_path_buf();
+        let budget_reached = matches!(&stop, Stop::BudgetReached);
 
         // `Stop` 里有两种是"盘用不了"，直接 `Err`；但**先**把 flush/save 试完，让残留的账尽量落盘
         // （下一轮才可能续），它们的失败只在还没有更原因素时才算主因。
@@ -1681,6 +1760,10 @@ impl Engine {
                 ),
                 Stop::WorkerGone { worker: Some(worker) } => format!("worker {worker} 的线程不在了：它那一枪不会有结论"),
                 Stop::WorkerGone { worker: None } => "所有 worker 线程都不在了：回报通道已断开".to_string(),
+                Stop::BudgetReached => format!(
+                    "已达到本次运行字节预算（--max-bytes={}）：断点已保留，再次运行会继续",
+                    self.cfg.max_bytes
+                ),
                 Stop::Done if !sched_done => format!(
                     "没有活可派了，调度器却说还剩 {} 字节没归属（内部矛盾，不敢当成完成）",
                     self.sched.pending_bytes()
@@ -1724,6 +1807,7 @@ impl Engine {
             retries: self.stats.retries,
             elapsed: self.started.elapsed(),
             ok,
+            budget_reached,
             trace: std::mem::take(&mut self.trace),
             fresh_reason: self.fresh_reason.clone(),
             message,
@@ -2250,6 +2334,7 @@ mod tests {
             retries: 0,
             elapsed: Duration::ZERO,
             ok: true,
+            budget_reached: false,
             trace,
             fresh_reason: None,
             message: None,
@@ -2422,6 +2507,9 @@ mod tests {
             trace: vec![TraceStep::Seeded(vec![])],
             fresh_reason: None,
             run_delivered: 0,
+            budget_share: vec![0],
+            budget_base: 0,
+            budget_exhausted: false,
             last_save: started,
             last_tick: started,
             saved_pending,
@@ -2748,5 +2836,41 @@ mod tests {
             assert_eq!(busy_worker_count(workers), *want_active, "{case}");
             assert_eq!(slow_retry_rounds(workers), *want_rounds, "{case}");
         }
+    }
+
+    /// A16：字节预算按"预读基数 + 已交付 + 在途预占"算，派枪时把额度折成终点帽；
+    /// 在途预占在结论回来时归零，花到顶后置 `budget_exhausted`。
+    #[test]
+    fn the_byte_budget_slices_shots_and_stops_after_the_cap() {
+        let cfg = Config { workers: 1, max_bytes: 1_000, ..Config::default() };
+        let mut fx = hand_engine("budget", cfg, 10_000);
+        fx.engine.budget_base = 250;
+
+        let first = Interval { start: 0, end: 9_999 };
+        assert!(fx.engine.dispatch(0, first).is_none());
+        assert_eq!(fx.engine.budget_share[0], 750, "可用额度 1000-250，单 worker 全给它");
+        assert_eq!(fx.engine.caps[0].load(Ordering::Acquire), 749, "帽是 start+share-1");
+
+        assert!(
+            fx.engine
+                .on_report(report(0, first, Outcome::Advanced { bytes: 700 }))
+                .is_none()
+        );
+        assert_eq!(fx.engine.budget_share[0], 0, "结论回来后在途预占归零");
+        assert!(!fx.engine.budget_exhausted, "还差 50 字节，不许提前收工");
+        assert_eq!(fx.engine.budget_available(), 50);
+
+        let second = Interval { start: 750, end: 9_999 };
+        assert!(fx.engine.dispatch(0, second).is_none());
+        assert_eq!(fx.engine.budget_share[0], 50);
+        assert_eq!(fx.engine.caps[0].load(Ordering::Acquire), 799);
+
+        assert!(
+            fx.engine
+                .on_report(report(0, second, Outcome::Advanced { bytes: 50 }))
+                .is_none()
+        );
+        assert!(fx.engine.budget_exhausted, "花到顶必须置位");
+        assert_eq!(fx.engine.budget_available(), 0);
     }
 }

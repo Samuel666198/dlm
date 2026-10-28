@@ -190,6 +190,12 @@ fn check_boundaries(cli: &Cli) -> anyhow::Result<()> {
             "参数写错了：--connections 至少 1（给了 0 就没有 worker，一个字节都下不动）"
         );
     }
+    if cli.max_bytes > 0 && cli.data_file.is_some() {
+        anyhow::bail!(
+            "参数写错了：--max-bytes 不能和 --data-file 同给——带请求体的任务整份一次 POST、不可续，\
+             字节预算无处停；要么去掉 --max-bytes，要么改成可分段下载"
+        );
+    }
     Ok(())
 }
 
@@ -241,6 +247,8 @@ pub struct Cli {
     connections: Option<usize>,
     #[arg(long, value_name = "BYTES_PER_SECOND", default_value_t = 0, help = "所有连接合计的速率上限（字节/秒；0 = 不限）")]
     max_speed: u64,
+    #[arg(long, value_name = "BYTES", default_value_t = 0, help = "本次运行最多新交付的字节数（0 = 不限；到量即停并保留断点）")]
+    max_bytes: u64,
     #[arg(long, value_name = "URL", help = "原样发送的 Referer 头")]
     referer: Option<String>,
     #[arg(long, value_name = "COOKIE", help = "原样发送 Cookie 头（不分 http/https，写入断点文件）")]
@@ -283,6 +291,7 @@ impl std::fmt::Debug for Cli {
             .field("out_name", &self.out_name)
             .field("connections", &self.connections)
             .field("max_speed", &self.max_speed)
+            .field("max_bytes", &self.max_bytes)
             .field("referer", &self.referer)
             .field("cookie", &self.cookie)
             .field("cookie_stdin", &self.cookie_stdin)
@@ -387,6 +396,7 @@ impl Cli {
             cfg.workers = connections;
         }
         cfg.max_speed = self.max_speed;
+        cfg.max_bytes = self.max_bytes;
         cfg.max_retries = self.max_retries;
         cfg.verify_sha256 = self.sha256.clone();
         cfg.force_fresh = self.no_resume;
@@ -687,6 +697,8 @@ mod tests {
             "3",
             "--max-speed",
             "1048576",
+            "--max-bytes",
+            "2048",
             "--max-retries",
             "7",
             "--sha256",
@@ -696,6 +708,7 @@ mod tests {
         let cfg = c.into_config();
         assert_eq!(cfg.workers, 3, "E20⑤：--connections 必须是 Config::workers 的唯一来源，不许被 Task 上任何数吞掉");
         assert_eq!(cfg.max_speed, 1_048_576, "--max-speed 必须原样进 Config::max_speed");
+        assert_eq!(cfg.max_bytes, 2048, "--max-bytes 必须原样进 Config::max_bytes");
         assert_eq!(cfg.max_retries, Some(7));
         assert_eq!(cfg.verify_sha256.as_deref(), Some(HEX64));
         assert!(cfg.force_fresh, "--no-resume ⇒ Config::force_fresh（spec §4）");
@@ -705,9 +718,9 @@ mod tests {
         assert_eq!(c.into_task()?.flags, 0);
         let d = parse(&["dlm", "--url", "https://x/a"])?.into_config();
         assert_eq!(
-            (d.workers, d.max_speed, d.max_retries, d.verify_sha256, d.force_fresh),
-            (DEFAULT_CONNECTIONS, 0, None, None, false),
-            "什么都不给时五格各归其位（max_speed 默认 0 = 不限）"
+            (d.workers, d.max_speed, d.max_bytes, d.max_retries, d.verify_sha256, d.force_fresh),
+            (DEFAULT_CONNECTIONS, 0, 0, None, None, false),
+            "什么都不给时六格各归其位（max_speed / max_bytes 默认 0 = 不限）"
         );
         // **T99-J2 第 3 节（Q5-1）**：帮助里那个"默认 N"与实现常数交叉一次（期望值来自**实现常数**、
         // 输入来自**帮助文本**，两份对面互问；这不是"问被测产品自己要"，与 `…_lower_bound_…` 同一立场）。
@@ -718,6 +731,42 @@ mod tests {
             DEFAULT_CONNECTIONS,
             "`--connections` 的帮助写的默认值与 `consts::DEFAULT_CONNECTIONS` 必须是同一个数（T99-J2 第 3 节）"
         );
+        Ok(())
+    }
+
+    /// `--max-bytes` 与带体任务互斥（spec §2.2）：预算在整份 POST 上没有落点，必须在上网前拒。
+    /// `0` 是"不限"，与 `--data-file` 同给不算冲突（等价于没给）。
+    #[test]
+    fn max_bytes_maps_into_config_and_is_refused_with_data_file() -> anyhow::Result<()> {
+        let c = parse(&["dlm", "--url", "https://x/a", "--max-bytes", "1048576"])?;
+        assert_eq!(c.into_config().max_bytes, 1_048_576);
+
+        let err = match parse(&[
+            "dlm",
+            "--url",
+            "https://x/a",
+            "--max-bytes",
+            "1",
+            "--data-file",
+            "body.bin",
+        ]) {
+            Ok(_) => panic!("--max-bytes 配 --data-file 必须当场拒"),
+            Err(err) => err,
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("--max-bytes"), "{text}");
+        assert!(text.contains("--data-file"), "{text}");
+
+        let zero = parse(&[
+            "dlm",
+            "--url",
+            "https://x/a",
+            "--data-file",
+            "body.bin",
+            "--max-bytes",
+            "0",
+        ])?;
+        assert_eq!(zero.into_config().max_bytes, 0, "显式 0 = 不限，不是互斥");
         Ok(())
     }
 

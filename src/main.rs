@@ -37,6 +37,8 @@ const DOWNLOAD_FAILED: u8 = 1;
 /// 与 `--connections 0`，实测变异"把参数层交回 1"会红在那里），本文件的
 /// `the_error_layer_does_not_reuse_the_download_tiers` 钉"2 撞不撞下载档"。
 const BAD_ARGS: u8 = 2;
+/// A16：`--max-bytes` 到量且没下完。断点在、可续传；与"下载失败"分开，脚本能据此决定何时再跑。
+const BYTE_BUDGET_REACHED: u8 = 3;
 
 fn main() -> ExitCode {
     ExitCode::from(match dispatch() {
@@ -132,7 +134,13 @@ fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
         println!();
     }
     println!("{line}");
-    if ok { 0 } else { DOWNLOAD_FAILED }
+    if ok {
+        0
+    } else if rep.budget_reached {
+        BYTE_BUDGET_REACHED
+    } else {
+        DOWNLOAD_FAILED
+    }
 }
 
 /// 参数层那一支的统一收尾（**E24②**："两档"不覆盖这一层）。
@@ -191,6 +199,7 @@ mod tests {
             retries: 0,
             elapsed: Duration::from_millis(1),
             ok,
+            budget_reached: false,
             trace: vec![],
             fresh_reason: None,
             message: message.map(str::to_string),
@@ -232,6 +241,30 @@ mod tests {
         );
         // ④ 反方向：没下完**而且没话**也不许被读成 0（挡住"`message` 空就当成功"那种写法）。
         assert_eq!(finish(&report(false, None), &task(), true), DOWNLOAD_FAILED);
+    }
+
+    /// A16 的第三档：只有"预算到量且没下完"才退 3；预算内完成仍是 0，普通失败仍是 1。
+    #[test]
+    fn the_byte_budget_maps_to_exit_three_and_completion_still_maps_to_zero() {
+        let mut budget_stop = report(false, Some("已达到本次运行字节预算"));
+        budget_stop.budget_reached = true;
+        assert_eq!(finish(&budget_stop, &task(), true), BYTE_BUDGET_REACHED);
+
+        let mut finished_within_budget = report(true, None);
+        finished_within_budget.budget_reached = true;
+        assert_eq!(
+            finish(&finished_within_budget, &task(), true),
+            0,
+            "预算标记只在没下完时才改变退出码；下完了仍是 0"
+        );
+
+        assert_eq!(
+            finish(&report(false, Some("普通失败")), &task(), true),
+            DOWNLOAD_FAILED,
+            "没有预算标记的失败不许被读成 3"
+        );
+        assert_ne!(BYTE_BUDGET_REACHED, DOWNLOAD_FAILED);
+        assert_ne!(BYTE_BUDGET_REACHED, BAD_ARGS);
     }
 
     #[test]
