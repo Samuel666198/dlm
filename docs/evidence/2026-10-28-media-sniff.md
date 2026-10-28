@@ -46,7 +46,8 @@ plain_file=...\dl\file.bin bytes=4
 - 截图：`docs/evidence/2026-10-28-tabbit-file-panel.png`；
   加载与快捷方式细节：`2026-10-28-tabbit-extension.md`。
 
-回归：B1 ping、B2 直接投递、B10 queue/direct 三条真浏览器用例均通过。
+回归：B1/B2/B10 三条真浏览器用例在 B3b-lite 首发那轮已通过；本轮只改扩展 JS，未重复运行，
+本轮的端到端证据是上面的 Edge 与 Tabbit 两发。
 
 ## 边界
 

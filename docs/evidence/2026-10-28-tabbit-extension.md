@@ -28,9 +28,9 @@
 
 ## 验证
 
-- 重启 Tabbit 后打开 `https://example.com/`：
+- 重启 Tabbit 后打开测试页：
   - `#dlm-submit` 存在；
-  - 扩展徽标 `OK`，`#dlm-native-status` = `dlm native: pong com.dlm.host v0.1.0`。
+  - `#dlm-native-status` 显示扩展状态（本轮显示上次任务 `dlm job: …`；宿主连通性以点下载成功为准）。
 - 本地页面请求 `/stream.m3u8` 且带一个 `/tabbit-file.bin` 文件链接：
   - 页面出现 `下载 2`；
   - 扩展面板列出 `stream.m3u8`（HLS）与 `tabbit-file.bin`（文件）。
