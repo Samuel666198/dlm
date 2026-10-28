@@ -198,11 +198,24 @@
 - **四闸**：`--lib` **307/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（纯扩展/文档改动）。
 - **未做**：DASH/DRM、Firefox/Opera 包、自动下载。
 
+## 2026-10-28 右键下载 403 修复（User-Agent）
+
+- **症状**：Tabbit 右键 `Download with dlm` 后无文件、无提示。宿主日志显示三次
+  `试探请求被服务器拒绝：HTTP 403`。
+- **根因**：dlm 的请求**完全不带 User-Agent**；ModelScope 的 LFS CDN 对无 UA 请求直接 403
+  （同 URL 带 `dlm/0.1.0` 即 206）。
+- **修复**：`consts::USER_AGENT = dlm/<版本>`，引擎客户端与 HLS 客户端统一 `.user_agent(...)`；
+  新增判据 `engine::tests::every_http_request_carries_the_dlm_user_agent`。
+- **验证**：ModelScope PDF 真实落盘 **1,515,878 B**；Tabbit 真实右键链路经“无 UA 就 403”的本地站点
+  落盘 4 B（服务端记录 `ua="dlm/0.1.0"`）。证据＝[`../../evidence/2026-10-28-user-agent-403.md`](../../evidence/2026-10-28-user-agent-403.md)。
+- **四闸**：`--lib` **308/0**（3.01 s，新增 1 针）· `--bins` **4/0** · `integration` **117/0**（65.33 s）· clippy **0**。
+- **未做**：扩展仍不展示任务完成/失败；失败只能看宿主日志。
+
 ## 2026-10-28 Windows x64 便携包
 
 - **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
-  （**6,592,380 B**，sha256 `25ae1a56c71a40bc74e616cd11ae80de74e0a91164a1778b1fdfedac4f997a04`；
-  2026-10-28 晚随扩展 0.2.1 重建）。
+  （**6,599,138 B**，sha256 `eea6d764ea292fc07cc7ecf5dcc8752f7463f8b9470fce8a7279977453091a75`；
+  2026-10-28 晚随扩展 0.2.1 与 User-Agent 修复重建）。
 - **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
   `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
 - **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，

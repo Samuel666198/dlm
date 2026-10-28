@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
 use reqwest::blocking::Client;
 
+use crate::consts::USER_AGENT;
 use crate::engine::{self, Config, Report};
 use crate::probe;
 use crate::rate::RateLimiter;
@@ -27,6 +28,7 @@ const MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
 /// HLS 顺序下载不依赖连接池；明确禁用空闲复用，避免"服务端关连接、客户端复用旧池"的竞态。
 fn build_hls_client() -> Result<Client> {
     Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(HLS_CLIENT_TIMEOUT_SECS))
         .connect_timeout(std::time::Duration::from_secs(HLS_CONNECT_TIMEOUT_SECS))
         .tcp_nodelay(true)

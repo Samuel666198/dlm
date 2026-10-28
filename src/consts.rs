@@ -1,3 +1,8 @@
+/// 下载侧所有对外 HTTP 请求（探测、分段、整份、HLS）统一带的 User-Agent。
+///
+/// 不少 CDN/WAF 对**没有 UA** 的请求直接 403（ModelScope 的 LFS CDN 实测如此）；
+/// 用自报家门的 `dlm/<版本>`，不冒充浏览器。
+pub const USER_AGENT: &str = concat!("dlm/", env!("CARGO_PKG_VERSION"));
 pub const PROBE_READ_BYTES: u64 = 236_032;
 pub const MIN_SEGMENT_BYTES: u64 = 16_384;
 pub const DEFAULT_CONNECTIONS: usize = 8;

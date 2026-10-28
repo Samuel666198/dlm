@@ -159,7 +159,10 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
-use crate::consts::{FAST_RETRY_MAX, FLAG_KEEP_STATE, PROBE_READ_BYTES, SLOW_RETRY_INTERVAL_SECS, STATE_SAVE_MAX_INTERVAL_SECS};
+use crate::consts::{
+    FAST_RETRY_MAX, FLAG_KEEP_STATE, PROBE_READ_BYTES, SLOW_RETRY_INTERVAL_SECS, STATE_SAVE_MAX_INTERVAL_SECS,
+    USER_AGENT,
+};
 use crate::fetch::{self, FailKind, Outcome};
 use crate::probe;
 use crate::rate::RateLimiter;
@@ -1006,6 +1009,7 @@ pub(crate) fn sha256_of_path(path: &Path) -> Result<String> {
 /// `Connection: close` / `pool_max_idle_per_host(0)`（R5 / E2 / STATUS 第 3 条）。
 pub(crate) fn build_client() -> Result<Client> {
     Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(CLIENT_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_nodelay(true)
@@ -2876,5 +2880,28 @@ mod tests {
         );
         assert!(fx.engine.budget_exhausted, "花到顶必须置位");
         assert_eq!(fx.engine.budget_available(), 0);
+    }
+
+    /// 不少 CDN/WAF 对没有 UA 的请求直接 403（ModelScope 的 LFS CDN 实测如此）。
+    /// 这里只钉"请求真的带上了 `dlm/<版本>`"，不碰任何对端行为。
+    #[test]
+    fn every_http_request_carries_the_dlm_user_agent() {
+        use std::io::{Read as _, Write as _};
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).unwrap();
+            let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+            head
+        });
+        let resp = build_client().unwrap().get(format!("http://{addr}/ua")).send().unwrap();
+        assert_eq!(resp.status(), 200);
+        let head = server.join().unwrap();
+        let want = format!("user-agent: {}", USER_AGENT.to_ascii_lowercase());
+        assert!(head.contains(&want), "请求头里必须有 `{want}`：\n{head}");
     }
 }

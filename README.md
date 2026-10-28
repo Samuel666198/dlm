@@ -317,6 +317,7 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | 更新检查默认关闭；只有给了 `--update-url` 才发一次 GET，清单须含 `version`/`latest`；只通知，不自动下载安装；外部请求走系统代理环境 | C3 spec §2 |
 | 分类只按文件名扩展名打标签/筛选；`--category-dirs` 才建 `out-dir/<category>/` 子目录，默认不改落盘路径 | C3 spec §1 |
 | HLS 只做明文 m3u8（master/media、相对 URI、EXT-X-MAP、BYTERANGE）；拒绝加密 KEY；**不可续传**，失败保留已完成的半截文件；跨 host 分片不带 Cookie/Auth/Referer | B3a spec |
+| 下载请求统一带 `User-Agent: dlm/<版本>`（探测、分段、HLS、整份下载）；不冒充浏览器。部分 CDN/WAF 对**没有 UA** 的请求直接 403（ModelScope LFS 实测），浏览器右键投递失败多半是这一条 | 2026-10-28 修复 |
 | 重跳上限靠 HTTP 客户端默认继承，本 CLI 未显式设置 | — |
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
