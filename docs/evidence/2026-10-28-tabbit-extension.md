@@ -1,0 +1,43 @@
+# Tabbit 扩展安装记录（2026-10-28）
+
+**浏览器**：Tabbit Browser 1.18.21.0（Chromium 154）
+**扩展路径**：`%LOCALAPPDATA%\dlm\extension`（由包内 `install.ps1` 复制）
+**宿主**：`%LOCALAPPDATA%\dlm\bin\dlm-native-host.exe`，HKCU Chrome/Edge 已注册 `com.dlm.host`
+
+## 为什么不用“加载已解压”
+
+- Tabbit 的 `chrome://extensions` 在 Playwright/CDP 里被拦截（`Navigation URL is not allowed`）。
+- Tabbit 没有 `Extensions.loadUnpacked` CDP 命令（实测 `'Extensions.loadUnpacked' wasn't found`）。
+
+## 实际方案
+
+给 Tabbit 的四个快捷方式加启动参数：
+
+```text
+--load-extension="C:\Users\ROG\AppData\Local\dlm\extension" --disable-features=DisableLoadExtensionCommandLineSwitch
+```
+
+修改的快捷方式：
+
+- `%USERPROFILE%\Desktop\Tabbit Browser.lnk`
+- `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Tabbit Browser.lnk`
+- `%APPDATA%\Microsoft\Internet Explorer\Quick Launch\Tabbit Browser.lnk`
+- `%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Tabbit Browser.lnk`
+
+原快捷方式备份在 `%LOCALAPPDATA%\dlm\shortcut-backup\`。启动参数对每次通过这些快捷方式启动生效。
+
+## 验证
+
+- 重启 Tabbit 后打开 `https://example.com/`：
+  - `#dlm-submit` 存在；
+  - `#dlm-native-status` = `dlm native: pong com.dlm.host v0.1.0`。
+- 本地页面请求 `/stream.m3u8`：
+  - 页面出现 `媒体 1`；
+  - 扩展面板列出该 HLS URL（未实际再点下载，Edge 端已验过 `stream.ts = AAABBB`）。
+
+## 注意
+
+- 重启 Tabbit 时它没有自动恢复原标签页；已手动恢复 4 个 URL（本机 `samueldemac-mini.local` 已 DNS 不解析，未能恢复）。
+- 如果 Tabbit 更新或重建快捷方式，启动参数可能丢失；届时重新加回上面的参数即可。
+- 通过其它入口启动（例如自动更新器直接启动 exe、非上述快捷方式）不会带 `--load-extension`，扩展不会加载；先完全退出 Tabbit，再从未被改过的快捷方式启动。
+- 要撤销：把 `%LOCALAPPDATA%\dlm\shortcut-backup\` 里的对应 `.lnk` 复制回原位置。

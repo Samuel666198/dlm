@@ -101,3 +101,9 @@ DASH（`.mpd`）暂不列；不做音视频合并。
 - B2/B3b 扩展权限：`nativeMessaging` + `storage` + `contextMenus` + `cookies` + `webRequest`，
   `host_permissions: <all_urls>`；content script 显示状态、页面按钮和媒体面板。
 - 页面挂钩/DNR/代理不在 B2/B10；媒体嗅探只到 HLS/直链，DASH/DRM 未做。
+
+## Tabbit Browser（本机 1.18）
+
+Tabbit 是 Chromium 154，支持该扩展。自动化无法打开 `chrome://extensions`，本机用快捷方式参数
+`--load-extension=%LOCALAPPDATA%\dlm\extension` 加载；记录与回退方式见
+`docs/evidence/2026-10-28-tabbit-extension.md`。

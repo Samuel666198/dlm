@@ -377,6 +377,7 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`packaging/build-package.ps1`](packaging/build-package.ps1) | Windows x64 release zip 打包脚本 |
 | [`packaging/install.ps1`](packaging/install.ps1) | 包内用户级安装器（HKCU） |
 | [`docs/evidence/2026-10-28-package.md`](docs/evidence/2026-10-28-package.md) | 便携包产物、hash 与冒烟记录 |
+| [`docs/evidence/2026-10-28-tabbit-extension.md`](docs/evidence/2026-10-28-tabbit-extension.md) | Tabbit 1.18 扩展加载记录与快捷方式回退点 |
 | [`docs/superpowers/specs/2026-10-28-b3a-hls-design.md`](docs/superpowers/specs/2026-10-28-b3a-hls-design.md) | B3a HLS 直链设计 |
 | [`docs/superpowers/plans/2026-10-28-b3a-hls.md`](docs/superpowers/plans/2026-10-28-b3a-hls.md) | B3a HLS 直链计划 |
 | [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |
