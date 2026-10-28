@@ -912,6 +912,7 @@ $('add').addEventListener('submit', async (e) => {
   const j = await r.json();
   if (!j.ok) { alert(j.error || '添加失败'); return; }
   e.target.reset();
+  exeInput.style.display = 'none';
   load();
 });
 setInterval(load, 1000);

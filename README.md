@@ -248,7 +248,7 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 | `--endpoint <FILE>` | `%LOCALAPPDATA%\dlm\gui\endpoint.json` | B10 端点文件；写失败只警告、浏览器回退直连 |
 
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
-- **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。超出上界最多并发数 × 64 KiB。
+- **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。停止粒度按每个任务 dlm 的 worker 算：越过帽最多每个 worker 一块（64 KiB）。
 - **完成后动作**：队列只接 `open` 与 `run:<exe>`（与 CLI 同形，由子进程执行）；`shutdown` 在 API 层拒绝——队列可能同时完成多个任务，关机副作用不可控。
 - **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志（日志跨轮 append）。
 - **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
@@ -276,7 +276,7 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | 416 不是无条件"标完成"：只有 `Content-Range: bytes */<len>` 里的 `len` 等于我们手里的总长才认 | spec §10 R10 |
 | 断点保存的节奏**等于一枪收尾的节奏**（那句"每 5 秒兜底"是合取条件，从不单独生效）⇒ 开跑十几秒内被硬杀，断点里只有初始那一格种子 | spec §10 R14 |
 | v2 起每次 `Retighten` 的重复 ≤ 一块（64 KiB）：48 MiB、8 worker、全速实测 `duplicated` **319,799 B（0.63%）/ 32 次收紧**，上界 2,097,152 B；限速/续传档未复量，旧 12.8%–20.8% 只作 v1 历史 | spec §10 R21 / 计划 E14、E31 |
-| `--max-bytes` 按本次运行的新交付字节计：新建任务首轮预读计入，续传预读不计；到量最多再落一块（64 KiB），并发 N 时上界 N×64 KiB | spec §2.2/R24 |
+| `--max-bytes` 按本次运行的新交付字节计：新建任务首轮预读计入，续传预读不计。预读本身最多 236032 B；预算比它还小时，新建任务会先落这一截再停。此后到量最多再落一块（64 KiB），每个 dlm 的并发 worker 各算一块 | spec §2.2/R24 |
 | 队列配额按断点覆盖量增量采样（500 ms 一拍）：暂停/崩溃前最后一拍之后在途、尚未写进断点的字节不计入本窗，续传时重新计入；系统时钟回拨会延后固定窗口 | spec §2.1/§2.7 |
 | 队列配额与 `--max-speed` 是两件事；队列暂不透传限速 | spec §2.7 |
 | B10 端点文件含 token，位于用户目录；同用户进程可读，与"能直接 spawn dlm"同一信任边界；GUI 被硬杀会留下陈旧端点文件，宿主按"连不上 ⇒ 回退"容忍 | spec §4.5 |
