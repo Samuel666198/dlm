@@ -237,7 +237,7 @@ try {
   let statusText = '';
   for (let i = 0; i < 60; i++) {
     statusText = (await evalText("document.querySelector('#dlm-native-status')?.textContent || ''")) || '';
-    if (/pong|dlm job|dlm queue/i.test(statusText)) break;
+    if (/pong|正在下载|已加入队列|下载完成|下载失败/i.test(statusText)) break;
     await sleep(250);
   }
   log += `host_status=${statusText}\n`;
@@ -256,6 +256,16 @@ try {
   if (autoBytes !== 4) throw new Error(`点击下载链接没有交给 dlm：${autoBytes}`);
   if (!stayed) throw new Error('点击下载链接后页面跳走了');
   if (fs.readFileSync(autoPath, 'utf8') !== 'AUTO') throw new Error('自动接管内容不对');
+
+  // 宿主在子进程退出后要回 done，页面必须看得到完成/失败。
+  let doneText = '';
+  for (let i = 0; i < 100; i++) {
+    doneText = (await evalText("document.querySelector('#dlm-native-status')?.textContent || ''")) || '';
+    if (/下载完成|下载失败/i.test(doneText)) break;
+    await sleep(100);
+  }
+  log += `done_status=${doneText}\n`;
+  if (!doneText.includes('下载完成')) throw new Error(`没有收到完成反馈：${doneText}`);
 
   // 普通页面链接不许被接管（对照臂：defaultPrevented 必须为 false）。
   const normalPrevented = await evalText(`(() => {

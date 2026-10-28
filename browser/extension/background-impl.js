@@ -9,6 +9,7 @@ const mediaStore = chrome.storage.session || chrome.storage.local;
 let port = null;
 let mediaByTab = new Map();
 const mediaReady = loadMedia();
+chrome.storage.local.set({ buildVersion: chrome.runtime.getManifest().version, buildHasDone: true });
 
 function store(values) {
   chrome.storage.local.set(values);
@@ -121,9 +122,24 @@ function connect() {
   }
 
   port.onMessage.addListener((msg) => {
-    if (msg && msg.op === "accepted") {
+    if (msg && msg.op === "done") {
+      store({ lastResult: msg });
+      chrome.action.setBadgeText({ text: msg.ok ? "✓" : "!" });
+      chrome.action.setBadgeBackgroundColor({ color: msg.ok ? "#2e7d32" : "#c62828" });
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const tab = tabs && tabs[0];
+        if (tab && tab.id != null) {
+          chrome.tabs.sendMessage(
+            tab.id,
+            { op: "job-done", job: msg.job, ok: msg.ok, code: msg.code },
+            () => void chrome.runtime.lastError
+          );
+        }
+      });
+      console.log("dlm job done", msg);
+    } else if (msg && msg.op === "accepted") {
       const mode = msg.mode || "direct";
-      store({ lastJob: { ...msg, mode }, lastError: null });
+      store({ lastJob: { ...msg, mode }, lastResult: null, lastError: null });
       chrome.action.setBadgeText({ text: "↓" });
       chrome.action.setBadgeBackgroundColor({ color: "#0f766e" });
       console.log("dlm job accepted", mode, msg);

@@ -77,8 +77,13 @@ function refresh() {
   });
 }
 
-chrome.storage.local.get(["lastPong", "lastError", "lastJob"], (values) => {
-  if (values.lastJob) setStatus(values.lastJob.mode === "queue" ? "已加入队列" : "已直接下载");
+chrome.storage.local.get(["lastPong", "lastError", "lastJob", "lastResult"], (values) => {
+  if (values.lastResult) {
+    setStatus(
+      values.lastResult.ok ? "下载完成" : "下载失败（退出码 " + (values.lastResult.code ?? "?") + "）",
+      !values.lastResult.ok
+    );
+  } else if (values.lastJob) setStatus(values.lastJob.mode === "queue" ? "已加入队列" : "已交给 dlm");
   else if (values.lastPong) setStatus("宿主 " + (values.lastPong.version || "ok"));
   else setStatus(values.lastError || "宿主未连接", true);
 });

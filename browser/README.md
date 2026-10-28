@@ -85,7 +85,12 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 页面里已识别的下载/媒体链接，左键点击会被 content script 接管（`preventDefault`）并交给 dlm；
   仅当宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、普通链接不接管；
   `page-download` 投递失败时回退浏览器默认行为。
+- 宿主 spawn dlm 时用 `CREATE_NO_WINDOW`，不再弹空白终端窗口（关窗口会顺手杀掉下载）。
+- 宿主在子进程退出后回一条 `op:"done"`；页面右下角显示“正在下载 / 下载完成 / 下载失败（退出码）”，
+  popup 同步显示最近结果。
 - 工具栏 popup 显示宿主状态与当前标签页的下载列表。
+- `background.js` 是稳定入口 `background-sw.js` + 版本化 `importScripts("background-impl.js?v=<version>")`：
+  未打包扩展的 Service Worker 会被浏览器缓存，换实现时靠版本号换 URL 强制重取。
 - 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；
   普通文件不带 Cookie 时按 B10 进队列（GUI 开着），带 Cookie 或 GUI 不可达时直连。
 - 验收：

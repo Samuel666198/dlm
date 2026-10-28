@@ -221,11 +221,23 @@
 - **四闸**：`--lib` **308/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（纯扩展/文档）。
 - **未做**：不做 `chrome.downloads` 全局接管，JS 按钮/表单触发的下载仍走浏览器。
 
+## 2026-10-28 下载不再弹终端窗口 + 完成反馈
+
+- **症状**：点击下载后出现空白终端窗口；关窗口会杀掉 dlm，页面无任何完成/失败提示。
+- **修复**：`host.rs` 在 Windows 上以 `CREATE_NO_WINDOW` 启动 dlm；子进程退出后回
+  `{op:"done",job,ok,code,log}`，页面右下角与 popup 显示“正在下载 / 下载完成 / 下载失败（退出码）”。
+- **SW 缓存**：未打包扩展只改 `background.js`、重启浏览器仍可能跑旧 Service Worker；
+  改为 `background-sw.js` + 版本化 `importScripts("background-impl.js?v=<version>")`。
+- **验证**：Tabbit 32 MiB 慢速下载 `MainWindowHandle=0`、落盘 33,554,432 B、状态变为“下载完成”；
+  Edge 自动化的 `done_status` 也是“下载完成”。扩展 0.2.4。
+- **四闸**：`--lib` **309/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**。
+- **未做**：被硬杀时未确认的字节不能安全续传；本次 9.35 GB 半截文件已停止重下，需删除后重下。
+
 ## 2026-10-28 Windows x64 便携包
 
 - **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
-  （**6,599,956 B**，sha256 `47cb3a8df6f2a4b11cfb8ac84321f487b3a990c01e2bac7e4272730b83c200cd`；
-  2026-10-28 晚随扩展 0.2.2、点击接管与 User-Agent 修复重建）。
+  （**6,608,186 B**，sha256 `6c142abe36405dad5660d9687347c67f06fe9e02a94de8efb2cbec73df97d1d2`；
+  2026-10-28 晚随扩展 0.2.4、点击接管、完成反馈与 User-Agent 修复重建）。
 - **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
   `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
 - **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，

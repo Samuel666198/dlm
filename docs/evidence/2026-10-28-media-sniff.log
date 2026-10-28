@@ -1,11 +1,12 @@
 browser=Edg/156.0.4314.50
-page=http://127.0.0.1:61755/page.html
+page=http://127.0.0.1:59273/page.html
 dlm=E:\WorkSpace\projects\tool\dlm\target\debug\dlm.exe
 media_button=下载 3
-media_items=["http://127.0.0.1:61755/file.bin","http://127.0.0.1:61755/auto.bin","http://127.0.0.1:61755/stream.m3u8"]
-file=C:\Users\ROG\AppData\Local\Temp\dlm-media-HIPMfJ\dl\stream.ts bytes=6
-plain_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-HIPMfJ\dl\file.bin bytes=4
-host_status=dlm job: 1793195872-2
-auto_click_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-HIPMfJ\dl\auto.bin bytes=4 stayed=true
+media_items=["http://127.0.0.1:59273/file.bin","http://127.0.0.1:59273/auto.bin","http://127.0.0.1:59273/stream.m3u8"]
+file=C:\Users\ROG\AppData\Local\Temp\dlm-media-9FEnOX\dl\stream.ts bytes=6
+plain_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-9FEnOX\dl\file.bin bytes=4
+host_status=dlm: 下载完成
+auto_click_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-9FEnOX\dl\auto.bin bytes=4 stayed=true
+done_status=dlm: 下载完成
 normal_link_prevented=false
 screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-28-media-sniff.png

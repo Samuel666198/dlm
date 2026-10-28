@@ -6,7 +6,7 @@
 
 ## 实现
 
-- `background.js`：
+- `background-impl.js`（入口是稳定的 `background-sw.js`，按扩展版本 import）：
   - `webRequest.onBeforeRequest` 只读嗅探 `.m3u8`/媒体后缀（每 tab 去重、最多 40 条，
     `storage.session` 跨 service worker 保存，`tabs.onRemoved/onUpdated` 清理）。
   - `webRequest.onHeadersReceived`（`responseHeaders`）认 `Content-Disposition: attachment`
@@ -19,11 +19,14 @@
 - `content.js` 点击接管：已识别为下载/媒体的 `<a>` 左键点击在捕获阶段 `preventDefault`，
   改发 `page-download`；只在宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、
   普通链接不接管；`page-download` 回执 `ok:false` 时回退浏览器默认行为。
-- `background.js`：`page-download` 回 `{ok}`，让 content 能区分“宿主没接住”并回退。
+- `background-impl.js`：`page-download` 回 `{ok}`，让 content 能区分“宿主没接住”并回退；
+  收到宿主的 `op:"done"` 后存 `lastResult`、切徽标，并通知当前标签页。
+- `src/host.rs`：spawn dlm 用 `CREATE_NO_WINDOW`（Windows），不再弹终端窗口；
+  子进程退出后回 `{op:"done",job,ok,code,log}`。
 - `popup.html` / `popup.js`：扩展图标 popup，显示宿主状态和当前标签页下载列表。
 - `src/host.rs`：`download` 接受 `hls:true`，跳过队列，给 dlm 加 `--hls`；HLS 强制直连；
   普通文件不带 Cookie 时按 B10 进队列。**本轮 host.rs 无改动。**
-- Manifest：扩展版本 **0.2.2**（点击接管增量；权限沿用 `webRequest`）。
+- Manifest：扩展版本 **0.2.4**（点击接管 + 完成反馈 + SW 缓存入口；权限沿用 `webRequest`）。
 
 ## 真浏览器验收（Edge 156）
 
@@ -50,12 +53,14 @@ normal_link_prevented=false
 
 ## 真浏览器验收（Tabbit 1.18.21 / Chromium 154）
 
-- 扩展从 `%LOCALAPPDATA%\dlm\extension`（0.2.2）加载；页面出现 `下载 2`，
+- 扩展从 `%LOCALAPPDATA%\dlm\extension`（0.2.4）加载；页面出现 `下载 2`，
   条目 `stream.m3u8` + `tabbit-file.bin`。
 - 点文件条目：`%USERPROFILE%\Downloads\tabbit-file.bin` **4 B** = `FILE`；
 - 点 HLS 条目：`%USERPROFILE%\Downloads\stream.ts` **6 B** = `AAABBB`；
 - **左键点页面里的下载链接**：页面 URL 不变，dlm 落盘 `tabbit-file.bin` **4 B** = `FILE`；
-  本地站点记录到请求头 `ua="dlm/0.1.0"`。
+  本地站点记录到请求头 `ua="dlm/0.1.0"`；状态从“正在下载”变为 `dlm: 下载完成`。
+- **慢速 32 MiB 下载**：dlm 进程 `MainWindowHandle=0`（没有终端窗口），落盘 33,554,432 B，
+  状态最终为 `dlm: 下载完成`。
 - 截图：`docs/evidence/2026-10-28-tabbit-file-panel.png`；
   加载与快捷方式细节：`2026-10-28-tabbit-extension.md`。
 

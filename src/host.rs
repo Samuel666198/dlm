@@ -8,7 +8,11 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -82,20 +86,45 @@ impl HostConfig {
     }
 }
 
+/// Windows：别给控制台程序开可见终端。宿主是浏览器拉起的后台进程，弹一个空白终端
+/// 会让用户以为“没反应”，关掉窗口还会顺手杀掉正在下载的 dlm。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+type Notify = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+
 pub struct Host {
     config: HostConfig,
     seq: u64,
+    notify: Option<Notify>,
 }
 
 impl Host {
     pub fn new(config: HostConfig) -> Self {
-        Self { config, seq: 0 }
+        Self { config, seq: 0, notify: None }
+    }
+
+    pub fn with_notify(mut self, notify: Notify) -> Self {
+        self.notify = Some(notify);
+        self
     }
 
     pub fn serve_stdio() -> io::Result<()> {
         let config = HostConfig::load();
-        let mut host = Host::new(config);
-        host.serve(io::stdin().lock(), io::stdout().lock())
+        let out = Arc::new(std::sync::Mutex::new(io::stdout()));
+        let writer = out.clone();
+        let host = Host::new(config).with_notify(Arc::new(move |bytes| {
+            if let Ok(mut guard) = writer.lock() {
+                let _ = native::write_frame(&mut *guard, &bytes);
+            }
+        }));
+        let mut stdin = io::stdin().lock();
+        let mut host = host;
+        while let Some(frame) = native::read_frame(&mut stdin)? {
+            let reply = host.handle(&frame);
+            native::write_frame(&mut *out.lock().expect("stdout lock"), &reply)?;
+        }
+        Ok(())
     }
 
     pub fn serve<R: Read, W: Write>(&mut self, mut input: R, mut output: W) -> io::Result<()> {
@@ -209,6 +238,8 @@ impl Host {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .stdin(if cookie.is_some() { Stdio::piped() } else { Stdio::null() });
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
@@ -222,6 +253,27 @@ impl Host {
         {
             let _ = child.kill();
             return error("could not hand cookie to dlm");
+        }
+
+        if let Some(notify) = self.notify.clone() {
+            let job = job.clone();
+            let log_path = log_path.clone();
+            std::thread::spawn(move || {
+                let (ok, code) = match child.wait() {
+                    Ok(status) => (status.success(), status.code()),
+                    Err(_) => (false, None),
+                };
+                let frame = json!({
+                    "op": "done",
+                    "job": job,
+                    "ok": ok,
+                    "code": code,
+                    "log": log_path.to_string_lossy(),
+                });
+                if let Ok(bytes) = serde_json::to_vec(&frame) {
+                    notify(bytes);
+                }
+            });
         }
 
         serde_json::to_vec(&json!({
@@ -389,6 +441,28 @@ mod tests {
         assert_eq!(reply["mode"], "direct", "没有端点文件 ⇒ 回退直连：{reply}");
         let log = reply["log"].as_str().expect("log path");
         assert!(std::path::Path::new(log).exists(), "job log should exist: {log}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_reports_when_the_download_process_exits() {
+        let dir = std::env::temp_dir().join(format!("dlm-b2-done-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut host = Host::new(config(&dir)).with_notify(Arc::new(move |bytes| {
+            let _ = tx.send(bytes);
+        }));
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/x","name":"x.bin"}"#),
+        )
+        .unwrap();
+        assert_eq!(reply["op"], "accepted", "{reply}");
+        let frame = rx.recv_timeout(Duration::from_secs(15)).expect("done frame");
+        let done: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(done["op"], "done", "{done}");
+        assert_eq!(done["job"], reply["job"]);
+        assert!(done["ok"].is_boolean(), "done 必须带退出结论：{done}");
+        assert_eq!(done["log"], reply["log"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

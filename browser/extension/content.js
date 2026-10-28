@@ -1,5 +1,6 @@
 // 页面右下角的 dlm 状态 + 一个把当前页交给 dlm 的按钮（B2 的最小可测入口）。
 // 真正的右键菜单在 background.js；这个按钮让浏览器验收可以走 DOM 点击。
+document.documentElement.setAttribute("data-dlm-version", chrome.runtime.getManifest().version);
 
 function ensureBox() {
   let box = document.getElementById("dlm-native-box");
@@ -218,14 +219,18 @@ document.addEventListener(
 function render() {
   ensureBox();
   const el = document.getElementById("dlm-native-status");
-  chrome.storage.local.get(["lastPong", "lastError", "lastJob"], (values) => {
+  chrome.storage.local.get(["lastPong", "lastError", "lastJob", "lastResult"], (values) => {
     hostReady = !!values.lastPong;
-    if (values.lastJob) {
+    if (values.lastResult) {
+      const r = values.lastResult;
+      el.textContent = r.ok ? "dlm: 下载完成" : "dlm: 下载失败（退出码 " + (r.code ?? "?") + "）";
+      el.style.background = r.ok ? "#1b5e20" : "#c62828";
+    } else if (values.lastJob) {
       const job = values.lastJob;
       if (job.mode === "queue") {
-        el.textContent = "dlm queue: " + (job.id || "accepted");
+        el.textContent = "dlm: 已加入队列 " + (job.id || "");
       } else {
-        el.textContent = "dlm job: " + (job.job || "accepted");
+        el.textContent = "dlm: 正在下载 " + (job.job || "");
       }
       el.style.background = "#1565c0";
     } else if (values.lastPong) {
@@ -243,5 +248,12 @@ render();
 refreshMedia();
 setInterval(refreshMedia, 1500);
 chrome.storage.onChanged.addListener(render);
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.op !== "job-done") return;
+  const el = document.getElementById("dlm-native-status");
+  if (!el) return;
+  el.textContent = msg.ok ? "dlm: 下载完成" : "dlm: 下载失败（退出码 " + (msg.code ?? "?") + "）";
+  el.style.background = msg.ok ? "#1b5e20" : "#c62828";
+});
 // 页面加载时主动唤醒 service worker：未打包扩展刚加载时它可能还没被任何事件拉起。
 chrome.runtime.sendMessage({ op: "wake" }, () => void chrome.runtime.lastError);
