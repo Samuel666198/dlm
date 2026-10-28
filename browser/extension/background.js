@@ -1,13 +1,84 @@
-// B2/B10：Native Messaging 长连接 + 右键菜单/页面按钮投递。
+// B2/B10/B3b：Native Messaging 长连接 + 右键/页面投递 + 媒体嗅探。
 // 只把 url/referer/cookie 交给宿主；页面挂钩、DNR、代理读取不在这一版。
 // B10：宿主对无 Cookie 的公开直链优先交给 dlm-gui 队列，回执用 mode 区分 queue/direct。
+// B3b：webRequest 只读嗅探 .m3u8/媒体直链；HLS 强制直连 dlm --hls。
 
 const HOST = "com.dlm.host";
+const MEDIA_KEY = "mediaByTab";
+const mediaStore = chrome.storage.session || chrome.storage.local;
 let port = null;
+let mediaByTab = new Map();
+const mediaReady = loadMedia();
 
 function store(values) {
   chrome.storage.local.set(values);
 }
+
+function loadMedia() {
+  return mediaStore
+    .get(MEDIA_KEY)
+    .then((got) => {
+      const raw = got && got[MEDIA_KEY];
+      mediaByTab = new Map(Object.entries(raw || {}));
+    })
+    .catch(() => {
+      mediaByTab = new Map();
+    });
+}
+
+function saveMedia() {
+  const raw = Object.fromEntries(mediaByTab);
+  return mediaStore.set({ [MEDIA_KEY]: raw }).catch(() => {});
+}
+
+function mediaKind(details) {
+  const url = details && details.url;
+  if (!/^https?:\/\//i.test(url || "")) return null;
+  let path = "";
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (path.endsWith(".m3u8")) return "hls";
+  if (path.endsWith(".mpd")) return null; // DASH 需要音视频合并，B3b 不列
+  if ([".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".ts", ".mov"].some((ext) => path.endsWith(ext))) {
+    return "file";
+  }
+  if (details.type === "media") return "file";
+  return null;
+}
+
+function noteMedia(details) {
+  if (!details || details.tabId < 0) return;
+  const kind = mediaKind(details);
+  if (!kind) return;
+  mediaReady.then(() => {
+    const list = mediaByTab.get(details.tabId) || [];
+    if (list.some((item) => item.url === details.url)) return;
+    list.push({ url: details.url, kind, at: Date.now() });
+    while (list.length > 20) list.shift();
+    mediaByTab.set(details.tabId, list);
+    saveMedia();
+  });
+}
+
+chrome.webRequest.onBeforeRequest.addListener(noteMedia, {
+  urls: ["<all_urls>"],
+  types: ["media", "xmlhttprequest", "other"],
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  mediaReady.then(() => {
+    if (mediaByTab.delete(tabId)) saveMedia();
+  });
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!changeInfo.url) return;
+  mediaReady.then(() => {
+    if (mediaByTab.delete(tabId)) saveMedia();
+  });
+});
 
 function connect() {
   if (port) return;
@@ -24,7 +95,7 @@ function connect() {
       const mode = msg.mode || "direct";
       store({ lastJob: { ...msg, mode }, lastError: null });
       chrome.action.setBadgeText({ text: "↓" });
-      chrome.action.setBadgeBackgroundColor({ color: "#1565c0" });
+      chrome.action.setBadgeBackgroundColor({ color: "#0f766e" });
       console.log("dlm job accepted", mode, msg);
     } else if (msg && msg.op === "error") {
       store({ lastPong: null, lastError: msg.message || "native host error" });
@@ -73,13 +144,15 @@ function cookieHeader(url) {
   });
 }
 
-function submitPage(url, referer) {
+function submitPage(url, referer, hls) {
   if (!/^https?:\/\//i.test(url || "")) {
     store({ lastJob: null, lastError: "only http/https URLs can be sent to dlm" });
     return;
   }
   cookieHeader(url).then((cookie) => {
-    submitTask({ op: "download", url, referer: referer || url, cookie });
+    const task = { op: "download", url, referer: referer || url, cookie };
+    if (hls) task.hls = true;
+    submitTask(task);
   });
 }
 
@@ -99,18 +172,24 @@ chrome.runtime.onInstalled.addListener(() => {
   connect();
 });
 chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.op === "wake") connect();
-  if (msg && msg.op === "page-download") submitPage(msg.url, msg.referer);
+  if (msg && msg.op === "page-download") {
+    submitPage(msg.url, msg.referer, !!msg.hls);
+  }
+  if (msg && msg.op === "media-list") {
+    mediaReady.then(() => {
+      const tabId = msg.tabId == null ? sender.tab && sender.tab.id : msg.tabId;
+      sendResponse({ items: (tabId == null ? [] : mediaByTab.get(tabId)) || [] });
+    });
+    return true;
+  }
   sendResponse({ ok: true });
 });
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== "dlm-download") return;
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
-  submitPage(url, info.pageUrl || (tab && tab.url) || url);
-});
-chrome.action.onClicked.addListener(() => {
-  if (port) port.postMessage({ op: "ping" });
-  else connect();
+  const hls = /\.m3u8(?:$|[?#])/i.test(url);
+  submitPage(url, info.pageUrl || (tab && tab.url) || url, hls);
 });

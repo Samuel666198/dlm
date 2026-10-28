@@ -3,7 +3,7 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 是内核与命令行；v2 已加 B1/B2/B10 浏览器投递（无 Cookie 的公开直链可进队列）与 C1–C3 本地 Web UI
+v1 是内核与命令行；v2 已加 B1/B2/B10/B3b 浏览器投递（无 Cookie 的公开直链可进队列，页面媒体嗅探）与 C1–C3 本地 Web UI
 （`dlm-gui`：任务队列、全局固定窗口配额、完成后动作、环回 HTTP + 内嵌单页）。不做原生 GUI、Windows 服务、守护进程、站点抓取。
 
 ```
@@ -211,7 +211,7 @@ B2 **没有**本地监听/令牌，也不是队列（队列与环回 HTTP 在 C 
 node browser/test/verify-native-download.mjs
 ```
 
-页面挂钩、DNR、代理读取、媒体嗅探不在 B2。
+页面挂钩、DNR、代理读取不在 B2；媒体嗅探由 B3b-lite 的扩展面板负责（见下）。
 
 **B10**：无 Cookie 的公开直链，在 `dlm-gui` 开着时优先交给队列（回执 `mode:"queue"` + `id`）；
 带 Cookie 的下载仍走 B2 直连（队列不存 Cookie）；GUI 不可达或端点文件不存在 ⇒ 回退直连；
@@ -225,6 +225,14 @@ node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Mi
 ```
 
 证据：[`docs/evidence/2026-10-27-quota-queue-b10.md`](docs/evidence/2026-10-27-quota-queue-b10.md)。
+
+**B3b-lite 媒体嗅探**：扩展用 `webRequest`（只读）监听当前标签页的 `.m3u8` 与媒体直链，
+页面右下角出现“媒体 N”面板，工具栏 popup 也能看；点“下载”把 URL 交给宿主，HLS 强制直连
+`dlm --hls`（队列不接不可续传的 HLS）。只列 HLS/直链，不列 DASH，不自动下载。浏览器验收：
+
+```bash
+node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
 
 ## HLS 直链（B3a）
 
@@ -240,7 +248,8 @@ target/debug/dlm.exe --url https://example.com/master.m3u8 --hls --out-dir D:/dl
 - 分片按顺序写入一个输出文件；默认名把 `.m3u8` 换成 `.ts`。**不写断点、不可续传**，失败保留半截文件。
 - 同源分片沿用 Referer/Cookie/Basic；**跨 host 分片不带这些凭据**。
 - `--max-speed` 可叠加；`--sha256` 在合并完成后校验；`--data-file`/`--max-bytes` 与 `--hls` 互斥。
-- **不做** DASH、DRM、浏览器媒体嗅探、队列 HLS。队列/浏览器投递的 `.m3u8` 仍按普通文件处理。
+- **不做** DASH、DRM、队列 HLS。浏览器里的 HLS/媒体直链由 B3b-lite 扩展嗅探并直连 `--hls`；
+  直接投递 `.m3u8` 到队列仍按普通文件处理。
 
 ## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
 
@@ -310,8 +319,8 @@ node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截�
 | `\r` 覆盖不擦掉上一发的行尾；终端窄于进度行会折行 | 计划 E26/C6 |
 | 耗时只印 `ms` 一档，不做自适应 | 计划 E26/C7 |
 
-不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/媒体嗅探/站点抓取（B1/B2 已有直接 URL 投递；
-B3 只做了 B3a 的 HLS 直链，DASH/DRM/嗅探未做）、
+不做且不在 v1 计划：内核/驱动拦截、浏览器页面挂钩/站点抓取（B1/B2 已有直接 URL 投递；
+B3a 已有 HLS 直链，B3b-lite 已有扩展媒体面板；DASH/DRM 未做）、
 原生 GUI/Windows 服务/开机自启、常驻守护进程、配额式限速（到量暂停/择时恢复）、自动更新、
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
@@ -321,7 +330,7 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```
-cargo test --lib                            # 306 通过（含队列/配额/分类/更新/HLS/UI 纯函数）
+cargo test --lib                            # 307 通过（含队列/配额/分类/更新/HLS/宿主/UI 纯函数）
 cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
 cargo test --test integration               # 117 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查/HLS 端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
@@ -345,6 +354,9 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/superpowers/specs/2026-10-28-c3-categories-update-design.md`](docs/superpowers/specs/2026-10-28-c3-categories-update-design.md) | C3 分类规则与更新检查设计 |
 | [`docs/superpowers/plans/2026-10-28-c3-categories-update.md`](docs/superpowers/plans/2026-10-28-c3-categories-update.md) | C3 分类规则与更新检查计划 |
 | [`docs/evidence/2026-10-28-c3-categories-update.md`](docs/evidence/2026-10-28-c3-categories-update.md) | C3 分类/更新证据 |
+| [`docs/superpowers/specs/2026-10-28-media-sniff-design.md`](docs/superpowers/specs/2026-10-28-media-sniff-design.md) | B3b-lite 媒体嗅探设计 |
+| [`docs/superpowers/plans/2026-10-28-media-sniff.md`](docs/superpowers/plans/2026-10-28-media-sniff.md) | B3b-lite 媒体嗅探计划 |
+| [`docs/evidence/2026-10-28-media-sniff.md`](docs/evidence/2026-10-28-media-sniff.md) | B3b-lite 媒体嗅探证据 |
 | [`docs/superpowers/specs/2026-10-28-b3a-hls-design.md`](docs/superpowers/specs/2026-10-28-b3a-hls-design.md) | B3a HLS 直链设计 |
 | [`docs/superpowers/plans/2026-10-28-b3a-hls.md`](docs/superpowers/plans/2026-10-28-b3a-hls.md) | B3a HLS 直链计划 |
 | [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |

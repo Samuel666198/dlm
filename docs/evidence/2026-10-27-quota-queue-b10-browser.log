@@ -1,11 +1,11 @@
 browser=Edg/156.0.4314.50
-page=http://127.0.0.1:64254/file.bin
-queue_out=C:\Users\ROG\AppData\Local\Temp\dlm-b10-b9BxVe\queue-out
-direct=C:\Users\ROG\AppData\Local\Temp\dlm-b10-b9BxVe\direct
-queue_status=dlm queue: 1793170656418-1
-queue_task=[{"id":"1793170656418-1","url":"http://127.0.0.1:64254/file.bin","name":"file.bin","referer":"http://127.0.0.1:64254/file.bin","status":"done","pid":null,"exit_code":0,"log":"C:\\Users\\ROG\\AppData\\Local\\Temp\\dlm-b10-b9BxVe\\gui-logs\\1793170656418-1.log","progress":100,"total_len":65536,"delivered":65536,"created_at":1793170656,"updated_at":1793170656,"start_at":null,"hold_until":null,"on_complete":null}]
-queue_file=C:\Users\ROG\AppData\Local\Temp\dlm-b10-b9BxVe\queue-out\file.bin bytes=65536
+page=http://127.0.0.1:55627/file.bin
+queue_out=C:\Users\ROG\AppData\Local\Temp\dlm-b10-Iv7l5S\queue-out
+direct=C:\Users\ROG\AppData\Local\Temp\dlm-b10-Iv7l5S\direct
+queue_status=dlm queue: 1793185838271-1
+queue_task=[{"id":"1793185838271-1","url":"http://127.0.0.1:55627/file.bin","name":"file.bin","referer":"http://127.0.0.1:55627/file.bin","status":"done","pid":null,"exit_code":0,"log":"C:\\Users\\ROG\\AppData\\Local\\Temp\\dlm-b10-Iv7l5S\\gui-logs\\1793185838271-1.log","progress":100,"total_len":65536,"delivered":65536,"created_at":1793185838,"updated_at":1793185838,"start_at":null,"hold_until":null,"on_complete":null,"category":"other"}]
+queue_file=C:\Users\ROG\AppData\Local\Temp\dlm-b10-Iv7l5S\queue-out\file.bin bytes=65536
 queue_screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-27-quota-queue-b10-queue.png
-direct_status=dlm job: 1793170659-1
-direct_file=C:\Users\ROG\AppData\Local\Temp\dlm-b10-b9BxVe\direct\file.bin ok=true
+direct_status=dlm job: 1793185841-1
+direct_file=C:\Users\ROG\AppData\Local\Temp\dlm-b10-Iv7l5S\direct\file.bin ok=true
 screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-27-quota-queue-b10.png

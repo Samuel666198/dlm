@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{color-scheme:light;font-family:"Segoe UI Variable","Segoe UI",system-ui,"Microsoft YaHei",sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;width:360px;background:#f7f8fa;color:#171b22}
+  header{display:flex;align-items:center;justify-content:space-between;padding:13px 14px 11px;border-bottom:1px solid #e6e9ee}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;letter-spacing:-.02em}
+  .mark{width:24px;height:24px;border-radius:6px;background:#0f766e;color:#fff;display:grid;place-items:center;font-size:13px}
+  .status{font:10px ui-monospace,Consolas,monospace;color:#6c7687;border:1px solid #e6e9ee;background:#fff;border-radius:6px;padding:4px 7px}
+  main{padding:10px 12px 12px}
+  .hint{font-size:11px;color:#9aa4b2;padding:8px 2px 10px}
+  .item{border:1px solid #e6e9ee;background:#fff;border-radius:8px;padding:9px;margin-bottom:7px}
+  .row{display:flex;align-items:center;gap:7px}
+  .kind{font:9px ui-monospace,Consolas,monospace;color:#0f766e;border:1px solid #cfe8e2;background:#e7f4f1;border-radius:4px;padding:1px 4px}
+  .url{flex:1;min-width:0;font:10px ui-monospace,Consolas,monospace;color:#6c7687;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dl{flex:0 0 auto;border:0;border-radius:5px;background:#0f766e;color:#fff;font-size:11px;padding:5px 9px;cursor:pointer}
+  .dl:hover{background:#0b655e}
+  .empty{font-size:11px;color:#9aa4b2;text-align:center;padding:22px 8px}
+  footer{display:flex;justify-content:space-between;align-items:center;padding:0 14px 12px;font:10px ui-monospace,Consolas,monospace;color:#9aa4b2}
+  button.ghost{font-size:10px;border:1px solid #e6e9ee;background:#fff;color:#6c7687;border-radius:5px;padding:4px 7px;cursor:pointer}
+</style>
+</head>
+<body>
+<header><div class="brand"><span class="mark">↓</span>dlm</div><div class="status" id="status">检查宿主…</div></header>
+<main><div class="hint">当前页面检测到的媒体</div><div id="list"></div></main>
+<footer><span id="count">0 条</span><button class="ghost" id="refresh">刷新</button></footer>
+<script src="popup.js"></script>
+</body>
+</html>

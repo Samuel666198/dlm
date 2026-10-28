@@ -129,10 +129,12 @@ impl Host {
         let name = text("name");
         let referer = text("referer");
         let cookie = text("cookie");
+        let hls = value.get("hls").and_then(Value::as_bool).unwrap_or(false);
 
         // B10：无 Cookie 且队列可达 ⇒ 交给队列（队列的落点是 `dlm-gui --out-dir`）。
         // 带 Cookie 的下载仍走 B2 直连：队列不存 Cookie。
-        if cookie.is_none() {
+        // B3b：HLS 强制直连 —— 队列没有 --hls，也不能把不可续传的 HLS 伪装成普通文件。
+        if cookie.is_none() && !hls {
             match self.try_queue(url, name, referer) {
                 QueueOutcome::Queued(id) => {
                     return serde_json::to_vec(&json!({
@@ -196,6 +198,9 @@ impl Host {
         }
         if cookie.is_some() {
             args.push("--cookie-stdin".into());
+        }
+        if hls {
+            args.push("--hls".into());
         }
 
         let mut command = Command::new(&self.config.dlm_exe);
@@ -457,6 +462,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reply["mode"], "direct", "端点连不上要回退：{reply}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hls_downloads_skip_the_queue_and_stay_direct() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = std::env::temp_dir().join(format!("dlm-b3b-hls-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut host = Host::new(HostConfig {
+            gui_endpoint: Some(endpoint_file(&dir, port)),
+            ..config(&dir)
+        });
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/a.m3u8","hls":true}"#),
+        )
+        .unwrap();
+        assert_eq!(reply["mode"], "direct", "HLS 必须直连：{reply}");
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "HLS 不许碰队列端点");
         let _ = fs::remove_dir_all(&dir);
     }
 

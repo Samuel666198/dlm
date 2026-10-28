@@ -16,6 +16,20 @@ function ensureBox() {
     "style",
     "padding:8px 12px;font:12px/1.4 monospace;color:#fff;border-radius:4px;max-width:60vw;white-space:pre-wrap"
   );
+  const mediaButton = document.createElement("button");
+  mediaButton.id = "dlm-media-count";
+  mediaButton.type = "button";
+  mediaButton.textContent = "媒体 0";
+  mediaButton.hidden = true;
+  mediaButton.title = "查看页面里检测到的媒体";
+  mediaButton.setAttribute(
+    "style",
+    "padding:8px 10px;font:12px/1.2 monospace;color:#fff;background:#0f766e;border:0;border-radius:4px;cursor:pointer"
+  );
+  mediaButton.addEventListener("click", () => {
+    const panel = document.getElementById("dlm-media-panel");
+    if (panel) panel.hidden = !panel.hidden;
+  });
   const button = document.createElement("button");
   button.id = "dlm-submit";
   button.type = "button";
@@ -32,9 +46,81 @@ function ensureBox() {
     );
   });
   box.appendChild(status);
+  box.appendChild(mediaButton);
   box.appendChild(button);
   document.documentElement.appendChild(box);
+
+  const panel = document.createElement("div");
+  panel.id = "dlm-media-panel";
+  panel.hidden = true;
+  panel.setAttribute(
+    "style",
+    "position:fixed;right:12px;bottom:56px;z-index:2147483647;width:min(360px,calc(100vw - 24px));max-height:45vh;overflow:auto;background:#111820;color:#e8eef7;border:1px solid #2a3644;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,.35);font:12px/1.45 monospace"
+  );
+  const head = document.createElement("div");
+  head.textContent = "检测到的媒体";
+  head.setAttribute("style", "padding:9px 11px;border-bottom:1px solid #263342;color:#9fb0c3;font-size:11px");
+  const list = document.createElement("div");
+  list.id = "dlm-media-list";
+  list.setAttribute("style", "padding:4px");
+  panel.appendChild(head);
+  panel.appendChild(list);
+  document.documentElement.appendChild(panel);
   return box;
+}
+
+function renderMedia(items) {
+  const button = document.getElementById("dlm-media-count");
+  const panel = document.getElementById("dlm-media-panel");
+  const list = document.getElementById("dlm-media-list");
+  if (!button || !panel || !list) return;
+  const rows = Array.isArray(items) ? items : [];
+  button.hidden = rows.length === 0;
+  button.textContent = "媒体 " + rows.length;
+  if (!rows.length) panel.hidden = true;
+  list.replaceChildren();
+  for (const item of rows) {
+    const row = document.createElement("div");
+    row.setAttribute("style", "display:flex;align-items:center;gap:8px;padding:7px 6px;border-bottom:1px solid #1c2733");
+    const kind = document.createElement("span");
+    kind.textContent = item.kind === "hls" ? "HLS" : "文件";
+    kind.setAttribute(
+      "style",
+      "flex:0 0 auto;font-size:10px;color:" + (item.kind === "hls" ? "#6ee7d2" : "#9fb0c3") + ";border:1px solid #2a3644;border-radius:3px;padding:1px 4px"
+    );
+    const url = document.createElement("span");
+    url.className = "url";
+    url.textContent = item.url;
+    url.title = item.url;
+    url.setAttribute("style", "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b8c6d6;font-size:10px");
+    const download = document.createElement("button");
+    download.type = "button";
+    download.textContent = "下载";
+    download.setAttribute(
+      "style",
+      "flex:0 0 auto;padding:4px 8px;font:11px monospace;color:#07110f;background:#6ee7d2;border:0;border-radius:4px;cursor:pointer"
+    );
+    download.addEventListener("click", () => {
+      chrome.runtime.sendMessage(
+        {
+          op: "page-download",
+          url: item.url,
+          referer: location.href,
+          hls: item.kind === "hls"
+        },
+        () => void chrome.runtime.lastError
+      );
+    });
+    row.append(kind, url, download);
+    list.appendChild(row);
+  }
+}
+
+function refreshMedia() {
+  chrome.runtime.sendMessage({ op: "media-list" }, (reply) => {
+    if (chrome.runtime.lastError) return;
+    renderMedia(reply && reply.items);
+  });
 }
 
 function render() {
@@ -61,6 +147,8 @@ function render() {
 }
 
 render();
+refreshMedia();
+setInterval(refreshMedia, 1500);
 chrome.storage.onChanged.addListener(render);
 // 页面加载时主动唤醒 service worker：未打包扩展刚加载时它可能还没被任何事件拉起。
 chrome.runtime.sendMessage({ op: "wake" }, () => void chrome.runtime.lastError);

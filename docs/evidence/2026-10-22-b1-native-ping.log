@@ -1,4 +1,4 @@
-browser=Edg/155.0.4283.62
-page=http://127.0.0.1:57932/
+browser=Edg/156.0.4314.50
+page=http://127.0.0.1:52781/
 status=dlm native: pong com.dlm.host v0.1.0
 screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-22-b1-native-ping.png

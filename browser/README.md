@@ -1,4 +1,4 @@
-# dlm Native Messaging 宿主（B1/B2/B10）
+# dlm Native Messaging 宿主（B1/B2/B10/B3b）
 
 宿主名 `com.dlm.host`；Chrome/Edge 扩展 ID 固定为 `fkebhmogekekphpcggaclfgpfmofhdjk`（扩展 manifest 里的 `key` 决定）。
 B1 只做 `{"op":"ping"}` → `{"op":"pong",...}`，不接下载。
@@ -59,7 +59,7 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 验收：`node browser/test/verify-native-download.mjs`（Edge 155 实测：dlm 请求带 `sid=42`/Referer/UA 空，
   落盘文件等于页面；截图/日志在 `docs/evidence/2026-10-22-b2-browser-download.*`）。
 - 一任务一进程是 B2 直连的形态；无 Cookie 的公开直链在 `dlm-gui` 开着时由 B10 交给队列。
-  页面挂钩/DNR/代理/媒体嗅探不在 B2。
+  页面挂钩/DNR/代理不在 B2；媒体嗅探见 B3b。
 
 ## B10：无 Cookie 投递进队列
 
@@ -72,6 +72,22 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
   杀 GUI 后回退直连再落盘 65536 B；证据在 `docs/evidence/2026-10-27-quota-queue-b10.*`）。
 - 端点文件含 token，和"能直接 spawn dlm"同一信任边界；不自动拉起 GUI。
 
+## B3b：媒体嗅探
+
+- `webRequest`（只读）监听当前标签页的 `.m3u8` 与媒体直链；每 tab 去重、最多 20 条，
+  `storage.session` 跨 service worker 保存。
+- 页面右下角出现“媒体 N”面板；点条目的“下载”发送 `page-download`，HLS 带 `hls:true`。
+- 工具栏 popup 显示宿主状态与当前标签页媒体列表。
+- 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）。
+- 验收：
+
+```bash
+node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+证据：`docs/evidence/2026-10-28-media-sniff.*`（本地页面请求 HLS → 面板 → 点击 → `stream.ts` = `AAABBB`）。
+DASH（`.mpd`）暂不列；不做音视频合并。
+
 ## 手动加载
 
 `chrome://extensions` → 开发者模式 → 加载已解压的扩展 → 选 `browser/extension`。扩展动作徽标应为 `OK`，
@@ -82,6 +98,6 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 宿主只读 stdin、写 stdout 帧；诊断走 stderr。B1 只认 `ping`/`hello`；B2 增加 `download`
   （只接 `http/https`，spawn `dlm`，Cookie 走 `--cookie-stdin`）；B10 对无 Cookie 的下载先尝试
   队列 `/api/add`。不执行任意命令；宿主自身没有本地监听（队列端口属于 `dlm-gui`）。
-- B2 扩展权限：`nativeMessaging` + `storage` + `contextMenus` + `cookies`，`host_permissions: <all_urls>`；
-  content script 显示状态并提供页面按钮。
-- 页面挂钩/DNR/代理/媒体嗅探不在 B2/B10。
+- B2/B3b 扩展权限：`nativeMessaging` + `storage` + `contextMenus` + `cookies` + `webRequest`，
+  `host_permissions: <all_urls>`；content script 显示状态、页面按钮和媒体面板。
+- 页面挂钩/DNR/代理不在 B2/B10；媒体嗅探只到 HLS/直链，DASH/DRM 未做。

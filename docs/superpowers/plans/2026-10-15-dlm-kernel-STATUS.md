@@ -174,8 +174,18 @@
   （master→media→三片顺序合并、加密拒绝、参数层拒绝零请求）。
 - **真实公网**：Apple bipbop fMP4 240p（BYTERANGE+map）⇒ 退 0、27,672,619 B、16 s、ffprobe 610 s；
   Mux 流在本机分片超时（外部 CDN 边界）。
-- **四闸**：`--lib` **306/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.59 s）· clippy **0**。
+- **四闸**：`--lib` **307/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.59 s）· clippy **0**。
 - **未做**：DASH、DRM、浏览器媒体嗅探、队列 HLS、断点续传。
+
+## 2026-10-28 B3b-lite 媒体嗅探交付
+
+- **扩展**：`webRequest` 只读监听 `.m3u8`/媒体直链，按 tab 去重/限 20，`storage.session` 跨 worker 保存；
+  页面“媒体 N”面板 + 工具栏 popup；点“下载”发 `page-download`（HLS 带 `hls:true`）。
+- **宿主**：`download` 收到 `hls:true` 跳过队列，spawn `dlm --hls`；HLS 强制直连。
+- **真浏览器**：Edge 156 本地页面请求 HLS → 面板出现条目 → 点击 → 落盘 `stream.ts` 6 B = `AAABBB`；
+  B1/B2/B10 回归均通过。
+- **四闸**：`--lib` **307/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（65.07 s）· clippy **0**。
+- **未做**：DASH/DRM、Firefox/Opera 包、自动下载。
 
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
