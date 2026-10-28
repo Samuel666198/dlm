@@ -57,7 +57,8 @@ direct_file=…\direct\file.bin ok=true
 
 - GUI 开着：宿主走 `/api/add`，回执 `mode=queue`，落点由 `dlm-gui --out-dir` 决定。
 - 杀掉 GUI：端点文件仍在但连不上 ⇒ 回退 B2 直连，落点回到宿主 `download_dir`。
-- 截图：`docs/evidence/2026-10-27-quota-queue-b10.png`；完整日志：
+- 截图：队列阶段 `docs/evidence/2026-10-27-quota-queue-b10-queue.png`，
+  直连回退 `docs/evidence/2026-10-27-quota-queue-b10.png`；完整日志：
   `docs/evidence/2026-10-27-quota-queue-b10-browser.log`。
 - 队列文件里没有 Cookie 字段；带 Cookie 的投递由单元用例
   `host_keeps_cookie_downloads_on_the_direct_path` 钉住。

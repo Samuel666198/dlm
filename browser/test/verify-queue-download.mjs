@@ -24,6 +24,7 @@ const ext = path.resolve(arg('extension', path.join(root, 'browser', 'extension'
 const dlmExe = path.resolve(arg('dlm', path.join(root, 'target', 'debug', 'dlm.exe')));
 const guiExe = path.resolve(arg('gui', path.join(root, 'target', 'debug', 'dlm-gui.exe')));
 const out = path.resolve(arg('out', path.join(root, 'docs', 'evidence', '2026-10-27-quota-queue-b10.png')));
+const queueOutPng = out.replace(/\.png$/, '-queue.png');
 const logPath = path.resolve(arg('log', path.join(root, 'docs', 'evidence', '2026-10-27-quota-queue-b10-browser.log')));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 for (const p of [dlmExe, guiExe]) if (!fs.existsSync(p)) throw new Error(`missing ${p}`);
@@ -203,6 +204,10 @@ try {
   const queuedBytes = fs.existsSync(queuedFile) ? fs.statSync(queuedFile).size : -1;
   log += `queue_task=${queueText}\nqueue_file=${queuedFile} bytes=${queuedBytes}\n`;
   if (!queuedOk || queuedBytes !== 65536) throw new Error(`队列没有下完：${queueText}`);
+  const qshot = await cdp('Page.captureScreenshot', { format: 'png' });
+  fs.mkdirSync(path.dirname(queueOutPng), { recursive: true });
+  fs.writeFileSync(queueOutPng, Buffer.from(qshot.data, 'base64'));
+  log += `queue_screenshot=${queueOutPng}\n`;
 
   // 第二发：杀掉 GUI（端点文件留着），无 Cookie ⇒ 回退直连。
   gui.kill();
