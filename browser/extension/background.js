@@ -1,5 +1,6 @@
-// B2：Native Messaging 长连接 + 右键菜单/页面按钮投递。
+// B2/B10：Native Messaging 长连接 + 右键菜单/页面按钮投递。
 // 只把 url/referer/cookie 交给宿主；页面挂钩、DNR、代理读取不在这一版。
+// B10：宿主对无 Cookie 的公开直链优先交给 dlm-gui 队列，回执用 mode 区分 queue/direct。
 
 const HOST = "com.dlm.host";
 let port = null;
@@ -20,10 +21,11 @@ function connect() {
 
   port.onMessage.addListener((msg) => {
     if (msg && msg.op === "accepted") {
-      store({ lastJob: msg, lastError: null });
+      const mode = msg.mode || "direct";
+      store({ lastJob: { ...msg, mode }, lastError: null });
       chrome.action.setBadgeText({ text: "↓" });
       chrome.action.setBadgeBackgroundColor({ color: "#1565c0" });
-      console.log("dlm job accepted", msg);
+      console.log("dlm job accepted", mode, msg);
     } else if (msg && msg.op === "error") {
       store({ lastPong: null, lastError: msg.message || "native host error" });
       chrome.action.setBadgeText({ text: "!" });

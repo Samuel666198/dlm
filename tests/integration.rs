@@ -6923,6 +6923,7 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
     let queue = dir.path().join("queue.json");
     let out_dir = dir.path().join("dl");
     let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
     let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
     let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = probe.local_addr()?.port();
@@ -6940,6 +6941,8 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
                 out_dir.to_str().context("out dir utf8")?,
                 "--log-dir",
                 log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
                 "--dlm",
                 env!("CARGO_BIN_EXE_dlm"),
                 "--concurrency",
@@ -7178,5 +7181,369 @@ fn max_bytes_with_data_file_is_a_parameter_error() -> anyhow::Result<()> {
     assert_eq!(out.status.code(), Some(2), "应停在参数层：{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("--max-bytes"), "{}", stderr_of(&out));
     assert!(srv.requests()?.is_empty(), "参数层拒绝时一个请求都不许发");
+    Ok(())
+}
+
+/// A16：队列全局固定窗口配额。`/sz/524288` + 每窗 262144 + 2 秒窗口 ⇒ 至少一次预算停住，
+/// 窗口重置后自动续传至完成；任务日志里能看到 `--max-bytes` 的结论话。
+#[test]
+fn gui_quota_stops_and_resumes_across_a_window() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let (_srv, node_base) = harness::spawn()?;
+    let dir = harness::tmp_dir("gui-quota")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-quota-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--concurrency",
+                "1",
+                "--quota",
+                "262144",
+                "--quota-window",
+                "2",
+                "--token",
+                token,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let quota: serde_json::Value =
+        serde_json::from_str(&client.get(format!("{gui_base}/api/quota?t={token}")).send()?.text()?)?;
+    assert_eq!(quota["enabled"], true, "{quota}");
+    assert_eq!(quota["limit"], 262144, "{quota}");
+
+    let add = serde_json::json!({
+        "url": format!("{node_base}/sz/524288"),
+        "name": "quota.bin",
+        "referer": null,
+        "start_at": null,
+        "on_complete": null,
+    });
+    let reply: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{gui_base}/api/add?t={token}"))
+            .header("content-type", "application/json")
+            .body(add.to_string())
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let id = reply["id"].as_str().context("queue add id")?.to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut stopped_once = false;
+    let text = loop {
+        let tasks: Vec<serde_json::Value> =
+            serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+        let Some(task) = tasks.iter().find(|t| t["id"] == id.as_str()) else {
+            if Instant::now() > deadline {
+                panic!("task never appeared: id={id} tasks={tasks:?}");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        if task["exit_code"] == 3 && task["status"] == "queued" {
+            stopped_once = true;
+        }
+        match task["status"].as_str() {
+            Some("done") => break task.clone(),
+            Some("failed") => panic!("quota task failed: {task}"),
+            _ => {}
+        }
+        if Instant::now() > deadline {
+            panic!("quota task didn't finish: {task}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(std::fs::metadata(out_dir.join("quota.bin"))?.len(), 524_288);
+    let log = std::fs::read_to_string(log_dir.join(format!("{id}.log")))?;
+    assert!(
+        log.contains("已达到本次运行字节预算"),
+        "至少有一轮是被预算停住的；stopped_once={stopped_once} log={log}"
+    );
+    assert_eq!(text["status"], "done");
+    drop(_srv);
+    Ok(())
+}
+
+/// A16：队列配额的参数档。窗口 0 / 小于一轮预读的额度都必须停在 2，不能启动。
+#[test]
+fn gui_quota_windows_are_validated() -> anyhow::Result<()> {
+    let dir = harness::tmp_dir("gui-quota-args")?;
+    let queue = dir.path().join("queue.json");
+    let base = [
+        "--queue".to_string(),
+        queue.to_string_lossy().to_string(),
+        "--endpoint".to_string(),
+        dir.path().join("endpoint.json").to_string_lossy().to_string(),
+        "--token".to_string(),
+        "x".to_string(),
+    ];
+    let bin = env!("CARGO_BIN_EXE_dlm-gui");
+    let run = |extra: &[&str]| -> anyhow::Result<std::process::Output> {
+        let mut args: Vec<String> = base.to_vec();
+        args.extend(extra.iter().map(|s| s.to_string()));
+        Ok(std::process::Command::new(bin).args(args).output()?)
+    };
+    let zero_window = run(&["--quota", "262144", "--quota-window", "0"])?;
+    assert_eq!(zero_window.status.code(), Some(2), "{}", String::from_utf8_lossy(&zero_window.stderr));
+    assert!(String::from_utf8_lossy(&zero_window.stderr).contains("--quota-window"));
+
+    let tiny = run(&["--quota", "1024"])?;
+    assert_eq!(tiny.status.code(), Some(2), "{}", String::from_utf8_lossy(&tiny.stderr));
+    assert!(String::from_utf8_lossy(&tiny.stderr).contains("--quota"));
+
+    let zero = run(&["--quota", "0", "--quota-window", "60"])?;
+    assert_eq!(zero.status.code(), Some(2), "{}", String::from_utf8_lossy(&zero.stderr));
+    Ok(())
+}
+
+/// E4 补全：队列只接 `open` / `run:<exe>`。`shutdown` 必须在 `/api/add` 当场拒，且不入队。
+#[test]
+fn gui_rejects_shutdown_completion_action() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-action")?;
+    let queue = dir.path().join("queue.json");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-action-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                dir.path().join("dl").to_str().context("out dir utf8")?,
+                "--log-dir",
+                dir.path().join("logs").to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--token",
+                token,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let reply: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{gui_base}/api/add?t={token}"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({
+                    "url": "https://example.invalid/x.bin",
+                    "name": "x.bin",
+                    "on_complete": "shutdown:60",
+                })
+                .to_string(),
+            )
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert!(
+        reply["error"].as_str().is_some_and(|e| e.contains("shutdown")),
+        "{reply}"
+    );
+    let tasks: Vec<serde_json::Value> =
+        serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+    assert!(tasks.is_empty(), "被拒的任务不许入队：{tasks:?}");
+    Ok(())
+}
+
+/// B10：宿主无 Cookie 投递 → 队列 → 真的下完；队列文件里没有 Cookie 字段。
+#[test]
+fn host_to_queue_end_to_end() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let (_srv, node_base) = harness::spawn()?;
+    let dir = harness::tmp_dir("host-queue")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "host-queue-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                dir.path().join("logs").to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--token",
+                token,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut host = dlm::host::Host::new(dlm::host::HostConfig {
+        dlm_exe: std::path::PathBuf::from(env!("CARGO_BIN_EXE_dlm")),
+        download_dir: dir.path().join("direct"),
+        log_dir: dir.path().join("host-logs"),
+        gui_endpoint: Some(endpoint.clone()),
+    });
+    let reply: serde_json::Value = serde_json::from_slice(
+        &host.handle(
+            format!(
+                r#"{{"op":"download","url":"{node_base}/sz/65536","referer":"{node_base}/page"}}"#
+            )
+            .as_bytes(),
+        ),
+    )?;
+    assert_eq!(reply["op"], "accepted", "{reply}");
+    assert_eq!(reply["mode"], "queue", "{reply}");
+    let id = reply["id"].as_str().context("queue id")?.to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let tasks: Vec<serde_json::Value> =
+            serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+        if let Some(task) = tasks.iter().find(|t| t["id"] == id.as_str()) {
+            match task["status"].as_str() {
+                Some("done") => break,
+                Some("failed") => panic!("queue task failed: {task}"),
+                _ => {}
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("host → queue didn't finish: {tasks:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(std::fs::metadata(out_dir.join("65536"))?.len(), 65_536);
+    let queue_text = std::fs::read_to_string(&queue)?;
+    assert!(!queue_text.to_ascii_lowercase().contains("cookie"), "队列文件不许出现 Cookie：{queue_text}");
     Ok(())
 }

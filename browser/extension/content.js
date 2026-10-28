@@ -42,7 +42,12 @@ function render() {
   const el = document.getElementById("dlm-native-status");
   chrome.storage.local.get(["lastPong", "lastError", "lastJob"], (values) => {
     if (values.lastJob) {
-      el.textContent = "dlm job: " + (values.lastJob.job || "accepted");
+      const job = values.lastJob;
+      if (job.mode === "queue") {
+        el.textContent = "dlm queue: " + (job.id || "accepted");
+      } else {
+        el.textContent = "dlm job: " + (job.job || "accepted");
+      }
       el.style.background = "#1565c0";
     } else if (values.lastPong) {
       const p = values.lastPong;

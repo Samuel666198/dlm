@@ -50,6 +50,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dlm-c3-'));
 const queue = path.join(tmp, 'queue.json');
 const downloadDir = path.join(tmp, 'dl');
 const logDir = path.join(tmp, 'logs');
+const endpoint = path.join(tmp, 'endpoint.json');
 const profile = path.join(tmp, 'profile');
 fs.mkdirSync(profile, { recursive: true });
 const guiPort = await freePort();
@@ -64,6 +65,7 @@ const gui = spawn(
     '--queue', queue,
     '--out-dir', downloadDir,
     '--log-dir', logDir,
+    '--endpoint', endpoint,
     '--dlm', dlmExe,
     '--concurrency', '2',
   ],

@@ -6,10 +6,19 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
+use dlm::consts::PROBE_READ_BYTES;
 use dlm::gui::{self, GuiConfig};
+use dlm::queue::QueueStore;
 
 fn main() -> ExitCode {
-    match parse().and_then(gui::run) {
+    let config = match parse() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("dlm-gui: {err:#}");
+            return ExitCode::from(2);
+        }
+    };
+    match gui::run(config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("dlm-gui: {err:#}");
@@ -27,6 +36,9 @@ fn parse() -> Result<GuiConfig> {
         concurrency: 2,
         port: 0,
         token: None,
+        quota_limit: None,
+        quota_window_secs: None,
+        endpoint: local_app_data().join("dlm").join("gui").join("endpoint.json"),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -38,9 +50,14 @@ fn parse() -> Result<GuiConfig> {
             "--dlm" => config.dlm_exe = PathBuf::from(next(&mut args, "--dlm")?),
             "--concurrency" => config.concurrency = next(&mut args, "--concurrency")?.parse()?,
             "--token" => config.token = Some(next(&mut args, "--token")?),
+            "--quota" => config.quota_limit = Some(next(&mut args, "--quota")?.parse()?),
+            "--quota-window" => {
+                config.quota_window_secs = Some(next(&mut args, "--quota-window")?.parse()?)
+            }
+            "--endpoint" => config.endpoint = PathBuf::from(next(&mut args, "--endpoint")?),
             "--help" | "-h" => {
                 println!(
-                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T]"
+                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE]"
                 );
                 std::process::exit(0);
             }
@@ -49,6 +66,24 @@ fn parse() -> Result<GuiConfig> {
     }
     if config.concurrency == 0 {
         bail!("--concurrency 至少 1");
+    }
+    if config.quota_window_secs == Some(0) {
+        bail!("--quota-window 至少 1 秒");
+    }
+    if config.quota_limit == Some(0) && config.quota_window_secs.is_some() {
+        bail!("--quota 0 是关闭配额，不能再给 --quota-window");
+    }
+    let stored_limit = if config.quota_limit.is_none() && config.quota_window_secs.is_some() {
+        QueueStore::load(config.queue.clone())?.quota().map(|q| q.limit)
+    } else {
+        None
+    };
+    let effective = config.quota_limit.or(stored_limit).unwrap_or(0);
+    if config.quota_window_secs.is_some() && effective == 0 {
+        bail!("--quota-window 需要先启用 --quota，或队列里已经存有配额");
+    }
+    if effective > 0 && effective < PROBE_READ_BYTES {
+        bail!("--quota 至少 {PROBE_READ_BYTES} 字节（首轮预读要落盘并计入配额）");
     }
     Ok(config)
 }

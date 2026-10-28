@@ -4,10 +4,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::actions::CompletionAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,8 +48,29 @@ pub struct Task {
     pub updated_at: u64,
     /// Unix 秒；`Some` 且未到点 ⇒ 不启动。A3b 的计划任务落在这里。
     pub start_at: Option<u64>,
+    /// 配额窗口等待：`Some` 且未到点 ⇒ 不启动；与用户自己的 `start_at` 分开。
+    #[serde(default)]
+    pub hold_until: Option<u64>,
+    /// 完成后动作原始串（`open` / `run:<exe>`）；队列拒绝 `shutdown`。
+    #[serde(default)]
+    pub on_complete: Option<String>,
     pub total_len: Option<u64>,
     pub delivered: Option<u64>,
+}
+
+/// 队列级全局固定窗口配额（A16）。`window_started_at == 0` = 尚未起算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaState {
+    pub limit: u64,
+    pub window_secs: u64,
+    pub window_started_at: u64,
+    pub used: u64,
+}
+
+impl QuotaState {
+    pub fn resets_at(&self) -> u64 {
+        self.window_started_at.saturating_add(self.window_secs.max(1))
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -55,6 +79,8 @@ struct QueueFile {
     next_id: u64,
     #[serde(default)]
     tasks: Vec<Task>,
+    #[serde(default)]
+    quota: Option<QuotaState>,
 }
 
 #[derive(Debug)]
@@ -62,6 +88,7 @@ pub struct QueueStore {
     path: PathBuf,
     next_id: u64,
     tasks: Vec<Task>,
+    quota: Option<QuotaState>,
 }
 
 pub fn now_secs() -> u64 {
@@ -83,7 +110,7 @@ impl QueueStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => QueueFile::default(),
             Err(err) => return Err(err).with_context(|| format!("读队列文件失败：{}", path.display())),
         };
-        Ok(Self { path, next_id: file.next_id.max(1), tasks: file.tasks })
+        Ok(Self { path, next_id: file.next_id.max(1), tasks: file.tasks, quota: file.quota })
     }
 
     pub fn path(&self) -> &Path {
@@ -100,6 +127,99 @@ impl QueueStore {
 
     pub fn find_mut(&mut self, id: &str) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|t| t.id == id)
+    }
+
+    pub fn quota(&self) -> Option<QuotaState> {
+        self.quota
+    }
+
+    /// 设/改额度。`limit == 0` 关闭并清掉所有等待；改额度或窗口会把本窗账归零、下次派发起算。
+    pub fn set_quota(&mut self, limit: u64, window_secs: u64) -> bool {
+        if limit == 0 {
+            let had_holds = self.tasks.iter().any(|t| t.hold_until.is_some());
+            let changed = self.quota.is_some() || had_holds;
+            self.quota = None;
+            for task in &mut self.tasks {
+                task.hold_until = None;
+            }
+            return changed;
+        }
+        let window_secs = window_secs.max(1);
+        let changed = self
+            .quota
+            .is_none_or(|q| q.limit != limit || q.window_secs != window_secs);
+        if !changed {
+            return false;
+        }
+        self.quota = Some(QuotaState { limit, window_secs, window_started_at: 0, used: 0 });
+        for task in &mut self.tasks {
+            task.hold_until = None;
+        }
+        true
+    }
+
+    /// 推进固定窗口：跨过整窗就清零并释放到点的等待。没有起算（`window_started_at == 0`）时不动。
+    pub fn quota_tick(&mut self, now: u64) -> bool {
+        let Some(mut quota) = self.quota else { return false };
+        if quota.window_started_at == 0 {
+            return false;
+        }
+        let window = quota.window_secs.max(1);
+        let end = quota.window_started_at.saturating_add(window);
+        if now < end {
+            return false;
+        }
+        let elapsed = now - quota.window_started_at;
+        let windows = (elapsed / window).max(1);
+        quota.window_started_at =
+            quota.window_started_at.saturating_add(windows.saturating_mul(window));
+        quota.used = 0;
+        self.quota = Some(quota);
+        for task in &mut self.tasks {
+            if task.hold_until.is_some_and(|until| until <= now) {
+                task.hold_until = None;
+            }
+        }
+        true
+    }
+
+    pub fn quota_charge(&mut self, bytes: u64) -> bool {
+        let Some(quota) = self.quota.as_mut() else { return false };
+        if bytes == 0 {
+            return false;
+        }
+        quota.used = quota.used.saturating_add(bytes);
+        true
+    }
+
+    pub fn quota_hold(&mut self, id: &str, until: u64) -> bool {
+        let Some(task) = self.find_mut(id) else { return false };
+        if task.hold_until == Some(until) {
+            return false;
+        }
+        task.hold_until = Some(until);
+        true
+    }
+
+    /// 下一次整窗重置的时刻；还没起算 ⇒ `None`。
+    pub fn quota_next_reset(&self) -> Option<u64> {
+        self.quota.filter(|q| q.window_started_at > 0).map(|q| q.resets_at())
+    }
+
+    /// 一个任务的覆盖量：断点可读就用段表；成功收尾会删断点，退回读目标文件长度。
+    /// `TaskView` 与配额采样共用这一处，避免两套口径。
+    pub fn delivered(&self, out_dir: &Path, name: &str) -> Option<u64> {
+        delivered(out_dir, name)
+    }
+
+    /// 第一次派发带配额的任务时起算本窗（没有任务时窗口不流逝）。
+    pub fn quota_start(&mut self, now: u64) -> bool {
+        let Some(quota) = self.quota.as_mut() else { return false };
+        if quota.window_started_at != 0 {
+            return false;
+        }
+        quota.window_started_at = now;
+        true
     }
 
     /// 重启恢复：上次进程已不在，`running` 一律当 `paused`（dlm 断点还在，可恢复）。
@@ -121,7 +241,11 @@ impl QueueStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("建队列目录失败：{}", parent.display()))?;
         }
-        let file = QueueFile { next_id: self.next_id, tasks: self.tasks.clone() };
+        let file = QueueFile {
+            next_id: self.next_id,
+            tasks: self.tasks.clone(),
+            quota: self.quota,
+        };
         let text = serde_json::to_string_pretty(&file).context("序列化队列失败")?;
         let tmp = tmp_path(&self.path);
         fs::write(&tmp, text).with_context(|| format!("写队列临时文件失败：{}", tmp.display()))?;
@@ -137,6 +261,7 @@ impl QueueStore {
         name: &str,
         referer: Option<String>,
         start_at: Option<u64>,
+        on_complete: Option<String>,
         log_dir: &Path,
     ) -> Result<Task> {
         let lower = url.to_ascii_lowercase();
@@ -160,6 +285,8 @@ impl QueueStore {
             created_at: now,
             updated_at: now,
             start_at,
+            hold_until: None,
+            on_complete,
             total_len: None,
             delivered: None,
         };
@@ -170,6 +297,17 @@ impl QueueStore {
     pub fn remove(&mut self, id: &str) -> Option<Task> {
         let pos = self.tasks.iter().position(|t| t.id == id)?;
         Some(self.tasks.remove(pos))
+    }
+}
+
+/// 队列只接受 `open` / `run:<exe>`；`shutdown` 会一次关掉整台机器，队列可能同时完成多个任务 ⇒ 拒绝。
+pub fn validate_on_complete(raw: &str) -> Result<Option<String>> {
+    match CompletionAction::from_str(raw) {
+        Ok(CompletionAction::Open | CompletionAction::Run(_)) => Ok(Some(raw.to_string())),
+        Ok(CompletionAction::Shutdown { .. }) => {
+            bail!("队列不支持 shutdown，请在 CLI 用 --on-complete shutdown:<秒数>")
+        }
+        Err(err) => bail!("{err}"),
     }
 }
 
@@ -192,6 +330,12 @@ pub fn target_path(out_dir: &Path, name: &str) -> PathBuf {
 
 pub fn state_path(out_dir: &Path, name: &str) -> PathBuf {
     PathBuf::from(format!("{}.dlm.json", target_path(out_dir, name).display()))
+}
+
+/// 覆盖量：断点可读就用段表；成功收尾会删断点，退回读目标文件长度。
+pub fn delivered(out_dir: &Path, name: &str) -> Option<u64> {
+    let (_, covered) = progress(out_dir, name);
+    covered.or_else(|| fs::metadata(target_path(out_dir, name)).ok().map(|m| m.len()))
 }
 
 /// 从断点读 `(total_len, delivered)`；没有/坏文件交 `(None, None)`。
@@ -240,7 +384,7 @@ mod tests {
     fn add_save_load_roundtrip() {
         let (dir, mut store) = temp_queue("roundtrip");
         let task = store
-            .add("https://example.com/a.bin", "a.bin", Some("https://example.com/".into()), None, &dir)
+            .add("https://example.com/a.bin", "a.bin", Some("https://example.com/".into()), None, None, &dir)
             .unwrap();
         store.save().unwrap();
         let loaded = QueueStore::load(store.path().to_path_buf()).unwrap();
@@ -254,7 +398,7 @@ mod tests {
     #[test]
     fn running_becomes_paused_on_recovery() {
         let (dir, mut store) = temp_queue("recover");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, &dir).unwrap();
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
         store.find_mut(&task.id).unwrap().status = TaskStatus::Running;
         store.find_mut(&task.id).unwrap().pid = Some(1234);
         assert!(store.recover_running());
@@ -266,10 +410,10 @@ mod tests {
     #[test]
     fn rejects_bad_urls_and_names() {
         let (dir, mut store) = temp_queue("bad");
-        assert!(store.add("file:///x", "a.bin", None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "../a", None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "a/b", None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "a:b", None, None, &dir).is_err());
+        assert!(store.add("file:///x", "a.bin", None, None, None, &dir).is_err());
+        assert!(store.add("https://example.com/a", "../a", None, None, None, &dir).is_err());
+        assert!(store.add("https://example.com/a", "a/b", None, None, None, &dir).is_err());
+        assert!(store.add("https://example.com/a", "a:b", None, None, None, &dir).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -289,9 +433,106 @@ mod tests {
     #[test]
     fn remove_returns_the_task() {
         let (dir, mut store) = temp_queue("remove");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, &dir).unwrap();
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
         assert_eq!(store.remove(&task.id).unwrap().id, task.id);
         assert!(store.find(&task.id).is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_queue_without_quota_or_actions_still_loads() {
+        let (dir, _store) = temp_queue("old");
+        let path = dir.join("queue.json");
+        fs::write(
+            &path,
+            r#"{"next_id":2,"tasks":[{"id":"1-1","url":"https://x/a","name":"a.bin","referer":null,
+                "status":"paused","pid":null,"exit_code":null,"log":"x.log","created_at":1,
+                "updated_at":1,"start_at":null,"total_len":null,"delivered":null}]}"#,
+        )
+        .unwrap();
+        let loaded = QueueStore::load(path).unwrap();
+        assert!(loaded.quota().is_none());
+        assert_eq!(loaded.tasks().len(), 1);
+        assert!(loaded.tasks()[0].hold_until.is_none());
+        assert!(loaded.tasks()[0].on_complete.is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quota_window_resets_and_releases_holds() {
+        let (dir, mut store) = temp_queue("quota");
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
+        assert!(store.set_quota(1_000, 10));
+        assert!(store.quota_start(100));
+        assert!(store.quota_charge(600));
+        assert!(store.quota_hold(&task.id, 110));
+        assert!(!store.quota_tick(105), "窗口未到不许清零");
+        assert_eq!(store.quota().unwrap().used, 600);
+        assert!(store.quota_tick(110), "到点要推进窗口");
+        let q = store.quota().unwrap();
+        assert_eq!((q.window_started_at, q.used), (110, 0));
+        assert_eq!(store.find(&task.id).unwrap().hold_until, None, "到点释放等待");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quota_charge_and_disable_roundtrip() {
+        let (dir, mut store) = temp_queue("quota-off");
+        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, &dir).unwrap();
+        assert!(!store.quota_charge(5), "没启用时不计账");
+        assert!(store.set_quota(1_000, 10));
+        assert!(store.quota_start(100));
+        assert!(store.quota_charge(5));
+        assert_eq!(store.quota().unwrap().used, 5);
+        assert!(store.quota_hold(&task.id, 110));
+        assert!(store.set_quota(0, 10), "关闭是变化");
+        assert!(store.quota().is_none());
+        assert_eq!(store.find(&task.id).unwrap().hold_until, None, "关闭要清等待");
+        assert!(!store.set_quota(0, 10), "重复关闭不再算变化");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quota_survives_a_queue_roundtrip() {
+        let (dir, mut store) = temp_queue("quota-roundtrip");
+        assert!(store.set_quota(4_194_304, 3600));
+        assert!(store.quota_start(100));
+        assert!(store.quota_charge(123));
+        store.save().unwrap();
+        let loaded = QueueStore::load(dir.join("queue.json")).unwrap();
+        let q = loaded.quota().expect("quota survives");
+        assert_eq!((q.limit, q.window_secs, q.window_started_at, q.used), (4_194_304, 3600, 100, 123));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn queue_accepts_open_and_run_but_rejects_shutdown() {
+        assert_eq!(validate_on_complete("open").unwrap().as_deref(), Some("open"));
+        assert_eq!(
+            validate_on_complete("run:C:\\tools\\scan.exe").unwrap().as_deref(),
+            Some("run:C:\\tools\\scan.exe")
+        );
+        let err = validate_on_complete("shutdown:60").unwrap_err().to_string();
+        assert!(err.contains("shutdown"), "{err}");
+        assert!(validate_on_complete("wat").is_err());
+    }
+
+    #[test]
+    fn on_complete_survives_a_queue_roundtrip() {
+        let (dir, mut store) = temp_queue("action");
+        let task = store
+            .add(
+                "https://example.com/a.bin",
+                "a.bin",
+                None,
+                None,
+                Some("open".to_string()),
+                &dir,
+            )
+            .unwrap();
+        store.save().unwrap();
+        let loaded = QueueStore::load(dir.join("queue.json")).unwrap();
+        assert_eq!(loaded.find(&task.id).unwrap().on_complete.as_deref(), Some("open"));
         let _ = fs::remove_dir_all(dir);
     }
 }
