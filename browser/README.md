@@ -82,6 +82,9 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
     通过 `page-links` 并入同一份列表。
 - 每 tab 去重、最多 40 条，`storage.session` 跨 service worker 保存。
 - 页面右下角出现“下载 N”面板（标签 HLS/文件）；点条目的“下载”发送 `page-download`，HLS 带 `hls:true`。
+- 页面里已识别的下载/媒体链接，左键点击会被 content script 接管（`preventDefault`）并交给 dlm；
+  仅当宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、普通链接不接管；
+  `page-download` 投递失败时回退浏览器默认行为。
 - 工具栏 popup 显示宿主状态与当前标签页的下载列表。
 - 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；
   普通文件不带 Cookie 时按 B10 进队列（GUI 开着），带 Cookie 或 GUI 不可达时直连。
@@ -91,8 +94,9 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 ```
 
-证据：`docs/evidence/2026-10-28-media-sniff.*`（本地页面请求 HLS + 文件链接 → 面板 `下载 2` → 点击 →
-`stream.ts` = `AAABBB`、`file.bin` = `FILE`；Tabbit 实测见 `2026-10-28-tabbit-extension.md`）。
+证据：`docs/evidence/2026-10-28-media-sniff.*`（本地页面请求 HLS + 文件链接 → 面板 `下载 3` → 点击 →
+`stream.ts` = `AAABBB`、`file.bin` = `FILE`；左键点 `/auto.bin` 由 dlm 落盘且页面不跳走；
+普通链接不被拦截；Tabbit 实测见 `2026-10-28-tabbit-extension.md`）。
 DASH（`.mpd`）暂不列；不做音视频合并。
 
 ## 手动加载

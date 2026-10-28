@@ -162,10 +162,64 @@ function refreshMedia() {
   });
 }
 
+// 宿主最近回过 pong 才接管点击；没装/断线时保持浏览器原生行为。
+let hostReady = false;
+
+function downloadKind(a, url) {
+  if (a.hasAttribute("download")) return "file";
+  if (url.pathname.toLowerCase().endsWith(".m3u8")) return "hls";
+  if (FILE_LINK_RE.test(url.pathname)) return "file";
+  return null;
+}
+
+function fallbackToBrowser(a) {
+  if (a.hasAttribute("download")) {
+    const copy = a.cloneNode(true);
+    copy.removeAttribute("id");
+    document.body.appendChild(copy);
+    copy.click();
+    copy.remove();
+    return;
+  }
+  window.location.assign(a.href);
+}
+
+document.addEventListener(
+  "click",
+  (ev) => {
+    if (ev.defaultPrevented || ev.button !== 0) return;
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+    const target = ev.target instanceof Element ? ev.target : null;
+    const a = target && target.closest("a[href]");
+    if (!a) return;
+    if ((a.target || "").toLowerCase() === "_blank") return;
+    let url = null;
+    try {
+      url = new URL(a.getAttribute("href"), location.href);
+    } catch {
+      return;
+    }
+    if (!/^https?:$/i.test(url.protocol)) return;
+    const kind = downloadKind(a, url);
+    if (!kind) return;
+    if (!hostReady) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    chrome.runtime.sendMessage(
+      { op: "page-download", url: url.href, referer: location.href, hls: kind === "hls" },
+      (reply) => {
+        if (chrome.runtime.lastError || !reply || reply.ok === false) fallbackToBrowser(a);
+      }
+    );
+  },
+  true
+);
+
 function render() {
   ensureBox();
   const el = document.getElementById("dlm-native-status");
   chrome.storage.local.get(["lastPong", "lastError", "lastJob"], (values) => {
+    hostReady = !!values.lastPong;
     if (values.lastJob) {
       const job = values.lastJob;
       if (job.mode === "queue") {

@@ -157,9 +157,15 @@ function submitTask(task) {
   if (!port) connect();
   if (!port) {
     store({ lastJob: null, lastError: "native host unavailable" });
-    return;
+    return false;
   }
-  port.postMessage(task);
+  try {
+    port.postMessage(task);
+    return true;
+  } catch (err) {
+    store({ lastJob: null, lastError: String(err) });
+    return false;
+  }
 }
 
 function cookieHeader(url) {
@@ -177,13 +183,19 @@ function cookieHeader(url) {
 function submitPage(url, referer, hls) {
   if (!/^https?:\/\//i.test(url || "")) {
     store({ lastJob: null, lastError: "only http/https URLs can be sent to dlm" });
-    return;
+    return false;
+  }
+  if (!port) connect();
+  if (!port) {
+    store({ lastJob: null, lastError: "native host unavailable" });
+    return false;
   }
   cookieHeader(url).then((cookie) => {
     const task = { op: "download", url, referer: referer || url, cookie };
     if (hls) task.hls = true;
     submitTask(task);
   });
+  return true;
 }
 
 function installMenu() {
@@ -205,7 +217,8 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.op === "wake") connect();
   if (msg && msg.op === "page-download") {
-    submitPage(msg.url, msg.referer, !!msg.hls);
+    sendResponse({ ok: submitPage(msg.url, msg.referer, !!msg.hls) });
+    return true;
   }
   if (msg && msg.op === "page-links") {
     const tabId = sender.tab && sender.tab.id;

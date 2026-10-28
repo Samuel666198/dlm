@@ -230,7 +230,9 @@ node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Mi
 以及普通文件——页面里 `a[href]` 命中常见文件后缀的链接、响应头带 `Content-Disposition: attachment`
 或 `application/octet-stream`/zip/pdf/rar/7z/msi/apk 等二进制的请求。页面右下角出现“下载 N”面板
 （标签 HLS/文件），工具栏 popup 也能看；点“下载”把 URL 交给宿主：HLS 强制直连 `dlm --hls`
-（队列不接不可续传的 HLS），普通文件按 B10 规则走队列或直连。只列这些，不列 DASH，不自动下载。浏览器验收：
+（队列不接不可续传的 HLS），普通文件按 B10 规则走队列或直连。
+页面里已识别为下载/媒体的链接，**左键点击也直接交给 dlm**，不再走浏览器；宿主未连接、
+带 Ctrl/Shift/Alt、`target="_blank"` 和普通网页链接都不接管。只列这些，不列 DASH，不自动下载。浏览器验收：
 
 ```bash
 node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"

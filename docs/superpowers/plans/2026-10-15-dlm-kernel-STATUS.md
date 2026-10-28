@@ -211,11 +211,21 @@
 - **四闸**：`--lib` **308/0**（3.01 s，新增 1 针）· `--bins` **4/0** · `integration` **117/0**（65.33 s）· clippy **0**。
 - **未做**：扩展仍不展示任务完成/失败；失败只能看宿主日志。
 
+## 2026-10-28 B3b-lite 点击下载接管
+
+- **扩展 0.2.2**：已识别为下载/媒体的 `<a>` 左键点击在捕获阶段改为 `page-download` 交给 dlm；
+  仅宿主回过 pong 时接管；Ctrl/Shift/Alt、`target="_blank"`、普通链接不接管；
+  投递回执 `ok:false` 时回退浏览器默认行为。
+- **验证**：Edge 156 面板 `下载 3`；点 `/auto.bin` 由 dlm 落盘 4 B 且页面不跳走；普通链接
+  `defaultPrevented=false`。Tabbit 左键点下载链接落盘 4 B（页面 URL 不变）。
+- **四闸**：`--lib` **308/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（纯扩展/文档）。
+- **未做**：不做 `chrome.downloads` 全局接管，JS 按钮/表单触发的下载仍走浏览器。
+
 ## 2026-10-28 Windows x64 便携包
 
 - **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
-  （**6,599,138 B**，sha256 `eea6d764ea292fc07cc7ecf5dcc8752f7463f8b9470fce8a7279977453091a75`；
-  2026-10-28 晚随扩展 0.2.1 与 User-Agent 修复重建）。
+  （**6,599,956 B**，sha256 `47cb3a8df6f2a4b11cfb8ac84321f487b3a990c01e2bac7e4272730b83c200cd`；
+  2026-10-28 晚随扩展 0.2.2、点击接管与 User-Agent 修复重建）。
 - **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
   `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
 - **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，

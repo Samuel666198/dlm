@@ -31,6 +31,7 @@ const pageHtml = '<!doctype html><html><head><meta charset="utf-8"><title>dlm me
   '<body><h1>dlm media sniff</h1><p>点击按钮请求一个 HLS 播放列表。</p>' +
   '<button id="load-media">加载媒体</button>' +
   '<a id="file-link" href="/file.bin">下载文件</a>' +
+  '<a id="auto-file-link" href="/auto.bin">自动接管</a>' +
   '<script>document.getElementById("load-media").onclick = () => fetch("/stream.m3u8").catch(() => {});</script></body></html>';
 const playlist = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n#EXT-X-ENDLIST\n';
 const server = http.createServer((req, res) => {
@@ -57,6 +58,16 @@ const server = http.createServer((req, res) => {
   if (req.url === '/file.bin') {
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': 4 });
     res.end('FILE');
+    return;
+  }
+  if (req.url === '/auto.bin') {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': 4 });
+    res.end('AUTO');
+    return;
+  }
+  if (req.url === '/normal-page') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><title>normal</title>ok');
     return;
   }
   res.writeHead(404, { 'Content-Length': 0 });
@@ -161,7 +172,7 @@ try {
   let mediaText = '';
   for (let i = 0; i < 80; i++) {
     mediaText = (await evalText("document.querySelector('#dlm-media-count')?.textContent || ''")) || '';
-    if (mediaText.startsWith('下载 2')) break;
+    if (mediaText.startsWith('下载 3')) break;
     await sleep(250);
   }
   log += `media_button=${mediaText}\n`;
@@ -221,6 +232,44 @@ try {
   }
   log += `plain_file=${filePath} bytes=${fileBytes}\n`;
   if (fileBytes !== 4) throw new Error(`普通文件没有落成 FILE：${fileBytes}`);
+
+  // 宿主就绪后，左键点击下载链接应被 content.js 接管，改由 dlm 落盘。
+  let statusText = '';
+  for (let i = 0; i < 60; i++) {
+    statusText = (await evalText("document.querySelector('#dlm-native-status')?.textContent || ''")) || '';
+    if (/pong|dlm job|dlm queue/i.test(statusText)) break;
+    await sleep(250);
+  }
+  log += `host_status=${statusText}\n`;
+  await evalText("document.getElementById('auto-file-link').click(); true");
+  const autoPath = path.join(downloadDir, 'auto.bin');
+  let autoBytes = -1;
+  for (let i = 0; i < 120; i++) {
+    if (fs.existsSync(autoPath)) {
+      autoBytes = fs.statSync(autoPath).size;
+      if (autoBytes === 4) break;
+    }
+    await sleep(100);
+  }
+  const stayed = (await evalText("location.pathname")) === '/page.html';
+  log += `auto_click_file=${autoPath} bytes=${autoBytes} stayed=${stayed}\n`;
+  if (autoBytes !== 4) throw new Error(`点击下载链接没有交给 dlm：${autoBytes}`);
+  if (!stayed) throw new Error('点击下载链接后页面跳走了');
+  if (fs.readFileSync(autoPath, 'utf8') !== 'AUTO') throw new Error('自动接管内容不对');
+
+  // 普通页面链接不许被接管（对照臂：defaultPrevented 必须为 false）。
+  const normalPrevented = await evalText(`(() => {
+    let prevented = null;
+    const a = document.createElement('a');
+    a.href = '/normal-page';
+    document.body.appendChild(a);
+    a.addEventListener('click', (e) => { prevented = e.defaultPrevented; e.preventDefault(); }, { once: true });
+    a.click();
+    a.remove();
+    return prevented;
+  })()`);
+  log += `normal_link_prevented=${normalPrevented}\n`;
+  if (normalPrevented) throw new Error('普通链接被误拦截');
 
   const shot = await cdp('Page.captureScreenshot', { format: 'png' });
   fs.mkdirSync(path.dirname(out), { recursive: true });
