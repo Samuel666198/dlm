@@ -43,7 +43,7 @@
 
 **Service Worker 缓存**：只改 background 文件、重启浏览器后，content script 会更新而 Service Worker
 可能仍跑旧缓存。Tabbit 1.18 上试过 `background-sw.js` + `importScripts("...?v=<version>")`，
-SW 直接没启动；最终改成**带版本号的文件名**（当前 `background-0.2.5.js`，manifest 指过去），
+SW 直接没启动；最终改成**带版本号的文件名**（当前 `background-0.2.6.js`，manifest 指过去），
 换实现时换文件名。排查标记：页面 `document.documentElement` 的 `data-dlm-version`，
 storage 的 `buildVersion`。
 

@@ -86,11 +86,14 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 点条目“下载”发送 `page-download`，HLS 带 `hls:true`。页面里已识别的下载/媒体链接，左键点击先弹
   确认卡片，确认后才交给 dlm；仅当宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、
   普通链接不接管；投递失败时页面链接回退浏览器默认行为。
+- `page-hook.js` 跑在 MAIN world（`document_start`），钩住站点脚本创建的**游离 `<a download>`** 的
+  `.click()`（这种点击不经过页面 DOM，content script 看不到）。它用 `postMessage` 把 URL 交给 content，
+  同样先弹确认；宿主不在线时用带 `data-dlm-native="1"` 的临时锚点回退浏览器下载。
 - 宿主 spawn dlm 时用 `CREATE_NO_WINDOW`，不再弹空白终端窗口（关窗口会顺手杀掉下载）。
 - 宿主把 dlm 的进度行解析成 `op:"progress"`（400 ms 节流），子进程退出后回 `op:"done"`；
   页面与 popup 的完成/失败状态都来自这里。
 - 工具栏 popup 显示宿主状态与当前标签页的下载列表。
-- Service Worker 用**带版本号的文件名**（当前 `background-0.2.5.js`，manifest 里指过去）：
+- Service Worker 用**带版本号的文件名**（当前 `background-0.2.6.js`，manifest 里指过去）：
   未打包扩展的 SW 会被浏览器缓存，只改内容、重启浏览器仍可能跑旧代码；换文件名才能强制重取。
   排查标记：页面 `document.documentElement` 的 `data-dlm-version`、storage 的 `buildVersion`。
 - 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；

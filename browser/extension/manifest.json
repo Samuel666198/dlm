@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "dlm Download Companion",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "网页右键/点击下载链接/媒体与文件嗅探 → dlm 本地下载器",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1FspEKfO9G+GhHKTPI3pEtGmIB9DSeL+/B0FqRLjsiiKbvYqS2DFqAZEV8mfo/r/LQxHtYzhU34sddjOad7cvSKvKG/iAyAtLysLKM8prkD2qpISPY3PLxf5v33/Zy+CQcu7apbK99ntiX30ZiBxKexlM1hyIWGCg+FOMoTuTTfAskuLhXB8WUd1HTemY7zidw5diBADiQW8LLfCf7jyA+iBy3RPFj4F8LE2kNBftvGge6WdnbMDvvuxI9Pn6L2XW2qsusZPQ9QMFdUgCT3YnfJw9N5UBmCZJac5uXptYDbvYqHX982cKMMn7WdcVqa6r2x0hDlT5FX9yeKf5ugmIQIDAQAB",
   "permissions": [
@@ -15,13 +15,23 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background-0.2.5.js"
+    "service_worker": "background-0.2.6.js"
   },
   "action": {
     "default_title": "dlm",
     "default_popup": "popup.html"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "<all_urls>"

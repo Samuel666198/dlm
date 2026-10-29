@@ -376,6 +376,7 @@ function renderConfirm() {
 
 function render() {
   ensureWidget();
+  host.dataset.dlmReady = state.hostReady ? "1" : "0";
   const anyActive = state.active.size > 0;
   const any = state.items.length > 0 || anyActive || state.finished.length > 0 || !!state.confirm;
   host.hidden = !any;
@@ -479,6 +480,43 @@ function confirmClick(a, url, kind) {
     url: url.href,
     kind,
     name: fileName(url.href),
+    domain: url.host,
+  };
+  state.collapsed = false;
+  render();
+}
+
+function nativeDownload(url, name) {
+  const a = document.createElement("a");
+  a.href = url;
+  const base = (name || "").split("/").pop();
+  if (base) a.download = base;
+  a.dataset.dlmNative = "1";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function onPageHookMessage(ev) {
+  if (ev.source !== window) return;
+  const data = ev.data;
+  if (!data || data.source !== "dlm-page" || data.type !== "anchor-download") return;
+  if (!/^https?:\/\//i.test(data.url || "")) return;
+  if (!state.hostReady) {
+    nativeDownload(data.url, data.name);
+    return;
+  }
+  let url = null;
+  try {
+    url = new URL(data.url);
+  } catch {
+    return;
+  }
+  const base = (data.name || "").split("/").pop();
+  state.confirm = {
+    url: url.href,
+    kind: url.pathname.toLowerCase().endsWith(".m3u8") ? "hls" : "file",
+    name: base || fileName(url.href),
     domain: url.host,
   };
   state.collapsed = false;
@@ -594,6 +632,7 @@ chrome.storage.onChanged.addListener(() => {
 });
 
 document.addEventListener("click", onDocumentClick, true);
+window.addEventListener("message", onPageHookMessage);
 render();
 refreshMedia();
 setInterval(refreshMedia, 1500);

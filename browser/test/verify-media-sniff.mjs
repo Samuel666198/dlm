@@ -33,7 +33,10 @@ const pageHtml = '<!doctype html><html><head><meta charset="utf-8"><title>dlm me
   '<a id="file-link" href="/file.bin">下载文件</a>' +
   '<a id="auto-file-link" href="/auto.bin">自动接管</a>' +
   '<a id="slow-file-link" href="/slow.bin">慢速文件</a>' +
-  '<script>document.getElementById("load-media").onclick = () => fetch("/stream.m3u8").catch(() => {});</script></body></html>';
+  '<button id="site-download">站点按钮</button>' +
+  '<script>document.getElementById("load-media").onclick = () => fetch("/stream.m3u8").catch(() => {});' +
+  'document.getElementById("site-download").onclick = () => { const a = document.createElement("a"); a.href = "/site.bin"; a.download = "site.bin"; a.click(); };' +
+  '</script></body></html>';
 const playlist = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n#EXT-X-ENDLIST\n';
 const server = http.createServer((req, res) => {
   if (req.url === '/page.html') {
@@ -89,6 +92,11 @@ const server = http.createServer((req, res) => {
       pos += n;
     }, 400);
     req.on('close', () => clearInterval(timer));
+    return;
+  }
+  if (req.url === '/site.bin') {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': 4 });
+    res.end('SITE');
     return;
   }
   if (req.url === '/normal-page') {
@@ -318,6 +326,30 @@ try {
   }
   log += `done_text=${doneText}\n`;
   if (!doneText.includes('完成')) throw new Error(`没有收到完成反馈：${doneText}`);
+
+  // 站点脚本 createElement('a') + click()：游离 anchor 也要被 page-hook 接住，先确认再下载。
+  await evalText("document.getElementById('site-download').click(); true");
+  let siteConfirm = false;
+  for (let i = 0; i < 40; i++) {
+    siteConfirm = !!(await evalText("!window.__dlm('#dlm-confirm')?.hidden"));
+    if (siteConfirm) break;
+    await sleep(100);
+  }
+  if (!siteConfirm) throw new Error('站点脚本下载没有弹确认');
+  const sitePath = path.join(downloadDir, 'site.bin');
+  if (fs.existsSync(sitePath)) throw new Error('站点脚本在确认前就下载了');
+  await evalText("window.__dlm('#dlm-confirm-yes').click(); true");
+  let siteBytes = -1;
+  for (let i = 0; i < 120; i++) {
+    if (fs.existsSync(sitePath)) {
+      siteBytes = fs.statSync(sitePath).size;
+      if (siteBytes === 4) break;
+    }
+    await sleep(100);
+  }
+  log += `site_script_file=${sitePath} bytes=${siteBytes}\n`;
+  if (siteBytes !== 4) throw new Error(`站点脚本下载没有交给 dlm：${siteBytes}`);
+  if (fs.readFileSync(sitePath, 'utf8') !== 'SITE') throw new Error('站点脚本下载内容不对');
 
   // 慢速文件：要能看到进度条，点“停止”后显示断点保留。
   await evalText("document.getElementById('slow-file-link').click(); true");

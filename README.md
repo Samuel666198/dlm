@@ -233,7 +233,9 @@ node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Mi
 可停止（保留断点）；工具栏 popup 也能看。点“下载”把 URL 交给宿主：HLS 强制直连 `dlm --hls`
 （队列不接不可续传的 HLS），普通文件按 B10 规则走队列或直连。
 页面里已识别为下载/媒体的链接，**左键点击先弹确认卡片，确认后才交给 dlm**，不再走浏览器；
-宿主未连接、带 Ctrl/Shift/Alt、`target="_blank"` 和普通网页链接都不接管。宿主 spawn dlm 时不再弹终端窗口。
+站点自己用 `createElement('a') + click()` 触发的下载（ModelScope 行内“下载”就是这种）也会被
+MAIN-world 钩子接住，同样先确认，不会再出现浏览器偷下小文件。宿主未连接、带 Ctrl/Shift/Alt、
+`target="_blank"` 和普通网页链接都不接管。宿主 spawn dlm 时不再弹终端窗口。
 只列这些，不列 DASH，不自动下载。浏览器验收：
 
 ```bash

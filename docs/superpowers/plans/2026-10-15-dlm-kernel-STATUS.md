@@ -246,11 +246,22 @@
 - **四闸**：`--lib` **311/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**。
 - **未做**：JS 按钮/表单下载仍走浏览器；进度来自人类可读行，不是逐 worker 真值。
 
+## 2026-10-29 站点脚本下载拦截（扩展 0.2.6）
+
+- **根因**：ModelScope 文件列表行内“下载”是 `<span>`，站点点击后动态创建**游离**的
+  `<a download>` 再 `.click()`；这种点击不经过页面 DOM，content 的捕获监听看不到，浏览器直接下小文件。
+- **修复**：新增 `page-hook.js`（MAIN world，`document_start`）钩住 `HTMLAnchorElement.prototype.click`；
+  命中 `download` 属性/文件后缀时 `postMessage` 给 content，同样走确认卡片；宿主不在线时用
+  `data-dlm-native="1"` 临时锚点回退浏览器下载。
+- **验证**：Edge 156 站点脚本按钮先确认后落盘 4 B；Tabbit 真实 ModelScope 页面点 `config.json` 行
+  与大文件行都只弹确认（名称正确），`Downloads` 无落盘、无新任务。
+- **四闸**：`--lib` **311/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（纯扩展/文档）。
+
 ## 2026-10-28 Windows x64 便携包
 
 - **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
-  （**6,638,289 B**，sha256 `0fea3a58951157e5b1c2318300e96cd01e0634a509e8612e3c27a031403219cc`；
-  2026-10-29 随扩展 0.2.5 的页内组件与宿主进度/停止重建）。
+  （**6,639,802 B**，sha256 `37029479fe349cb2cf9532c8b3fc8b70a4176615c675c0ac229642e392236174`；
+  2026-10-29 随扩展 0.2.6 的页内组件、站点脚本钩子与宿主进度/停止重建）。
 - **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
   `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
 - **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，

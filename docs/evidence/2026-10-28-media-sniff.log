@@ -1,14 +1,15 @@
 browser=Edg/156.0.4314.50
-page=http://127.0.0.1:61422/page.html
+page=http://127.0.0.1:57543/page.html
 dlm=E:\WorkSpace\projects\tool\dlm\target\debug\dlm.exe
 media_button=可下载 4
-media_items=["http://127.0.0.1:61422/file.bin","http://127.0.0.1:61422/auto.bin","http://127.0.0.1:61422/slow.bin","http://127.0.0.1:61422/stream.m3u8"]
-file=C:\Users\ROG\AppData\Local\Temp\dlm-media-I9KgWD\dl\stream.ts bytes=6
-plain_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-I9KgWD\dl\file.bin bytes=4
+media_items=["http://127.0.0.1:57543/file.bin","http://127.0.0.1:57543/auto.bin","http://127.0.0.1:57543/slow.bin","http://127.0.0.1:57543/stream.m3u8"]
+file=C:\Users\ROG\AppData\Local\Temp\dlm-media-F5DfoG\dl\stream.ts bytes=6
+plain_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-F5DfoG\dl\file.bin bytes=4
 host_ready=true
-auto_click_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-I9KgWD\dl\auto.bin bytes=4 stayed=true
+auto_click_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-F5DfoG\dl\auto.bin bytes=4 stayed=true
 done_text=✓auto.bin完成✓file.bin完成✓stream.m3u8完成
+site_script_file=C:\Users\ROG\AppData\Local\Temp\dlm-media-F5DfoG\dl\site.bin bytes=4
 progress=1
-stopped_text=✕slow.bin已停止（断点保留）✓auto.bin完成✓file.bin完成
+stopped_text=✕slow.bin已停止（断点保留）✓site.bin完成✓auto.bin完成
 normal_link_prevented=false
 screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-10-28-media-sniff.png
