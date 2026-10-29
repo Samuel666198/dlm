@@ -32,6 +32,7 @@ const pageHtml = '<!doctype html><html><head><meta charset="utf-8"><title>dlm me
   '<button id="load-media">加载媒体</button>' +
   '<a id="file-link" href="/file.bin">下载文件</a>' +
   '<a id="auto-file-link" href="/auto.bin">自动接管</a>' +
+  '<a id="slow-file-link" href="/slow.bin">慢速文件</a>' +
   '<script>document.getElementById("load-media").onclick = () => fetch("/stream.m3u8").catch(() => {});</script></body></html>';
 const playlist = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n#EXT-X-ENDLIST\n';
 const server = http.createServer((req, res) => {
@@ -63,6 +64,31 @@ const server = http.createServer((req, res) => {
   if (req.url === '/auto.bin') {
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': 4 });
     res.end('AUTO');
+    return;
+  }
+  if (req.url === '/slow.bin') {
+    const SIZE = 32 * 1024 * 1024;
+    const range = req.headers.range;
+    let start = 0, end = SIZE - 1, status = 200;
+    const m = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (m) {
+      if (m[1]) start = Number(m[1]);
+      if (m[2]) end = Number(m[2]);
+      status = 206;
+    }
+    const len = end - start + 1;
+    const headers = { 'Content-Type': 'application/octet-stream', 'Content-Length': String(len), 'Accept-Ranges': 'bytes' };
+    if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${SIZE}`;
+    res.writeHead(status, headers);
+    let pos = start;
+    const chunk = 256 * 1024;
+    const timer = setInterval(() => {
+      if (pos > end) { clearInterval(timer); res.end(); return; }
+      const n = Math.min(chunk, end - pos + 1);
+      res.write(Buffer.alloc(n, 0x41));
+      pos += n;
+    }, 400);
+    req.on('close', () => clearInterval(timer));
     return;
   }
   if (req.url === '/normal-page') {
@@ -155,34 +181,49 @@ try {
     ws.send(JSON.stringify({ id, method, params }));
   });
   await cdp('Runtime.enable');
+  await cdp('Page.enable');
   const evalText = async (expression) => {
     const r = await cdp('Runtime.evaluate', { expression, returnByValue: true });
     return r.result?.value;
   };
 
-  for (let i = 0; i < 80; i++) {
-    if (await evalText("!!document.querySelector('#dlm-submit')")) break;
+  const helper = "window.__dlm=(sel)=>document.getElementById('dlm-native-box')?.shadowRoot?.querySelector(sel)||null; true";
+  await evalText(helper);
+  let injected = false;
+  for (let i = 0; i < 40; i++) {
+    injected = !!(await evalText("!!window.__dlm('#dlm-submit')"));
+    if (injected) break;
     await sleep(250);
   }
-  if (!(await evalText("!!document.querySelector('#dlm-submit')"))) throw new Error('扩展未注入');
-  await sleep(1500); // 给 service worker 注册 webRequest 的时间；真实扩展在浏览前就加载
+  if (!injected) {
+    // 扩展在页面开始加载之后才完成注册时，content script 不会补注入；重载一次。
+    await cdp('Page.reload', { ignoreCache: true });
+    await sleep(2500);
+    await evalText(helper);
+    for (let i = 0; i < 40; i++) {
+      injected = !!(await evalText("!!window.__dlm('#dlm-submit')"));
+      if (injected) break;
+      await sleep(250);
+    }
+  }
+  if (!injected) throw new Error('扩展未注入');
+  await sleep(2500); // 等宿主 pong + 页面链接扫描
   await evalText("document.querySelector('#load-media').click(); true");
   await sleep(600);
 
   let mediaText = '';
   for (let i = 0; i < 80; i++) {
-    mediaText = (await evalText("document.querySelector('#dlm-media-count')?.textContent || ''")) || '';
-    if (mediaText.startsWith('下载 3')) break;
+    mediaText = (await evalText("window.__dlm('#dlm-pill-meta')?.textContent || ''")) || '';
+    if (mediaText === '可下载 3') break;
     await sleep(250);
   }
   log += `media_button=${mediaText}\n`;
-  if (!mediaText.startsWith('下载 ')) throw new Error('没有检测到下载条目');
-  if (mediaText === '下载 0') throw new Error('下载计数为 0');
+  if (!mediaText.startsWith('可下载')) throw new Error('没有检测到下载条目');
 
-  await evalText("document.querySelector('#dlm-media-count').click(); true");
-  const panel = await evalText("(!document.querySelector('#dlm-media-panel')?.hidden)");
+  await evalText("window.__dlm('#dlm-toggle').click(); true");
+  const panel = await evalText("!window.__dlm('#dlm-panel')?.hidden");
   if (!panel) throw new Error('下载面板没有打开');
-  const items = await evalText("Array.from(document.querySelectorAll('#dlm-media-list .url')).map(e=>e.textContent)");
+  const items = await evalText("Array.from(window.__dlm('#dlm-list').querySelectorAll('.url')).map(e=>e.title)");
   log += `media_items=${JSON.stringify(items)}\n`;
   if (!items || !items.some((u) => u.includes('/stream.m3u8'))) {
     throw new Error(`下载面板没有 HLS 条目：${JSON.stringify(items)}`);
@@ -191,8 +232,8 @@ try {
     throw new Error(`下载面板没有文件链接：${JSON.stringify(items)}`);
   }
   const clickedHls = await evalText(`(() => {
-    const rows = [...document.querySelectorAll('#dlm-media-list > div')];
-    const row = rows.find((r) => (r.querySelector('.url')?.textContent || '').includes('/stream.m3u8'));
+    const rows = [...window.__dlm('#dlm-list').children];
+    const row = rows.find((r) => (r.querySelector('.url')?.title || '').includes('/stream.m3u8'));
     if (!row) return false;
     row.querySelector('button')?.click();
     return true;
@@ -214,8 +255,8 @@ try {
   if (body !== 'AAABBB') throw new Error(`HLS 内容不对：${JSON.stringify(body)}`);
 
   const clickedFile = await evalText(`(() => {
-    const rows = [...document.querySelectorAll('#dlm-media-list > div')];
-    const row = rows.find((r) => (r.querySelector('.url')?.textContent || '').includes('/file.bin'));
+    const rows = [...window.__dlm('#dlm-list').children];
+    const row = rows.find((r) => (r.querySelector('.url')?.title || '').includes('/file.bin'));
     if (!row) return false;
     row.querySelector('button')?.click();
     return true;
@@ -233,16 +274,27 @@ try {
   log += `plain_file=${filePath} bytes=${fileBytes}\n`;
   if (fileBytes !== 4) throw new Error(`普通文件没有落成 FILE：${fileBytes}`);
 
-  // 宿主就绪后，左键点击下载链接应被 content.js 接管，改由 dlm 落盘。
-  let statusText = '';
-  for (let i = 0; i < 60; i++) {
-    statusText = (await evalText("document.querySelector('#dlm-native-status')?.textContent || ''")) || '';
-    if (/pong|正在下载|已加入队列|下载完成|下载失败/i.test(statusText)) break;
+  // 宿主就绪后，点击下载链接先弹确认，不直接下载。
+  let hostReady = false;
+  for (let i = 0; i < 40; i++) {
+    hostReady = !!(await evalText("window.__dlm('#dlm-host-note')?.hidden"));
+    if (hostReady) break;
     await sleep(250);
   }
-  log += `host_status=${statusText}\n`;
+  log += `host_ready=${hostReady}\n`;
+  if (!hostReady) throw new Error('宿主未就绪');
+
   await evalText("document.getElementById('auto-file-link').click(); true");
+  let confirmShown = false;
+  for (let i = 0; i < 40; i++) {
+    confirmShown = !!(await evalText("!window.__dlm('#dlm-confirm')?.hidden"));
+    if (confirmShown) break;
+    await sleep(100);
+  }
+  if (!confirmShown) throw new Error('点击下载链接没有弹确认');
   const autoPath = path.join(downloadDir, 'auto.bin');
+  if (fs.existsSync(autoPath)) throw new Error('确认前就开始了下载');
+  await evalText("window.__dlm('#dlm-confirm-yes').click(); true");
   let autoBytes = -1;
   for (let i = 0; i < 120; i++) {
     if (fs.existsSync(autoPath)) {
@@ -253,19 +305,47 @@ try {
   }
   const stayed = (await evalText("location.pathname")) === '/page.html';
   log += `auto_click_file=${autoPath} bytes=${autoBytes} stayed=${stayed}\n`;
-  if (autoBytes !== 4) throw new Error(`点击下载链接没有交给 dlm：${autoBytes}`);
-  if (!stayed) throw new Error('点击下载链接后页面跳走了');
+  if (autoBytes !== 4) throw new Error(`确认后没有交给 dlm：${autoBytes}`);
+  if (!stayed) throw new Error('确认后页面跳走了');
   if (fs.readFileSync(autoPath, 'utf8') !== 'AUTO') throw new Error('自动接管内容不对');
 
   // 宿主在子进程退出后要回 done，页面必须看得到完成/失败。
   let doneText = '';
   for (let i = 0; i < 100; i++) {
-    doneText = (await evalText("document.querySelector('#dlm-native-status')?.textContent || ''")) || '';
-    if (/下载完成|下载失败/i.test(doneText)) break;
+    doneText = (await evalText("window.__dlm('#dlm-finished')?.textContent || ''")) || '';
+    if (doneText.includes('完成')) break;
     await sleep(100);
   }
-  log += `done_status=${doneText}\n`;
-  if (!doneText.includes('下载完成')) throw new Error(`没有收到完成反馈：${doneText}`);
+  log += `done_text=${doneText}\n`;
+  if (!doneText.includes('完成')) throw new Error(`没有收到完成反馈：${doneText}`);
+
+  // 慢速文件：要能看到进度条，点“停止”后显示断点保留。
+  await evalText("document.getElementById('slow-file-link').click(); true");
+  let slowConfirm = false;
+  for (let i = 0; i < 40; i++) {
+    slowConfirm = !!(await evalText("!window.__dlm('#dlm-confirm')?.hidden"));
+    if (slowConfirm) break;
+    await sleep(100);
+  }
+  if (!slowConfirm) throw new Error('慢速文件没有弹确认');
+  await evalText("window.__dlm('#dlm-confirm-yes').click(); true");
+  let progress = -1;
+  for (let i = 0; i < 120; i++) {
+    progress = Number(await evalText("window.__dlm('#dlm-active .bar')?.getAttribute('aria-valuenow') || '-1'"));
+    if (progress > 0) break;
+    await sleep(100);
+  }
+  log += `progress=${progress}\n`;
+  if (!(progress > 0)) throw new Error('没有收到进度');
+  await evalText("window.__dlm('#dlm-active button.ghost')?.click(); true");
+  let stoppedText = '';
+  for (let i = 0; i < 60; i++) {
+    stoppedText = (await evalText("window.__dlm('#dlm-finished')?.textContent || ''")) || '';
+    if (stoppedText.includes('已停止')) break;
+    await sleep(100);
+  }
+  log += `stopped_text=${stoppedText}\n`;
+  if (!stoppedText.includes('已停止')) throw new Error(`停止后没有反馈：${stoppedText}`);
 
   // 普通页面链接不许被接管（对照臂：defaultPrevented 必须为 false）。
   const normalPrevented = await evalText(`(() => {

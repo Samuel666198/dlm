@@ -41,10 +41,11 @@
 **注意**：扩展文件更新后必须完全退出 Tabbit（`Stop-Process -Name 'Tabbit Browser'`）再从未改过的快捷方式启动；
 仅关闭窗口或再次点快捷方式不会重新加载已解压扩展，面板仍是旧代码。
 
-**Service Worker 缓存**：只改 `background.js`、重启浏览器后，content script 会更新而 Service Worker
-可能仍跑旧缓存（实测 done 分支不执行）。扩展 0.2.4 起入口固定为 `background-sw.js`，内部按版本
-`importScripts("background-impl.js?v=<version>")`；升版本即换 URL，强制重取实现。
-排查标记：页面 `document.documentElement` 的 `data-dlm-version`，storage 的 `buildVersion`。
+**Service Worker 缓存**：只改 background 文件、重启浏览器后，content script 会更新而 Service Worker
+可能仍跑旧缓存。Tabbit 1.18 上试过 `background-sw.js` + `importScripts("...?v=<version>")`，
+SW 直接没启动；最终改成**带版本号的文件名**（当前 `background-0.2.5.js`，manifest 指过去），
+换实现时换文件名。排查标记：页面 `document.documentElement` 的 `data-dlm-version`，
+storage 的 `buildVersion`。
 
 ## 注意
 

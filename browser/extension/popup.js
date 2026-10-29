@@ -41,7 +41,8 @@ function render(items) {
           op: "page-download",
           url: item.url,
           referer: currentTab.url || item.url,
-          hls: item.kind === "hls"
+          hls: item.kind === "hls",
+          tabId: currentTab.id
         },
         () => {
           if (chrome.runtime.lastError) {

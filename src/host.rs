@@ -4,12 +4,13 @@
 //! 都没有就用默认：dlm.exe 与宿主同目录、下载到 `%USERPROFILE%\Downloads`、日志到
 //! `%LOCALAPPDATA%\dlm\native-host\jobs`。测试用 `DLM_NATIVE_CONFIG` 指向临时目录。
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -92,16 +93,26 @@ impl HostConfig {
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 type Notify = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+type Jobs = Arc<Mutex<HashMap<String, (u32, Option<i64>)>>>;
+type Canceled = Arc<Mutex<HashSet<String>>>;
 
 pub struct Host {
     config: HostConfig,
     seq: u64,
     notify: Option<Notify>,
+    jobs: Jobs,
+    canceled: Canceled,
 }
 
 impl Host {
     pub fn new(config: HostConfig) -> Self {
-        Self { config, seq: 0, notify: None }
+        Self {
+            config,
+            seq: 0,
+            notify: None,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            canceled: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     pub fn with_notify(mut self, notify: Notify) -> Self {
@@ -140,10 +151,11 @@ impl Host {
             Ok(v) => v,
             Err(_) => return native::respond(payload),
         };
-        if value.get("op").and_then(Value::as_str) == Some("download") {
-            return self.download(&value);
+        match value.get("op").and_then(Value::as_str) {
+            Some("download") => self.download(&value),
+            Some("cancel") => self.cancel(&value),
+            _ => native::respond(payload),
         }
-        native::respond(payload)
     }
 
     fn download(&mut self, value: &Value) -> Vec<u8> {
@@ -159,6 +171,8 @@ impl Host {
         let referer = text("referer");
         let cookie = text("cookie");
         let hls = value.get("hls").and_then(Value::as_bool).unwrap_or(false);
+        let tab = value.get("tab").and_then(Value::as_i64);
+        let display_name = name.map(str::to_string).unwrap_or_else(|| derive_name(url));
 
         // B10：无 Cookie 且队列可达 ⇒ 交给队列（队列的落点是 `dlm-gui --out-dir`）。
         // 带 Cookie 的下载仍走 B2 直连：队列不存 Cookie。
@@ -170,6 +184,8 @@ impl Host {
                         "op": "accepted",
                         "mode": "queue",
                         "id": id,
+                        "name": display_name,
+                        "tab": tab,
                     }))
                     .expect("json! serializable");
                 }
@@ -215,7 +231,6 @@ impl Host {
             url.into(),
             "--out-dir".into(),
             self.config.download_dir.clone().into(),
-            "--quiet".into(),
         ];
         if let Some(name) = name {
             args.push("--out-name".into());
@@ -235,7 +250,7 @@ impl Host {
         let mut command = Command::new(&self.config.dlm_exe);
         command
             .args(&args)
-            .stdout(Stdio::from(log))
+            .stdout(Stdio::piped())
             .stderr(Stdio::from(log_err))
             .stdin(if cookie.is_some() { Stdio::piped() } else { Stdio::null() });
         #[cfg(windows)]
@@ -255,22 +270,87 @@ impl Host {
             return error("could not hand cookie to dlm");
         }
 
-        if let Some(notify) = self.notify.clone() {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.insert(job.clone(), (child.id(), tab));
+        }
+
+        if let Some(stdout) = child.stdout.take() {
             let job = job.clone();
+            let name = display_name.clone();
+            let notify = self.notify.clone();
+            let mut log = log;
+            std::thread::spawn(move || {
+                let mut reader = stdout;
+                let mut acc: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                let mut last_emit = Instant::now() - Duration::from_secs(2);
+                loop {
+                    let n = match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    for &byte in &buf[..n] {
+                        if byte == b'\r' || byte == b'\n' {
+                            if !acc.is_empty() {
+                                handle_dlm_line(
+                                    &String::from_utf8_lossy(&acc),
+                                    &mut log,
+                                    &job,
+                                    &name,
+                                    tab,
+                                    &notify,
+                                    &mut last_emit,
+                                );
+                                acc.clear();
+                            }
+                        } else {
+                            acc.push(byte);
+                        }
+                    }
+                }
+                if !acc.is_empty() {
+                    handle_dlm_line(
+                        &String::from_utf8_lossy(&acc),
+                        &mut log,
+                        &job,
+                        &name,
+                        tab,
+                        &notify,
+                        &mut last_emit,
+                    );
+                }
+            });
+        }
+
+        {
+            let notify = self.notify.clone();
+            let job = job.clone();
+            let name = display_name.clone();
             let log_path = log_path.clone();
+            let jobs = self.jobs.clone();
+            let canceled = self.canceled.clone();
             std::thread::spawn(move || {
                 let (ok, code) = match child.wait() {
                     Ok(status) => (status.success(), status.code()),
                     Err(_) => (false, None),
                 };
+                if let Ok(mut map) = jobs.lock() {
+                    map.remove(&job);
+                }
+                let was_canceled = canceled.lock().map(|mut set| set.remove(&job)).unwrap_or(false);
                 let frame = json!({
                     "op": "done",
                     "job": job,
+                    "tab": tab,
+                    "name": name,
                     "ok": ok,
                     "code": code,
+                    "canceled": was_canceled,
                     "log": log_path.to_string_lossy(),
                 });
-                if let Ok(bytes) = serde_json::to_vec(&frame) {
+                if let Some(notify) = notify
+                    && let Ok(bytes) = serde_json::to_vec(&frame)
+                {
                     notify(bytes);
                 }
             });
@@ -280,9 +360,62 @@ impl Host {
             "op": "accepted",
             "mode": "direct",
             "job": job,
+            "tab": tab,
+            "name": display_name,
             "log": log_path.to_string_lossy(),
         }))
         .expect("json! serializable")
+    }
+
+    fn cancel(&self, value: &Value) -> Vec<u8> {
+        let Some(job) = value.get("job").and_then(Value::as_str) else {
+            return error("cancel needs a job");
+        };
+        let found = self.jobs.lock().ok().and_then(|jobs| jobs.get(job).copied());
+        let Some((pid, tab)) = found else {
+            return serde_json::to_vec(&json!({
+                "op": "cancel",
+                "job": job,
+                "ok": false,
+                "message": "未知任务或已结束",
+            }))
+            .expect("json! serializable");
+        };
+        if let Ok(mut set) = self.canceled.lock() {
+            set.insert(job.to_string());
+        }
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("taskkill");
+            command
+                .args(["/PID", &pid.to_string(), "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW);
+            let ok = command.status().map(|status| status.success()).unwrap_or(false);
+            if !ok && let Ok(mut set) = self.canceled.lock() {
+                set.remove(job);
+            }
+            serde_json::to_vec(&json!({
+                "op": "cancel",
+                "job": job,
+                "tab": tab,
+                "ok": ok,
+                "message": if ok { "已停止，断点保留" } else { "停止失败" },
+            }))
+            .expect("json! serializable")
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = tab;
+            serde_json::to_vec(&json!({
+                "op": "cancel",
+                "job": job,
+                "ok": false,
+                "message": "当前平台不支持停止",
+            }))
+            .expect("json! serializable")
+        }
     }
 
     fn try_queue(&self, url: &str, name: Option<&str>, referer: Option<&str>) -> QueueOutcome {
@@ -350,6 +483,73 @@ impl Host {
             }
         }
     }
+}
+
+/// 把 dlm 的一行 stdout 分流：进度行转成 `op:"progress"`（每 400 ms 最多一发），其余写回任务日志。
+fn handle_dlm_line(
+    text: &str,
+    log: &mut fs::File,
+    job: &str,
+    name: &str,
+    tab: Option<i64>,
+    notify: &Option<Notify>,
+    last_emit: &mut Instant,
+) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if let Some((percent, done, total, speed)) = parse_progress(text) {
+        if last_emit.elapsed() < Duration::from_millis(400) {
+            return;
+        }
+        *last_emit = Instant::now();
+        if let Some(notify) = notify {
+            let eta = if speed > 0.0 {
+                ((total.saturating_sub(done)) as f64 / speed).round() as u64
+            } else {
+                0
+            };
+            let frame = json!({
+                "op": "progress",
+                "job": job,
+                "tab": tab,
+                "name": name,
+                "percent": percent,
+                "done": done,
+                "total": total,
+                "speed": speed,
+                "eta": eta,
+            });
+            if let Ok(bytes) = serde_json::to_vec(&frame) {
+                notify(bytes);
+            }
+        }
+    } else {
+        let _ = writeln!(log, "{text}");
+    }
+}
+
+/// `45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4  dup 5.5%` ⇒ `(45.2, done, total, speed)`（字节/秒）。
+fn parse_progress(line: &str) -> Option<(f64, u64, u64, f64)> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 6 {
+        return None;
+    }
+    let percent = tokens[0].strip_suffix('%')?.parse::<f64>().ok()?;
+    let done_mib = tokens[1].parse::<f64>().ok()?;
+    let total_mib = tokens[2].strip_prefix("MiB/")?.parse::<f64>().ok()?;
+    if tokens[3] != "MiB" || !tokens[5].starts_with("MiB/s") {
+        return None;
+    }
+    let speed_mib = tokens[4].parse::<f64>().ok()?;
+    const MIB: f64 = 1_048_576.0;
+    Some((
+        percent,
+        (done_mib * MIB) as u64,
+        (total_mib * MIB) as u64,
+        speed_mib * MIB,
+    ))
 }
 
 fn derive_name(url: &str) -> String {
@@ -464,6 +664,26 @@ mod tests {
         assert!(done["ok"].is_boolean(), "done 必须带退出结论：{done}");
         assert_eq!(done["log"], reply["log"]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn progress_lines_are_parsed_and_other_lines_are_not() {
+        let (percent, done, total, speed) =
+            parse_progress("45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4  dup 5.5%").expect("progress line");
+        assert!((percent - 45.2).abs() < 1e-9);
+        assert_eq!(total, 48 * 1_048_576);
+        assert!((done as i64 - (21.7 * 1_048_576.0) as i64).abs() <= 1);
+        assert!((speed - 3.1 * 1_048_576.0).abs() < 1.0);
+        assert!(parse_progress("下载已完成  目标：x  全长 4 B").is_none());
+        assert!(parse_progress("").is_none());
+    }
+
+    #[test]
+    fn cancel_unknown_job_is_refused() {
+        let mut host = Host::new(config(&std::env::temp_dir()));
+        let reply: Value = serde_json::from_slice(&host.handle(br#"{"op":"cancel","job":"nope"}"#)).unwrap();
+        assert_eq!(reply["op"], "cancel");
+        assert_eq!(reply["ok"], false);
     }
 
     #[test]

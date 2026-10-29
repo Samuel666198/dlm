@@ -233,11 +233,24 @@
 - **四闸**：`--lib` **309/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**。
 - **未做**：被硬杀时未确认的字节不能安全续传；本次 9.35 GB 半截文件已停止重下，需删除后重下。
 
+## 2026-10-29 页内下载组件（确认/进度/停止）
+
+- **扩展 0.2.5**：shadow DOM 组件，折叠胶囊 + “进行中 / 最近 / 可下载”；点下载链接先弹确认，
+  确认后才投递；进行中显示进度条/速度/剩余时间与“停止”；停止走宿主 `cancel`，断点保留。
+- **宿主**：去掉 `--quiet`，解析 dlm stdout 的进度行（400 ms 节流）发 `op:"progress"`；
+  `accepted/progress/cancel/done` 带 `tab`；`cancel` 用 `taskkill /PID`。
+- **Service Worker**：Tabbit 上 `importScripts(...?v=...)` 不启动；改为带版本号的 SW 文件名
+  `background-0.2.5.js`。
+- **验证**：Edge 156 面板 `可下载 4`、确认前无文件、完成后 `✓`、进度 `aria-valuenow=1`、
+  停止后 `已停止（断点保留）`；Tabbit 真机确认/完成/进度/停止全过，`MainWindowHandle=0`。
+- **四闸**：`--lib` **311/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**。
+- **未做**：JS 按钮/表单下载仍走浏览器；进度来自人类可读行，不是逐 worker 真值。
+
 ## 2026-10-28 Windows x64 便携包
 
 - **打包脚本**：`packaging/build-package.ps1`；产物 `target/package/dlm-0.1.0-win-x64.zip`
-  （**6,608,186 B**，sha256 `6c142abe36405dad5660d9687347c67f06fe9e02a94de8efb2cbec73df97d1d2`；
-  2026-10-28 晚随扩展 0.2.4、点击接管、完成反馈与 User-Agent 修复重建）。
+  （**6,638,289 B**，sha256 `0fea3a58951157e5b1c2318300e96cd01e0634a509e8612e3c27a031403219cc`；
+  2026-10-29 随扩展 0.2.5 的页内组件与宿主进度/停止重建）。
 - **包含**：三个 release exe、`browser/extension`（MV3）、`install.ps1`/`uninstall.ps1`、
   `START-HERE.txt`/`README-PACKAGE.md`、主 README；共 14 个文件。
 - **安装器**：复制到 `%LOCALAPPDATA%\dlm\bin` + `extension`，写宿主 manifest，注册 HKCU Chrome/Edge，

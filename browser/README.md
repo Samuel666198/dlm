@@ -81,16 +81,18 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
   - 页面 `content.js` 每 1.5 s 扫一次 `a[href]` 的常见文件后缀（zip/rar/pdf/docx/exe/msi/apk/图片…），
     通过 `page-links` 并入同一份列表。
 - 每 tab 去重、最多 40 条，`storage.session` 跨 service worker 保存。
-- 页面右下角出现“下载 N”面板（标签 HLS/文件）；点条目的“下载”发送 `page-download`，HLS 带 `hls:true`。
-- 页面里已识别的下载/媒体链接，左键点击会被 content script 接管（`preventDefault`）并交给 dlm；
-  仅当宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、普通链接不接管；
-  `page-download` 投递失败时回退浏览器默认行为。
+- 页面右下角是一个 shadow DOM 小组件：折叠时显示进行中数量与总进度；展开后分“进行中 / 最近 / 可下载”。
+  进行中项有进度条、速度、剩余时间与“停止”（杀进程、保留断点）；最近显示完成/失败/已停止/已入队。
+- 点条目“下载”发送 `page-download`，HLS 带 `hls:true`。页面里已识别的下载/媒体链接，左键点击先弹
+  确认卡片，确认后才交给 dlm；仅当宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、
+  普通链接不接管；投递失败时页面链接回退浏览器默认行为。
 - 宿主 spawn dlm 时用 `CREATE_NO_WINDOW`，不再弹空白终端窗口（关窗口会顺手杀掉下载）。
-- 宿主在子进程退出后回一条 `op:"done"`；页面右下角显示“正在下载 / 下载完成 / 下载失败（退出码）”，
-  popup 同步显示最近结果。
+- 宿主把 dlm 的进度行解析成 `op:"progress"`（400 ms 节流），子进程退出后回 `op:"done"`；
+  页面与 popup 的完成/失败状态都来自这里。
 - 工具栏 popup 显示宿主状态与当前标签页的下载列表。
-- `background.js` 是稳定入口 `background-sw.js` + 版本化 `importScripts("background-impl.js?v=<version>")`：
-  未打包扩展的 Service Worker 会被浏览器缓存，换实现时靠版本号换 URL 强制重取。
+- Service Worker 用**带版本号的文件名**（当前 `background-0.2.5.js`，manifest 里指过去）：
+  未打包扩展的 SW 会被浏览器缓存，只改内容、重启浏览器仍可能跑旧代码；换文件名才能强制重取。
+  排查标记：页面 `document.documentElement` 的 `data-dlm-version`、storage 的 `buildVersion`。
 - 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；
   普通文件不带 Cookie 时按 B10 进队列（GUI 开着），带 Cookie 或 GUI 不可达时直连。
 - 验收：

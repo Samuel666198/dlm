@@ -1,77 +1,73 @@
-# B3b-lite 浏览器媒体与文件嗅探证据（2026-10-28）
+# B3b-lite 浏览器媒体与文件嗅探证据（2026-10-28，2026-10-29 更新 UI/进度）
 
-**四闸**：`--lib` **308/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0** ·
-`clippy --all-targets -- -D warnings` **0**（本轮只改扩展 JS 与文档，Rust 零改动；
-308 里的 +1 是 User-Agent 修复那轮的回归针）。
+**四闸**：`--lib` **311/0**（3.01 s）· `--bins` **4/0** · `integration` **117/0**（64.56 s）·
+`clippy --all-targets -- -D warnings` **0**。
 
 ## 实现
 
-- `background-impl.js`（入口是稳定的 `background-sw.js`，按扩展版本 import）：
+- `background-0.2.5.js`（Service Worker 文件名带版本号，manifest 指过去；见
+  [`2026-10-29-inpage-widget.md`](2026-10-29-inpage-widget.md) 的缓存说明）：
   - `webRequest.onBeforeRequest` 只读嗅探 `.m3u8`/媒体后缀（每 tab 去重、最多 40 条，
     `storage.session` 跨 service worker 保存，`tabs.onRemoved/onUpdated` 清理）。
   - `webRequest.onHeadersReceived`（`responseHeaders`）认 `Content-Disposition: attachment`
-    与 `application/octet-stream`/zip/pdf/msdownload/7z/rar/msi/apk 等二进制响应；
-    覆盖 `main_frame`/`sub_frame`/`object`/`xmlhttprequest`/`other`。
+    与 `application/octet-stream`/zip/pdf/msdownload/7z/rar/msi/apk 等二进制响应。
   - `page-links` 消息把页面收集到的文件链接并入同一份列表。
-- `content.js`：页面右下角“下载 N”按钮 + 面板；每 1.5 s 扫一次 `a[href]` 的常见文件后缀
-  （zip/rar/pdf/docx/exe/msi/apk/图片…，本地最多 30 条），与后台嗅探结果合并（最多 40 条）；
-  条目“下载”发送 `page-download`，HLS 带 `hls`。面板与按钮文案从“媒体”改为“下载”。
-- `content.js` 点击接管：已识别为下载/媒体的 `<a>` 左键点击在捕获阶段 `preventDefault`，
-  改发 `page-download`；只在宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、
-  普通链接不接管；`page-download` 回执 `ok:false` 时回退浏览器默认行为。
-- `background-impl.js`：`page-download` 回 `{ok}`，让 content 能区分“宿主没接住”并回退；
-  收到宿主的 `op:"done"` 后存 `lastResult`、切徽标，并通知当前标签页。
-- `src/host.rs`：spawn dlm 用 `CREATE_NO_WINDOW`（Windows），不再弹终端窗口；
-  子进程退出后回 `{op:"done",job,ok,code,log}`。
-- `popup.html` / `popup.js`：扩展图标 popup，显示宿主状态和当前标签页下载列表。
-- `src/host.rs`：`download` 接受 `hls:true`，跳过队列，给 dlm 加 `--hls`；HLS 强制直连；
-  普通文件不带 Cookie 时按 B10 进队列。**本轮 host.rs 无改动。**
-- Manifest：扩展版本 **0.2.4**（点击接管 + 完成反馈 + SW 缓存入口；权限沿用 `webRequest`）。
+  - `page-download` 回 `{ok}`；把宿主的 `accepted/progress/cancel/done` 按 `tab` 转发给页面。
+- `content.js`：页面右下角的 shadow DOM 组件（折叠胶囊 + “进行中 / 最近 / 可下载”面板）；
+  每 1.5 s 扫一次 `a[href]` 的常见文件后缀，与后台嗅探结果合并（最多 40 条）。
+  - 左键点已识别的下载/媒体链接：**先弹确认卡片**，确认后才发 `page-download`；
+    Ctrl/Shift/Alt、`target="_blank"`、普通链接不接管；宿主未 pong 时不接管。
+  - 进行中显示进度条、速度、剩余时间与“停止”；停止走宿主 `cancel`（杀进程、保留断点）。
+  - 页面链接投递失败时回退浏览器默认行为；面板里的“下载”是明确动作，不再二次确认。
+- `src/host.rs`：
+  - spawn dlm 用 `CREATE_NO_WINDOW`（Windows），不再弹终端窗口；
+  - 去掉 `--quiet`，读 dlm stdout：进度行转 `op:"progress"`（400 ms 节流），其余写回任务日志；
+  - 子进程退出回 `{op:"done",job,tab,name,ok,code,canceled,log}`；
+  - `cancel` 用 `taskkill /PID` 杀进程并标记 `canceled`。
+- Manifest：扩展版本 **0.2.5**（确认卡片 + 进度/停止 + 版本化 SW 文件名；权限沿用 `webRequest`）。
 
 ## 真浏览器验收（Edge 156）
 
 `browser/test/verify-media-sniff.mjs`：
 
-- 页面放一个请求 `/stream.m3u8` 的按钮、一个 `<a href="/file.bin">` 面板用链接、
-  一个 `<a id="auto-file-link" href="/auto.bin">` 点击接管链接；
-- 扩展面板出现 `下载 3`，条目为 `/stream.m3u8`、`/file.bin`、`/auto.bin`；
-- 点击 HLS 条目后宿主直连 `dlm --hls`，落盘 `stream.ts` **6 B**，内容 `AAABBB`（两段拼接）；
-- 点击文件条目后落盘 `file.bin` **4 B**，内容 `FILE`；
-- 左键点击 `/auto.bin`：页面 URL 停在 `page.html`，由 dlm 落盘 `auto.bin` **4 B** = `AUTO`；
-- 对照臂：点一条普通页面链接，`defaultPrevented` 为 `false`（不被接管）；
-- 截图：`docs/evidence/2026-10-28-media-sniff.png`；日志：`2026-10-28-media-sniff.log`。
+- 页面放 HLS 请求按钮、面板用 `/file.bin` 链接、`/auto.bin` 确认链接、`/slow.bin` 慢速链接；
+- 面板 `可下载 4`；点 HLS 条目落盘 `stream.ts` **6 B** = `AAABBB`，点文件条目落盘 `file.bin` **4 B** = `FILE`；
+- 点 `/auto.bin`：确认卡片出现；**确认前 `auto.bin` 不存在**；点“下载”后落盘 **4 B** = `AUTO`，页面 URL 不变；
+- 完成状态：`#dlm-finished` 出现 `✓ auto.bin 完成`；
+- 慢速 32 MiB：`#dlm-active .bar` 的 `aria-valuenow` 到 **1**（已有进度）；
+  点“停止”后显示 `✕ slow.bin 已停止（断点保留）`；
+- 对照臂：普通页面链接 `defaultPrevented=false`（不被接管）。
 
 ```
-media_button=下载 3
-media_items=[".../file.bin",".../auto.bin",".../stream.m3u8"]
-file=...\dl\stream.ts bytes=6
+media_button=可下载 4
+media_items=[".../file.bin",".../auto.bin",".../slow.bin",".../stream.m3u8"]
 plain_file=...\dl\file.bin bytes=4
-host_status=dlm job: ...
+host_ready=true
 auto_click_file=...\dl\auto.bin bytes=4 stayed=true
+done_text=✓auto.bin完成✓file.bin完成✓stream.m3u8完成
+progress=1
+stopped_text=✕slow.bin已停止（断点保留）✓auto.bin完成✓file.bin完成
 normal_link_prevented=false
 ```
 
+截图：`docs/evidence/2026-10-28-media-sniff.png`；日志：`2026-10-28-media-sniff.log`。
+
 ## 真浏览器验收（Tabbit 1.18.21 / Chromium 154）
 
-- 扩展从 `%LOCALAPPDATA%\dlm\extension`（0.2.4）加载；页面出现 `下载 2`，
-  条目 `stream.m3u8` + `tabbit-file.bin`。
-- 点文件条目：`%USERPROFILE%\Downloads\tabbit-file.bin` **4 B** = `FILE`；
-- 点 HLS 条目：`%USERPROFILE%\Downloads\stream.ts` **6 B** = `AAABBB`；
-- **左键点页面里的下载链接**：页面 URL 不变，dlm 落盘 `tabbit-file.bin` **4 B** = `FILE`；
-  本地站点记录到请求头 `ua="dlm/0.1.0"`；状态从“正在下载”变为 `dlm: 下载完成`。
-- **慢速 32 MiB 下载**：dlm 进程 `MainWindowHandle=0`（没有终端窗口），落盘 33,554,432 B，
-  状态最终为 `dlm: 下载完成`。
+- 扩展从 `%LOCALAPPDATA%\dlm\extension`（0.2.5）加载；组件 `可下载 2`。
+- 点下载链接 → 确认卡片（文件名 `tabbit-file.bin`）→ 点“下载” → 落盘 **4 B** = `FILE`，
+  `最近` 显示 `✓ tabbit-file.bin 完成`。
+- 慢速 32 MiB：进行中显示 `204.8 KB / 32.0 MB`、进度条；此时 `dlm` 进程
+  `MainWindowHandle=0`（没有终端窗口）。
+- 点“停止” → `✕ slow.bin 已停止（断点保留）`，`dlm` 进程退出。
 - 截图：`docs/evidence/2026-10-28-tabbit-file-panel.png`；
   加载与快捷方式细节：`2026-10-28-tabbit-extension.md`。
-
-回归：B1/B2/B10 三条真浏览器用例在 B3b-lite 首发那轮已通过；本轮只改扩展 JS，未重复运行，
-本轮的端到端证据是上面的 Edge 与 Tabbit 两发。
 
 ## 边界
 
 - 只支持 HLS（`.m3u8`）和媒体/文件直链；DASH（`.mpd`）不列、不做音视频合并。
 - 页面链接靠后缀启发式；无后缀的下载按钮靠响应头识别，识别不到的不会出现在面板。
-- 左键接管只覆盖**已识别的链接**；JS 按钮/表单触发的下载仍走浏览器（不做 `chrome.downloads` 全局接管）。
-- 嗅探结果只在浏览器会话里；不自动下载、不自动播放。
+- 左键确认只覆盖**已识别的链接**；JS 按钮/表单触发的下载仍走浏览器（不做 `chrome.downloads` 全局接管）。
+- 进度来自 dlm 的人类可读进度行（400 ms 节流）；停止是杀进程，断点里只包含已确认字节。
 - HLS 不可续传，失败保留已完成的半截文件（沿用 B3a）。
 - 文件链接仍走 B10：无 Cookie + GUI 开着 ⇒ 队列；带 Cookie/GUI 不可达 ⇒ 直连。

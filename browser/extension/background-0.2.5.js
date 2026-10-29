@@ -122,26 +122,26 @@ function connect() {
   }
 
   port.onMessage.addListener((msg) => {
+    if (msg && msg.op === "progress") {
+      sendToJobTab(msg.tab, { ...msg, op: "job-progress" });
+      return;
+    }
+    if (msg && msg.op === "cancel") {
+      sendToJobTab(msg.tab, { ...msg, op: "job-cancel" });
+      return;
+    }
     if (msg && msg.op === "done") {
       store({ lastResult: msg });
       chrome.action.setBadgeText({ text: msg.ok ? "✓" : "!" });
       chrome.action.setBadgeBackgroundColor({ color: msg.ok ? "#2e7d32" : "#c62828" });
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        const tab = tabs && tabs[0];
-        if (tab && tab.id != null) {
-          chrome.tabs.sendMessage(
-            tab.id,
-            { op: "job-done", job: msg.job, ok: msg.ok, code: msg.code },
-            () => void chrome.runtime.lastError
-          );
-        }
-      });
+      sendToJobTab(msg.tab, { ...msg, op: "job-done" });
       console.log("dlm job done", msg);
     } else if (msg && msg.op === "accepted") {
       const mode = msg.mode || "direct";
       store({ lastJob: { ...msg, mode }, lastResult: null, lastError: null });
       chrome.action.setBadgeText({ text: "↓" });
       chrome.action.setBadgeBackgroundColor({ color: "#0f766e" });
+      sendToJobTab(msg.tab, { ...msg, mode, op: "job-accepted" });
       console.log("dlm job accepted", mode, msg);
     } else if (msg && msg.op === "error") {
       store({ lastPong: null, lastError: msg.message || "native host error" });
@@ -196,7 +196,12 @@ function cookieHeader(url) {
   });
 }
 
-function submitPage(url, referer, hls) {
+function sendToJobTab(tabId, message) {
+  if (tabId == null) return;
+  chrome.tabs.sendMessage(tabId, message, () => void chrome.runtime.lastError);
+}
+
+function submitPage(url, referer, hls, tab) {
   if (!/^https?:\/\//i.test(url || "")) {
     store({ lastJob: null, lastError: "only http/https URLs can be sent to dlm" });
     return false;
@@ -209,6 +214,7 @@ function submitPage(url, referer, hls) {
   cookieHeader(url).then((cookie) => {
     const task = { op: "download", url, referer: referer || url, cookie };
     if (hls) task.hls = true;
+    if (tab != null) task.tab = tab;
     submitTask(task);
   });
   return true;
@@ -233,7 +239,21 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.op === "wake") connect();
   if (msg && msg.op === "page-download") {
-    sendResponse({ ok: submitPage(msg.url, msg.referer, !!msg.hls) });
+    const tab = sender.tab && sender.tab.id != null ? sender.tab.id : msg.tabId;
+    sendResponse({ ok: submitPage(msg.url, msg.referer, !!msg.hls, tab) });
+    return true;
+  }
+  if (msg && msg.op === "cancel") {
+    if (!port) {
+      sendResponse({ ok: false, message: "native host unavailable" });
+      return true;
+    }
+    try {
+      port.postMessage({ op: "cancel", job: msg.job });
+      sendResponse({ ok: true });
+    } catch (err) {
+      sendResponse({ ok: false, message: String(err) });
+    }
     return true;
   }
   if (msg && msg.op === "page-links") {
@@ -263,5 +283,5 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
   const hls = /\.m3u8(?:$|[?#])/i.test(url);
-  submitPage(url, info.pageUrl || (tab && tab.url) || url, hls);
+  submitPage(url, info.pageUrl || (tab && tab.url) || url, hls, tab && tab.id);
 });
