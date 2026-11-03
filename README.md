@@ -228,8 +228,9 @@ node browser/test/verify-queue-download.mjs --browser "C:\Program Files (x86)\Mi
 
 **B3b-lite 媒体与文件嗅探**：扩展用 `webRequest`（只读）监听当前标签页的 `.m3u8`、媒体直链，
 以及普通文件——页面里 `a[href]` 命中常见文件后缀的链接、响应头带 `Content-Disposition: attachment`
-或 `application/octet-stream`/zip/pdf/rar/7z/msi/apk 等二进制的请求。页面右下角是一个 dlm 小组件：
-折叠时显示进行中数量与总进度，展开后分“进行中 / 最近 / 可下载”，进行中带进度条、速度与剩余时间，
+或 `application/octet-stream`/zip/pdf/rar/7z/msi/apk 等二进制的请求。页面里是一个可拖动的 dlm 悬浮球：
+默认右下角，可拖到任意位置；闲置 5 秒且没有进行中任务时降到 55% 透明。点球展开面板，按球的位置自动换向，
+窄屏变底部抽屉；面板分“进行中 / 可下载 / 最近”三个标签页，进行中带进度条、速度与剩余时间，
 可停止（保留断点）；工具栏 popup 也能看。点“下载”把 URL 交给宿主：HLS 强制直连 `dlm --hls`
 （队列不接不可续传的 HLS），普通文件按 B10 规则走队列或直连。
 页面里已识别为下载/媒体的链接，**左键点击先弹确认卡片，确认后才交给 dlm**，不再走浏览器；
@@ -240,6 +241,7 @@ MAIN-world 钩子接住，同样先确认，不会再出现浏览器偷下小文
 
 ```bash
 node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+node browser/test/verify-widget-ball.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 ```
 
 ## HLS 直链（B3a）
@@ -337,7 +339,7 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 ## 版本号（两套，各自独立）
 
 - **内核 / CLI / GUI**：`Cargo.toml` 的 `version`，当前 **0.1.0**。`dlm --version`、`User-Agent: dlm/<版本>` 与便携包名都用它。
-- **浏览器扩展**：`browser/extension/manifest.json` 的 `version`，当前 **0.2.6**。扩展的 Service Worker 文件名带版本号（`background-<version>.js`，见 [`browser/README.md`](browser/README.md)），升级扩展时同时改这两处。
+- **浏览器扩展**：`browser/extension/manifest.json` 的 `version`，当前 **0.2.7**。扩展的 Service Worker 文件名带版本号（`background-<version>.js`，见 [`browser/README.md`](browser/README.md)），升级扩展时同时改这两处。
 
 两者**不要求相等**：扩展可以独立迭代，内核也可以独立发版。看包名 `dlm-0.1.0-win-x64.zip` 时，0.1.0 是内核版本，不是扩展版本。
 
@@ -410,6 +412,7 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/superpowers/plans/2026-10-28-b3a-hls.md`](docs/superpowers/plans/2026-10-28-b3a-hls.md) | B3a HLS 直链计划 |
 | [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |
 | [`docs/evidence/2026-10-29-inpage-widget.md`](docs/evidence/2026-10-29-inpage-widget.md) | 页内下载组件（确认/进度/停止）与站点脚本拦截证据 |
+| [`docs/evidence/2026-11-03-floating-ball.md`](docs/evidence/2026-11-03-floating-ball.md) | 悬浮球拖动/位置记忆/闲置淡出与面板标签页证据 |
 | [`docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md`](docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md) | 交接稿：接手顺序、硬纪律、已裁定不要重做、具名欠账 |
 | [`docs/superpowers/plans/2026-10-21-三路路线图.md`](docs/superpowers/plans/2026-10-21-三路路线图.md) | 下一阶段路线图（A/B/C 三路与完成状态） |
 | [`docs/superpowers/plans/2026-10-21-能力对照表.md`](docs/superpowers/plans/2026-10-21-能力对照表.md) | 能力对照表的实现计划 |

@@ -84,8 +84,11 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
   （MAIN world 不能共享模块）；改一份必须改另一份。`node browser/test/check-extension-static.mjs`
   会断言两者逐字相等，并检查 manifest 版本与 `background-<version>.js` 文件名一致（已接进 `gates.ps1`）。
 - 每 tab 去重、最多 40 条，`storage.session` 跨 service worker 保存。
-- 页面右下角是一个 shadow DOM 小组件：折叠时显示进行中数量与总进度；展开后分“进行中 / 最近 / 可下载”。
-  进行中项有进度条、速度、剩余时间与“停止”（杀进程、保留断点）；最近显示完成/失败/已停止/已入队。
+- 页面里是一个可拖动的 shadow DOM 悬浮球：默认右下角 12px；拖动超过 4px 才算移动，位置存
+  `chrome.storage.local`（全局一份）。闲置 5 秒且没有进行中任务时降到 55% 透明，悬停/拖动/展开恢复。
+- 点球展开面板，面板按球的位置自动向左或向右、向上或向下展开；窄于 520px 时变成底部抽屉。
+  面板分“进行中 / 可下载 / 最近”三个标签页；进行中项有进度条、速度、剩余时间与“停止”（杀进程、保留断点）。
+  头部保留“本页”与收起按钮，底部有“重置位置”；Esc 也能收起面板。
 - 点条目“下载”发送 `page-download`，HLS 带 `hls:true`。页面里已识别的下载/媒体链接，左键点击先弹
   确认卡片，确认后才交给 dlm；仅当宿主最近回过 pong 时生效；Ctrl/Shift/Alt、`target="_blank"`、
   普通链接不接管；投递失败时页面链接回退浏览器默认行为。
@@ -96,7 +99,7 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 宿主把 dlm 的进度行解析成 `op:"progress"`（400 ms 节流），子进程退出后回 `op:"done"`；
   页面与 popup 的完成/失败状态都来自这里。
 - 工具栏 popup 显示宿主状态与当前标签页的下载列表。
-- Service Worker 用**带版本号的文件名**（当前 `background-0.2.6.js`，manifest 里指过去）：
+- Service Worker 用**带版本号的文件名**（当前 `background-0.2.7.js`，manifest 里指过去）：
   未打包扩展的 SW 会被浏览器缓存，只改内容、重启浏览器仍可能跑旧代码；换文件名才能强制重取。
   排查标记：页面 `document.documentElement` 的 `data-dlm-version`、storage 的 `buildVersion`。
 - 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；
@@ -105,11 +108,14 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 
 ```bash
 node browser/test/verify-media-sniff.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+node browser/test/verify-widget-ball.mjs --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 ```
 
 证据：`docs/evidence/2026-10-28-media-sniff.*`（本地页面请求 HLS + 文件链接 → 面板 `下载 3` → 点击 →
 `stream.ts` = `AAABBB`、`file.bin` = `FILE`；左键点 `/auto.bin` 由 dlm 落盘且页面不跳走；
 普通链接不被拦截；Tabbit 实测见 `2026-10-28-tabbit-extension.md`）。
+悬浮球：`docs/evidence/2026-11-03-floating-ball.*`（Edge 156 实测拖动生效、位置跨刷新保留、闲置
+`opacity=0.55`、面板在左上向下展开/右下向左展开、标签页可切换）。
 DASH（`.mpd`）暂不列；不做音视频合并。
 
 ## 手动加载

@@ -1,8 +1,15 @@
-// 页面右下角的 dlm 组件：检测到的下载、进行中进度、确认后交付。
+// 页面里的 dlm 悬浮球：检测到的下载、进行中进度、确认后交付。
 // 组件住在 shadow DOM 里，避免被站点 CSS 污染；所有用户数据只用 textContent 写入。
+// 悬浮球可拖动，位置存 chrome.storage.local；空闲 5 秒后降到 55% 透明。
 document.documentElement.setAttribute("data-dlm-version", chrome.runtime.getManifest().version);
 
 const FILE_LINK_RE = /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab|pdf|docx?|xlsx?|pptx?|txt|md|epub|mobi|csv|exe|msi|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4[av]|mp3|flac|wav|aac|ogg|opus|wma|jpg|jpeg|png|gif|bmp|webp|svg|tiff?|heic|ts|bin)(?:$|[?#])/i;
+
+const POS_KEY = "dlmBallPos";
+const BALL_SIZE = 48;
+const MARGIN = 8;
+const DRAG_THRESHOLD = 4;
+const IDLE_AFTER_MS = 5000;
 
 const state = {
   items: [],
@@ -12,11 +19,16 @@ const state = {
   confirm: null,
   collapsed: true,
   hostReady: false,
+  tab: "active",
 };
 
 let renderTimer = null;
 let shadow = null;
 let host = null;
+let rootEl = null;
+let drag = null;
+let suppressClick = false;
+let lastActivity = Date.now();
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -31,6 +43,14 @@ function fileName(url) {
     return seg || "download.bin";
   } catch {
     return "download.bin";
+  }
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
   }
 }
 
@@ -71,7 +91,9 @@ function aggregate() {
 const STYLE = `
   :host {
     all: initial;
-    position: fixed; right: 12px; bottom: 12px; z-index: 2147483647;
+    display: block;
+    position: fixed; right: 12px; bottom: 12px; left: auto; top: auto;
+    z-index: 2147483647;
     color-scheme: light dark;
     font-family: "Segoe UI Variable", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
     font-size: 13px; line-height: 1.4; color: #171b22;
@@ -90,84 +112,112 @@ const STYLE = `
   }
   * { box-sizing: border-box; }
   button { font: inherit; }
-  .wrap { display: flex; justify-content: flex-end; }
-  .pill {
-    max-width: 336px; background: var(--card); border: 1px solid var(--line);
-    border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
+  .root { position: relative; width: ${BALL_SIZE}px; height: ${BALL_SIZE}px; }
+  .ball {
+    position: relative; width: ${BALL_SIZE}px; height: ${BALL_SIZE}px; padding: 0;
+    border: 0; border-radius: 50%; cursor: grab; touch-action: none;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, var(--teal), #0b5f59);
+    color: #fff; box-shadow: 0 8px 24px rgba(15,23,42,.28);
+    transition: opacity .28s ease, transform .15s ease, box-shadow .2s ease;
   }
-  .pillbtn {
-    display: flex; align-items: center; gap: 8px; width: 100%;
-    border: 0; background: transparent; color: var(--ink);
-    padding: 9px 10px; min-height: 46px; cursor: pointer; text-align: left;
+  .ball:hover { transform: translateY(-1px); box-shadow: 0 10px 30px rgba(15,23,42,.34); }
+  .ball:focus-visible { outline: 2px solid var(--teal-2); outline-offset: 3px; }
+  .root.dragging .ball { cursor: grabbing; transform: scale(1.04); }
+  .root.idle .ball { opacity: .55; }
+  .root.idle:hover .ball, .root.dragging .ball { opacity: 1; }
+  .ring { position: absolute; inset: -5px; width: 58px; height: 58px; transform: rotate(-90deg); pointer-events: none; }
+  .ring circle { fill: none; stroke: var(--teal-2); stroke-width: 3; stroke-linecap: round; }
+  .badge {
+    position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px;
+    border: 2px solid var(--card); border-radius: 999px; background: var(--danger); color: #fff;
+    font: 600 10px/14px ui-monospace, Consolas, monospace; text-align: center;
   }
-  .mark {
-    width: 24px; height: 24px; flex: 0 0 auto; border-radius: 7px;
-    display: grid; place-items: center; background: var(--teal); color: var(--teal-ink);
-    font: 500 13px/1 ui-monospace, Consolas, monospace;
-  }
-  .pillbtn b { font-size: 13px; font-weight: 500; }
-  .pill .meta { color: var(--muted); font-size: 11px; font-weight: 400; }
-  .mini { margin-left: auto; width: 54px; height: 4px; border-radius: 999px; background: var(--track); overflow: hidden; }
-  .mini i { display: block; height: 100%; background: var(--teal-2); }
-  .pill .pct { font: 500 11px/1 ui-monospace, Consolas, monospace; color: var(--teal); }
-  .chev { color: var(--muted); font-size: 11px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .panel {
-    width: min(336px, calc(100vw - 24px)); background: var(--card);
-    border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
-    overflow: hidden;
+    position: absolute; left: 0; bottom: 58px; width: min(340px, calc(100vw - 24px));
+    max-height: min(70vh, 560px); display: flex; flex-direction: column; overflow: hidden;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
   }
-  header { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-bottom: 1px solid var(--line); }
-  header b { font-size: 13px; font-weight: 500; color: var(--ink); }
-  header .sub { font-size: 11px; color: var(--muted); }
-  header .icon {
-    margin-left: auto; min-width: 32px; height: 32px; border: 0; border-radius: 7px;
-    background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 7px;
+  .panel.side-left { left: auto; right: 0; }
+  .panel.dir-down { bottom: auto; top: 58px; }
+  .panel[hidden] { display: none; }
+  .ph { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--page); }
+  .mark {
+    width: 26px; height: 26px; flex: 0 0 auto; border-radius: 8px; display: grid; place-items: center;
+    background: var(--teal); color: var(--teal-ink); font: 500 14px/1 ui-monospace, Consolas, monospace;
   }
-  header .icon + .icon { margin-left: 0; }
-  .body { padding: 10px 12px 12px; max-height: min(70vh, 520px); overflow: auto; }
+  .ph b { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .ph .sub { min-width: 0; margin-right: auto; font-size: 11px; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ph .icon {
+    min-width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent;
+    color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 6px;
+  }
+  .ph .icon:hover { background: var(--card); color: var(--ink); }
+  .ph .icon:last-child { margin-left: 0; }
+  .tabs { display: flex; align-items: center; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .tab {
+    display: flex; align-items: center; gap: 5px; border: 0; border-radius: 7px; padding: 6px 8px;
+    background: transparent; color: var(--muted); font-size: 11px; cursor: pointer;
+  }
+  .tab:hover { background: var(--page); color: var(--ink); }
+  .tab.active { background: var(--teal-soft); color: var(--teal); font-weight: 600; }
+  .tab .n {
+    min-width: 15px; height: 15px; padding: 0 3px; border-radius: 999px; background: var(--page);
+    color: var(--muted); font: 500 9px/15px ui-monospace, Consolas, monospace; text-align: center;
+  }
+  .tab.active .n { background: var(--card); color: var(--teal); }
+  .body { padding: 10px 12px 12px; overflow: auto; max-height: min(56vh, 420px); }
+  .pane[hidden] { display: none; }
   .ask { border: 1px solid var(--teal); background: var(--teal-soft); border-radius: 10px; padding: 11px; margin-bottom: 10px; }
   .ask-title { font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--ink); }
   .ask-name { font-size: 12px; color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .ask-src { font: 10px/1.4 ui-monospace, Consolas, monospace; color: var(--muted); margin-top: 4px; }
   .ask-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 9px; }
-  h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 11px; font-weight: 500; color: var(--muted); }
-  h4 .count {
-    min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
-    background: var(--teal-soft); color: var(--teal); font: 500 10px/16px ui-monospace, Consolas, monospace; text-align: center;
-  }
-  section { margin-top: 10px; }
-  section:first-of-type { margin-top: 0; }
   .active { border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: var(--page); margin-bottom: 8px; }
-  .name { font-size: 12px; font-weight: 500; color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .active:last-child { margin-bottom: 0; }
+  .rowhead { display: flex; align-items: baseline; gap: 8px; }
+  .name { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .pct { flex: 0 0 auto; font: 600 11px/1 ui-monospace, Consolas, monospace; color: var(--teal); }
   .bar { width: 100%; height: 6px; border-radius: 999px; background: var(--track); overflow: hidden; margin: 8px 0 6px; }
   .bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--teal), var(--teal-2)); }
   .meta { display: flex; flex-wrap: wrap; gap: 8px; font: 10px/1.3 ui-monospace, Consolas, monospace; color: var(--muted); }
   .actions { display: flex; justify-content: flex-end; margin-top: 7px; }
   .ghost, .primary, .dl {
-    border-radius: 7px; font: 500 11px/1 inherit; cursor: pointer; min-height: 32px; padding: 0 10px;
+    border-radius: 7px; font: 500 11px/1 inherit; cursor: pointer; min-height: 30px; padding: 0 10px;
   }
   .ghost { border: 1px solid var(--line); background: var(--card); color: var(--muted); }
+  .ghost:hover { color: var(--ink); }
   .primary { border: 0; background: var(--teal); color: var(--teal-ink); padding: 0 14px; }
-  .done { display: flex; align-items: center; gap: 7px; padding: 7px 2px; border-bottom: 1px solid var(--line); }
+  .done { display: flex; align-items: center; gap: 7px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
   .done:last-child { border-bottom: 0; }
   .done .name { flex: 1; font-weight: 400; }
   .done .meta { font-size: 10px; }
   .check { color: var(--teal); font-weight: 500; }
   .cross { color: var(--danger); font-weight: 500; }
-  .link { display: flex; align-items: center; gap: 7px; padding: 6px 2px; border-bottom: 1px solid var(--line); }
+  .link { display: flex; align-items: center; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
   .link:last-child { border-bottom: 0; }
   .chip {
     flex: 0 0 auto; border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px;
     font: 9px/1.4 ui-monospace, Consolas, monospace; color: var(--muted);
   }
   .chip.hls { color: var(--teal); border-color: var(--teal-soft); background: var(--teal-soft); }
-  .url {
-    flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-    font: 10px/1.4 ui-monospace, Consolas, monospace; color: var(--muted);
-  }
+  .linkinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .url { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 11px/1.35 ui-monospace, Consolas, monospace; color: var(--ink); }
+  .host { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 9px/1.3 ui-monospace, Consolas, monospace; color: var(--muted); }
   .dl { flex: 0 0 auto; border: 0; background: var(--teal-soft); color: var(--teal); padding: 0 9px; }
-  .empty, .note { font-size: 11px; color: var(--muted); padding: 6px 2px; }
+  .dl:hover { background: var(--teal); color: var(--teal-ink); }
+  .empty, .note { font-size: 11px; color: var(--muted); padding: 8px 2px; }
   .note { color: var(--danger); }
+  .pf { display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; border-top: 1px solid var(--line); background: var(--page); }
+  .linkbtn { border: 0; background: transparent; color: var(--muted); font-size: 10px; cursor: pointer; padding: 4px 0; }
+  .linkbtn:hover { color: var(--teal); }
+  .ver { font: 9px/1 ui-monospace, Consolas, monospace; color: var(--muted); }
+  @media (max-width: 520px) {
+    .panel, .panel.side-left, .panel.dir-down {
+      position: fixed; left: 12px; right: 12px; top: auto; bottom: 12px; width: auto; max-height: 70vh;
+    }
+  }
 `;
 
 function ensureWidget() {
@@ -177,24 +227,28 @@ function ensureWidget() {
   shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
   style.textContent = STYLE;
-  const wrap = el("div", "wrap");
-  wrap.innerHTML = `
-    <div id="dlm-pill" class="pill" hidden>
-      <button id="dlm-toggle" class="pillbtn" type="button" aria-label="展开 dlm 下载面板">
-        <span class="mark">↓</span><b>dlm</b>
-        <span id="dlm-pill-meta" class="meta"></span>
-        <span id="dlm-pill-bar" class="mini" hidden><i></i></span>
-        <span id="dlm-pill-pct" class="pct"></span>
-        <span class="chev">⌃</span>
-      </button>
-    </div>
+  const root = el("div", "root");
+  root.id = "dlm-root";
+  root.innerHTML = `
+    <button id="dlm-toggle" class="ball" type="button" aria-label="打开 dlm 下载面板" aria-expanded="false" title="dlm">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M12 4v12m-6-6 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <svg id="dlm-ring" class="ring" viewBox="0 0 58 58" hidden><circle cx="29" cy="29" r="26"/></svg>
+      <span id="dlm-badge" class="badge" hidden>0</span>
+      <span id="dlm-pill-meta" class="sr"></span>
+    </button>
     <div id="dlm-panel" class="panel" hidden>
-      <header>
-        <span class="mark">↓</span><b>dlm</b>
-        <span id="dlm-sub" class="sub"></span>
+      <div class="ph">
+        <span class="mark">↓</span><b>dlm</b><span id="dlm-sub" class="sub"></span>
         <button id="dlm-submit" class="icon" type="button" title="把当前页交给 dlm">本页</button>
-        <button id="dlm-fold" class="icon" type="button" aria-label="收起">—</button>
-      </header>
+        <button id="dlm-fold" class="icon" type="button" aria-label="收起面板">×</button>
+      </div>
+      <div class="tabs" role="tablist" aria-label="下载视图">
+        <button class="tab" data-tab="active" role="tab">进行中 <span id="dlm-active-count" class="n">0</span></button>
+        <button class="tab" data-tab="links" role="tab">可下载 <span id="dlm-links-count" class="n">0</span></button>
+        <button class="tab" data-tab="recent" role="tab">最近 <span id="dlm-recent-count" class="n">0</span></button>
+      </div>
       <div class="body">
         <div id="dlm-confirm" class="ask" hidden>
           <div class="ask-title">用 dlm 下载这个文件？</div>
@@ -205,45 +259,71 @@ function ensureWidget() {
             <button id="dlm-confirm-yes" class="primary" type="button">下载</button>
           </div>
         </div>
-        <section id="dlm-active-sec" hidden>
-          <h4>进行中 <span id="dlm-active-count" class="count">0</span></h4>
+        <div id="dlm-pane-active" class="pane">
           <div id="dlm-active"></div>
-        </section>
-        <section id="dlm-finished-sec" hidden>
-          <h4>最近</h4>
-          <div id="dlm-finished"></div>
-        </section>
-        <section id="dlm-links-sec" hidden>
-          <h4>可下载 <span id="dlm-links-count" class="count">0</span></h4>
+          <div id="dlm-active-empty" class="empty" hidden>没有进行中的下载。</div>
+        </div>
+        <div id="dlm-pane-links" class="pane" hidden>
           <div id="dlm-list"></div>
-        </section>
-        <div id="dlm-empty" class="empty" hidden>这个页面还没有检测到下载。</div>
+          <div id="dlm-links-empty" class="empty" hidden>没有检测到可下载的链接。</div>
+        </div>
+        <div id="dlm-pane-recent" class="pane" hidden>
+          <div id="dlm-finished"></div>
+          <div id="dlm-recent-empty" class="empty" hidden>还没有最近记录。</div>
+        </div>
         <div id="dlm-host-note" class="note" hidden>宿主未连接，点击不会接管。</div>
       </div>
+      <div class="pf">
+        <button id="dlm-reset" class="linkbtn" type="button">重置位置</button>
+        <span id="dlm-ver" class="ver"></span>
+      </div>
     </div>`;
-  shadow.append(style, wrap);
+  shadow.append(style, root);
   document.documentElement.appendChild(host);
+  rootEl = root;
+  shadow.getElementById("dlm-ver").textContent = "v" + chrome.runtime.getManifest().version;
 
-  shadow.getElementById("dlm-toggle").addEventListener("click", () => {
-    state.collapsed = false;
-    render();
+  const ball = shadow.getElementById("dlm-toggle");
+  ball.addEventListener("click", (ev) => {
+    if (suppressClick) {
+      suppressClick = false;
+      ev.preventDefault();
+      return;
+    }
+    togglePanel();
   });
-  shadow.getElementById("dlm-fold").addEventListener("click", () => {
-    state.collapsed = true;
-    render();
-  });
+  ball.addEventListener("pointerdown", onPointerDown);
+  ball.addEventListener("pointermove", onPointerMove);
+  ball.addEventListener("pointerup", onPointerUp);
+  ball.addEventListener("pointercancel", onPointerUp);
+  ball.addEventListener("pointerenter", markActivity);
+
+  shadow.getElementById("dlm-fold").addEventListener("click", closePanel);
   shadow.getElementById("dlm-submit").addEventListener("click", () => {
     sendDownload(location.href, "file", true);
   });
+  shadow.getElementById("dlm-reset").addEventListener("click", resetPosition);
   shadow.getElementById("dlm-confirm-no").addEventListener("click", () => {
     state.confirm = null;
+    markActivity();
     render();
   });
   shadow.getElementById("dlm-confirm-yes").addEventListener("click", () => {
     const pending = state.confirm;
     state.confirm = null;
     if (pending) sendDownload(pending.url, pending.kind, false);
+    markActivity();
     render();
+  });
+  for (const tab of shadow.querySelectorAll(".tab")) {
+    tab.addEventListener("click", () => setTab(tab.dataset.tab));
+  }
+
+  chrome.storage.local.get([POS_KEY], (values) => {
+    const pos = values && values[POS_KEY];
+    if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+      moveTo(pos.x, pos.y);
+    }
   });
 }
 
@@ -253,6 +333,134 @@ function scheduleRender() {
     renderTimer = null;
     render();
   }, 150);
+}
+
+function markActivity() {
+  lastActivity = Date.now();
+  if (rootEl) rootEl.classList.remove("idle");
+}
+
+function updateIdle() {
+  if (!rootEl) return;
+  const idle =
+    state.collapsed &&
+    state.active.size === 0 &&
+    !state.confirm &&
+    Date.now() - lastActivity > IDLE_AFTER_MS;
+  rootEl.classList.toggle("idle", idle);
+}
+
+function moveTo(x, y) {
+  if (!host) return;
+  const maxX = Math.max(MARGIN, window.innerWidth - BALL_SIZE - MARGIN);
+  const maxY = Math.max(MARGIN, window.innerHeight - BALL_SIZE - MARGIN);
+  const left = Math.min(Math.max(MARGIN, x), maxX);
+  const top = Math.min(Math.max(MARGIN, y), maxY);
+  host.style.left = Math.round(left) + "px";
+  host.style.top = Math.round(top) + "px";
+  host.style.right = "auto";
+  host.style.bottom = "auto";
+  if (!state.collapsed) placePanel();
+}
+
+function savePosition() {
+  const rect = host.getBoundingClientRect();
+  chrome.storage.local.set({ [POS_KEY]: { x: Math.round(rect.left), y: Math.round(rect.top) } });
+}
+
+function resetPosition() {
+  chrome.storage.local.remove(POS_KEY);
+  host.style.left = "auto";
+  host.style.top = "auto";
+  host.style.right = "12px";
+  host.style.bottom = "12px";
+  markActivity();
+  if (!state.collapsed) placePanel();
+}
+
+function onPointerDown(ev) {
+  if (ev.button !== 0) return;
+  const rect = host.getBoundingClientRect();
+  drag = {
+    id: ev.pointerId,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    originX: rect.left,
+    originY: rect.top,
+    moved: false,
+  };
+  shadow.getElementById("dlm-toggle").setPointerCapture(ev.pointerId);
+  markActivity();
+  ev.preventDefault();
+}
+
+function onPointerMove(ev) {
+  if (!drag || ev.pointerId !== drag.id) return;
+  const dx = ev.clientX - drag.startX;
+  const dy = ev.clientY - drag.startY;
+  if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+  drag.moved = true;
+  rootEl.classList.add("dragging");
+  moveTo(drag.originX + dx, drag.originY + dy);
+}
+
+function onPointerUp(ev) {
+  if (!drag || ev.pointerId !== drag.id) return;
+  const moved = drag.moved;
+  drag = null;
+  rootEl.classList.remove("dragging");
+  if (moved) {
+    savePosition();
+    suppressClick = true;
+    setTimeout(() => {
+      suppressClick = false;
+    }, 0);
+  }
+}
+
+function placePanel() {
+  if (!host || state.collapsed) return;
+  const panel = shadow.getElementById("dlm-panel");
+  const rect = host.getBoundingClientRect();
+  if (window.innerWidth <= 520) {
+    panel.style.maxHeight = "";
+    return;
+  }
+  const spaceRight = window.innerWidth - rect.left - 12;
+  const spaceLeft = rect.left + BALL_SIZE + 12;
+  panel.classList.toggle("side-left", spaceLeft > spaceRight);
+  const spaceBelow = window.innerHeight - rect.top - 70;
+  const spaceAbove = rect.top - 70;
+  const down = spaceBelow >= spaceAbove;
+  panel.classList.toggle("dir-down", down);
+  panel.style.maxHeight = Math.max(200, Math.min(560, down ? spaceBelow : spaceAbove)) + "px";
+}
+
+function setTab(tab) {
+  if (!["active", "links", "recent"].includes(tab)) return;
+  state.tab = tab;
+  markActivity();
+  render();
+}
+
+function openPanel() {
+  state.collapsed = false;
+  if (state.confirm || state.active.size > 0) state.tab = "active";
+  else if (state.items.length > 0) state.tab = "links";
+  else state.tab = "recent";
+  markActivity();
+  render();
+}
+
+function closePanel() {
+  state.collapsed = true;
+  render();
+}
+
+function togglePanel() {
+  markActivity();
+  if (state.collapsed) openPanel();
+  else closePanel();
 }
 
 function sendDownload(url, kind, fromPage) {
@@ -296,7 +504,10 @@ function renderActive() {
   let index = 0;
   for (const [job, entry] of state.active) {
     const row = el("div", "active");
-    row.appendChild(el("div", "name", entry.name || "下载任务"));
+    const head = el("div", "rowhead");
+    head.appendChild(el("span", "name", entry.name || "下载任务"));
+    head.appendChild(el("span", "pct", Math.round(entry.percent || 0) + "%"));
+    row.appendChild(head);
     const bar = el("div", "bar");
     const fill = el("i");
     fill.style.width = Math.max(0, Math.min(100, entry.percent || 0)) + "%";
@@ -324,7 +535,7 @@ function renderActive() {
     index += 1;
   }
   shadow.getElementById("dlm-active-count").textContent = String(index);
-  shadow.getElementById("dlm-active-sec").hidden = index === 0;
+  shadow.getElementById("dlm-active-empty").hidden = index > 0;
 }
 
 function renderFinished() {
@@ -343,7 +554,8 @@ function renderFinished() {
     row.appendChild(el("span", "meta", text));
     box.appendChild(row);
   }
-  shadow.getElementById("dlm-finished-sec").hidden = state.finished.length === 0;
+  shadow.getElementById("dlm-recent-count").textContent = String(state.finished.length);
+  shadow.getElementById("dlm-recent-empty").hidden = state.finished.length > 0;
 }
 
 function renderLinks() {
@@ -352,9 +564,13 @@ function renderLinks() {
   for (const item of state.items) {
     const row = el("div", "link");
     row.appendChild(el("span", "chip" + (item.kind === "hls" ? " hls" : ""), item.kind === "hls" ? "HLS" : "文件"));
+    const info = el("div", "linkinfo");
     const url = el("span", "url", fileName(item.url));
     url.title = item.url;
-    row.appendChild(url);
+    info.appendChild(url);
+    const hostLabel = hostOf(item.url);
+    if (hostLabel) info.appendChild(el("span", "host", hostLabel));
+    row.appendChild(info);
     const btn = el("button", "dl", "下载");
     btn.type = "button";
     btn.addEventListener("click", () => sendDownload(item.url, item.kind, false));
@@ -362,7 +578,7 @@ function renderLinks() {
     box.appendChild(row);
   }
   shadow.getElementById("dlm-links-count").textContent = String(state.items.length);
-  shadow.getElementById("dlm-links-sec").hidden = state.items.length === 0;
+  shadow.getElementById("dlm-links-empty").hidden = state.items.length > 0;
 }
 
 function renderConfirm() {
@@ -374,6 +590,27 @@ function renderConfirm() {
     state.confirm.domain + " · " + (state.confirm.kind === "hls" ? "HLS" : "文件");
 }
 
+function renderTabs() {
+  const counts = {
+    active: state.active.size,
+    links: state.items.length,
+    recent: state.finished.length,
+  };
+  const panes = {
+    active: shadow.getElementById("dlm-pane-active"),
+    links: shadow.getElementById("dlm-pane-links"),
+    recent: shadow.getElementById("dlm-pane-recent"),
+  };
+  for (const tab of shadow.querySelectorAll(".tab")) {
+    const key = tab.dataset.tab;
+    const on = key === state.tab;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.querySelector(".n").textContent = String(counts[key] || 0);
+    if (panes[key]) panes[key].hidden = !on;
+  }
+}
+
 function render() {
   ensureWidget();
   host.dataset.dlmReady = state.hostReady ? "1" : "0";
@@ -382,45 +619,49 @@ function render() {
   host.hidden = !any;
   if (!any) return;
 
-  shadow.getElementById("dlm-pill").hidden = !state.collapsed;
   shadow.getElementById("dlm-panel").hidden = state.collapsed;
+  shadow.getElementById("dlm-toggle").setAttribute("aria-expanded", state.collapsed ? "false" : "true");
 
   const agg = aggregate();
-  const pillMeta = shadow.getElementById("dlm-pill-meta");
-  const pillBar = shadow.getElementById("dlm-pill-bar");
-  const pillPct = shadow.getElementById("dlm-pill-pct");
+  const ring = shadow.getElementById("dlm-ring");
+  const badge = shadow.getElementById("dlm-badge");
   if (agg.count > 0) {
-    pillMeta.textContent = agg.count + " 个下载";
-    pillBar.hidden = false;
-    pillBar.firstElementChild.style.width = agg.percent + "%";
-    pillPct.textContent = agg.percent + "%";
+    const circumference = 2 * Math.PI * 26;
+    ring.hidden = false;
+    ring.style.strokeDasharray = `${((agg.percent / 100) * circumference).toFixed(1)} ${circumference.toFixed(1)}`;
+    badge.hidden = false;
+    badge.textContent = String(agg.count);
   } else {
-    pillMeta.textContent = "可下载 " + state.items.length;
-    pillBar.hidden = true;
-    pillPct.textContent = "";
+    ring.hidden = true;
+    badge.hidden = true;
   }
-  shadow.getElementById("dlm-sub").textContent = anyActive ? agg.count + " 个下载" : "";
+  shadow.getElementById("dlm-pill-meta").textContent = agg.count
+    ? agg.count + " 个下载"
+    : "可下载 " + state.items.length;
 
+  const ball = shadow.getElementById("dlm-toggle");
+  ball.title = agg.count ? "dlm：" + agg.count + " 个下载进行中" : "dlm：可下载 " + state.items.length;
+  ball.setAttribute("aria-label", state.collapsed ? "打开 dlm 下载面板" : "收起 dlm 下载面板");
+
+  let sub = "";
+  if (agg.count > 0) sub = agg.count + " 个进行中";
+  else if (state.items.length > 0) sub = "可下载 " + state.items.length;
+  else if (state.finished.length > 0) sub = "最近 " + state.finished.length;
+  shadow.getElementById("dlm-sub").textContent = sub;
+
+  if (state.confirm) state.tab = "active";
   renderConfirm();
   renderActive();
   renderFinished();
   renderLinks();
+  renderTabs();
 
-  const empty = shadow.getElementById("dlm-empty");
-  empty.hidden = anyActive || state.items.length > 0 || state.finished.length > 0 || !!state.confirm;
-  shadow.getElementById("dlm-host-note").hidden = state.hostReady || !any;
-  if (!state.collapsed && !state.confirm && !anyActive && state.items.length > 0 && state.finished.length === 0) {
-    // 面板里只有检测列表时也保持紧凑；无需额外提示。
-  }
+  shadow.getElementById("dlm-host-note").hidden = state.hostReady;
+  updateIdle();
+  if (!state.collapsed) placePanel();
 }
 
 // ---- 检测与点击接管 -------------------------------------------------------
-
-function addUnique(list, item) {
-  if (!item || !item.url) return;
-  if (list.some((x) => x.url === item.url)) return;
-  list.push(item);
-}
 
 function collectFileLinks() {
   const seen = new Set();
@@ -483,6 +724,8 @@ function confirmClick(a, url, kind) {
     domain: url.host,
   };
   state.collapsed = false;
+  state.tab = "active";
+  markActivity();
   render();
 }
 
@@ -520,19 +763,9 @@ function onPageHookMessage(ev) {
     domain: url.host,
   };
   state.collapsed = false;
+  state.tab = "active";
+  markActivity();
   render();
-}
-
-function fallbackToBrowser(a) {
-  if (a.hasAttribute("download")) {
-    const copy = a.cloneNode(true);
-    copy.removeAttribute("id");
-    document.body.appendChild(copy);
-    copy.click();
-    copy.remove();
-    return;
-  }
-  window.location.assign(a.href);
 }
 
 function onDocumentClick(ev) {
@@ -561,10 +794,12 @@ function onDocumentClick(ev) {
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg) return;
   if (msg.op === "job-accepted") {
+    markActivity();
     if (msg.mode === "queue") {
       state.finished.unshift({ name: msg.name || "下载任务", queue: msg.id });
       state.finished = state.finished.slice(0, 3);
       state.collapsed = false;
+      state.tab = "recent";
     } else {
       state.active.set(msg.job, {
         job: msg.job,
@@ -577,6 +812,7 @@ chrome.runtime.onMessage.addListener((msg) => {
         stopping: false,
       });
       state.collapsed = false;
+      state.tab = "active";
     }
     render();
     return;
@@ -615,9 +851,24 @@ chrome.runtime.onMessage.addListener((msg) => {
       code: msg.code,
     });
     state.finished = state.finished.slice(0, 3);
+    markActivity();
     state.collapsed = false;
+    state.tab = state.active.size > 0 ? "active" : "recent";
     render();
   }
+});
+
+window.addEventListener("resize", () => {
+  if (!host) return;
+  if (host.style.left && host.style.left !== "auto") {
+    const rect = host.getBoundingClientRect();
+    moveTo(rect.left, rect.top);
+  } else if (!state.collapsed) {
+    placePanel();
+  }
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !state.collapsed) closePanel();
 });
 
 chrome.storage.local.get(["lastPong"], (values) => {
@@ -633,6 +884,7 @@ chrome.storage.onChanged.addListener(() => {
 
 document.addEventListener("click", onDocumentClick, true);
 window.addEventListener("message", onPageHookMessage);
+setInterval(updateIdle, 1000);
 render();
 refreshMedia();
 setInterval(refreshMedia, 1500);

@@ -222,7 +222,7 @@ try {
   let mediaText = '';
   for (let i = 0; i < 80; i++) {
     mediaText = (await evalText("window.__dlm('#dlm-pill-meta')?.textContent || ''")) || '';
-    if (mediaText === '可下载 3') break;
+    if (mediaText.startsWith('可下载')) break;
     await sleep(250);
   }
   log += `media_button=${mediaText}\n`;

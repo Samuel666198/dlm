@@ -1,0 +1,19 @@
+browser=Edg/156.0.4314.58
+page=http://127.0.0.1:50976/page.html
+ball_meta=可下载 2
+initial={"x":918,"y":549,"w":48,"h":48}
+moved={"x":298,"y":129,"w":48,"h":48}
+panel_at_top_left=panel dir-down
+moved2={"x":922,"y":553,"w":48,"h":48}
+panel_at_bottom_right=panel side-left
+links_tab=true count=2
+screenshot=E:\WorkSpace\projects\tool\dlm\docs\evidence\2026-11-03-floating-ball.png
+panel_closed=true
+class_1s=root
+class_2s=root
+class_3s=root
+class_4s=root
+class_5s=root idle
+class_6s=root idle
+idle=true opacity=0.55
+after_reload={"x":922,"y":553,"w":48,"h":48}

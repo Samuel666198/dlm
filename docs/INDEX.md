@@ -9,7 +9,7 @@
 | 分支 | `sdd/dlm-kernel`，未 push、无远程 |
 | 门禁 | `--lib 311/0` · `--bins 4/0` · `--test integration 117/0` · `clippy 0` · `fmt --check 0` |
 | 产品面 | 内核 + CLI + 本地 Web UI 队列 + Native Messaging 扩展（右键/页内组件/媒体与文件嗅探/HLS 直链） |
-| 最新进展 | `2026-10-29 页内下载组件`、`2026-10-29 站点脚本下载拦截`（扩展 0.2.6）、`2026-10-28 Windows x64 便携包` |
+| 最新进展 | `2026-11-03 悬浮球`（扩展 0.2.7）、`2026-10-29 页内下载组件`、`2026-10-29 站点脚本下载拦截`、`2026-10-28 Windows x64 便携包` |
 | 长期归档 | `E:\WorkSpace\archive\2026_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`（`.superpowers/sdd` 的 2026-10-21 快照） |
 
 ## 怎么读
@@ -91,6 +91,7 @@
 | [`evidence/2026-10-28-tabbit-extension.md`](evidence/2026-10-28-tabbit-extension.md) | Tabbit 扩展加载记录 |
 | [`evidence/2026-10-28-user-agent-403.md`](evidence/2026-10-28-user-agent-403.md) | UA 缺失导致 403 |
 | [`evidence/2026-10-29-inpage-widget.md`](evidence/2026-10-29-inpage-widget.md) | 页内组件与站点脚本拦截 |
+| [`evidence/2026-11-03-floating-ball.md`](evidence/2026-11-03-floating-ball.md) | 悬浮球拖动、位置记忆、闲置淡出与面板标签页 |
 
 ## 不在 `docs/` 的账本
 
