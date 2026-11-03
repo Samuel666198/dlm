@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 | `sdd/dlm-kernel`，169 发，未 push、无远程 |
+| 分支 | `sdd/dlm-kernel`，未 push、无远程 |
 | 门禁 | `--lib 311/0` · `--bins 4/0` · `--test integration 117/0` · `clippy 0` · `fmt --check 0` |
 | 产品面 | 内核 + CLI + 本地 Web UI 队列 + Native Messaging 扩展（右键/页内组件/媒体与文件嗅探/HLS 直链） |
 | 最新进展 | `2026-10-29 页内下载组件`、`2026-10-29 站点脚本下载拦截`（扩展 0.2.6）、`2026-10-28 Windows x64 便携包` |
