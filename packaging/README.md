@@ -13,7 +13,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
    `install.ps1`、`uninstall.ps1`、`START-HERE.txt`、`README-PACKAGE.md`、主 README；
 3. 生成 `target/package/dlm-<version>-win-x64.zip`，打印字节数与 sha256。
 
-版本号从 `Cargo.toml` 的 `version` 读取，也可 `-Version 0.1.0` 覆盖。
+包名版本号从 `Cargo.toml` 的 `version` 读取（当前 0.1.0），也可 `-Version 0.1.0` 覆盖；**扩展版本独立**，取自 `browser/extension/manifest.json`（当前 0.2.6），包名不反映扩展版本。
 
 ## 安装器行为
 

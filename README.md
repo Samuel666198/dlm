@@ -334,6 +334,13 @@ B3a 已有 HLS 直链，B3b-lite 已有扩展媒体/文件面板；DASH/DRM 未�
 动作链/系统计划任务/阻止休眠（`open`／`run`／`shutdown` 已做，队列的 `start_at` 已做）。
 C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 
+## 版本号（两套，各自独立）
+
+- **内核 / CLI / GUI**：`Cargo.toml` 的 `version`，当前 **0.1.0**。`dlm --version`、`User-Agent: dlm/<版本>` 与便携包名都用它。
+- **浏览器扩展**：`browser/extension/manifest.json` 的 `version`，当前 **0.2.6**。扩展的 Service Worker 文件名带版本号（`background-<version>.js`，见 [`browser/README.md`](browser/README.md)），升级扩展时同时改这两处。
+
+两者**不要求相等**：扩展可以独立迭代，内核也可以独立发版。看包名 `dlm-0.1.0-win-x64.zip` 时，0.1.0 是内核版本，不是扩展版本。
+
 ## 打包（Windows x64）
 
 ```powershell
@@ -353,13 +360,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
 
 ## 测试与验收
 
-四道门禁，全绿才算交付（**数字随发漂移，这里的值是收口那一发亲跑的实测数**，跑一遍看的是"0 failed"而不是这个数）：
+四道门禁（外加格式检查）全绿才算交付（**数字随发漂移，这里的值是 2026-11-03 复核时的实测数**，跑一遍看的是"0 failed"而不是这个数）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1
+```
+
+`gates.ps1` 依次跑下面五条并把结果打成一张表（`-SkipIntegration` 可跳过最慢的一条）：
 
 ```
-cargo test --lib                            # 307 通过（含队列/配额/分类/更新/HLS/宿主/UI 纯函数）
+cargo fmt --check                            # 退出码 0
+cargo test --lib                            # 311 通过（含队列/配额/分类/更新/HLS/宿主/UI 纯函数）
 cargo test --bins                           # 4 通过（装配层的退出档只有这一层看得见）
 cargo test --test integration               # 117 通过（真发 HTTP，对端是自己写的 node 服务器；含 dlm-gui 队列/配额/宿主投递/更新检查/HLS 端到端）
 cargo clippy --all-targets -- -D warnings    # 退出码 0
+node browser/test/check-extension-static.mjs # 扩展版本/SW 文件名/两份后缀正则一致
 ```
 
 `tests/harness/probe-server.mjs` 是自己人的对端，能演：诚实头 + 掐断 body（`/drop/<n>`）、限速（`/slow`）、
@@ -368,6 +383,8 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 [`docs/evidence/2026-10-18-spec7-四场景验收.md`](docs/evidence/2026-10-18-spec7-四场景验收.md)。
 
 ## 文档地图
+
+**完整清单、阅读顺序与 E/R/T 编号释义见 [`docs/INDEX.md`](docs/INDEX.md)**；下表只列常看的入口。
 
 | 位置 | 是什么 |
 |---|---|
@@ -385,12 +402,30 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/evidence/2026-10-28-media-sniff.md`](docs/evidence/2026-10-28-media-sniff.md) | B3b-lite 媒体嗅探证据 |
 | [`packaging/build-package.ps1`](packaging/build-package.ps1) | Windows x64 release zip 打包脚本 |
 | [`packaging/install.ps1`](packaging/install.ps1) | 包内用户级安装器（HKCU） |
+| [`gates.ps1`](gates.ps1) | 一条命令跑全部门禁（fmt/lib/bins/integration/clippy/扩展静态检查），失败退 1 |
+| [`docs/INDEX.md`](docs/INDEX.md) | 文档总索引：阅读顺序、E/R/T 编号释义、每篇文档的状态 |
 | [`docs/evidence/2026-10-28-package.md`](docs/evidence/2026-10-28-package.md) | 便携包产物、hash 与冒烟记录 |
 | [`docs/evidence/2026-10-28-tabbit-extension.md`](docs/evidence/2026-10-28-tabbit-extension.md) | Tabbit 1.18 扩展加载记录与快捷方式回退点 |
 | [`docs/superpowers/specs/2026-10-28-b3a-hls-design.md`](docs/superpowers/specs/2026-10-28-b3a-hls-design.md) | B3a HLS 直链设计 |
 | [`docs/superpowers/plans/2026-10-28-b3a-hls.md`](docs/superpowers/plans/2026-10-28-b3a-hls.md) | B3a HLS 直链计划 |
 | [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |
-| [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E31 是权威**，与正文/设计稿冲突时以它为准 |
+| [`docs/evidence/2026-10-29-inpage-widget.md`](docs/evidence/2026-10-29-inpage-widget.md) | 页内下载组件（确认/进度/停止）与站点脚本拦截证据 |
+| [`docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md`](docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md) | 交接稿：接手顺序、硬纪律、已裁定不要重做、具名欠账 |
+| [`docs/superpowers/plans/2026-10-21-三路路线图.md`](docs/superpowers/plans/2026-10-21-三路路线图.md) | 下一阶段路线图（A/B/C 三路与完成状态） |
+| [`docs/superpowers/plans/2026-10-21-能力对照表.md`](docs/superpowers/plans/2026-10-21-能力对照表.md) | 能力对照表的实现计划 |
+| [`docs/evidence/2026-10-21-idm能力对照表.md`](docs/evidence/2026-10-21-idm能力对照表.md) | IDM 能力 × dlm 现状对照表（含 §10–§12 增量） |
+| [`docs/superpowers/plans/2026-10-18-控制员代裁清单.md`](docs/superpowers/plans/2026-10-18-控制员代裁清单.md) | 我替用户做的裁定汇总（39 项，含撤回两条） |
+| [`docs/superpowers/plans/2026-10-21-A1-if-range.md`](docs/superpowers/plans/2026-10-21-A1-if-range.md) | A1 `If-Range` 条件续传计划 |
+| [`docs/superpowers/plans/2026-10-21-A2-rate-cap.md`](docs/superpowers/plans/2026-10-21-A2-rate-cap.md) | A2 全任务共享速率上限计划 |
+| [`docs/superpowers/plans/2026-10-21-A3a-completion-actions.md`](docs/superpowers/plans/2026-10-21-A3a-completion-actions.md) | A3a 完成后动作计划 |
+| [`docs/superpowers/plans/2026-10-21-A3b-shutdown.md`](docs/superpowers/plans/2026-10-21-A3b-shutdown.md) | A3b shutdown 完成后动作计划 |
+| [`docs/superpowers/plans/2026-10-21-A4-cursor-aware-split.md`](docs/superpowers/plans/2026-10-21-A4-cursor-aware-split.md) | A4 块级光标劈分计划 |
+| [`docs/evidence/2026-10-22-b1-native-messaging.md`](docs/evidence/2026-10-22-b1-native-messaging.md) | B1 Native Messaging 最小闭环证据 |
+| [`docs/evidence/2026-10-22-b2-browser-download.md`](docs/evidence/2026-10-22-b2-browser-download.md) | B2 浏览器直接投递证据 |
+| [`docs/evidence/2026-10-22-native-messaging-recon.md`](docs/evidence/2026-10-22-native-messaging-recon.md) | B0 Native Messaging 只读取证 |
+| [`docs/evidence/2026-10-28-native-host-window.md`](docs/evidence/2026-10-28-native-host-window.md) | 宿主 `CREATE_NO_WINDOW` 与完成反馈证据 |
+| [`docs/evidence/2026-10-28-user-agent-403.md`](docs/evidence/2026-10-28-user-agent-403.md) | UA 缺失导致 CDN 403 的定位与修复记录 |
+| [`docs/superpowers/plans/2026-10-15-dlm-kernel.md`](docs/superpowers/plans/2026-10-15-dlm-kernel.md) | 实现计划（T0–T10 逐任务；执行期追加的 T11 只作为 E31 的账存在，没有 `### Task` 正文）。**文末 `## 勘误` E1–E33 是权威**，与正文/设计稿冲突时以它为准 |
 | [`docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md`](docs/superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) | 执行状态：进度表、当前基线、恢复步骤、下游必守的裁定、挂账的 minor、等用户点头的事 |
 | `docs/evidence/` | 一次性实测记录（数字都来自真跑） |
 | `.superpowers/sdd/2026-10-15-dlm-kernel/` | 逐任务的执行报告、评审原文、变异账（被 `.gitignore` 忽略，不随仓库走） |

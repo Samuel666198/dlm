@@ -1,2 +1,4 @@
 target/
 *.dlm.json
+# SDD 执行账本（逐任务报告/评审原文/一次性对端）：不入库，长期归档见 archive/2026_retired/
+.superpowers/

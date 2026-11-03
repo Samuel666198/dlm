@@ -80,6 +80,9 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
     `application/octet-stream`/zip/pdf/msdownload/7z/rar/msi/apk 等二进制响应；
   - 页面 `content.js` 每 1.5 s 扫一次 `a[href]` 的常见文件后缀（zip/rar/pdf/docx/exe/msi/apk/图片…），
     通过 `page-links` 并入同一份列表。
+- ⚠ `content.js` 的 `FILE_LINK_RE` 与 `page-hook.js` 的 `FILE_RE` 是同一份后缀表的**双份副本**
+  （MAIN world 不能共享模块）；改一份必须改另一份。`node browser/test/check-extension-static.mjs`
+  会断言两者逐字相等，并检查 manifest 版本与 `background-<version>.js` 文件名一致（已接进 `gates.ps1`）。
 - 每 tab 去重、最多 40 条，`storage.session` 跨 service worker 保存。
 - 页面右下角是一个 shadow DOM 小组件：折叠时显示进行中数量与总进度；展开后分“进行中 / 最近 / 可下载”。
   进行中项有进度条、速度、剩余时间与“停止”（杀进程、保留断点）；最近显示完成/失败/已停止/已入队。
