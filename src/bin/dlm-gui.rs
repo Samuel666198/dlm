@@ -38,7 +38,10 @@ fn parse() -> Result<GuiConfig> {
         token: None,
         quota_limit: None,
         quota_window_secs: None,
-        endpoint: local_app_data().join("dlm").join("gui").join("endpoint.json"),
+        endpoint: local_app_data()
+            .join("dlm")
+            .join("gui")
+            .join("endpoint.json"),
         update_url: None,
         category_dirs: false,
         open: false,
@@ -60,7 +63,8 @@ fn parse() -> Result<GuiConfig> {
             "--endpoint" => config.endpoint = PathBuf::from(next(&mut args, "--endpoint")?),
             "--update-url" => {
                 let raw = next(&mut args, "--update-url")?;
-                let parsed = reqwest::Url::parse(&raw).map_err(|err| anyhow::anyhow!("--update-url 不是合法 URL：{err}"))?;
+                let parsed = reqwest::Url::parse(&raw)
+                    .map_err(|err| anyhow::anyhow!("--update-url 不是合法 URL：{err}"))?;
                 if !matches!(parsed.scheme(), "http" | "https") {
                     bail!("--update-url 只接受 http:// 或 https://");
                 }
@@ -87,7 +91,9 @@ fn parse() -> Result<GuiConfig> {
         bail!("--quota 0 是关闭配额，不能再给 --quota-window");
     }
     let stored_limit = if config.quota_limit.is_none() && config.quota_window_secs.is_some() {
-        QueueStore::load(config.queue.clone())?.quota().map(|q| q.limit)
+        QueueStore::load(config.queue.clone())?
+            .quota()
+            .map(|q| q.limit)
     } else {
         None
     };
@@ -106,11 +112,15 @@ fn next(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
 }
 
 fn local_app_data() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn user_profile() -> PathBuf {
-    std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn same_dir(name: &str) -> PathBuf {

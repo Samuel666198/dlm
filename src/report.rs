@@ -173,10 +173,7 @@ fn out_name_cell(task: &Task) -> String {
     match &task.name {
         Some(n) => n.clone(),
         None => match task.target_path().file_name() {
-            Some(derived) => format!(
-                "{}（未显式指定，取 URL 末段）",
-                derived.to_string_lossy()
-            ),
+            Some(derived) => format!("{}（未显式指定，取 URL 末段）", derived.to_string_lossy()),
             // 构造上到不了（`target_path()` 永远 `join` 出一个非空末段），留 [`ABSENT`] 是
             // 不想让这一格在真到不了的时候编出一个名字。
             None => ABSENT.to_string(),
@@ -237,7 +234,11 @@ pub fn outcome(rep: &Report, task: &Task) -> (String, bool) {
     // `confirmed` 也恒 0（`Report::confirmed` 的字段文档明写那一支"没有覆盖账"）。
     // ⇒ 那一路上这三格**整格不出现**，而不是印 0 冒充测过（**E25⑥** 末句）。
     let billed = task.segmentable();
-    let verdict = if rep.ok { "下载已完成" } else { "下载未完成" };
+    let verdict = if rep.ok {
+        "下载已完成"
+    } else {
+        "下载未完成"
+    };
     let mut lines: Vec<String> = vec![format!(
         "{verdict}  目标：{}  全长 {}，落盘 {}{}",
         // 落点取 `task.target_path()`（**E25⑦/E20⑨**）：`Report` 没有路径字段，
@@ -247,7 +248,11 @@ pub fn outcome(rep: &Report, task: &Task) -> (String, bool) {
         bytes(rep.delivered),
         // 两本账分开报（**E7**）：`delivered` 是盘上真有多少字节，`confirmed` 是归属已定的那些，
         // 两者不等是常态（洞、在途窗口、上一轮残留），合成一格就报不出这个区别。
-        if billed { format!("，归属已定 {}", bytes(rep.confirmed)) } else { String::new() },
+        if billed {
+            format!("，归属已定 {}", bytes(rep.confirmed))
+        } else {
+            String::new()
+        },
     )];
     if billed {
         lines.push(format!(
@@ -482,8 +487,14 @@ mod tests {
         for (n, (snap, want)) in cases.iter().enumerate() {
             let got = tick(snap);
             assert_eq!(got.as_str(), *want, "{n} 行的进度行与手算的期望不符：{got}");
-            assert!(!got.contains("NaN") && !got.contains("inf"), "{n} 行不许出现 NaN/inf（E22②）：{got}");
-            assert!(!got.contains("Seeded") && !got.contains("TraceStep"), "{n} 行不许带 trace 载体（E20⑨）：{got}");
+            assert!(
+                !got.contains("NaN") && !got.contains("inf"),
+                "{n} 行不许出现 NaN/inf（E22②）：{got}"
+            );
+            assert!(
+                !got.contains("Seeded") && !got.contains("TraceStep"),
+                "{n} 行不许带 trace 载体（E20⑨）：{got}"
+            );
         }
     }
 
@@ -503,8 +514,14 @@ mod tests {
             slow_retry_rounds: 0,
         });
         assert_eq!(no_dup, "93.7%  15.0 MiB/16.0 MiB  9.0 MiB/s  x3/8");
-        assert!(!no_dup.contains("dup"), "run_delivered 为 0 时 dup 整格不许出现：{no_dup}");
-        assert!(!no_dup.contains("slow-retry"), "还没进慢重试时那一格不许出现：{no_dup}");
+        assert!(
+            !no_dup.contains("dup"),
+            "run_delivered 为 0 时 dup 整格不许出现：{no_dup}"
+        );
+        assert!(
+            !no_dup.contains("slow-retry"),
+            "还没进慢重试时那一格不许出现：{no_dup}"
+        );
         // 上面那一行的百分比手算：15*1000/16 = 937.5 ⇒ 截断 937 ⇒ 93.7%（四舍五入会报 93.8%）。
     }
 
@@ -531,10 +548,19 @@ mod tests {
         assert_eq!(got, want);
         // E23⑥/E24③：摘要里"口令"这个话题整个不出现 —— 值、掩码、字段名三者一个都不许有。
         assert!(!got.contains("hunter2"), "口令的值不许进摘要：{got}");
-        assert!(!got.contains("[redacted]"), "连日志防线那个掩码也不许出现在摘要里：{got}");
-        assert!(!got.to_lowercase().contains("password"), "摘要里不许有 password 这个字段名：{got}");
+        assert!(
+            !got.contains("[redacted]"),
+            "连日志防线那个掩码也不许出现在摘要里：{got}"
+        );
+        assert!(
+            !got.to_lowercase().contains("password"),
+            "摘要里不许有 password 这个字段名：{got}"
+        );
         assert!(!got.contains("口令"), "摘要里不许有口令这个话题：{got}");
-        assert!(!got.contains("Seeded"), "摘要不是 `Debug`，不许把结构体摆出来：{got}");
+        assert!(
+            !got.contains("Seeded"),
+            "摘要不是 `Debug`，不许把结构体摆出来：{got}"
+        );
     }
 
     #[test]
@@ -551,21 +577,38 @@ mod tests {
             flags: FLAG_IGNORE_MTIME,
         };
         let got = summary(&t);
-        assert!(got.contains("标志位（flags）：bit1 忽略 Last-Modified"), "{got}");
+        assert!(
+            got.contains("标志位（flags）：bit1 忽略 Last-Modified"),
+            "{got}"
+        );
         assert!(got.contains("请求体文件（--data-file）："), "{got}");
-        assert!(got.contains("（未给）"), "缺字段要显式说\"未给\"，否则\"没有这一格\"与\"值为空\"读起来一样：{got}");
+        assert!(
+            got.contains("（未给）"),
+            "缺字段要显式说\"未给\"，否则\"没有这一格\"与\"值为空\"读起来一样：{got}"
+        );
         assert_eq!(
             got.matches("（未给）").count(),
             3,
             "referer / cookie / user 三格未给，别的格各有值：{got}"
         );
-        assert!(!got.contains("bit0 只入队不下"), "没置的位不许出现在摘要里：{got}");
+        assert!(
+            !got.contains("bit0 只入队不下"),
+            "没置的位不许出现在摘要里：{got}"
+        );
     }
 
     /// 表里一行的形状（提出来只为过 `clippy::type_complexity`）：
     /// `(这一行在测什么, ok, message, fresh_reason, 走不走 --data-file, 期望首句, 该不该按成功退出)`。
     /// 表内每一行的**内容与位置一个字都没动**。
-    type Row<'a> = (&'a str, bool, Option<&'a str>, Option<&'a str>, bool, &'a str, bool);
+    type Row<'a> = (
+        &'a str,
+        bool,
+        Option<&'a str>,
+        Option<&'a str>,
+        bool,
+        &'a str,
+        bool,
+    );
 
     #[test]
     fn the_final_line_bills_the_two_cross_run_counters_and_nothing_else() {
@@ -617,26 +660,54 @@ mod tests {
             let rep = report_with(ok, 2, 3, fresh, msg);
             let (text, success) = outcome(&rep, &sample_task(data_file));
             assert_eq!(success, want_success, "{label}：退出档读错了");
-            assert!(text.starts_with(verdict), "{label}：首句该是 {verdict}：{text}");
-            assert!(text.contains(&format!("目标：{target}")), "{label}：最终行要带落点（E25⑦）：{text}");
-            assert!(text.contains("全长 1024 B，落盘 1024 B，归属已定 1024 B"), "{label}：两本账分开报（E7）：{text}");
+            assert!(
+                text.starts_with(verdict),
+                "{label}：首句该是 {verdict}：{text}"
+            );
+            assert!(
+                text.contains(&format!("目标：{target}")),
+                "{label}：最终行要带落点（E25⑦）：{text}"
+            );
+            assert!(
+                text.contains("全长 1024 B，落盘 1024 B，归属已定 1024 B"),
+                "{label}：两本账分开报（E7）：{text}"
+            );
             assert!(
                 text.contains("这个断点文件从建立起一共重试 2 次，归属之外可能被重下 3 B"),
                 "{label}：那两格是跨断点文件的账、且 `duplicated` 不是账单（E20⑧/E14③/E25⑥）：{text}"
             );
-            assert!(text.contains("用时 1500 ms"), "{label}：耗时照 `elapsed` 报：{text}");
+            assert!(
+                text.contains("用时 1500 ms"),
+                "{label}：耗时照 `elapsed` 报：{text}"
+            );
             if let Some(m) = msg {
-                assert!(text.contains(m), "{label}：`message` 原样打，不截断不拼接（裁定 9）：{text}");
-                assert_eq!(text.matches("说明：").count(), 1, "{label}：那句只许出现一次：{text}");
+                assert!(
+                    text.contains(m),
+                    "{label}：`message` 原样打，不截断不拼接（裁定 9）：{text}"
+                );
+                assert_eq!(
+                    text.matches("说明：").count(),
+                    1,
+                    "{label}：那句只许出现一次：{text}"
+                );
             } else {
-                assert!(!text.contains("说明："), "{label}：没有话就别硬造一格：{text}");
+                assert!(
+                    !text.contains("说明："),
+                    "{label}：没有话就别硬造一格：{text}"
+                );
             }
             if let Some(r) = fresh {
                 assert!(text.contains(r), "{label}：`fresh_reason` 原样打：{text}");
             } else {
-                assert!(!text.contains("从头重来的原因"), "{label}：不是从头重来就不许说这句话：{text}");
+                assert!(
+                    !text.contains("从头重来的原因"),
+                    "{label}：不是从头重来就不许说这句话：{text}"
+                );
             }
-            assert!(!text.contains("Seeded"), "{label}：`trace` 一个字都不许进 stdout（E20⑨）：{text}");
+            assert!(
+                !text.contains("Seeded"),
+                "{label}：`trace` 一个字都不许进 stdout（E20⑨）：{text}"
+            );
         }
     }
 
@@ -651,7 +722,10 @@ mod tests {
         assert!(text.starts_with("下载已完成"), "{text}");
         assert!(text.contains("全长 1024 B，落盘 1024 B"), "{text}");
         for banned in ["重试", "归属之外", "归属已定", "从头重来"] {
-            assert!(!text.contains(banned), "POST 那一支没有这本账，{banned} 那一格不许出现：{text}");
+            assert!(
+                !text.contains(banned),
+                "POST 那一支没有这本账，{banned} 那一格不许出现：{text}"
+            );
         }
         // 对照：同一份 `Report` 走可分段那一条就有那两格（缺席由形状决定，不是渲染器心情）。
         let (with_state, _) = outcome(&rep, &sample_task(false));
@@ -678,7 +752,10 @@ mod tests {
         };
         assert_eq!(name_line(&given), "输出文件名：a.bin");
 
-        let derived = Task { name: None, ..sample_task(false) };
+        let derived = Task {
+            name: None,
+            ..sample_task(false)
+        };
         let got = name_line(&derived);
         assert_eq!(got, "输出文件名：a.bin（未显式指定，取 URL 末段）");
         assert!(!got.contains(ABSENT), "推导出来的名字不是\"没给\"：{got}");
@@ -704,7 +781,10 @@ mod tests {
             flags_cell(base.flags),
             "标志位（flags）：bit0 只入队不下、bit2 完成后保留断点"
         );
-        assert!(!flags_cell(base.flags).contains('5'), "掩码值 5 不许出现在那一格里");
+        assert!(
+            !flags_cell(base.flags).contains('5'),
+            "掩码值 5 不许出现在那一格里"
+        );
 
         // 一个都没置：不许留空（空行读起来像渲染器坏了那一格），也不许说"未给"
         // （它不是"没给"，是"给了、值是零"）。
@@ -715,8 +795,14 @@ mod tests {
         // 本版不认识的位（spec §5 只到 bit2）：**不静默丢掉**（摘要会说"没置"而断点文件里置着，
         // 下一轮 `resume` 的 ①b 读的就是那一份），但也**不印它的值**。
         let unknown = flags_cell(FLAG_ADD_ONLY | 1 << 7);
-        assert!(unknown.contains("bit0 只入队不下") && unknown.contains("本版不认识的位"), "{unknown}");
-        assert!(!unknown.contains("128"), "未知那一位的值不许打出来：{unknown}");
+        assert!(
+            unknown.contains("bit0 只入队不下") && unknown.contains("本版不认识的位"),
+            "{unknown}"
+        );
+        assert!(
+            !unknown.contains("128"),
+            "未知那一位的值不许打出来：{unknown}"
+        );
     }
 
     #[test]

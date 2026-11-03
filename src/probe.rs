@@ -150,13 +150,13 @@
 
 use std::io::Read;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
+use reqwest::StatusCode;
 use reqwest::blocking::{Client, Request, RequestBuilder, Response};
 use reqwest::header::{
-    HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_LENGTH,
-    CONTENT_RANGE, COOKIE, ETAG, LAST_MODIFIED, RANGE, REFERER,
+    ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG, HeaderMap,
+    HeaderName, HeaderValue, LAST_MODIFIED, RANGE, REFERER,
 };
-use reqwest::StatusCode;
 
 use crate::rate::RateLimiter;
 use crate::resume::ProbeFacts;
@@ -383,8 +383,10 @@ fn base64_stream_to_bytes(run: &[u8], url_alphabet: bool) -> Vec<u8> {
         if !readable {
             continue;
         }
-        let group_bits =
-            (vals[0] as u32) << 18 | (vals[1] as u32) << 12 | (vals[2] as u32) << 6 | vals[3] as u32;
+        let group_bits = (vals[0] as u32) << 18
+            | (vals[1] as u32) << 12
+            | (vals[2] as u32) << 6
+            | vals[3] as u32;
         if group.len() >= 2 {
             out.push(((group_bits >> 16) & 0xFF) as u8);
         }
@@ -402,7 +404,10 @@ fn base64_stream_to_bytes(run: &[u8], url_alphabet: bool) -> Vec<u8> {
 /// 任何内容，所以它不进判据 —— 见 `README.md`「凭证与边界」那条"只比口令不比用户名"的理由）。
 fn decoded_carries_credential_pair(decoded: &[u8], password: &[u8]) -> bool {
     let span = password.len() + 1;
-    span <= decoded.len() && decoded.windows(span).any(|w| w[0] == b':' && &w[1..] == password)
+    span <= decoded.len()
+        && decoded
+            .windows(span)
+            .any(|w| w[0] == b':' && &w[1..] == password)
 }
 
 /// 内容判据的**第二组**（T99-J1 §1）：待判串里每一段连续的 base64 符号都试着解一次
@@ -491,7 +496,9 @@ fn percent_decoded_bytes(input: &str) -> Vec<u8> {
 /// 字节 haystack 里有没有字节 needle（`needle` 为空 ⇒ 假：`windows(0)` 会 panic，而"空口令"本来
 /// 就不该让任何东西被拒 —— 见 `PASSWORD_CONTENT_FLOOR` 那一段）。
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// **内容判据本体**：串里出现了本任务口令的形状就算带着凭据。位置无关（path、query、fragment、
@@ -619,7 +626,9 @@ fn verifiers_carry_our_password(
 /// ⚠ **入参不由我们控制**（是服务器给的），所以这里不做归一之外的任何改写：只判、只拒，
 /// 不改写、不回显。
 pub(crate) fn landed_url_is_refused(url: &str, password: Option<&str>) -> bool {
-    authority_has_userinfo(url) || canonical_http_authority(url).is_none() || carries_our_password(url, password)
+    authority_has_userinfo(url)
+        || canonical_http_authority(url).is_none()
+        || carries_our_password(url, password)
 }
 
 /// 发**一发**试探请求，取回事实与预读。
@@ -670,8 +679,13 @@ pub fn run_with_limiter(
             // 先把同一个判据（三支合取，含本任务口令的两组形状）套上去，换成一句不回显的拒绝。
             // T99-J1 §3：这一支另加半句**失败阶段**（`LANDED_NO_RESPONSE_NOTE`），因为原始错误
             // 不能整条丢掉 —— 但只报类别，不抄 reqwest 原文（它整条带着那条地址）。
-            if e.url().is_some_and(|u| landed_url_is_refused(u.as_str(), task.password.as_deref())) {
-                bail!("{LANDED_CREDENTIALS}{}", LANDED_NO_RESPONSE_NOTE.replace("{stage}", reqwest_failure_stage(&e)));
+            if e.url()
+                .is_some_and(|u| landed_url_is_refused(u.as_str(), task.password.as_deref()))
+            {
+                bail!(
+                    "{LANDED_CREDENTIALS}{}",
+                    LANDED_NO_RESPONSE_NOTE.replace("{stage}", reqwest_failure_stage(&e))
+                );
             }
             return Err(e).context("试探请求发不出去");
         }
@@ -694,8 +708,12 @@ pub fn run_with_limiter(
         if range.is_some() && reported == Some(0) {
             // 这一支**不调** `facts_from_response`，`etag` / `last_modified` 在这里直接装进事实
             // ⇒ 验证子那道内容闸必须在这里也走一遍（T99-H2 §3；装填口＝ `empty_file_facts`）。
-            return empty_file_facts(&headers, final_url.into(), task.password.as_deref())
-                .map(|facts| ProbeResult { facts, prelude: vec![] });
+            return empty_file_facts(&headers, final_url.into(), task.password.as_deref()).map(
+                |facts| ProbeResult {
+                    facts,
+                    prelude: vec![],
+                },
+            );
         }
         bail!(
             "试探请求收到 416（Range Not Satisfiable）：对端报回的总长是 {reported:?}，\
@@ -709,7 +727,13 @@ pub fn run_with_limiter(
         bail!("试探请求被服务器拒绝：HTTP {status}");
     }
 
-    let facts = facts_from_response(status, range.is_some(), &headers, final_url.as_str(), task.password.as_deref())?;
+    let facts = facts_from_response(
+        status,
+        range.is_some(),
+        &headers,
+        final_url.as_str(),
+        task.password.as_deref(),
+    )?;
     let prelude = read_bounded(resp, prelude_max, limiter)?;
     Ok(ProbeResult { facts, prelude })
 }
@@ -725,7 +749,11 @@ pub fn run_with_limiter(
 ///
 /// `final_url` 不在这里判：`run()` 里更前面那道 `landed_url_is_refused` 已经管住它（这一支的
 /// 落地串与那道闸读的是同一份 `resp.url()`）。
-fn empty_file_facts(headers: &HeaderMap, final_url: String, password: Option<&str>) -> Result<ProbeFacts> {
+fn empty_file_facts(
+    headers: &HeaderMap,
+    final_url: String,
+    password: Option<&str>,
+) -> Result<ProbeFacts> {
     let etag = header_text(headers, ETAG);
     let last_modified = header_text(headers, LAST_MODIFIED);
     if verifiers_carry_our_password(etag.as_deref(), last_modified.as_deref(), password) {
@@ -869,7 +897,9 @@ fn build_request(agent: &Client, task: &Task, range: Option<&str>) -> Result<Req
 /// 被挡掉时本模块**不报错**（与口令那一半不同：那边是 `validate()` 直接拒整个任务）。用户如果真
 /// 需要凭据，把 URL 写成 `https://` 就是唯一的修法 —— 而退化到 `http://` 的镜像站拿不到那个头。
 pub(crate) fn with_contract_headers(req: RequestBuilder, task: &Task) -> Result<RequestBuilder> {
-    let mut req = req.header(ACCEPT_ENCODING, "identity").header(ACCEPT, "*/*");
+    let mut req = req
+        .header(ACCEPT_ENCODING, "identity")
+        .header(ACCEPT, "*/*");
     if let Some(referer) = &task.referer {
         req = req.header(REFERER, header_value(referer, "Referer")?);
     }
@@ -985,7 +1015,11 @@ fn peer_accepts_ranges(status: StatusCode, asked_for_range: bool, headers: &Head
 ///
 /// 这一条是 `Vec` 的内存边界（48 MiB 不许被读进来），也是模块文档第 3 条那支的唯一防线：
 /// 没有 Range 可限时，"读到上限就停"是唯一合法的限量方式。
-fn read_bounded(mut resp: Response, prelude_max: u64, limiter: Option<&RateLimiter>) -> Result<Vec<u8>> {
+fn read_bounded(
+    mut resp: Response,
+    prelude_max: u64,
+    limiter: Option<&RateLimiter>,
+) -> Result<Vec<u8>> {
     let mut prelude = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut remaining = prelude_max;
@@ -1003,8 +1037,10 @@ fn read_bounded(mut resp: Response, prelude_max: u64, limiter: Option<&RateLimit
             // 带上"已经读到多少"：这一支的排障问题是"对端在预读中途拆了连接"（`/drop/<n>` 的形状），
             // 断在哪一段直接决定 Task 7 的 `Stalled`/`Failed` 判法。
             Err(e) => {
-                return Err(anyhow::Error::new(e)
-                    .context(format!("读预读体失败（对端在预读读完之前把连接断了？）已读到 {} 字节", prelude.len())));
+                return Err(anyhow::Error::new(e).context(format!(
+                    "读预读体失败（对端在预读读完之前把连接断了？）已读到 {} 字节",
+                    prelude.len()
+                )));
             }
         }
     }
@@ -1046,10 +1082,16 @@ mod tests {
     #[test]
     fn the_prelude_range_is_sent_only_for_segmentable_tasks() {
         let t = task_with("https://x/a.bin", None);
-        assert_eq!(prelude_range(&t, 236_032).as_deref(), Some("bytes=0-236031"));
+        assert_eq!(
+            prelude_range(&t, 236_032).as_deref(),
+            Some("bytes=0-236031")
+        );
         // 带 POST 体：不发。F1 之后这一支在 `run()` 里到不了（带体的任务整个不被试探），留着的理由是
         // 模块文档第 3 条："能不能发 Range"与"能不能试探"是两道闸，不合并成一道。
-        assert_eq!(prelude_range(&task_with("https://x/a.bin", Some("body.bin")), 236_032), None);
+        assert_eq!(
+            prelude_range(&task_with("https://x/a.bin", Some("body.bin")), 236_032),
+            None
+        );
         // 上限 0：不发（不是 `bytes=0--1` 那种谎话）。
         assert_eq!(prelude_range(&t, 0), None);
         // 边界：`prelude_max` 是**字节数**，终点是它减一（含端点）⇒ 1 字节是 `bytes=0-0`、2 字节是 `bytes=0-1`。
@@ -1078,9 +1120,15 @@ mod tests {
         let degraded = headers(&[("content-length", "1048576")]);
         assert_eq!(total_len(&degraded, StatusCode::OK), Some(1_048_576));
         // 两个都没有 ⇒ None（`run` 在那里报错，绝不猜 0）。
-        assert_eq!(total_len(&headers(&[("etag", "\"x\"")]), StatusCode::OK), None);
+        assert_eq!(
+            total_len(&headers(&[("etag", "\"x\"")]), StatusCode::OK),
+            None
+        );
         // Content-Length 不是数字（chunked 或对端在说谎）⇒ 也走 None。
-        assert_eq!(total_len(&headers(&[("content-length", "gzip-ish")]), StatusCode::OK), None);
+        assert_eq!(
+            total_len(&headers(&[("content-length", "gzip-ish")]), StatusCode::OK),
+            None
+        );
     }
 
     /// 评审 **I2**：`206` 上"分母不可用"这一支**不许**退到 `Content-Length`（那是本次窗口的大小）。
@@ -1097,9 +1145,16 @@ mod tests {
             ("content-range", "bytes 0-236031/*"),
             ("accept-ranges", "bytes"),
         ]);
-        assert_eq!(total_len(&unknown, StatusCode::PARTIAL_CONTENT), None, "不是 236032");
+        assert_eq!(
+            total_len(&unknown, StatusCode::PARTIAL_CONTENT),
+            None,
+            "不是 236032"
+        );
         // 分母是垃圾（`content_range_total` 已经在 `bytes 0-9/*` 那一格给 None，这里是第二种坏法）。
-        let garbage = headers(&[("content-length", "236032"), ("content-range", "bytes 0-236031/nine")]);
+        let garbage = headers(&[
+            ("content-length", "236032"),
+            ("content-range", "bytes 0-236031/nine"),
+        ]);
         assert_eq!(total_len(&garbage, StatusCode::PARTIAL_CONTENT), None);
         // 206 压根不带 `Content-Range`（畸形对端，`range_honored` 那一条也会给假）。
         let missing = headers(&[("content-length", "236032"), ("accept-ranges", "bytes")]);
@@ -1109,19 +1164,38 @@ mod tests {
         // `a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads`）。
         // 注意 `unknown` 里那条 `Content-Range: bytes 0-236031/*` 在 200 上同样是"分母不可用"，
         // 两种坏法（`/*` 与压根没发）在这一支上落到同一个读数 —— 变的只有状态码。
-        assert_eq!(total_len(&unknown, StatusCode::OK), Some(236_032), "200 上分母不可用 ⇒ 照旧退 Content-Length");
-        assert_eq!(total_len(&missing, StatusCode::OK), Some(236_032), "200 + 只有 Content-Length ⇒ 照旧退它");
+        assert_eq!(
+            total_len(&unknown, StatusCode::OK),
+            Some(236_032),
+            "200 上分母不可用 ⇒ 照旧退 Content-Length"
+        );
+        assert_eq!(
+            total_len(&missing, StatusCode::OK),
+            Some(236_032),
+            "200 + 只有 Content-Length ⇒ 照旧退它"
+        );
     }
 
     #[test]
     fn content_range_total_reads_both_shapes_and_refuses_garbage() {
-        assert_eq!(content_range_total("bytes 0-236031/50331648"), Some(50_331_648));
-        assert_eq!(content_range_total("bytes */0"), Some(0), "416 那一支靠它把\"空文件\"读出来");
+        assert_eq!(
+            content_range_total("bytes 0-236031/50331648"),
+            Some(50_331_648)
+        );
+        assert_eq!(
+            content_range_total("bytes */0"),
+            Some(0),
+            "416 那一支靠它把\"空文件\"读出来"
+        );
         assert_eq!(content_range_total("bytes */4194304"), Some(4_194_304));
         assert_eq!(content_range_total("bytes 0-9/*"), None, "总数未知不是 0");
         assert_eq!(content_range_total("bytes 0-9/"), None);
         assert_eq!(content_range_total(""), None);
-        assert_eq!(content_range_total("items 0-9/10"), Some(10), "单位不参与解析（只看最后一个 / 之后）");
+        assert_eq!(
+            content_range_total("items 0-9/10"),
+            Some(10),
+            "单位不参与解析（只看最后一个 / 之后）"
+        );
         assert_eq!(content_range_total("bytes 0-9/1_000"), None);
     }
 
@@ -1132,7 +1206,10 @@ mod tests {
         assert!(accepts_bytes(Some(" bytes ")), "空格不参与");
         assert!(accepts_bytes(Some("bytes, none")), "列了 bytes 就认");
         assert!(!accepts_bytes(Some("none")), "明说不认 Range");
-        assert!(!accepts_bytes(Some("gzip, deflate")), "没有 bytes 这个 token");
+        assert!(
+            !accepts_bytes(Some("gzip, deflate")),
+            "没有 bytes 这个 token"
+        );
         assert!(!accepts_bytes(None), "头缺失（/noranges 的形状）");
     }
 
@@ -1143,7 +1220,11 @@ mod tests {
         // 三个方向都得是假：没问 Range、没回 206、回了 206 但没 Content-Range。
         assert!(!range_honored(StatusCode::PARTIAL_CONTENT, false, &h));
         assert!(!range_honored(StatusCode::OK, true, &h));
-        assert!(!range_honored(StatusCode::PARTIAL_CONTENT, true, &headers(&[("content-length", "2")])));
+        assert!(!range_honored(
+            StatusCode::PARTIAL_CONTENT,
+            true,
+            &headers(&[("content-length", "2")])
+        ));
     }
 
     /// 评审 **I1** 的真值表：**发过 Range 之后，"头怎么说"就不作数了**。
@@ -1154,15 +1235,24 @@ mod tests {
     /// 线上进取证因此用的是 ③ 那一格的两个真对端用例（见模块文档第 10 条）。
     #[test]
     fn peer_accepts_ranges_is_conjunctive_once_we_sent_a_range() {
-        let header_and_206 = headers(&[("accept-ranges", "bytes"), ("content-range", "bytes 0-1/2")]);
+        let header_and_206 =
+            headers(&[("accept-ranges", "bytes"), ("content-range", "bytes 0-1/2")]);
         let only_206 = headers(&[("content-range", "bytes 0-1/2")]);
         let header_but_200 = headers(&[("accept-ranges", "bytes"), ("content-length", "2")]);
         let nothing = headers(&[("content-length", "2")]);
 
         // ① 发了 Range、回 206、带头：两条证据都在 ⇒ true（诚实的限量预读，`/blob` 的形状）。
-        assert!(peer_accepts_ranges(StatusCode::PARTIAL_CONTENT, true, &header_and_206));
+        assert!(peer_accepts_ranges(
+            StatusCode::PARTIAL_CONTENT,
+            true,
+            &header_and_206
+        ));
         // ② 回了 206 + Content-Range 但**没有** `Accept-Ranges` ⇒ true（原裁定：行为比头硬）。
-        assert!(peer_accepts_ranges(StatusCode::PARTIAL_CONTENT, true, &only_206));
+        assert!(peer_accepts_ranges(
+            StatusCode::PARTIAL_CONTENT,
+            true,
+            &only_206
+        ));
         // ③ **本轮的缺陷格**：头说 `bytes`，行为上把我们的 `bytes=0-…` 当没有（回 200）⇒ false。
         assert!(
             !peer_accepts_ranges(StatusCode::OK, true, &header_but_200),
@@ -1190,13 +1280,26 @@ mod tests {
     #[test]
     fn validators_are_kept_verbatim_and_a_non_utf8_one_becomes_none() {
         // 原样保留：含引号的 ETag 不归一化（`resume` 的 ③ 按字符串比，改一个字符就换结论）。
-        let h = headers(&[("etag", "\"probe-abc\""), ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")]);
+        let h = headers(&[
+            ("etag", "\"probe-abc\""),
+            ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+        ]);
         assert_eq!(header_text(&h, ETAG).as_deref(), Some("\"probe-abc\""));
-        assert_eq!(header_text(&h, LAST_MODIFIED).as_deref(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
-        assert_eq!(header_text(&h, CONTENT_RANGE), None, "没发的头就是 None，不是空串");
+        assert_eq!(
+            header_text(&h, LAST_MODIFIED).as_deref(),
+            Some("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
+        assert_eq!(
+            header_text(&h, CONTENT_RANGE),
+            None,
+            "没发的头就是 None，不是空串"
+        );
         // 非 UTF-8：`ProbeFacts`/断点文件都装不下 ⇒ None（模块文档第 6 条，③ 自动落到 ④ 兜底）。
         let mut odd = HeaderMap::new();
-        odd.insert(ETAG, HeaderValue::from_bytes(&[0xFF, 0xFE]).expect("构造一个非 UTF-8 的头值"));
+        odd.insert(
+            ETAG,
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).expect("构造一个非 UTF-8 的头值"),
+        );
         assert_eq!(header_text(&odd, ETAG), None);
     }
 
@@ -1211,7 +1314,10 @@ mod tests {
             "HTTPS://ALICE:S3CRET@host/x",
             "https://alice:s3cret@host",
         ] {
-            assert!(authority_has_userinfo(url), "夹具前提：{url} 的 authority 里有 @");
+            assert!(
+                authority_has_userinfo(url),
+                "夹具前提：{url} 的 authority 里有 @"
+            );
         }
         // 那句常量是**落地 URL** 的拒绝文本（本模块另有 `LANDED_VERIFIER_CREDENTIALS` 管验证子，
         // T99-H2 §3 —— 两句各自主语不同，都不许带值）：它必须说清"凭据"、给出两种来源，
@@ -1219,9 +1325,15 @@ mod tests {
         // 断言住在下面的 `the_landing_refusal_wording_asserts_no_event_that_may_not_have_happened`
         // （T99-J1 §3；旧那句"服务器重定向后的地址在主机名前面带着凭据"是它自己的负臂）。
         let msg = LANDED_CREDENTIALS;
-        assert!(msg.contains("凭据") && msg.contains("断点"), "措辞要可行动：{msg}");
+        assert!(
+            msg.contains("凭据") && msg.contains("断点"),
+            "措辞要可行动：{msg}"
+        );
         for leak in ["alice", "s3cret", "@", "http://", "https://", "://"] {
-            assert!(!msg.contains(leak), "拒绝文本里出现了 URL 的成分（{leak}）：{msg}");
+            assert!(
+                !msg.contains(leak),
+                "拒绝文本里出现了 URL 的成分（{leak}）：{msg}"
+            );
         }
         assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
     }
@@ -1243,25 +1355,47 @@ mod tests {
     fn the_landing_refusal_wording_asserts_no_event_that_may_not_have_happened() {
         let msg = LANDED_CREDENTIALS;
         // (a) 不许断言发生过重定向。
-        for asserted in ["重定向后的地址", "服务器重定向后的地址", "被重定向到"] {
-            assert!(!msg.contains(asserted), "措辞断言了发生过重定向（{asserted}）：{msg}");
+        for asserted in ["重定向后的地址", "服务器重定向后的地址", "被重定向到"]
+        {
+            assert!(
+                !msg.contains(asserted),
+                "措辞断言了发生过重定向（{asserted}）：{msg}"
+            );
         }
-        assert!(msg.contains("可能") && msg.contains("--url"), "两种来源都要摆出来，否则用户只会去问服务器：{msg}");
+        assert!(
+            msg.contains("可能") && msg.contains("--url"),
+            "两种来源都要摆出来，否则用户只会去问服务器：{msg}"
+        );
         // (b) 不许点 userinfo 这一具体形状。
         for shape in ["userinfo", "主机名前面", "用户名前面", "账号密码那一段"] {
-            assert!(!msg.contains(shape), "措辞把矛头指到一个不存在的形状上（{shape}）：{msg}");
+            assert!(
+                !msg.contains(shape),
+                "措辞把矛头指到一个不存在的形状上（{shape}）：{msg}"
+            );
         }
         // 仍然可行动：说清后果（写进断点文件／续传冲突的原因）与"不回显"这条承诺。
-        assert!(msg.contains("凭据") && msg.contains("断点") && msg.contains("续传"), "措辞要点名后果：{msg}");
+        assert!(
+            msg.contains("凭据") && msg.contains("断点") && msg.contains("续传"),
+            "措辞要点名后果：{msg}"
+        );
         for leak in ["@", "://", "http://", "https://", "alice", "hunter2"] {
-            assert!(!msg.contains(leak), "主句里回显了地址的成分（{leak}）：{msg}");
+            assert!(
+                !msg.contains(leak),
+                "主句里回显了地址的成分（{leak}）：{msg}"
+            );
         }
         assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
         // (c) 错误支那半句：不许回显地址，但必须给出**失败阶段**这一维可行动信息。
         let note = LANDED_NO_RESPONSE_NOTE;
-        assert!(note.contains("失败阶段") && note.contains("{stage}"), "错误支要留类别，不许只剩假指认：{note}");
+        assert!(
+            note.contains("失败阶段") && note.contains("{stage}"),
+            "错误支要留类别，不许只剩假指认：{note}"
+        );
         for leak in ["@", "://", "http://", "https://"] {
-            assert!(!note.contains(leak), "错误支那半句回显了地址的成分（{leak}）：{note}");
+            assert!(
+                !note.contains(leak),
+                "错误支那半句回显了地址的成分（{leak}）：{note}"
+            );
         }
         assert!(!note.contains('\n'), "追加的那半句也在同一行里：{note}");
         // 分类函数交回的每个类别都得是**人话**且不含地址成分（它落在用户看得见的那一行里）。
@@ -1273,7 +1407,10 @@ mod tests {
             "请求本身拼不出来",
             "发出请求之后失败",
         ] {
-            assert!(!stage.contains("://") && !stage.contains('@'), "阶段名里混了地址成分：{stage}");
+            assert!(
+                !stage.contains("://") && !stage.contains('@'),
+                "阶段名里混了地址成分：{stage}"
+            );
             assert!(
                 !note.replace("{stage}", stage).contains("reqwest"),
                 "措辞里出现了内部库名（reqwest）：{note}"
@@ -1291,7 +1428,10 @@ mod tests {
             "https://host:8080/a.bin",
             "https://[fe80::1]/a.bin",
         ] {
-            assert!(!authority_has_userinfo(url), "{url} 的 authority 里没有 @，不该被拒");
+            assert!(
+                !authority_has_userinfo(url),
+                "{url} 的 authority 里没有 @，不该被拒"
+            );
         }
     }
 
@@ -1312,8 +1452,14 @@ mod tests {
     fn the_landing_gate_refuses_a_landing_url_carrying_this_tasks_password() {
         let l1 = "http://127.0.0.1:56296/alice:hunter2@127.0.0.1:56296/landed";
         // 夹具前提：这两支旧闸对这条串都是"放行"——拒它的只能是第三支。
-        assert!(!authority_has_userinfo(l1), "夹具前提：L1 形状的 @ 不在 authority 里");
-        assert!(canonical_http_authority(l1).is_some(), "夹具前提：L1 形状完全规范");
+        assert!(
+            !authority_has_userinfo(l1),
+            "夹具前提：L1 形状的 @ 不在 authority 里"
+        );
+        assert!(
+            canonical_http_authority(l1).is_some(),
+            "夹具前提：L1 形状完全规范"
+        );
         // 第三支只看"字面值在不在串里"，位置无关。
         for url in [
             l1,
@@ -1321,7 +1467,10 @@ mod tests {
             "http://127.0.0.1:56296/hunter2",
             "https://host/a.bin#hunter2",
         ] {
-            assert!(landed_url_is_refused(url, Some("hunter2")), "{url} 里带着本任务的口令字面值，必须拒");
+            assert!(
+                landed_url_is_refused(url, Some("hunter2")),
+                "{url} 里带着本任务的口令字面值，必须拒"
+            );
         }
         // 拒绝走的是同一句不回显的话：措辞的"不含 URL 成分"由
         // `the_landing_gate_rejects_a_userinfo_authority_and_never_echoes_it` 钉；这里钉的是
@@ -1331,11 +1480,17 @@ mod tests {
             panic!("final_url 就是从这里装填的：带本任务口令的落地串不许交回事实");
         };
         let msg = err.to_string();
-        assert_eq!(msg, LANDED_CREDENTIALS, "同一个常量，不许有第二个版本：{msg}");
+        assert_eq!(
+            msg, LANDED_CREDENTIALS,
+            "同一个常量，不许有第二个版本：{msg}"
+        );
         // 措辞同步（T99-J1 §3）：旧那句要求 `contains("重定向")`，而内容支命中时**可能压根没有重定向**
         // ⇒ 现在这一格要求的是"点名两种来源"（`--url` 那一半不许少），假指认那一族整根针在
         // `the_landing_refusal_wording_asserts_no_event_that_may_not_have_happened`。
-        assert!(msg.contains("凭据") && msg.contains("--url"), "措辞要可行动且给出两种来源：{msg}");
+        assert!(
+            msg.contains("凭据") && msg.contains("--url"),
+            "措辞要可行动且给出两种来源：{msg}"
+        );
         assert!(!msg.contains("hunter2"), "拒绝消息不回显口令：{msg}");
     }
 
@@ -1344,12 +1499,21 @@ mod tests {
     #[test]
     fn the_landing_gate_accepts_password_shaped_paths_that_are_not_this_tasks_password() {
         let land = "http://127.0.0.1:56296/someone:else@127.0.0.1:56296/landed";
-        assert!(!landed_url_is_refused(land, Some("hunter2")), "串里没有 hunter2，第三支不许开火");
+        assert!(
+            !landed_url_is_refused(land, Some("hunter2")),
+            "串里没有 hunter2，第三支不许开火"
+        );
         // 口令给过、但落地串里没有它：同一句话的正方向。
-        assert!(!landed_url_is_refused("http://127.0.0.1:56296/landed", Some("hunter2")));
+        assert!(!landed_url_is_refused(
+            "http://127.0.0.1:56296/landed",
+            Some("hunter2")
+        ));
         // 第三支是 task-aware 的：任务没口令 ⇒ 对面爱在 path 里放什么口令形状的文本都归半支 1/半支 2
         // 管（G1e 实测：这种串两闸放行），内容判据**不**凭空替用户做"这看着像凭据"的决定。
-        assert!(!landed_url_is_refused(land, None), "任务没口令，落地串按形状与 userinfo 判");
+        assert!(
+            !landed_url_is_refused(land, None),
+            "任务没口令，落地串按形状与 userinfo 判"
+        );
     }
 
     /// 空口令与短口令臂（T99-H2 §2 按新语义改写 G1f 那发 m1 针）：`--password ""` 的库层形状
@@ -1392,15 +1556,24 @@ mod tests {
             "4 字节口令在落地串里被原样带着 ⇒ 必须拒（下限取 4 的钉子在这一格）"
         );
         // 下限只管**内容**这一支：userinfo 与形状那两支与口令无关，短口令任务照样拒（不许被"放宽"误伤）。
-        assert!(landed_url_is_refused("https://alice:s3cret@host/x", Some("ab")), "userinfo 那支被下限带走了");
-        assert!(landed_url_is_refused("http:/host/x", Some("")), "形状那支被下限带走了");
+        assert!(
+            landed_url_is_refused("https://alice:s3cret@host/x", Some("ab")),
+            "userinfo 那支被下限带走了"
+        );
+        assert!(
+            landed_url_is_refused("http:/host/x", Some("")),
+            "形状那支被下限带走了"
+        );
         // char 数不算，**字节数**才算：`中` 是一个 char、三个字节 ⇒ 在下限之外。
         assert!(
             !landed_url_is_refused("http://127.0.0.1:56296/中", Some("中")),
             "`中` 的 UTF-8 长度是 3 字节 ⇒ 与 1～3 字节的 ASCII 口令同一档（下限按字节，见 `PASSWORD_CONTENT_FLOOR`）"
         );
         // 对照方向（不许被"修 m-floor"的人顺手放宽）：非空且够长的口令照旧逐字判。
-        assert!(landed_url_is_refused("http://127.0.0.1:56296/x/hunter2", Some("hunter2")));
+        assert!(landed_url_is_refused(
+            "http://127.0.0.1:56296/x/hunter2",
+            Some("hunter2")
+        ));
     }
 
     // ---- T99-H2 §1：内容判据的第一组（编我们那份的六个写法；编码器与解码器先各自钉死再进判据）----
@@ -1433,27 +1606,60 @@ mod tests {
             ("abc", "YWJj", "YWJj", "YWJj", "YWJj"),
             ("abcd", "YWJjZA==", "YWJjZA", "YWJjZA==", "YWJjZA"),
             ("abcde", "YWJjZGU=", "YWJjZGU", "YWJjZGU=", "YWJjZGU"),
-            ("hunter2", "aHVudGVyMg==", "aHVudGVyMg", "aHVudGVyMg==", "aHVudGVyMg"),
+            (
+                "hunter2",
+                "aHVudGVyMg==",
+                "aHVudGVyMg",
+                "aHVudGVyMg==",
+                "aHVudGVyMg",
+            ),
             ("a b%c#", "YSBiJWMj", "YSBiJWMj", "YSBiJWMj", "YSBiJWMj"),
             ("中文", "5Lit5paH", "5Lit5paH", "5Lit5paH", "5Lit5paH"),
             ("ÿ", "w78=", "w78", "w78=", "w78"),
             ("ÿÿ", "w7/Dvw==", "w7/Dvw", "w7_Dvw==", "w7_Dvw"),
             ("testÿ", "dGVzdMO/", "dGVzdMO/", "dGVzdMO_", "dGVzdMO_"),
             ("pÿss", "cMO/c3M=", "cMO/c3M", "cMO_c3M=", "cMO_c3M"),
-            ("secret+val/ue", "c2VjcmV0K3ZhbC91ZQ==", "c2VjcmV0K3ZhbC91ZQ", "c2VjcmV0K3ZhbC91ZQ==", "c2VjcmV0K3ZhbC91ZQ"),
+            (
+                "secret+val/ue",
+                "c2VjcmV0K3ZhbC91ZQ==",
+                "c2VjcmV0K3ZhbC91ZQ",
+                "c2VjcmV0K3ZhbC91ZQ==",
+                "c2VjcmV0K3ZhbC91ZQ",
+            ),
         ];
         for (input, std_padded, std_unpadded, url_padded, url_unpadded) in TABLE {
             let bytes = input.as_bytes();
-            assert_eq!(base64_of(bytes, STD_ALPHABET, true), *std_padded, "std 带 padding：{input:?}");
-            assert_eq!(base64_of(bytes, STD_ALPHABET, false), *std_unpadded, "std 去 padding：{input:?}");
-            assert_eq!(base64_of(bytes, URL_ALPHABET, true), *url_padded, "url-safe 带 padding：{input:?}");
-            assert_eq!(base64_of(bytes, URL_ALPHABET, false), *url_unpadded, "url-safe 去 padding：{input:?}");
+            assert_eq!(
+                base64_of(bytes, STD_ALPHABET, true),
+                *std_padded,
+                "std 带 padding：{input:?}"
+            );
+            assert_eq!(
+                base64_of(bytes, STD_ALPHABET, false),
+                *std_unpadded,
+                "std 去 padding：{input:?}"
+            );
+            assert_eq!(
+                base64_of(bytes, URL_ALPHABET, true),
+                *url_padded,
+                "url-safe 带 padding：{input:?}"
+            );
+            assert_eq!(
+                base64_of(bytes, URL_ALPHABET, false),
+                *url_unpadded,
+                "url-safe 去 padding：{input:?}"
+            );
         }
         // 判据实际消费的是 `password_base64_forms` 那四元组：顺序与内容也要逐字钉一次
         // （顺序写反＝四个形状里少判两个，表驱动看不出来）。
         assert_eq!(
             password_base64_forms("ÿÿ"),
-            ["w7/Dvw==".to_string(), "w7/Dvw".to_string(), "w7_Dvw==".to_string(), "w7_Dvw".to_string()],
+            [
+                "w7/Dvw==".to_string(),
+                "w7/Dvw".to_string(),
+                "w7_Dvw==".to_string(),
+                "w7_Dvw".to_string()
+            ],
             "四形的顺序：std 带 pad、std 去 pad、url 带 pad、url 去 pad"
         );
         assert_eq!(
@@ -1476,21 +1682,21 @@ mod tests {
     #[test]
     fn the_percent_decoder_keeps_every_shape_it_cannot_read() {
         const TABLE: &[(&str, &[u8])] = &[
-            ("a%20b", b"a b"),                    // §1 点名的那一格：空格在线上就是 `%20`
-            ("%68unter2", b"hunter2"),            // 对面把口令**整串**编码
-            ("hunter%32", b"hunter2"),            // 对面只编码了其中一字节
+            ("a%20b", b"a b"),         // §1 点名的那一格：空格在线上就是 `%20`
+            ("%68unter2", b"hunter2"), // 对面把口令**整串**编码
+            ("hunter%32", b"hunter2"), // 对面只编码了其中一字节
             ("a%2fb", b"a/b"),
-            ("a%2Fb", b"a/b"),                    // 十六进制大小写都认
+            ("a%2Fb", b"a/b"),                         // 十六进制大小写都认
             ("%E4%B8%AD%E6%96%87", "中文".as_bytes()), // 非 ASCII 口令的 UTF-8 字节序列
-            ("%ff", &[0xFF]),                     // 解出来不是合法 UTF-8 ⇒ 只能按字节比
+            ("%ff", &[0xFF]),                          // 解出来不是合法 UTF-8 ⇒ 只能按字节比
             ("a%00b", b"a\0b"),
-            ("100%", b"100%"),                    // 裸 `%`：原样
+            ("100%", b"100%"), // 裸 `%`：原样
             ("%", b"%"),
-            ("%2", b"%2"),                        // `%` 后面不足两字符：原样
-            ("%zz", b"%zz"),                      // 不是十六进制：原样
-            ("%%20", b"% "),                      // 第一个 `%` 看不懂就照抄，第二个照常解（与 unquote 同读法）
-            ("%2520", b"%20"),                    // 二次编码只解一层（本发**不**追第二次，见报告）
-            ("+%2B", b"++"),                      // `+` **不**解成空格：那是 form-urlencoded 的约定
+            ("%2", b"%2"),     // `%` 后面不足两字符：原样
+            ("%zz", b"%zz"),   // 不是十六进制：原样
+            ("%%20", b"% "),   // 第一个 `%` 看不懂就照抄，第二个照常解（与 unquote 同读法）
+            ("%2520", b"%20"), // 二次编码只解一层（本发**不**追第二次，见报告）
+            ("+%2B", b"++"),   // `+` **不**解成空格：那是 form-urlencoded 的约定
             ("no-percent-here", b"no-percent-here"),
             ("", b""),
         ];
@@ -1519,28 +1725,66 @@ mod tests {
             // 形 2：对面按百分号编码回显 ⇒ 解码待判串再比原样口令。旧那句 `url.contains(p)` 打不中，
             // 而且 §1 点名的正是这一族的**另一半成因**：口令里只要含空格／`%`／非 ASCII，
             // reqwest 序列化之后落地串里已经是 `%20`，**对面一个字都没改**也比不中。
-            ("http://127.0.0.1:56296/landed?tok=hunter%32", "hunter2", "形 2 百分号（只编码了一字节）"),
-            ("http://127.0.0.1:56296/%68unter2", "hunter2", "形 2 百分号（整串编码）"),
-            ("http://127.0.0.1:56296/a%20b2", "a b2", "形 2 百分号（空格 → %20，§1 那一句的形状）"),
-            ("http://127.0.0.1:56296/%E4%B8%AD%E6%96%87", "中文", "形 2 百分号 × 非 ASCII（字节平面）"),
+            (
+                "http://127.0.0.1:56296/landed?tok=hunter%32",
+                "hunter2",
+                "形 2 百分号（只编码了一字节）",
+            ),
+            (
+                "http://127.0.0.1:56296/%68unter2",
+                "hunter2",
+                "形 2 百分号（整串编码）",
+            ),
+            (
+                "http://127.0.0.1:56296/a%20b2",
+                "a b2",
+                "形 2 百分号（空格 → %20，§1 那一句的形状）",
+            ),
+            (
+                "http://127.0.0.1:56296/%E4%B8%AD%E6%96%87",
+                "中文",
+                "形 2 百分号 × 非 ASCII（字节平面）",
+            ),
             // 形 3～6：把**我们这份**口令做 std / url-safe × 带 / 不带 padding 四个形状。
             // `ÿÿ`（UTF-8 四字节）的四个写法两两不同 ⇒ 每支各留一格好归因；⚠ 但**两两不同不等于
             // 四支各有面积**（上面 M-1 那段：带 padding 两支是去 padding 两支的子串加尾点，
             // 永远不当唯一决定者）。旧那句"四支各自有格子＝量得到 `=` 的差别"over-claim 了。
-            ("http://127.0.0.1:56296/w7/Dvw==", "ÿÿ", "形 3 std 带 padding（非唯一决定者，见 M-1）"),
+            (
+                "http://127.0.0.1:56296/w7/Dvw==",
+                "ÿÿ",
+                "形 3 std 带 padding（非唯一决定者，见 M-1）",
+            ),
             ("http://127.0.0.1:56296/w7/Dvw", "ÿÿ", "形 4 std 去 padding"),
-            ("http://127.0.0.1:56296/w7_Dvw==", "ÿÿ", "形 5 url-safe 带 padding（非唯一决定者，见 M-1）"),
-            ("http://127.0.0.1:56296/w7_Dvw", "ÿÿ", "形 6 url-safe 去 padding"),
-            ("http://127.0.0.1:56296/5Lit5paH", "中文", "形 3～6 × 非 ASCII 口令"),
+            (
+                "http://127.0.0.1:56296/w7_Dvw==",
+                "ÿÿ",
+                "形 5 url-safe 带 padding（非唯一决定者，见 M-1）",
+            ),
+            (
+                "http://127.0.0.1:56296/w7_Dvw",
+                "ÿÿ",
+                "形 6 url-safe 去 padding",
+            ),
+            (
+                "http://127.0.0.1:56296/5Lit5paH",
+                "中文",
+                "形 3～6 × 非 ASCII 口令",
+            ),
         ];
         for &(url, password, arm) in CELLS {
             assert!(
                 canonical_http_authority(url).is_some(),
                 "夹具前提：{url} 必须是规范写法，否则半支 2 会替{arm}开火"
             );
-            assert!(!authority_has_userinfo(url), "夹具前提：{url} 的 authority 里不许有 @");
+            assert!(
+                !authority_has_userinfo(url),
+                "夹具前提：{url} 的 authority 里不许有 @"
+            );
             if !arm.starts_with("形 1") {
-                assert!(!url.contains(password), "夹具前提：{arm} 这一格里不该有口令的字面形：{url}");
+                assert!(
+                    !url.contains(password),
+                    "夹具前提：{arm} 这一格里不该有口令的字面形：{url}"
+                );
             }
             assert!(
                 landed_url_is_refused(url, Some(password)),
@@ -1551,12 +1795,15 @@ mod tests {
         // 对照臂（判据不许变成"看见什么都像凭据"）：这些串里没有本任务口令的任何一种形状。
         for url in [
             "http://127.0.0.1:56296/landed",
-            "http://127.0.0.1:56296/w7/Dvw==",     // 是**别的**口令的形状
-            "http://127.0.0.1:56296/YWJjZA==",     // `base64("abcd")`，本任务口令是 hunter2
-            "http://127.0.0.1:56296/a%20b2",       // 百分号形属于别的口令
+            "http://127.0.0.1:56296/w7/Dvw==", // 是**别的**口令的形状
+            "http://127.0.0.1:56296/YWJjZA==", // `base64("abcd")`，本任务口令是 hunter2
+            "http://127.0.0.1:56296/a%20b2",   // 百分号形属于别的口令
             "http://127.0.0.1:56296/normal.bin",
         ] {
-            assert!(!landed_url_is_refused(url, Some("hunter2")), "第三支不许对 {url} 开火（口令是 hunter2）");
+            assert!(
+                !landed_url_is_refused(url, Some("hunter2")),
+                "第三支不许对 {url} 开火（口令是 hunter2）"
+            );
         }
     }
 
@@ -1682,7 +1929,10 @@ mod tests {
                 canonical_http_authority(&url).is_some(),
                 "夹具前提：{url} 必须规范，否则半支 2 会替第二组开火"
             );
-            assert!(!authority_has_userinfo(&url), "夹具前提：{url} 的 authority 里不许有 @");
+            assert!(
+                !authority_has_userinfo(&url),
+                "夹具前提：{url} 的 authority 里不许有 @"
+            );
             let old_would_hit = forms.iter().any(|form| url.contains(form));
             assert_eq!(
                 old_would_hit, old_hits,
@@ -1696,14 +1946,22 @@ mod tests {
                 ));
             }
         }
-        assert!(failures.is_empty(), "第二组漏了 {} 格：\n{}", failures.len(), failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "第二组漏了 {} 格：\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
 
         // 对照臂一：**别的**口令的凭据对形状不许让本任务被拒（判据仍然只比"我们那份"）。
         for url in [
             "http://127.0.0.1:56296/YWxpY2U6aHVudGVyMg==", // 是 hunter2 的形状，本任务口令是 abcd
             "http://127.0.0.1:56296/c29tZW9uZTpoaQ",       // base64("someone:hi")：连口令都没有
         ] {
-            assert!(!landed_url_is_refused(url, Some("abcd")), "第二组不许对 {url} 开火（口令是 abcd）");
+            assert!(
+                !landed_url_is_refused(url, Some("abcd")),
+                "第二组不许对 {url} 开火（口令是 abcd）"
+            );
         }
         // 对照臂二（**登记为看不见的两格**，钉住"只认 `:<口令>` 这一结构位"那条决定）：
         // 顺序颠倒的凭据对与引号包着的口令 —— 解出来分别长着 `hunter2:` 与 `"hunter2"`，
@@ -1750,23 +2008,38 @@ mod tests {
         // (口令, 字段, 值)：值全是 ASCII（`headers()` 那个夹具只装得下合法头值），
         // 而 `ÿÿ` 这一份口令本身是非 ASCII —— 它的 base64 形状是 ASCII，这正是那四形的用处。
         for (secret, name, value) in [
-            ("hunter2", "etag", "\"hunter2\""),         // 形 1：字面
-            ("hunter2", "etag", "\"%68unter2\""),       // 形 2：百分号（整串编码）
-            ("hunter2", "etag", "\"a%20hunter2\""),     // 形 2：只有一个空格落到线上成了 %20
-            ("hunter2", "etag", "\"aHVudGVyMg==\""),    // 形 3/4：std（带 pad 的串里同时有去 pad 那一形）
+            ("hunter2", "etag", "\"hunter2\""),               // 形 1：字面
+            ("hunter2", "etag", "\"%68unter2\""),             // 形 2：百分号（整串编码）
+            ("hunter2", "etag", "\"a%20hunter2\""),           // 形 2：只有一个空格落到线上成了 %20
+            ("hunter2", "etag", "\"aHVudGVyMg==\""), // 形 3/4：std（带 pad 的串里同时有去 pad 那一形）
             ("hunter2", "last-modified", "hunter2-fixed"), // 另一个字段同一条判据
             ("hunter2", "last-modified", "\"y-aHVudGVyMg\""), // 另一个字段 × base64 去 padding
-            ("ÿÿ", "etag", "\"x-w7_Dvw\""),             // 形 6：url-safe 去 padding（std 那两形看不见 `_`）
-            ("ÿÿ", "last-modified", "w7/Dvw=="),         // 形 3：std 带 padding
+            ("ÿÿ", "etag", "\"x-w7_Dvw\""), // 形 6：url-safe 去 padding（std 那两形看不见 `_`）
+            ("ÿÿ", "last-modified", "w7/Dvw=="), // 形 3：std 带 padding
         ] {
             let h = headers(&[("content-length", "10"), (name, value)]);
-            let Err(err) = facts_from_response(StatusCode::OK, false, &h, "https://host/a.bin", Some(secret)) else {
+            let Err(err) = facts_from_response(
+                StatusCode::OK,
+                false,
+                &h,
+                "https://host/a.bin",
+                Some(secret),
+            ) else {
                 panic!("验证子 {name}={value:?} 里带着本任务口令 ⇒ 这份事实不许收下");
             };
             let msg = err.to_string();
-            assert_eq!(msg, LANDED_VERIFIER_CREDENTIALS, "同一句常量，不许有第二个版本：{msg}");
-            assert!(!msg.contains(secret) && !msg.contains(value), "拒绝消息回显了字段值：{msg}");
-            assert!(msg.contains("验证子") && msg.contains("口令"), "措辞要点名是哪两个字段：{msg}");
+            assert_eq!(
+                msg, LANDED_VERIFIER_CREDENTIALS,
+                "同一句常量，不许有第二个版本：{msg}"
+            );
+            assert!(
+                !msg.contains(secret) && !msg.contains(value),
+                "拒绝消息回显了字段值：{msg}"
+            );
+            assert!(
+                msg.contains("验证子") && msg.contains("口令"),
+                "措辞要点名是哪两个字段：{msg}"
+            );
             assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
         }
 
@@ -1777,31 +2050,71 @@ mod tests {
             ("etag", "W/\"YWJjZA==\""), // `base64("abcd")`，本任务口令是 hunter2
             ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
         ]);
-        let facts = facts_from_response(StatusCode::OK, false, &honest, "https://host/a.bin", Some(secret))
-            .expect("诚实验证子与口令无关，不许误杀");
-        assert_eq!(facts.etag.as_deref(), Some("W/\"YWJjZA==\""), "放行时验证子照旧原样装填（不归一化）");
-        assert_eq!(facts.last_modified.as_deref(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
+        let facts = facts_from_response(
+            StatusCode::OK,
+            false,
+            &honest,
+            "https://host/a.bin",
+            Some(secret),
+        )
+        .expect("诚实验证子与口令无关，不许误杀");
+        assert_eq!(
+            facts.etag.as_deref(),
+            Some("W/\"YWJjZA==\""),
+            "放行时验证子照旧原样装填（不归一化）"
+        );
+        assert_eq!(
+            facts.last_modified.as_deref(),
+            Some("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
 
         // 下限同样管这一支：3 字节口令即使字面撞在 ETag 里也**不比内容**（§2 的口径覆盖三个字段）。
         let short = headers(&[("content-length", "10"), ("etag", "\"abc\"")]);
-        assert!(facts_from_response(StatusCode::OK, false, &short, "https://host/a.bin", Some("abc")).is_ok());
+        assert!(
+            facts_from_response(
+                StatusCode::OK,
+                false,
+                &short,
+                "https://host/a.bin",
+                Some("abc")
+            )
+            .is_ok()
+        );
         // 没给口令 ⇒ 这一道闸恒不关火（对面爱在 ETag 里放什么放什么）。
-        assert!(facts_from_response(StatusCode::OK, false, &short, "https://host/a.bin", None).is_ok());
+        assert!(
+            facts_from_response(StatusCode::OK, false, &short, "https://host/a.bin", None).is_ok()
+        );
 
         // 416 + `bytes */0` 那一支：它**不调** `facts_from_response`，所以单独钉一次同一道闸。
         let tainted = headers(&[("content-range", "bytes */0"), ("etag", "\"aHVudGVyMg==\"")]);
-        let Err(err) = empty_file_facts(&tainted, "http://127.0.0.1:56296/sz/0".to_string(), Some(secret)) else {
-            panic!("416 那一支的 ETag 带着本任务口令 ⇒ 不许交回事实（这一支不走 facts_from_response）");
+        let Err(err) = empty_file_facts(
+            &tainted,
+            "http://127.0.0.1:56296/sz/0".to_string(),
+            Some(secret),
+        ) else {
+            panic!(
+                "416 那一支的 ETag 带着本任务口令 ⇒ 不许交回事实（这一支不走 facts_from_response）"
+            );
         };
         let msg = err.to_string();
-        assert_eq!(msg, LANDED_VERIFIER_CREDENTIALS, "同一句常量，不许有第二个版本：{msg}");
-        assert!(!msg.contains(secret) && !msg.contains("aHVudGVyMg"), "拒绝消息回显了字段值：{msg}");
+        assert_eq!(
+            msg, LANDED_VERIFIER_CREDENTIALS,
+            "同一句常量，不许有第二个版本：{msg}"
+        );
+        assert!(
+            !msg.contains(secret) && !msg.contains("aHVudGVyMg"),
+            "拒绝消息回显了字段值：{msg}"
+        );
 
         // 那一支的**放行形状**一个字节都不许变（模块文档第 9 条的三条并列，与抽出前逐字段同值）：
         // `total_len` 恒 0、`accept_ranges` 恒 true（解读）、验证子原样。
         let empty = headers(&[("content-range", "bytes */0"), ("etag", "\"probe-abc\"")]);
-        let facts = empty_file_facts(&empty, "http://127.0.0.1:56296/sz/0".to_string(), Some(secret))
-            .expect("诚实的空文件事实照旧收得下");
+        let facts = empty_file_facts(
+            &empty,
+            "http://127.0.0.1:56296/sz/0".to_string(),
+            Some(secret),
+        )
+        .expect("诚实的空文件事实照旧收得下");
         assert_eq!(
             facts,
             ProbeFacts {
@@ -1838,15 +2151,29 @@ mod tests {
     ///    钉"那一支确实走判据"这件事，因为**这台仪器造不出它的进程级夹具**（带口令的任务在明文对端
     ///    上先被 `Task::validate()` 拒，见上面 T99-G1f 那段与报告"这发看不见什么"）。
     #[test]
-    fn the_landing_and_verifier_gates_have_their_documented_call_sites_and_none_of_them_drops_the_password() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("probe.rs");
-        let all = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）", path.display()));
+    fn the_landing_and_verifier_gates_have_their_documented_call_sites_and_none_of_them_drops_the_password()
+     {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("probe.rs");
+        let all = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）",
+                path.display()
+            )
+        });
         let src = match all.find("#[cfg(test)]") {
             Some(at) => &all[..at],
-            None => panic!("src/probe.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"),
+            None => panic!(
+                "src/probe.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"
+            ),
         };
-        let code_lines = || src.lines().map(str::trim_start).filter(|l| !l.starts_with("//")).collect::<Vec<&str>>();
+        let code_lines = || {
+            src.lines()
+                .map(str::trim_start)
+                .filter(|l| !l.starts_with("//"))
+                .collect::<Vec<&str>>()
+        };
         let lines = code_lines();
 
         // 断言 1：定义一次、调用三次。
@@ -1858,7 +2185,10 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            lines.iter().filter(|l| l.contains("fn landed_url_is_refused(")).count(),
+            lines
+                .iter()
+                .filter(|l| l.contains("fn landed_url_is_refused("))
+                .count(),
             1,
             "`fn landed_url_is_refused(` 在产品区应当恰好定义一次（两本账）"
         );
@@ -1885,11 +2215,17 @@ mod tests {
                 "落地闸的调用点把第二实参换掉了（{second:?}）⇒ 那一处不再知道本任务的口令，\
                  内容判据在那一个口上恒假（m-arg 禁的形状）：{site}"
             );
-            assert_ne!(second, "None", "落地闸的调用点交回裸 `None` ⇒ 同一个口退回只看形状：{site}");
+            assert_ne!(
+                second, "None",
+                "落地闸的调用点交回裸 `None` ⇒ 同一个口退回只看形状：{site}"
+            );
         }
 
         // 断言 3：验证子那道闸在两处装填口各判一次。
-        let verifier_calls = call_sites("verifiers_carry_our_password(", "fn verifiers_carry_our_password(");
+        let verifier_calls = call_sites(
+            "verifiers_carry_our_password(",
+            "fn verifiers_carry_our_password(",
+        );
         assert_eq!(
             verifier_calls.len(),
             2,
@@ -1913,7 +2249,8 @@ mod tests {
         );
         let facts_body = body_of(src, "fn empty_file_facts(");
         assert!(
-            facts_body.contains("verifiers_carry_our_password(") && facts_body.contains("LANDED_VERIFIER_CREDENTIALS"),
+            facts_body.contains("verifiers_carry_our_password(")
+                && facts_body.contains("LANDED_VERIFIER_CREDENTIALS"),
             "`empty_file_facts` 的体内没有验证子闸或没有那句常量 ⇒ 416 那一支的闸被掏空了"
         );
 
@@ -1997,6 +2334,7 @@ mod tests {
         let mut body = String::new();
         let mut depth = 0i32;
         let mut inside = false;
+        let mut started = false;
         for line in src.lines() {
             let t = line.trim_start();
             if t.starts_with("//") {
@@ -2009,14 +2347,24 @@ mod tests {
                 inside = true;
             }
             depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if depth > 0 {
+                started = true;
+            }
             body.push_str(line);
             body.push('\n');
-            if depth == 0 && body.len() > 1 {
+            // 签名可能被 rustfmt 拆成多行：第一个 `{` 出现前 depth 恒 0，不能就此收工。
+            if started && depth == 0 {
                 break;
             }
         }
-        assert!(inside, "产品区里找不到含 `{head}` 的非注释行——本该存在的判据/分支没了");
-        assert_eq!(depth, 0, "`{head}` 的块在大括号深度上没闭合——针的夹具跟不上实现形状");
+        assert!(
+            inside,
+            "产品区里找不到含 `{head}` 的非注释行——本该存在的判据/分支没了"
+        );
+        assert_eq!(
+            depth, 0,
+            "`{head}` 的块在大括号深度上没闭合——针的夹具跟不上实现形状"
+        );
         body
     }
 
@@ -2035,9 +2383,12 @@ mod tests {
     #[test]
     fn build_request_sends_the_prelude_range_only_when_the_task_is_segmentable() {
         let seg = task_with("http://x/a.bin", None);
-        let req = build_request(&agent(), &seg, prelude_range(&seg, 236_032).as_deref())
-            .expect("建请求");
-        assert_eq!(req.headers().get(RANGE).map(|v| v.as_bytes()), Some(&b"bytes=0-236031"[..]));
+        let req =
+            build_request(&agent(), &seg, prelude_range(&seg, 236_032).as_deref()).expect("建请求");
+        assert_eq!(
+            req.headers().get(RANGE).map(|v| v.as_bytes()),
+            Some(&b"bytes=0-236031"[..])
+        );
 
         let post = task_with("http://x/a.bin", Some("body.bin"));
         let req = build_request(&agent(), &post, prelude_range(&post, 236_032).as_deref())
@@ -2059,19 +2410,40 @@ mod tests {
         t.user = Some("alice".into()); // https ⇒ F2 那道闸放行（它只看 scheme，别看别的）
         let req = build_request(&agent(), &t, Some("bytes=0-1")).expect("建请求");
         let h = req.headers();
-        assert_eq!(h.get(REFERER).map(|v| v.as_bytes()), Some(&b"https://ref.example/page"[..]));
+        assert_eq!(
+            h.get(REFERER).map(|v| v.as_bytes()),
+            Some(&b"https://ref.example/page"[..])
+        );
         assert_eq!(h.get(COOKIE).map(|v| v.as_bytes()), Some(&b"sid=42"[..]));
-        assert_eq!(h.get(ACCEPT_ENCODING).map(|v| v.as_bytes()), Some(&b"identity"[..]));
+        assert_eq!(
+            h.get(ACCEPT_ENCODING).map(|v| v.as_bytes()),
+            Some(&b"identity"[..])
+        );
         assert_eq!(h.get(ACCEPT).map(|v| v.as_bytes()), Some(&b"*/*"[..]));
         // base64("alice:") = YWxpY2U6；本用例**没有**口令参与，所以这里可以逐字断言。
-        assert_eq!(h.get("authorization").map(|v| v.as_bytes()), Some(BASIC_ALICE_COLON));
-        assert_eq!(req.url().as_str(), "https://x/a.bin", "请求打的就是任务那条 URL");
+        assert_eq!(
+            h.get("authorization").map(|v| v.as_bytes()),
+            Some(BASIC_ALICE_COLON)
+        );
+        assert_eq!(
+            req.url().as_str(),
+            "https://x/a.bin",
+            "请求打的就是任务那条 URL"
+        );
 
         // 反方向：什么契约头都没给 ⇒ 只有那两个通用头，绝不能凭空长出一个 Authorization。
-        let bare = build_request(&agent(), &task_with("https://x/a.bin", None), None).expect("建请求");
-        assert!(!bare.headers().contains_key("authorization"), "{:?}", bare.headers());
+        let bare =
+            build_request(&agent(), &task_with("https://x/a.bin", None), None).expect("建请求");
+        assert!(
+            !bare.headers().contains_key("authorization"),
+            "{:?}",
+            bare.headers()
+        );
         assert!(!bare.headers().contains_key(COOKIE));
-        assert!(bare.headers().contains_key(ACCEPT_ENCODING), "identity 是无条件的那一条");
+        assert!(
+            bare.headers().contains_key(ACCEPT_ENCODING),
+            "identity 是无条件的那一条"
+        );
     }
 
     #[test]
@@ -2120,7 +2492,10 @@ mod tests {
         assert!(msg.contains("口令"), "错误要说清是口令规则：{msg}");
         assert!(!msg.contains("hunter2"), "错误里不该抄口令：{msg}");
         // 这条错误必须是**校验**给的，不是连接/DNS 给的：后者不会带着"口令"两个字。
-        assert!(!msg.contains("发不出去"), "看起来是先发了请求才被网络拒（那口令就已经出门了）：{msg}");
+        assert!(
+            !msg.contains("发不出去"),
+            "看起来是先发了请求才被网络拒（那口令就已经出门了）：{msg}"
+        );
     }
 
     // ---- 评审 F1：带 `--data-file` 的任务**不许试探** ----
@@ -2152,18 +2527,35 @@ mod tests {
     #[test]
     fn a_task_carrying_a_data_file_is_refused_rather_than_probed_with_a_get() {
         let body = scratch_body(&format!("{BODY_SENTINEL}&cvv=999"));
-        let mut t = task_with("https://not-a-real-host.invalid/a.bin", Some(&body.display().to_string()));
+        let mut t = task_with(
+            "https://not-a-real-host.invalid/a.bin",
+            Some(&body.display().to_string()),
+        );
         t.user = Some("alice".into());
         t.password = Some("hunter2".into()); // https 上带口令是合法的 ⇒ 走到的是 data_file 那道闸，不是口令闸
         let Err(err) = run(&t, &agent(), 236_032) else {
-            panic!("带 --data-file 的任务必须被 probe 拒掉：发 GET 会把另一条请求的事实当成本次的（①b 挡的那种）");
+            panic!(
+                "带 --data-file 的任务必须被 probe 拒掉：发 GET 会把另一条请求的事实当成本次的（①b 挡的那种）"
+            );
         };
         let msg = err.to_string();
-        assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
-        assert!(!msg.contains(BODY_SENTINEL) && !msg.contains("cvv"), "错误里抄了体的字节：{msg}");
-        assert!(!msg.contains("hunter2") && !msg.contains("alice"), "错误里抄了凭据：{msg}");
+        assert!(
+            msg.contains("--data-file"),
+            "错误要点名那个参数，用户才知道改什么：{msg}"
+        );
+        assert!(
+            !msg.contains(BODY_SENTINEL) && !msg.contains("cvv"),
+            "错误里抄了体的字节：{msg}"
+        );
+        assert!(
+            !msg.contains("hunter2") && !msg.contains("alice"),
+            "错误里抄了凭据：{msg}"
+        );
         assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
-        assert!(!msg.contains("发不出去"), "看起来是先发了请求才被网络拒（那已经把 GET 打出去了）：{msg}");
+        assert!(
+            !msg.contains("发不出去"),
+            "看起来是先发了请求才被网络拒（那已经把 GET 打出去了）：{msg}"
+        );
         let _ = std::fs::remove_file(&body);
     }
 
@@ -2211,24 +2603,27 @@ mod tests {
         // 是因为它是一条 `pub(crate)` 的纯判据，契约不许假设"调用点已经过滤过"，
         // 而认不出是 TLS 时唯一安全的取法就是不送凭据。
         for url in [
-            "x/a.bin",                      // 无 scheme ⇒ 保守那一支
-            "alice:s3cret@x/a.bin",         // 无 scheme 且带 userinfo（E9 那边另有其闸，这里照样不是 https）
-            "httpx://x/a.bin",              // 差一个字母的 scheme 不是 https
-            "https+proxy://x/a.bin",        // 复合 scheme 也不是
+            "x/a.bin",               // 无 scheme ⇒ 保守那一支
+            "alice:s3cret@x/a.bin", // 无 scheme 且带 userinfo（E9 那边另有其闸，这里照样不是 https）
+            "httpx://x/a.bin",      // 差一个字母的 scheme 不是 https
+            "https+proxy://x/a.bin", // 复合 scheme 也不是
             "ftp://x/a.bin",
-            "",                             // 空串（`validate()` 会拒，判据自己不许 panic）
+            "", // 空串（`validate()` 会拒，判据自己不许 panic）
             ":",
-            "://x/a.bin",                   // `://` 前面不是 scheme
+            "://x/a.bin", // `://` 前面不是 scheme
         ] {
             assert!(!url_is_https(url), "{url:?} 不该被当成 https");
         }
         for url in [
             "https://x/a.bin",
-            "HTTPS://X/A.BIN",              // 大写 scheme 仍是 https：闸不许把加密连接误判成明文
+            "HTTPS://X/A.BIN", // 大写 scheme 仍是 https：闸不许把加密连接误判成明文
             "HtTpS://x/a.bin",
             "https://x:8443/a.bin?u=alice@x#frag", // scheme 之外的 @ 不参与判断
         ] {
-            assert!(url_is_https(url), "{url:?} 就是 https，凭据必须照发（误判会静默换来 401）");
+            assert!(
+                url_is_https(url),
+                "{url:?} 就是 https，凭据必须照发（误判会静默换来 401）"
+            );
         }
     }
 
@@ -2249,20 +2644,30 @@ mod tests {
         up.user = Some("alice".into());
         up.password = Some("hunter2".into());
         let req = build_request(&agent(), &up, None).expect("建请求");
-        assert_eq!(req.headers().get("authorization").map(|v| v.as_bytes()), Some(BASIC_ALICE_HUNTER2));
+        assert_eq!(
+            req.headers().get("authorization").map(|v| v.as_bytes()),
+            Some(BASIC_ALICE_HUNTER2)
+        );
 
         // 只有用户名的 https 支：`Basic base64("user:")`，与 curl 同形。
         let mut bare = task_with("https://x/a.bin", None);
         bare.user = Some("alice".into());
         let req = build_request(&agent(), &bare, None).expect("建请求");
-        assert_eq!(req.headers().get("authorization").map(|v| v.as_bytes()), Some(BASIC_ALICE_COLON));
+        assert_eq!(
+            req.headers().get("authorization").map(|v| v.as_bytes()),
+            Some(BASIC_ALICE_COLON)
+        );
 
         // 只有口令、没有用户名（`--password` 单独给）⇒ 用户名取空串，仍然是 `Basic`（"给了口令却悄悄不带"
         // 才是绝对不行的形状）。
         let mut pwonly = task_with("https://x/a.bin", None);
         pwonly.password = Some("hunter2".into());
         let req = build_request(&agent(), &pwonly, None).expect("建请求");
-        assert!(req.headers().contains_key("authorization"), "{:?}", req.headers());
+        assert!(
+            req.headers().contains_key("authorization"),
+            "{:?}",
+            req.headers()
+        );
     }
 
     #[test]
@@ -2276,9 +2681,15 @@ mod tests {
         t.cookies = Some("sid=42".into());
         let req = build_request(&agent(), &t, None).expect("建请求");
         let h = req.headers();
-        assert_eq!(h.get(REFERER).map(|v| v.as_bytes()), Some(&b"https://ref.example/page"[..]));
+        assert_eq!(
+            h.get(REFERER).map(|v| v.as_bytes()),
+            Some(&b"https://ref.example/page"[..])
+        );
         assert_eq!(h.get(COOKIE).map(|v| v.as_bytes()), Some(&b"sid=42"[..]));
-        assert!(!h.contains_key("authorization"), "这个夹具没给凭据，Authorization 不该凭空长出来：{h:?}");
+        assert!(
+            !h.contains_key("authorization"),
+            "这个夹具没给凭据，Authorization 不该凭空长出来：{h:?}"
+        );
     }
 
     // ---- 修复轮 F2：抽出来的那份"响应头 → 事实"的读法 ----
@@ -2296,8 +2707,14 @@ mod tests {
             ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
             ("accept-ranges", "bytes"),
         ]);
-        let facts = facts_from_response(StatusCode::PARTIAL_CONTENT, true, &h, "https://x/a.bin", None)
-            .expect("这一份响应读得出事实");
+        let facts = facts_from_response(
+            StatusCode::PARTIAL_CONTENT,
+            true,
+            &h,
+            "https://x/a.bin",
+            None,
+        )
+        .expect("这一份响应读得出事实");
         assert_eq!(
             facts,
             ProbeFacts {
@@ -2312,13 +2729,28 @@ mod tests {
 
         // `asked_for_range = false`（`run_whole` 那一格）：只看头。头说 bytes 就认，头说 none 就不认。
         let claims = headers(&[("content-length", "10"), ("accept-ranges", "bytes")]);
-        let facts = facts_from_response(StatusCode::OK, false, &claims, "https://x/a.bin", None).expect("读得出事实");
-        assert!(facts.accept_ranges, "没发 Range 时行为上没有证据可看，只能由头说");
-        assert_eq!(facts.total_len, 10, "200 的 Content-Length 就是它交出来的整个 body（模块文档第 4 条）");
+        let facts = facts_from_response(StatusCode::OK, false, &claims, "https://x/a.bin", None)
+            .expect("读得出事实");
+        assert!(
+            facts.accept_ranges,
+            "没发 Range 时行为上没有证据可看，只能由头说"
+        );
+        assert_eq!(
+            facts.total_len, 10,
+            "200 的 Content-Length 就是它交出来的整个 body（模块文档第 4 条）"
+        );
         let denies = headers(&[("content-length", "10"), ("accept-ranges", "none")]);
-        assert!(!facts_from_response(StatusCode::OK, false, &denies, "https://x/a.bin", None).expect("读得出事实").accept_ranges);
+        assert!(
+            !facts_from_response(StatusCode::OK, false, &denies, "https://x/a.bin", None)
+                .expect("读得出事实")
+                .accept_ranges
+        );
         // 反方向（不许被顺手改掉）：发过 Range 而对方回 200 ⇒ 仍然不认（评审 I1 那一格）。
-        assert!(!facts_from_response(StatusCode::OK, true, &claims, "https://x/a.bin", None).expect("读得出事实").accept_ranges);
+        assert!(
+            !facts_from_response(StatusCode::OK, true, &claims, "https://x/a.bin", None)
+                .expect("读得出事实")
+                .accept_ranges
+        );
     }
 
     #[test]
@@ -2326,13 +2758,25 @@ mod tests {
         // 这道闸必须住在读法**里面**：`fetch::run_whole` 不经过 `probe::run`，外面那道闸够不着它；
         // 而它拒绝用的必须是同一个常量，不是第二个版本的措辞（`probe` 那一侧因此多一次同值判断，无副作用）。
         let h = headers(&[("content-length", "10")]);
-        let Err(err) = facts_from_response(StatusCode::OK, false, &h, "https://alice:s3cret@host/x", None) else {
+        let Err(err) = facts_from_response(
+            StatusCode::OK,
+            false,
+            &h,
+            "https://alice:s3cret@host/x",
+            None,
+        ) else {
             panic!("落地 URL 带 userinfo（E9 / Task 5 评审 C3）时不许交回事实");
         };
         let msg = err.to_string();
-        assert_eq!(msg, LANDED_CREDENTIALS, "同一个常量，不许有第二个版本：{msg}");
+        assert_eq!(
+            msg, LANDED_CREDENTIALS,
+            "同一个常量，不许有第二个版本：{msg}"
+        );
         for leak in ["alice", "s3cret", "@", "http://", "https://"] {
-            assert!(!msg.contains(leak), "拒绝文本里出现了 URL 的成分（{leak}）：{msg}");
+            assert!(
+                !msg.contains(leak),
+                "拒绝文本里出现了 URL 的成分（{leak}）：{msg}"
+            );
         }
     }
 
@@ -2345,7 +2789,10 @@ mod tests {
             final_url: "http://x/a".into(),
             accept_ranges: true,
         };
-        let r = ProbeResult { facts: facts.clone(), prelude: vec![1, 2, 3] };
+        let r = ProbeResult {
+            facts: facts.clone(),
+            prelude: vec![1, 2, 3],
+        };
         assert_eq!(r.facts(), facts, "Task 5 的闸按值比，交回的必须是同一份");
         assert_eq!(r.prelude.len(), 3, "facts() 不许动预读");
     }

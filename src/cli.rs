@@ -167,7 +167,9 @@ fn expand_idm_aliases<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Resu
         // 值位探测：`--opt=值` 那种写法**不吃**下一个参数，只有裸 `--opt` 才可能进这张表。
         value_slot = starts_with_ascii(&arg, b"--")
             && !arg.as_encoded_bytes().contains(&b'=')
-            && VALUE_TAKING_LONGS.iter().any(|name| OsStr::new(name) == arg);
+            && VALUE_TAKING_LONGS
+                .iter()
+                .any(|name| OsStr::new(name) == arg);
         out.push(arg);
     }
     Ok(out)
@@ -247,35 +249,77 @@ pub fn parse_from<I: IntoIterator<Item = OsString>>(args: I) -> anyhow::Result<C
     after_help = ALIAS_EPILOG
 )]
 pub struct Cli {
-    #[arg(long, value_name = "URL", help = "下载 URL（必填；仅接受 http://、https:// 规范写法）")]
+    #[arg(
+        long,
+        value_name = "URL",
+        help = "下载 URL（必填；仅接受 http://、https:// 规范写法）"
+    )]
     url: String,
     #[arg(long, value_name = "DIR", help = "输出目录（默认当前目录）")]
     out_dir: Option<PathBuf>,
-    #[arg(long, value_name = "NAME", help = "输出文件名（不给取 URL 末段；都不许走出 --out-dir）")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "输出文件名（不给取 URL 末段；都不许走出 --out-dir）"
+    )]
     out_name: Option<String>,
     #[arg(long, value_name = "N", help = "并发连接数（默认 8，至少 1）")]
     connections: Option<usize>,
-    #[arg(long, value_name = "BYTES_PER_SECOND", default_value_t = 0, help = "所有连接合计的速率上限（字节/秒；0 = 不限）")]
+    #[arg(
+        long,
+        value_name = "BYTES_PER_SECOND",
+        default_value_t = 0,
+        help = "所有连接合计的速率上限（字节/秒；0 = 不限）"
+    )]
     max_speed: u64,
-    #[arg(long, value_name = "BYTES", default_value_t = 0, help = "本次运行最多新交付的字节数（0 = 不限；到量即停并保留断点）")]
+    #[arg(
+        long,
+        value_name = "BYTES",
+        default_value_t = 0,
+        help = "本次运行最多新交付的字节数（0 = 不限；到量即停并保留断点）"
+    )]
     max_bytes: u64,
     #[arg(long, value_name = "URL", help = "原样发送的 Referer 头")]
     referer: Option<String>,
-    #[arg(long, value_name = "COOKIE", help = "原样发送 Cookie 头（不分 http/https，写入断点文件）")]
+    #[arg(
+        long,
+        value_name = "COOKIE",
+        help = "原样发送 Cookie 头（不分 http/https，写入断点文件）"
+    )]
     cookie: Option<String>,
-    #[arg(long, conflicts_with = "cookie", help = "从 stdin 读 Cookie 头（避免出现在命令行/进程列表）")]
+    #[arg(
+        long,
+        conflicts_with = "cookie",
+        help = "从 stdin 读 Cookie 头（避免出现在命令行/进程列表）"
+    )]
     cookie_stdin: bool,
-    #[arg(long, value_name = "FILE", help = "从这个文件读请求体（不试探、不读写断点、不可续传）")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "从这个文件读请求体（不试探、不读写断点、不可续传）"
+    )]
     data_file: Option<PathBuf>,
-    #[arg(long, value_name = "USER", help = "Basic 认证的用户名（只在 https 上发送）")]
+    #[arg(
+        long,
+        value_name = "USER",
+        help = "Basic 认证的用户名（只在 https 上发送）"
+    )]
     user: Option<String>,
-    #[arg(long, value_name = "PASSWORD", help = "Basic 口令（仅 https 发送；配 http:// 会直接失败）")]
+    #[arg(
+        long,
+        value_name = "PASSWORD",
+        help = "Basic 口令（仅 https 发送；配 http:// 会直接失败）"
+    )]
     password: Option<String>,
     #[arg(long, help = "仅 Last-Modified 变化时可续传（ETag 变则从头重来）")]
     ignore_mtime: bool,
     #[arg(long, help = "无视断点文件，从头下载")]
     no_resume: bool,
-    #[arg(long, value_name = "HEX", help = "完成后校验（需 64 位十六进制；不符保留文件并报错、不自动删）")]
+    #[arg(
+        long,
+        value_name = "HEX",
+        help = "完成后校验（需 64 位十六进制；不符保留文件并报错、不自动删）"
+    )]
     sha256: Option<String>,
     #[arg(long, value_name = "N", help = "给无限慢重试封顶的重试次数")]
     max_retries: Option<u32>,
@@ -285,9 +329,16 @@ pub struct Cli {
     quiet: bool,
     #[arg(long, help = "只打印任务摘要后退出，不发送任何请求")]
     no_start: bool,
-    #[arg(long, help = "把 URL 当作 HLS 播放列表，顺序下载分片并合并（不做 DASH/DRM/嗅探）")]
+    #[arg(
+        long,
+        help = "把 URL 当作 HLS 播放列表，顺序下载分片并合并（不做 DASH/DRM/嗅探）"
+    )]
     hls: bool,
-    #[arg(long, value_name = "ACTION", help = "完成后动作：open 或 run:<exe>（程序收到落点路径作为第一个参数）")]
+    #[arg(
+        long,
+        value_name = "ACTION",
+        help = "完成后动作：open、run:<exe>（程序收到落点路径作为第一个参数）或 shutdown:<秒数>（至少 60）"
+    )]
     on_complete: Option<CompletionAction>,
 }
 
@@ -326,9 +377,15 @@ impl std::fmt::Debug for Cli {
 
 fn cookies_from_stdin<R: Read>(input: &mut R) -> anyhow::Result<Option<String>> {
     let mut raw = String::new();
-    input.read_to_string(&mut raw).context("读 --cookie-stdin 失败")?;
+    input
+        .read_to_string(&mut raw)
+        .context("读 --cookie-stdin 失败")?;
     let trimmed = raw.trim_end_matches(['\r', '\n']);
-    Ok(if trimmed.is_empty() { None } else { Some(trimmed.to_string()) })
+    Ok(if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    })
 }
 
 impl Cli {
@@ -460,11 +517,19 @@ mod tests {
     #[test]
     fn flag_bits_map_to_task_flags() -> anyhow::Result<()> {
         let c = parse(&["dlm", "/d", "https://x/a", "/n", "/a", "--keep-state"])?;
-        assert!(c.quiet(), "/n 才是静默别名（E23①：plan 正文把 /q 记成静默是反的）");
+        assert!(
+            c.quiet(),
+            "/n 才是静默别名（E23①：plan 正文把 /q 记成静默是反的）"
+        );
         let t = c.into_task()?;
         assert_eq!(t.flags & FLAG_ADD_ONLY, FLAG_ADD_ONLY);
         assert_eq!(t.flags & FLAG_KEEP_STATE, FLAG_KEEP_STATE);
-        assert_eq!(t.flags, FLAG_ADD_ONLY | FLAG_KEEP_STATE, "flags 里只有 bit0/bit1/bit2 三格，静默不许占一格（E20③）：{:b}", t.flags);
+        assert_eq!(
+            t.flags,
+            FLAG_ADD_ONLY | FLAG_KEEP_STATE,
+            "flags 里只有 bit0/bit1/bit2 三格，静默不许占一格（E20③）：{:b}",
+            t.flags
+        );
         Ok(())
     }
 
@@ -472,10 +537,18 @@ mod tests {
     fn plain_http_with_password_fails_at_parse_time() {
         for url in ["http://x/a", "HTTP://x/a", "HtTp://x/a"] {
             let r = parse(&["dlm", "--url", url, "--password", "p"]).and_then(|c| c.into_task());
-            assert!(r.is_err(), "{url} 带口令必须在解析期失败，不许降级成明文发送（E3 / spec §4）");
+            assert!(
+                r.is_err(),
+                "{url} 带口令必须在解析期失败，不许降级成明文发送（E3 / spec §4）"
+            );
         }
-        let ok = parse(&["dlm", "--url", "https://x/a", "--password", "p"]).and_then(|c| c.into_task());
-        assert!(ok.is_ok(), "https 带口令是本工具支持的形状：{}", ok.unwrap_err());
+        let ok =
+            parse(&["dlm", "--url", "https://x/a", "--password", "p"]).and_then(|c| c.into_task());
+        assert!(
+            ok.is_ok(),
+            "https 带口令是本工具支持的形状：{}",
+            ok.unwrap_err()
+        );
     }
 
     #[test]
@@ -483,9 +556,16 @@ mod tests {
         for spelling in ["--quiet", "/n"] {
             let c = parse(&["dlm", "--url", "https://x/a", spelling])?;
             assert!(c.quiet(), "{spelling} 该置静默位");
-            assert_eq!(c.into_task()?.flags, 0, "{spelling} 不许往 flags 里塞任何位（E20③）");
+            assert_eq!(
+                c.into_task()?.flags,
+                0,
+                "{spelling} 不许往 flags 里塞任何位（E20③）"
+            );
         }
-        assert!(!parse(&["dlm", "--url", "https://x/a"])?.quiet(), "不给就是非静默");
+        assert!(
+            !parse(&["dlm", "--url", "https://x/a"])?.quiet(),
+            "不给就是非静默"
+        );
         Ok(())
     }
 
@@ -494,8 +574,15 @@ mod tests {
         let a = parse(&["dlm", "--url", "https://x/a", "/a"])?;
         let b = parse(&["dlm", "--url", "https://x/a", "--no-start"])?;
         assert_eq!(a, b, "/a 与 --no-start 同义（E23②）");
-        assert!(a.no_start() && b.no_start(), "9B-2 要用这个访问器在 engine::run 之前短路（E20④）");
-        assert_eq!(a.into_task()?.flags, FLAG_ADD_ONLY, "bit0 是唯一落点，别的位一格都不许多置");
+        assert!(
+            a.no_start() && b.no_start(),
+            "9B-2 要用这个访问器在 engine::run 之前短路（E20④）"
+        );
+        assert_eq!(
+            a.into_task()?.flags,
+            FLAG_ADD_ONLY,
+            "bit0 是唯一落点，别的位一格都不许多置"
+        );
         assert_eq!(b.into_task()?.flags, FLAG_ADD_ONLY);
         let none = parse(&["dlm", "--url", "https://x/a"])?;
         assert!(!none.no_start(), "不给 --no-start 就不许默认入队");
@@ -505,11 +592,27 @@ mod tests {
 
     #[test]
     fn ignore_mtime_and_keep_state_map_to_bit1_and_bit2() -> anyhow::Result<()> {
-        assert_eq!(task(&["dlm", "--url", "https://x/a", "--ignore-mtime"])?.flags, FLAG_IGNORE_MTIME);
-        assert_eq!(task(&["dlm", "--url", "https://x/a", "--keep-state"])?.flags, FLAG_KEEP_STATE);
-        let both = task(&["dlm", "--url", "https://x/a", "--ignore-mtime", "--keep-state"])?;
+        assert_eq!(
+            task(&["dlm", "--url", "https://x/a", "--ignore-mtime"])?.flags,
+            FLAG_IGNORE_MTIME
+        );
+        assert_eq!(
+            task(&["dlm", "--url", "https://x/a", "--keep-state"])?.flags,
+            FLAG_KEEP_STATE
+        );
+        let both = task(&[
+            "dlm",
+            "--url",
+            "https://x/a",
+            "--ignore-mtime",
+            "--keep-state",
+        ])?;
         assert_eq!(both.flags, FLAG_IGNORE_MTIME | FLAG_KEEP_STATE);
-        assert_eq!(task(&["dlm", "--url", "https://x/a", "--no-resume"])?.flags, 0, "--no-resume 走 Config::force_fresh，不占 flags 位");
+        assert_eq!(
+            task(&["dlm", "--url", "https://x/a", "--no-resume"])?.flags,
+            0,
+            "--no-resume 走 Config::force_fresh，不占 flags 位"
+        );
         Ok(())
     }
 
@@ -520,10 +623,26 @@ mod tests {
             let with = parse(&["dlm", ignored, "/d", "https://x/a.bin", ignored])?;
             assert_eq!(plain, with, "{ignored} 必须像不存在一样（逐字段相等）");
             assert!(!with.quiet(), "{ignored} 不是静默（E23①：静默是 /n）");
-            assert_eq!(with.into_task()?.flags, 0, "{ignored} 不许置任何 flag 位（E23③：接受并忽略 ≠ 发明语义）");
+            assert_eq!(
+                with.into_task()?.flags,
+                0,
+                "{ignored} 不许置任何 flag 位（E23③：接受并忽略 ≠ 发明语义）"
+            );
         }
-        let c = parse(&["dlm", "/d", "https://x/a.bin", "/n", "/q", "/s", "/onboot", "/a"])?;
-        assert!(c.quiet() && c.no_start(), "现成 IDM 脚本会 /n /q /a 一起用，忽略项不许把别的别名带倒");
+        let c = parse(&[
+            "dlm",
+            "/d",
+            "https://x/a.bin",
+            "/n",
+            "/q",
+            "/s",
+            "/onboot",
+            "/a",
+        ])?;
+        assert!(
+            c.quiet() && c.no_start(),
+            "现成 IDM 脚本会 /n /q /a 一起用，忽略项不许把别的别名带倒"
+        );
         assert_eq!(c.into_task()?.flags, FLAG_ADD_ONLY);
         Ok(())
     }
@@ -532,26 +651,50 @@ mod tests {
     fn an_unknown_slash_alias_errors_instead_of_being_swallowed() {
         for bad in ["/z", "/h", "/D", "/q=1", "/on", "/"] {
             let Err(err) = parse(&["dlm", "/d", "https://x/a", bad]) else {
-                panic!("{bad} 不在 C3 取证表里，必须报错：拼错一个字母不能变成\"参数被吃掉了\"（E23④）");
+                panic!(
+                    "{bad} 不在 C3 取证表里，必须报错：拼错一个字母不能变成\"参数被吃掉了\"（E23④）"
+                );
             };
             let msg = err.to_string();
-            assert!(msg.contains("未知别名"), "{bad} 的错误要说清是未知别名：{msg}");
+            assert!(
+                msg.contains("未知别名"),
+                "{bad} 的错误要说清是未知别名：{msg}"
+            );
         }
     }
 
     #[test]
     fn sha256_shape_is_a_parameter_error_not_a_verification_failure() -> anyhow::Result<()> {
-        for bad in ["deadbeef".repeat(4), "g".repeat(64), String::new(), "f".repeat(65)] {
+        for bad in [
+            "deadbeef".repeat(4),
+            "g".repeat(64),
+            String::new(),
+            "f".repeat(65),
+        ] {
             let Err(err) = parse(&["dlm", "--url", "https://x/a", "--sha256", bad.as_str()]) else {
-                panic!("--sha256 给的是 {} 个字符（{}…），形状不合法必须在解析期报错（E23⑤）", bad.chars().count(), &bad[..bad.len().min(8)]);
+                panic!(
+                    "--sha256 给的是 {} 个字符（{}…），形状不合法必须在解析期报错（E23⑤）",
+                    bad.chars().count(),
+                    &bad[..bad.len().min(8)]
+                );
             };
             let msg = err.to_string();
-            assert!(msg.contains("参数写错了") && msg.contains("--sha256"), "这是参数形状问题，措辞要照参数错说：{msg}");
-            assert!(!msg.contains("校验不符"), "不许把形状错路由成引擎那句\"校验不符\"（E20⑨）：{msg}");
+            assert!(
+                msg.contains("参数写错了") && msg.contains("--sha256"),
+                "这是参数形状问题，措辞要照参数错说：{msg}"
+            );
+            assert!(
+                !msg.contains("校验不符"),
+                "不许把形状错路由成引擎那句\"校验不符\"（E20⑨）：{msg}"
+            );
         }
         for good in [HEX64.to_string(), "A".repeat(64)] {
             let c = parse(&["dlm", "--url", "https://x/a", "--sha256", good.as_str()])?;
-            assert_eq!(c.into_config().verify_sha256.as_deref(), Some(good.as_str()), "64 位十六进制原样交给引擎（大小写由 hash_matches 负责）");
+            assert_eq!(
+                c.into_config().verify_sha256.as_deref(),
+                Some(good.as_str()),
+                "64 位十六进制原样交给引擎（大小写由 hash_matches 负责）"
+            );
         }
         Ok(())
     }
@@ -606,14 +749,20 @@ mod tests {
         let n_text = n.to_string();
 
         let Err(err) = parse(&["dlm", "--url", "https://x/a", "--connections", &below_text]) else {
-            panic!("--connections {below} 必须在边界就被拒（这个数是**帮助**里那个下限减一，E23⑤）");
+            panic!(
+                "--connections {below} 必须在边界就被拒（这个数是**帮助**里那个下限减一，E23⑤）"
+            );
         };
         let msg = err.to_string();
-        assert!(msg.contains("参数写错了") && msg.contains("--connections"), "{msg}");
+        assert!(
+            msg.contains("参数写错了") && msg.contains("--connections"),
+            "{msg}"
+        );
 
         let c = parse(&["dlm", "--url", "https://x/a", "--connections", &n_text])?;
         assert_eq!(
-            c.into_config().workers, n,
+            c.into_config().workers,
+            n,
             "帮助说至少 {n}，那 {n} 就是最小合法值，必须原样进 Config::workers（两侧不同源＝这一发的全部意义）"
         );
         Ok(())
@@ -633,7 +782,10 @@ mod tests {
         let exact = "0".repeat(n);
 
         let Err(err) = parse(&["dlm", "--url", "https://x/a", "--sha256", &short]) else {
-            panic!("--sha256 给 {n} 减一（{} 个）位必须被拒（帮助写的就是这个数）", n - 1);
+            panic!(
+                "--sha256 给 {n} 减一（{} 个）位必须被拒（帮助写的就是这个数）",
+                n - 1
+            );
         };
         let msg = err.to_string();
         assert!(
@@ -678,7 +830,11 @@ mod tests {
         assert_eq!(t.cookies.as_deref(), Some("a=1; b=2"));
         assert_eq!(t.data_file, Some(PathBuf::from("D:/body/post.bin")));
         assert_eq!(t.user.as_deref(), Some("alice"));
-        assert_eq!(t.password.as_deref(), Some("hunter2"), "口令的值必须原样走到 Task（掩码只属于 Debug）");
+        assert_eq!(
+            t.password.as_deref(),
+            Some("hunter2"),
+            "口令的值必须原样走到 Task（掩码只属于 Debug）"
+        );
         assert_eq!(t.dir, PathBuf::from("D:/downloads"));
         assert_eq!(t.name.as_deref(), Some("renamed.bin"));
         assert_eq!(t.flags, FLAG_IGNORE_MTIME | FLAG_KEEP_STATE);
@@ -690,8 +846,15 @@ mod tests {
         let Err(err) = parse(&["dlm", "--quiet"]) else {
             panic!("没有 URL 就没有可下的东西，--url 必须是必填项（spec §5 的 usage）");
         };
-        assert!(err.to_string().contains("--url"), "错误要指出缺的是 --url：{err}");
-        assert_eq!(task(&["dlm", "--url", "https://x/a.bin"])?.dir, PathBuf::from("."), "spec §5 没给 --out-dir 的默认值 ⇒ 落在当前目录");
+        assert!(
+            err.to_string().contains("--url"),
+            "错误要指出缺的是 --url：{err}"
+        );
+        assert_eq!(
+            task(&["dlm", "--url", "https://x/a.bin"])?.dir,
+            PathBuf::from("."),
+            "spec §5 没给 --out-dir 的默认值 ⇒ 落在当前目录"
+        );
         Ok(())
     }
 
@@ -722,19 +885,44 @@ mod tests {
             "--no-resume",
         ])?;
         let cfg = c.into_config();
-        assert_eq!(cfg.workers, 3, "E20⑤：--connections 必须是 Config::workers 的唯一来源，不许被 Task 上任何数吞掉");
-        assert_eq!(cfg.max_speed, 1_048_576, "--max-speed 必须原样进 Config::max_speed");
-        assert_eq!(cfg.max_bytes, 2048, "--max-bytes 必须原样进 Config::max_bytes");
+        assert_eq!(
+            cfg.workers, 3,
+            "E20⑤：--connections 必须是 Config::workers 的唯一来源，不许被 Task 上任何数吞掉"
+        );
+        assert_eq!(
+            cfg.max_speed, 1_048_576,
+            "--max-speed 必须原样进 Config::max_speed"
+        );
+        assert_eq!(
+            cfg.max_bytes, 2048,
+            "--max-bytes 必须原样进 Config::max_bytes"
+        );
         assert_eq!(cfg.max_retries, Some(7));
         assert_eq!(cfg.verify_sha256.as_deref(), Some(HEX64));
-        assert!(cfg.force_fresh, "--no-resume ⇒ Config::force_fresh（spec §4）");
-        assert_eq!(cfg.min_seg, MIN_SEGMENT_BYTES, "spec §5 的长选项里没有一个能改 min_seg ⇒ 它只能保持默认");
-        assert!(cfg.on_tick.is_none(), "进度行的 sink 由 9B-2 挂（E22 第 4 条），这一层不碰");
+        assert!(
+            cfg.force_fresh,
+            "--no-resume ⇒ Config::force_fresh（spec §4）"
+        );
+        assert_eq!(
+            cfg.min_seg, MIN_SEGMENT_BYTES,
+            "spec §5 的长选项里没有一个能改 min_seg ⇒ 它只能保持默认"
+        );
+        assert!(
+            cfg.on_tick.is_none(),
+            "进度行的 sink 由 9B-2 挂（E22 第 4 条），这一层不碰"
+        );
         // `into_config` 借 `&self` ⇒ 之后还能 `into_task`（9B-2 要先看 quiet/no_start 再消费）。
         assert_eq!(c.into_task()?.flags, 0);
         let d = parse(&["dlm", "--url", "https://x/a"])?.into_config();
         assert_eq!(
-            (d.workers, d.max_speed, d.max_bytes, d.max_retries, d.verify_sha256, d.force_fresh),
+            (
+                d.workers,
+                d.max_speed,
+                d.max_bytes,
+                d.max_retries,
+                d.verify_sha256,
+                d.force_fresh
+            ),
             (DEFAULT_CONNECTIONS, 0, 0, None, None, false),
             "什么都不给时六格各归其位（max_speed / max_bytes 默认 0 = 不限）"
         );
@@ -821,8 +1009,18 @@ mod tests {
 
     #[test]
     fn long_option_equal_form_does_not_swallow_the_next_token() -> anyhow::Result<()> {
-        let c = parse(&["dlm", "--url=https://x/a.bin", "--connections=4", "/n", "/f", "b.bin"])?;
-        assert!(c.quiet(), "--url=… 这种写法不吃下一个参数，所以后面的 /n 仍是别名");
+        let c = parse(&[
+            "dlm",
+            "--url=https://x/a.bin",
+            "--connections=4",
+            "/n",
+            "/f",
+            "b.bin",
+        ])?;
+        assert!(
+            c.quiet(),
+            "--url=… 这种写法不吃下一个参数，所以后面的 /n 仍是别名"
+        );
         assert_eq!(c.into_task()?.name.as_deref(), Some("b.bin"));
         Ok(())
     }
@@ -837,13 +1035,23 @@ mod tests {
     fn a_slash_token_in_value_position_stays_a_value() -> anyhow::Result<()> {
         // 臂 1（parse 层）：`/f` 在值位上是合法的**值**。
         let c1 = parse(&["dlm", "--url", "https://x/a.bin", "--out-name", "/f"])?;
-        assert_eq!(c1.out_name.as_deref(), Some("/f"), "`/f` 在值位上**不被展开成别名**（它合不合规是落点闸那道另一码事）；把它展开成别名会把用户的参数吃掉");
+        assert_eq!(
+            c1.out_name.as_deref(),
+            Some("/f"),
+            "`/f` 在值位上**不被展开成别名**（它合不合规是落点闸那道另一码事）；把它展开成别名会把用户的参数吃掉"
+        );
         // 臂 2（parse 层）：`--url`/`--out-name` 都是值位旗标，值位上的 `/d` 既不当静默旗标、也不吃左值。
         let c2 = parse(&["dlm", "--url", "https://x/n", "--out-name", "/d"])?;
-        assert!(!c2.quiet(), "`--url`/`--out-name` 都是值位旗标：值位上长得像别名的 /xxx 串不被展开成静默旗标");
+        assert!(
+            !c2.quiet(),
+            "`--url`/`--out-name` 都是值位旗标：值位上长得像别名的 /xxx 串不被展开成静默旗标"
+        );
         assert_eq!(c2.url, "https://x/n", "值位的 /d 没有把 --url 的值吃掉");
         // 臂 3（新闸，T99-G5 第 1 条）：越目录的名字由 `Task::validate()` 当场拒，不在 parse 层。
-        assert!(c2.into_task().is_err(), "/d 这种绝对形状的 --out-name 现在必须在 into_task() 就被拒");
+        assert!(
+            c2.into_task().is_err(),
+            "/d 这种绝对形状的 --out-name 现在必须在 into_task() 就被拒"
+        );
         Ok(())
     }
 
@@ -861,26 +1069,60 @@ mod tests {
         let cases: &[(&[&str], &[&str])] = &[
             // (a) 普通值：三条吃值别名各一发（今天已是绿的，留作表的骨架）。
             (&["dlm", "/d", URL], &["dlm", "--url", URL]),
-            (&["dlm", "/d", URL, "/p", "D:/d"], &["dlm", "--url", URL, "--out-dir", "D:/d"]),
-            (&["dlm", "/d", URL, "/f", "b.bin"], &["dlm", "--url", URL, "--out-name", "b.bin"]),
+            (
+                &["dlm", "/d", URL, "/p", "D:/d"],
+                &["dlm", "--url", URL, "--out-dir", "D:/d"],
+            ),
+            (
+                &["dlm", "/d", URL, "/f", "b.bin"],
+                &["dlm", "--url", URL, "--out-name", "b.bin"],
+            ),
             // (b) 值本身长得像别名 token —— E28④ 的实测缺陷就咬在这一组。
-            (&["dlm", "/d", URL, "/f", "/n"], &["dlm", "--url", URL, "--out-name", "/n"]),
-            (&["dlm", "/d", URL, "/f", "/q"], &["dlm", "--url", URL, "--out-name", "/q"]),
-            (&["dlm", "/d", URL, "/p", "/onboot"], &["dlm", "--url", URL, "--out-dir", "/onboot"]),
-            (&["dlm", "/d", "/n", "/f", "/q"], &["dlm", "--url", "/n", "--out-name", "/q"]),
+            (
+                &["dlm", "/d", URL, "/f", "/n"],
+                &["dlm", "--url", URL, "--out-name", "/n"],
+            ),
+            (
+                &["dlm", "/d", URL, "/f", "/q"],
+                &["dlm", "--url", URL, "--out-name", "/q"],
+            ),
+            (
+                &["dlm", "/d", URL, "/p", "/onboot"],
+                &["dlm", "--url", URL, "--out-dir", "/onboot"],
+            ),
+            (
+                &["dlm", "/d", "/n", "/f", "/q"],
+                &["dlm", "--url", "/n", "--out-name", "/q"],
+            ),
             // (c) 展开成旗标/被忽略项的别名不吃下一 token：旗标别名后头跟的仍是待展开的别名。
-            (&["dlm", "/d", URL, "/n", "/f", "b.bin"], &["dlm", "--url", URL, "--quiet", "--out-name", "b.bin"]),
-            (&["dlm", "/d", URL, "/a", "/f", "b.bin"], &["dlm", "--url", URL, "--no-start", "--out-name", "b.bin"]),
-            (&["dlm", "/d", URL, "/q", "/f", "b.bin"], &["dlm", "--url", URL, "--out-name", "b.bin"]),
+            (
+                &["dlm", "/d", URL, "/n", "/f", "b.bin"],
+                &["dlm", "--url", URL, "--quiet", "--out-name", "b.bin"],
+            ),
+            (
+                &["dlm", "/d", URL, "/a", "/f", "b.bin"],
+                &["dlm", "--url", URL, "--no-start", "--out-name", "b.bin"],
+            ),
+            (
+                &["dlm", "/d", URL, "/q", "/f", "b.bin"],
+                &["dlm", "--url", URL, "--out-name", "b.bin"],
+            ),
         ];
         for (idm, posix) in cases {
             let a = parse(idm);
             let b = parse(posix);
             match (a, b) {
-                (Ok(x), Ok(y)) => assert_eq!(x, y, "别名写法 {idm:?} 必须与长选项写法 {posix:?} 逐字段相等（E28④ 的等价性）"),
+                (Ok(x), Ok(y)) => assert_eq!(
+                    x, y,
+                    "别名写法 {idm:?} 必须与长选项写法 {posix:?} 逐字段相等（E28④ 的等价性）"
+                ),
                 (Err(x), Err(y)) => panic!("两种写法都失败了：{idm:?} ⇒ {x}；{posix:?} ⇒ {y}"),
-                (Ok(_), Err(y)) => panic!("别名写法 {idm:?} 成了、长选项写法 {posix:?} 却失败：{y}"),
-                (Err(x), Ok(_)) => panic!("长选项写法 {posix:?} 成了、别名写法 {idm:?} 却失败：{x}（E28④：展开出来的长名没占值位）"),
+                (Ok(_), Err(y)) => {
+                    panic!("别名写法 {idm:?} 成了、长选项写法 {posix:?} 却失败：{y}")
+                }
+                (Err(x), Ok(_)) => panic!(
+                    "长选项写法 {posix:?} 成了、别名写法 {idm:?} 却失败：{x}（E28④：展开出来的长名没占值位）"
+                ),
             }
         }
     }
@@ -896,7 +1138,10 @@ mod tests {
                 panic!("{flag} 被接受了 —— dlm 没有这个旋钮，E20⑥/E23⑤ 禁止为它发明 CLI 入口");
             };
             let msg = err.to_string();
-            assert!(msg.contains(flag), "拒绝要原样点名 {flag}，用户才知道哪格写错了：{msg}");
+            assert!(
+                msg.contains(flag),
+                "拒绝要原样点名 {flag}，用户才知道哪格写错了：{msg}"
+            );
         }
     }
 
@@ -918,8 +1163,14 @@ mod tests {
             HEX64,
         ])?;
         let d = format!("{c:?}");
-        assert!(!d.contains("hunter2"), "Debug 里不能有口令本尊：错误路径上的 Debug 打印会把口令交进日志（E9 给 Task 的那份立场）：{d}");
-        assert!(d.contains("password: Some(\"[redacted]\")"), "口令要显式渲染成掩码而不是消失：{d}");
+        assert!(
+            !d.contains("hunter2"),
+            "Debug 里不能有口令本尊：错误路径上的 Debug 打印会把口令交进日志（E9 给 Task 的那份立场）：{d}"
+        );
+        assert!(
+            d.contains("password: Some(\"[redacted]\")"),
+            "口令要显式渲染成掩码而不是消失：{d}"
+        );
         for want in [
             "url: \"https://x/a\"",
             "user: Some(\"alice\")",
@@ -928,11 +1179,20 @@ mod tests {
             "connections: Some(2)",
             HEX64,
         ] {
-            assert!(d.contains(want), "Debug 里 {want} 该还在（掩码只针对 password）：{d}");
+            assert!(
+                d.contains(want),
+                "Debug 里 {want} 该还在（掩码只针对 password）：{d}"
+            );
         }
         let clean = format!("{:?}", parse(&["dlm", "--url", "https://x/a"])?);
-        assert!(clean.contains("password: None"), "没口令时该是 password: None：{clean}");
-        assert!(!clean.contains("[redacted]"), "没口令就不该留空掩码：{clean}");
+        assert!(
+            clean.contains("password: None"),
+            "没口令时该是 password: None：{clean}"
+        );
+        assert!(
+            !clean.contains("[redacted]"),
+            "没口令就不该留空掩码：{clean}"
+        );
         Ok(())
     }
 
@@ -950,28 +1210,61 @@ mod tests {
     fn a_repeated_alias_behaves_exactly_like_a_repeated_long_option() {
         let alias = parse(&["dlm", "/d", "https://x/a", "/d", "https://x/b"]);
         let long = parse(&["dlm", "--url", "https://x/a", "--url", "https://x/b"]);
-        let text = |r: &anyhow::Result<Cli>| r.as_ref().map(|c| format!("{c:?}")).unwrap_or_else(|e| e.to_string());
+        let text = |r: &anyhow::Result<Cli>| {
+            r.as_ref()
+                .map(|c| format!("{c:?}"))
+                .unwrap_or_else(|e| e.to_string())
+        };
         eprintln!("重复别名 ⇒ {}\n重复长选项 ⇒ {}", text(&alias), text(&long));
         match (alias, long) {
             (Ok(a), Ok(b)) => {
-                assert_eq!(a, b, "重复给同一条别名必须与重复给长选项逐字段相等（E23 附记②）");
-                assert_eq!(a.into_task().unwrap().url, "https://x/b", "后者覆盖前者，且不许因此报错");
+                assert_eq!(
+                    a, b,
+                    "重复给同一条别名必须与重复给长选项逐字段相等（E23 附记②）"
+                );
+                assert_eq!(
+                    a.into_task().unwrap().url,
+                    "https://x/b",
+                    "后者覆盖前者，且不许因此报错"
+                );
             }
             (Err(a), Err(b)) => {
                 let (sa, sb) = (a.to_string(), b.to_string());
-                assert_eq!(sa, sb, "两种写法给的错误必须逐字相同（别名层只是另一种拼法）");
-                assert!(sa.contains("--url"), "重复那一支不许被静默吞掉，报错要点名长选项：{sa}");
+                assert_eq!(
+                    sa, sb,
+                    "两种写法给的错误必须逐字相同（别名层只是另一种拼法）"
+                );
+                assert!(
+                    sa.contains("--url"),
+                    "重复那一支不许被静默吞掉，报错要点名长选项：{sa}"
+                );
             }
             _ => panic!("一种写法报错、另一种不报错 ⇒ 别名层的等价性自己拆了（E23 附记② 的立论）"),
         }
         // 重复的是**吃值的别名**，值位探测也得跟着对：`/p` 重复时两写法仍然同形。
         let both = parse(&["dlm", "/d", "https://x/a", "/p", "D:/one", "/p", "D:/two"]);
-        let both_long = parse(&["dlm", "/d", "https://x/a", "--out-dir", "D:/one", "--out-dir", "D:/two"]);
-        assert_eq!(both.is_err(), both_long.is_err(), "重复 `/p` 与重复 `--out-dir` 必须同一个结论");
+        let both_long = parse(&[
+            "dlm",
+            "/d",
+            "https://x/a",
+            "--out-dir",
+            "D:/one",
+            "--out-dir",
+            "D:/two",
+        ]);
+        assert_eq!(
+            both.is_err(),
+            both_long.is_err(),
+            "重复 `/p` 与重复 `--out-dir` 必须同一个结论"
+        );
         match (both, both_long) {
             (Ok(x), Ok(y)) => {
                 assert_eq!(x, y);
-                assert_eq!(y.into_task().unwrap().dir, PathBuf::from("D:/two"), "以后者为准");
+                assert_eq!(
+                    y.into_task().unwrap().dir,
+                    PathBuf::from("D:/two"),
+                    "以后者为准"
+                );
             }
             (Err(x), Err(y)) => assert_eq!(x.to_string(), y.to_string(), "同上：错误也要逐字相同"),
             _ => unreachable!("上面已经断过 is_err 同形"),
@@ -982,12 +1275,20 @@ mod tests {
         // 报告关切 1），而在**别名层没给自己单开一条结论**。
         let flag_alias = parse(&["dlm", "/d", "https://x/a", "/n", "/n"]);
         let flag_long = parse(&["dlm", "--url", "https://x/a", "--quiet", "--quiet"]);
-        assert_eq!(flag_alias.is_err(), flag_long.is_err(), "重复 `/n` 与重复 `--quiet` 必须同一个结论");
+        assert_eq!(
+            flag_alias.is_err(),
+            flag_long.is_err(),
+            "重复 `/n` 与重复 `--quiet` 必须同一个结论"
+        );
         match (flag_alias, flag_long) {
             (Ok(a), Ok(b)) => {
                 assert_eq!(a, b, "两种写法逐字段相等");
                 assert!(b.quiet(), "重复的静默旗标仍然只 meant 一件事");
-                assert_eq!(a.into_task().unwrap().flags, 0, "重复 `/n` 不许往 flags 里塞任何位（E20③）");
+                assert_eq!(
+                    a.into_task().unwrap().flags,
+                    0,
+                    "重复 `/n` 不许往 flags 里塞任何位（E20③）"
+                );
             }
             (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "错误也要逐字相同：{a}"),
             _ => unreachable!("上面已经断过 is_err 同形"),
@@ -997,22 +1298,50 @@ mod tests {
     #[test]
     fn the_alias_table_is_the_c3_attestation_and_nothing_more() {
         // 这一格钉的是**表本身**（E23①②③④）：映射错了就整体读回头像，而"多一个别名"就是发明功能。
-        let mapped: Vec<&str> = ALIASES.iter().filter(|(_, t)| t.is_some()).map(|(a, _)| *a).collect();
-        let ignored: Vec<&str> = ALIASES.iter().filter(|(_, t)| t.is_none()).map(|(a, _)| *a).collect();
-        assert_eq!(mapped, vec!["/d", "/p", "/f", "/n", "/a"], "长选项映射逐条照 recon C3");
-        assert_eq!(ignored, vec!["/q", "/s", "/onboot"], "接受并忽略的那三条也只许是 C3 里有据的三条");
-        assert!(!ALIASES.iter().any(|(a, _)| *a == "/h"), "/h 在 C3 里没有那一行 ⇒ v1 不实现（E23④）");
+        let mapped: Vec<&str> = ALIASES
+            .iter()
+            .filter(|(_, t)| t.is_some())
+            .map(|(a, _)| *a)
+            .collect();
+        let ignored: Vec<&str> = ALIASES
+            .iter()
+            .filter(|(_, t)| t.is_none())
+            .map(|(a, _)| *a)
+            .collect();
         assert_eq!(
-            ALIASES.iter().find(|(a, _)| *a == "/d").and_then(|(_, t)| *t),
+            mapped,
+            vec!["/d", "/p", "/f", "/n", "/a"],
+            "长选项映射逐条照 recon C3"
+        );
+        assert_eq!(
+            ignored,
+            vec!["/q", "/s", "/onboot"],
+            "接受并忽略的那三条也只许是 C3 里有据的三条"
+        );
+        assert!(
+            !ALIASES.iter().any(|(a, _)| *a == "/h"),
+            "/h 在 C3 里没有那一行 ⇒ v1 不实现（E23④）"
+        );
+        assert_eq!(
+            ALIASES
+                .iter()
+                .find(|(a, _)| *a == "/d")
+                .and_then(|(_, t)| *t),
             Some("--url"),
             "mu1 的靶子：/q 才是被计划写反的那条，/n 才映射 --quiet"
         );
         assert_eq!(
-            ALIASES.iter().find(|(a, _)| *a == "/n").and_then(|(_, t)| *t),
+            ALIASES
+                .iter()
+                .find(|(a, _)| *a == "/n")
+                .and_then(|(_, t)| *t),
             Some("--quiet")
         );
         assert_eq!(
-            ALIASES.iter().find(|(a, _)| *a == "/a").and_then(|(_, t)| *t),
+            ALIASES
+                .iter()
+                .find(|(a, _)| *a == "/a")
+                .and_then(|(_, t)| *t),
             Some("--no-start")
         );
     }
@@ -1100,27 +1429,65 @@ mod tests {
         assert_eq!(cookies_from_stdin(&mut empty)?, None);
 
         assert!(
-            parse(&["dlm", "--url", "https://x/a", "--cookie", "a=b", "--cookie-stdin"]).is_err(),
+            parse(&[
+                "dlm",
+                "--url",
+                "https://x/a",
+                "--cookie",
+                "a=b",
+                "--cookie-stdin"
+            ])
+            .is_err(),
             "--cookie 与 --cookie-stdin 必须互斥"
         );
         Ok(())
     }
 
     #[test]
-    fn on_complete_parses_open_run_and_shutdown_and_rejects_bad_values() -> anyhow::Result<()> {        assert_eq!(
+    fn on_complete_parses_open_run_and_shutdown_and_rejects_bad_values() -> anyhow::Result<()> {
+        assert_eq!(
             parse(&["dlm", "--url", "https://x/a", "--on-complete", "open"])?.action(),
             Some(&CompletionAction::Open)
         );
-        let run = parse(&["dlm", "--url", "https://x/a", "--on-complete", "run:C:\\tools\\scan.exe"])?;
-        assert_eq!(run.action(), Some(&CompletionAction::Run("C:\\tools\\scan.exe".into())));
-        let shutdown = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown:60"])?;
-        assert_eq!(shutdown.action(), Some(&CompletionAction::Shutdown { delay_secs: 60 }));
+        let run = parse(&[
+            "dlm",
+            "--url",
+            "https://x/a",
+            "--on-complete",
+            "run:C:\\tools\\scan.exe",
+        ])?;
+        assert_eq!(
+            run.action(),
+            Some(&CompletionAction::Run("C:\\tools\\scan.exe".into()))
+        );
+        let shutdown = parse(&[
+            "dlm",
+            "--url",
+            "https://x/a",
+            "--on-complete",
+            "shutdown:60",
+        ])?;
+        assert_eq!(
+            shutdown.action(),
+            Some(&CompletionAction::Shutdown { delay_secs: 60 })
+        );
 
         let err = parse(&["dlm", "--url", "https://x/a", "--on-complete", "wat"]).unwrap_err();
-        assert!(format!("{err:#}").contains("open"), "错误要指可用值：{err:#}");
-        let bare = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown"]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("open"),
+            "错误要指可用值：{err:#}"
+        );
+        let bare =
+            parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown"]).unwrap_err();
         assert!(format!("{bare:#}").contains("延迟"));
-        let too_soon = parse(&["dlm", "--url", "https://x/a", "--on-complete", "shutdown:59"]).unwrap_err();
+        let too_soon = parse(&[
+            "dlm",
+            "--url",
+            "https://x/a",
+            "--on-complete",
+            "shutdown:59",
+        ])
+        .unwrap_err();
         assert!(format!("{too_soon:#}").contains("60"));
         Ok(())
     }

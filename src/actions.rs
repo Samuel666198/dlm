@@ -1,7 +1,9 @@
-//! 完成后动作（R19）：`open` 或 `run:<exe>`。只在下完且校验通过后由 `main` 调用。
+//! 完成后动作（R19/R20）：`open`、`run:<exe>` 或 `shutdown:<秒数>`。只在下完且校验通过后由 `main` 调用。
 //!
 //! 这一层不做下载决策，也不看 `Report`：它只回答"给一个动作和一个落点，要启动什么进程"。
-//! 不经 shell；`run:<exe>` 的程序收到落点路径作为**唯一**附加参数。`shutdown` 明确不在本发。
+//! 不经 shell；`run:<exe>` 的程序收到落点路径作为**唯一**附加参数。
+//! `shutdown` 由 A3b 加入（至少 60 秒，见 [`CompletionAction::Shutdown`]）；本层只负责拼
+//! `shutdown.exe /s /t <N>`，不判断时机、也不替用户取消。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -88,9 +90,14 @@ mod tests {
 
     #[test]
     fn parses_open_run_and_shutdown() {
-        assert_eq!("open".parse::<CompletionAction>().unwrap(), CompletionAction::Open);
         assert_eq!(
-            "run:C:\\tools\\scan.exe".parse::<CompletionAction>().unwrap(),
+            "open".parse::<CompletionAction>().unwrap(),
+            CompletionAction::Open
+        );
+        assert_eq!(
+            "run:C:\\tools\\scan.exe"
+                .parse::<CompletionAction>()
+                .unwrap(),
             CompletionAction::Run("C:\\tools\\scan.exe".into())
         );
         assert_eq!(
@@ -101,12 +108,25 @@ mod tests {
 
     #[test]
     fn rejects_empty_run_unknown_values_and_bad_shutdown() {
-        assert!("run:".parse::<CompletionAction>().unwrap_err().contains("run:"));
-        assert!("wat".parse::<CompletionAction>().unwrap_err().contains("open"));
+        assert!(
+            "run:"
+                .parse::<CompletionAction>()
+                .unwrap_err()
+                .contains("run:")
+        );
+        assert!(
+            "wat"
+                .parse::<CompletionAction>()
+                .unwrap_err()
+                .contains("open")
+        );
         let bare = "shutdown".parse::<CompletionAction>().unwrap_err();
         assert!(bare.contains("延迟"), "shutdown 必须明说要带延迟：{bare}");
         let too_soon = "shutdown:59".parse::<CompletionAction>().unwrap_err();
-        assert!(too_soon.contains("60"), "低于 60 秒要拒绝并写出下限：{too_soon}");
+        assert!(
+            too_soon.contains("60"),
+            "低于 60 秒要拒绝并写出下限：{too_soon}"
+        );
         let not_a_number = "shutdown:soon".parse::<CompletionAction>().unwrap_err();
         assert!(not_a_number.contains("十进制"), "{not_a_number}");
     }
@@ -130,11 +150,18 @@ mod tests {
 
     #[test]
     fn shutdown_plan_is_shutdown_exe_with_the_delay() {
-        let plan = plan(&CompletionAction::Shutdown { delay_secs: 60 }, Path::new("D:/dl/a.bin"));
+        let plan = plan(
+            &CompletionAction::Shutdown { delay_secs: 60 },
+            Path::new("D:/dl/a.bin"),
+        );
         assert_eq!(plan.program, PathBuf::from("shutdown.exe"));
         assert_eq!(
             plan.args,
-            vec![PathBuf::from("/s"), PathBuf::from("/t"), PathBuf::from("60")]
+            vec![
+                PathBuf::from("/s"),
+                PathBuf::from("/t"),
+                PathBuf::from("60")
+            ]
         );
         assert_eq!(plan.args.len(), 3, "shutdown 不接受落点参数");
     }

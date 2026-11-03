@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 /// 试探服务器脚本（Task 0 起就固定在本仓库里，本轮**未改动**它的任何路由与收尾行为）。
@@ -46,7 +46,10 @@ const POLL: Duration = Duration::from_millis(20);
 fn free_port() -> Result<u16> {
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("向 OS 要空闲端口失败")?;
-    let port = listener.local_addr().context("拿不到临时端口的本地地址")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到临时端口的本地地址")?
+        .port();
     drop(listener); // 显式放开：不出作用域的话端口一直被我们占着，node 反而会 EADDRINUSE。
     Ok(port)
 }
@@ -103,8 +106,12 @@ impl Server {
                 .with_context(|| format!("server_start 里 {k} 不是字符串"))
         };
         Ok(Announced {
-            port: start["port"].as_u64().context("server_start.port 不是整数")? as u16,
-            size: start["size"].as_u64().context("server_start.size 不是整数")?,
+            port: start["port"]
+                .as_u64()
+                .context("server_start.port 不是整数")? as u16,
+            size: start["size"]
+                .as_u64()
+                .context("server_start.size 不是整数")?,
             sha256: text("sha256")?,
             etag: text("etag")?,
             last_modified: text("lastModified")?,
@@ -141,7 +148,11 @@ impl Server {
     /// 这是"我们的客户端到底**发出了**什么头"的唯一权威证据 —— 响应侧的断言只能证明收到什么，
     /// 证明不了发出什么（`Range` 有没有发、发的是不是限量那一条，都只能在这里看）。
     pub fn requests(&self) -> Result<Vec<Value>> {
-        Ok(self.events()?.into_iter().filter(|e| e["ev"] == "request").collect())
+        Ok(self
+            .events()?
+            .into_iter()
+            .filter(|e| e["ev"] == "request")
+            .collect())
     }
 
     /// 等"服务端至少看到了 `n` 条请求"，返回请求行（不含 `server_start` 之类）。
@@ -250,7 +261,11 @@ pub fn spawn() -> Result<(Server, String)> {
     let mut problems = vec![];
     for attempt in 0..5u32 {
         let port = free_port()?;
-        let log = dir.join(format!("probe-{}-{}-{attempt}.jsonl", port, std::process::id()));
+        let log = dir.join(format!(
+            "probe-{}-{}-{attempt}.jsonl",
+            port,
+            std::process::id()
+        ));
         // node 以 **append** 打开日志，同名残留会污染断言 ⇒ 先确保没有。
         let _ = std::fs::remove_file(&log);
         let mut child = start_node(&script, port, &log)?;
@@ -266,7 +281,10 @@ pub fn spawn() -> Result<(Server, String)> {
             }
         }
     }
-    Err(anyhow!("试了 5 次都没能把探针服务器起起来：\n{}", problems.join("\n")))
+    Err(anyhow!(
+        "试了 5 次都没能把探针服务器起起来：\n{}",
+        problems.join("\n")
+    ))
 }
 
 fn start_node(script: &Path, port: u16, log: &Path) -> Result<Child> {
@@ -340,7 +358,9 @@ fn read_jsonl(path: &Path) -> Result<Vec<Value>> {
 
 /// `<仓库>/target/harness`（`target/` 已在 `.gitignore` 里）。
 fn log_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("harness")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("harness")
 }
 
 // ---------------------------------------------------------------- 客户端与任务夹具
@@ -361,7 +381,9 @@ pub fn client() -> Result<reqwest::blocking::Client> {
 /// `dir` 指向 `target/harness-scratch`（建好）：`probe` 自己不碰磁盘，但 Task 7/8 的用例拿同一个夹具
 /// 就要落盘，落点必须 gitignored。
 pub fn blank_task() -> dlm::task::Task {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("harness-scratch");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("harness-scratch");
     std::fs::create_dir_all(&dir).expect("建 harness-scratch 目录");
     dlm::task::Task {
         url: String::new(),
@@ -429,7 +451,8 @@ pub fn head_status(head: &str) -> Result<u16> {
         .split_whitespace()
         .nth(1)
         .with_context(|| format!("状态行看不出状态码：{line}"))?;
-    code.parse::<u16>().with_context(|| format!("状态码不是数字：{line}"))
+    code.parse::<u16>()
+        .with_context(|| format!("状态码不是数字：{line}"))
 }
 
 /// 某个响应头的原样值（同名多行取第一条；名字大小写不敏感）。
@@ -533,7 +556,9 @@ fn spawn_stub(responder: impl Fn(&str) -> String + Send + 'static) -> Result<Stu
                 let Ok(mut stream) = stream else { break };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                 for _ in 0..PER_CONNECTION {
-                    let Some(target) = read_request_target(&mut stream) else { break };
+                    let Some(target) = read_request_target(&mut stream) else {
+                        break;
+                    };
                     let resp = responder(&target);
                     thread_seen.lock().expect("线程侧记录锁").push(target);
                     if stream.write_all(resp.as_bytes()).is_err() || stream.flush().is_err() {
@@ -559,7 +584,10 @@ pub fn spawn_redirect_stub(authority_template: &str) -> Result<(Stub, String)> {
     // 再把同一个 listener 交给对端：所以这里自己 bind、自己起线程，不复用 `spawn_stub`。
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("重定向对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到重定向对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到重定向对端的端口")?
+        .port();
     let land_url = format!(
         "http://{}/landed",
         authority_template.replace("{port}", &port.to_string())
@@ -622,8 +650,10 @@ pub fn spawn_raw_redirect_stub(location: &str) -> Result<(Stub, String)> {
     // 拼死在闭包里，再把同一个 listener 交给对端线程。
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .context("原始 Location 重定向对端 bind 失败")?;
-    let port =
-        listener.local_addr().context("拿不到原始 Location 重定向对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到原始 Location 重定向对端的端口")?
+        .port();
     let raw_location = location.replace("{port}", &port.to_string());
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
     let (thread_seen, thread_location) = (Arc::clone(&seen), raw_location.clone());
@@ -689,7 +719,10 @@ pub fn spawn_raw_redirect_stub(location: &str) -> Result<(Stub, String)> {
 pub fn spawn_header_recording_redirect_stub(location: &str) -> Result<(RedirectPeer, String)> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .context("记头重定向对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到记头重定向对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到记头重定向对端的端口")?
+        .port();
     let raw_location = location.replace("{port}", &port.to_string());
     let requests: Arc<Mutex<Vec<ReceivedRequest>>> = Arc::new(Mutex::new(vec![]));
     let (thread_requests, thread_location) = (Arc::clone(&requests), raw_location.clone());
@@ -744,7 +777,10 @@ impl RedirectPeer {
     }
 
     pub fn requests(&self) -> Vec<ReceivedRequest> {
-        self.requests.lock().expect("记头对端的记录锁没竞争者").clone()
+        self.requests
+            .lock()
+            .expect("记头对端的记录锁没竞争者")
+            .clone()
     }
 
     /// 收到过某个前缀的请求吗（"确实跟随了重定向"那一臂用它，别拿 `requests()` 自己拼）。
@@ -869,7 +905,9 @@ pub fn spawn_unknown_total_stub(window: u64) -> Result<Stub> {
         // 状态行下面那一条 `Content-Range` 由路由决定；`/no-content-range` 刻意一条都不带。
         let head = match target {
             "/known-total" => Some(format!("Content-Range: bytes 0-{last}/{FULL_LEN}\r\n")),
-            "/wrong-start" => Some(format!("Content-Range: bytes {lie_start}-{lie_last}/{FULL_LEN}\r\n")),
+            "/wrong-start" => Some(format!(
+                "Content-Range: bytes {lie_start}-{lie_last}/{FULL_LEN}\r\n"
+            )),
             "/garbage-total" => Some(format!("Content-Range: bytes 0-{last}/nine\r\n")),
             "/no-content-range" => Some(String::new()),
             "/unknown-total" => Some(format!("Content-Range: bytes 0-{last}/*\r\n")),
@@ -924,7 +962,8 @@ pub fn store(name: &str) -> Result<(dlm::store::Store, PathBuf)> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("harness-scratch");
-    std::fs::create_dir_all(&dir).with_context(|| format!("建 harness-scratch 目录失败：{}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("建 harness-scratch 目录失败：{}", dir.display()))?;
     let path = dir.join(format!("{}-{name}", std::process::id()));
     let store = dlm::store::Store::open(&path, true)
         .with_context(|| format!("开测试目标文件失败：{}", path.display()))?;
@@ -935,13 +974,15 @@ pub fn store(name: &str) -> Result<(dlm::store::Store, PathBuf)> {
 /// Task 3 的 deferred 条目明说"要读回就加 `read_at`，别放宽那句柄可见性"，所以取证走这条路）。
 /// 文件比 `offset + len` 短 ⇒ 当场报错，不静默给短切片（短切片会让"内容对不对"变成"读了几个字节"）。
 pub fn bytes_at(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>> {
-    let mut f = File::open(path).with_context(|| format!("打开取证文件失败：{}", path.display()))?;
+    let mut f =
+        File::open(path).with_context(|| format!("打开取证文件失败：{}", path.display()))?;
     let have = f.metadata().context("取取证文件长度失败")?.len();
     let end = offset.checked_add(len as u64).context("取证区间溢出")?;
     if end > have {
         bail!("取证要读 [{offset}, {end})，文件只有 {have} 字节 —— 该写的字节没写够");
     }
-    f.seek(SeekFrom::Start(offset)).with_context(|| format!("定位到 {offset} 失败"))?;
+    f.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("定位到 {offset} 失败"))?;
     let mut buf = vec![0u8; len];
     f.read_exact(&mut buf).context("读取证字节失败")?;
     Ok(buf)
@@ -956,7 +997,10 @@ pub fn bytes_at(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>> {
 /// 这里显式 `ensure!` 而不是悄悄容忍：宁可当场红，也不要一条瞎掉的 oracle（本项目已踩过三次）。
 pub fn require_block_alignment(path: &Path, start: u64, len: u64) -> Result<()> {
     const BLOCK: u64 = 4096;
-    anyhow::ensure!(start.is_multiple_of(BLOCK), "块号取证要求 start 是 {BLOCK} 的整数倍（给了 {start}）");
+    anyhow::ensure!(
+        start.is_multiple_of(BLOCK),
+        "块号取证要求 start 是 {BLOCK} 的整数倍（给了 {start}）"
+    );
     anyhow::ensure!(len > 0, "块号取证的长度不能是 0");
     let len = usize::try_from(len).context("取证长度超出 usize")?;
     let bytes = bytes_at(path, start, len)?;
@@ -976,7 +1020,8 @@ pub fn positioned_body(len: usize) -> Vec<u8> {
     let mut body = vec![0u8; len];
     for i in (0..len).step_by(4096) {
         if i + 4 <= len {
-            body[i..i + 4].copy_from_slice(&u32::try_from(i / 4096).expect("块号超出 u32").to_le_bytes());
+            body[i..i + 4]
+                .copy_from_slice(&u32::try_from(i / 4096).expect("块号超出 u32").to_le_bytes());
         }
     }
     body
@@ -991,9 +1036,12 @@ pub fn positioned_body(len: usize) -> Vec<u8> {
 /// "预算之内一个字节都没等到"——那个形状在本 harness 的 node 侧**不存在**（E5 记的就是这件事）。
 /// 进程内线程对端：测试二进制一退它就没了，不构成残留监听。
 pub fn spawn_silent_stub() -> Result<Stub> {
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .context("静默对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到静默对端的端口")?.port();
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("静默对端 bind 失败")?;
+    let port = listener
+        .local_addr()
+        .context("拿不到静默对端的端口")?
+        .port();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
     let thread_seen = Arc::clone(&seen);
     thread::Builder::new()
@@ -1002,7 +1050,10 @@ pub fn spawn_silent_stub() -> Result<Stub> {
             for stream in listener.incoming().take(4) {
                 let Ok(mut stream) = stream else { break };
                 if let Some(target) = read_request_target(&mut stream) {
-                    thread_seen.lock().expect("静默对端的记录锁没竞争者").push(target);
+                    thread_seen
+                        .lock()
+                        .expect("静默对端的记录锁没竞争者")
+                        .push(target);
                 }
                 // 永不回答：读着把连接吊住，直到客户端超时后自己断。
                 let mut sink = [0u8; 1024];
@@ -1029,7 +1080,10 @@ pub fn spawn_silent_stub() -> Result<Stub> {
 pub fn spawn_head_only_stub(content_length: u64) -> Result<Stub> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .context("只回头的对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到只回头的对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到只回头的对端的端口")?
+        .port();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
     let (thread_seen, thread_len) = (Arc::clone(&seen), content_length);
     thread::Builder::new()
@@ -1085,7 +1139,10 @@ impl PacedPeer {
     }
     /// 收到过的 `Range`（按到达顺序；没有那条头的那一枪记成空串）。
     pub fn ranges(&self) -> Vec<String> {
-        self.ranges.lock().expect("节拍对端的 Range 记录锁没竞争者").clone()
+        self.ranges
+            .lock()
+            .expect("节拍对端的 Range 记录锁没竞争者")
+            .clone()
     }
     /// 已经交给 socket 的 body 字节数（含内核缓冲里还没被读走的那一段）。
     pub fn written(&self) -> u64 {
@@ -1111,10 +1168,17 @@ pub fn uncapped() -> AtomicU64 {
 ///    写到了哪儿"。正确实现读完 `iv.start + 本次要的字节` 就收手（远小于 `body_len`），
 ///    而"先把整个 body 吸干净再切片"的写法必然把 `body_len` 都吸完 ⇒ 断言红。
 ///    节拍（每块之间 `pacing`）就是为了让这个差别在字节数上看得出来，而不是被内核缓冲糊掉。
-pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Duration) -> Result<PacedPeer> {
+pub fn spawn_paced_range_ignoring_stub(
+    body_len: u64,
+    chunk: usize,
+    pacing: Duration,
+) -> Result<PacedPeer> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .context("节拍降级对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到节拍降级对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到节拍降级对端的端口")?
+        .port();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
     let written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let ranges: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
@@ -1127,9 +1191,14 @@ pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Dura
         .spawn(move || {
             for stream in listener.incoming().take(4) {
                 let Ok(mut stream) = stream else { break };
-                let Some(target) = read_request_target(&mut stream) else { continue };
+                let Some(target) = read_request_target(&mut stream) else {
+                    continue;
+                };
                 thread_seen.lock().expect("线程侧记录锁").push(target);
-                thread_ranges.lock().expect("线程侧 Range 记录锁").push(String::new());
+                thread_ranges
+                    .lock()
+                    .expect("线程侧 Range 记录锁")
+                    .push(String::new());
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
                      Content-Length: {body_len}\r\nAccept-Ranges: bytes\r\n\
@@ -1153,7 +1222,12 @@ pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Dura
         })
         .context("起节拍降级对端线程失败")?;
 
-    Ok(PacedPeer { port, seen, written, ranges })
+    Ok(PacedPeer {
+        port,
+        seen,
+        written,
+        ranges,
+    })
 }
 
 /// 按**节拍**交出**诚实 206** 的对端（`run_window` 读侧超时那条命名用例要它）。
@@ -1174,10 +1248,17 @@ pub fn spawn_paced_range_ignoring_stub(body_len: u64, chunk: usize, pacing: Dura
 /// `Content-Length` 与本次要写的字节数严格一致、`Accept-Ranges: bytes` ⇒ 走的是 `run_window`
 /// 正常分段那一支（206 且起点可核对），不是降级 200 那一支。`total_len` 是本对端承认的文件长度，
 /// 起点越过它按 Range 语义给 416。
-pub fn spawn_paced_partial_stub(total_len: u64, chunk: usize, pacing: Duration) -> Result<PacedPeer> {
-    let listener =
-        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("节拍 206 对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到节拍 206 对端的端口")?.port();
+pub fn spawn_paced_partial_stub(
+    total_len: u64,
+    chunk: usize,
+    pacing: Duration,
+) -> Result<PacedPeer> {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .context("节拍 206 对端 bind 失败")?;
+    let port = listener
+        .local_addr()
+        .context("拿不到节拍 206 对端的端口")?
+        .port();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
     let written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let ranges: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
@@ -1232,7 +1313,12 @@ pub fn spawn_paced_partial_stub(total_len: u64, chunk: usize, pacing: Duration) 
         })
         .context("起节拍 206 对端线程失败")?;
 
-    Ok(PacedPeer { port, seen, written, ranges })
+    Ok(PacedPeer {
+        port,
+        seen,
+        written,
+        ranges,
+    })
 }
 
 /// `bytes=1048576-1114111` / `bytes=1048576-` ⇒ `(start, end)`（开放终点 ⇒ `end` 为 `None`）。
@@ -1254,7 +1340,11 @@ fn the_harness_range_parser_reads_both_ending_shapes() {
     // 而红出来的原因看着像被测代码的问题（取证工具不许在被测代码之后红）。
     assert_eq!(parse_range("bytes=0-16383"), Some((0, Some(16383))));
     assert_eq!(parse_range("bytes=1048576-"), Some((1048576, None)));
-    assert_eq!(parse_range("bytes=-1024"), None, "后缀式 Range 本 harness 不发，也不许被读成起点 0");
+    assert_eq!(
+        parse_range("bytes=-1024"),
+        None,
+        "后缀式 Range 本 harness 不发，也不许被读成起点 0"
+    );
     assert_eq!(parse_range(""), None);
     assert_eq!(parse_range("bytes=abc-"), None);
 }
@@ -1279,7 +1369,10 @@ impl ReceivedRequest {
     /// 某个请求头的值（名字大小写不敏感，与本 harness 所有头读取同一立场）。
     pub fn header(&self, name: &str) -> Option<&str> {
         let name = name.to_ascii_lowercase();
-        self.headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.as_str())
     }
 
     /// 某个请求头**是否存在**（"不许出现 Range"这一侧的断言用它，别拿 `header().is_none()` 绕）。
@@ -1307,7 +1400,10 @@ impl PostPeer {
 
     /// 服务过的全部请求（按到达顺序）。
     pub fn requests(&self) -> Vec<ReceivedRequest> {
-        self.requests.lock().expect("POST 对端的记录锁没竞争者").clone()
+        self.requests
+            .lock()
+            .expect("POST 对端的记录锁没竞争者")
+            .clone()
     }
 
     /// 第一条请求；一条都没有就当场报错（"根本没打到对端"与"打到了但方法不对"是两种故障）。
@@ -1335,7 +1431,10 @@ impl PostPeer {
 pub fn spawn_post_stub(accept_ranges: Option<&str>, response_body: Vec<u8>) -> Result<PostPeer> {
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("收体对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到收体对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到收体对端的端口")?
+        .port();
     let requests: Arc<Mutex<Vec<ReceivedRequest>>> = Arc::new(Mutex::new(vec![]));
     let thread_requests = Arc::clone(&requests);
     let ranges = accept_ranges.map(str::to_string);
@@ -1346,7 +1445,9 @@ pub fn spawn_post_stub(accept_ranges: Option<&str>, response_body: Vec<u8>) -> R
             for stream in listener.incoming().take(4) {
                 let Ok(mut stream) = stream else { break };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                let Some(req) = read_request_with_body(&mut stream) else { break };
+                let Some(req) = read_request_with_body(&mut stream) else {
+                    break;
+                };
                 let recognized = req.target.starts_with("/submit");
                 thread_requests.lock().expect("线程侧记录锁").push(req);
                 let written = if recognized {
@@ -1359,7 +1460,9 @@ pub fn spawn_post_stub(accept_ranges: Option<&str>, response_body: Vec<u8>) -> R
                         head.push_str(&format!("Accept-Ranges: {value}\r\n"));
                     }
                     head.push_str("\r\n");
-                    stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(&response_body))
+                    stream
+                        .write_all(head.as_bytes())
+                        .and_then(|_| stream.write_all(&response_body))
                 } else {
                     stream
                         .write_all("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".as_bytes())
@@ -1451,9 +1554,11 @@ pub fn scratch_body(name: &str, content: &[u8]) -> Result<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("harness-scratch");
-    std::fs::create_dir_all(&dir).with_context(|| format!("建 harness-scratch 目录失败：{}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("建 harness-scratch 目录失败：{}", dir.display()))?;
     let path = dir.join(format!("{}-{name}", std::process::id()));
-    std::fs::write(&path, content).with_context(|| format!("写请求体文件失败：{}", path.display()))?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("写请求体文件失败：{}", path.display()))?;
     Ok(path)
 }
 
@@ -1493,7 +1598,8 @@ pub fn tmp_dir(tag: &str) -> Result<TmpDir> {
         .join("target")
         .join("harness-scratch")
         .join(format!("{}-{tag}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).with_context(|| format!("建用例临时目录失败：{}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("建用例临时目录失败：{}", dir.display()))?;
     Ok(TmpDir { path: dir })
 }
 
@@ -1504,11 +1610,14 @@ pub fn tmp_dir(tag: &str) -> Result<TmpDir> {
 pub fn sha256_of(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     const CHUNK: usize = 64 * 1024;
-    let mut f = File::open(path).with_context(|| format!("打开散列取证文件失败：{}", path.display()))?;
+    let mut f =
+        File::open(path).with_context(|| format!("打开散列取证文件失败：{}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let n = f.read(&mut buf).with_context(|| format!("读散列取证文件失败：{}", path.display()))?;
+        let n = f
+            .read(&mut buf)
+            .with_context(|| format!("读散列取证文件失败：{}", path.display()))?;
         if n == 0 {
             break;
         }
@@ -1534,7 +1643,7 @@ pub fn expected_sha(len: u64) -> String {
     use sha2::{Digest, Sha256};
     const BLOB: u64 = 48 * 1024 * 1024;
     const BLOCK: u64 = 4096;
-    let len = len.min(BLOB);   // 与服务器那句 `Math.min(size, SIZE)` 同形
+    let len = len.min(BLOB); // 与服务器那句 `Math.min(size, SIZE)` 同形
     let mut hasher = Sha256::new();
     let mut block = [0u8; 4096];
     let mut offset = 0u64;
@@ -1543,7 +1652,11 @@ pub fn expected_sha(len: u64) -> String {
         for b in block.iter_mut() {
             *b = 0;
         }
-        block[..4].copy_from_slice(&u32::try_from(offset / BLOCK).expect("块号超出 u32").to_le_bytes());
+        block[..4].copy_from_slice(
+            &u32::try_from(offset / BLOCK)
+                .expect("块号超出 u32")
+                .to_le_bytes(),
+        );
         hasher.update(&block[..take]);
         offset += take as u64;
     }
@@ -1573,7 +1686,12 @@ pub fn ranges_of(requests: &[Value]) -> Vec<Option<String>> {
 pub fn methods_of(requests: &[Value]) -> Vec<String> {
     requests
         .iter()
-        .map(|r| r.get("method").and_then(Value::as_str).unwrap_or_default().to_string())
+        .map(|r| {
+            r.get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        })
         .collect()
 }
 
@@ -1586,10 +1704,13 @@ pub fn methods_of(requests: &[Value]) -> Vec<String> {
 /// 形状上比较，就等于把"线上真是那个区间"这道链接写成假断言。
 /// 看不懂的形状 ⇒ `Err`（宁可是夹具当场红，也不要悄悄少算一枪）。
 pub fn wire_span(value: &str, total_len: u64) -> Result<(u64, u64)> {
-    let (start, end) = parse_range(value).with_context(|| format!("服务端记下的 Range 看不懂：{value:?}"))?;
+    let (start, end) =
+        parse_range(value).with_context(|| format!("服务端记下的 Range 看不懂：{value:?}"))?;
     let end = match end {
         Some(e) => e,
-        None => total_len.checked_sub(1).context("开放终点的 Range 碰上空文件")?,
+        None => total_len
+            .checked_sub(1)
+            .context("开放终点的 Range 碰上空文件")?,
     };
     anyhow::ensure!(start <= end, "Range 的起点晚于终点：{value:?}");
     Ok((start, end))
@@ -1603,7 +1724,9 @@ pub fn wire_spans(ranges: &[Option<String>], total_len: u64) -> Result<Vec<(u64,
     ranges
         .iter()
         .map(|r| {
-            let value = r.as_deref().context("服务端收到了一条**没有** Range 的请求（窗口化的每一枪都该带）")?;
+            let value = r
+                .as_deref()
+                .context("服务端收到了一条**没有** Range 的请求（窗口化的每一枪都该带）")?;
             wire_span(value, total_len)
         })
         .collect()
@@ -1640,9 +1763,14 @@ fn the_sha_oracle_matches_what_the_server_serves() -> anyhow::Result<()> {
     // 那里落进散列的是块号小端表示的前几个字节，不是整块号）。
     for len in [65_536u64, 4 * 1024 * 1024 + 4096, 1_000_000, 5_000, 3] {
         let url = format!("{base}/sz/{len}");
-        let got = client()?.get(&url).send().with_context(|| format!("GET {url} 失败"))?;
+        let got = client()?
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {url} 失败"))?;
         assert_eq!(got.status().as_u16(), 200, "整段 GET 该是 200");
-        let body = got.bytes().with_context(|| format!("读 {url} 的 body 失败"))?;
+        let body = got
+            .bytes()
+            .with_context(|| format!("读 {url} 的 body 失败"))?;
         assert_eq!(body.len() as u64, len, "服务器自己说的长度");
         assert_eq!(
             sha256_of_bytes(&body),
@@ -1696,7 +1824,12 @@ impl ScriptedPeer {
 
     /// 收到过的每一枪的 `Range`（按到达顺序；没带那条头的一枪是空串）。
     pub fn shot_ranges(&self) -> Vec<String> {
-        self.shots.lock().expect("脚本对端的记录锁没竞争者").iter().map(|(r, _)| r.clone()).collect()
+        self.shots
+            .lock()
+            .expect("脚本对端的记录锁没竞争者")
+            .iter()
+            .map(|(r, _)| r.clone())
+            .collect()
     }
 
     /// 已经收到的枪数（用来在断言之前确认"这一轮该到的都到了"）。
@@ -1709,8 +1842,14 @@ impl ScriptedPeer {
     /// 守株待兔的读法；但**下标越界一律当场报错**，不许悄悄给个零时长让断言碰巧通过。
     pub fn arrival_gap(&self, prev: usize, next: usize) -> Result<Duration> {
         let guard = self.shots.lock().expect("脚本对端的记录锁没竞争者");
-        let a = guard.get(prev).with_context(|| format!("脚本对端只收到 {} 枪，没有第 {prev} 枪", guard.len()))?.1;
-        let b = guard.get(next).with_context(|| format!("脚本对端只收到 {} 枪，没有第 {next} 枪", guard.len()))?.1;
+        let a = guard
+            .get(prev)
+            .with_context(|| format!("脚本对端只收到 {} 枪，没有第 {prev} 枪", guard.len()))?
+            .1;
+        let b = guard
+            .get(next)
+            .with_context(|| format!("脚本对端只收到 {} 枪，没有第 {next} 枪", guard.len()))?
+            .1;
         Ok(b.saturating_duration_since(a))
     }
 }
@@ -1747,7 +1886,10 @@ pub fn spawn_scripted_peer(total_len: u64, script: Vec<Shot>, after: Shot) -> Re
     const PER_CONNECTION: usize = 64;
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).context("脚本对端 bind 失败")?;
-    let port = listener.local_addr().context("拿不到脚本对端的端口")?.port();
+    let port = listener
+        .local_addr()
+        .context("拿不到脚本对端的端口")?
+        .port();
     let shots: Arc<Mutex<Vec<(String, Instant)>>> = Arc::new(Mutex::new(vec![]));
     let (thread_shots, blob) = (
         Arc::clone(&shots),
@@ -1763,9 +1905,14 @@ pub fn spawn_scripted_peer(total_len: u64, script: Vec<Shot>, after: Shot) -> Re
                 let Ok(mut stream) = stream else { break };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 for _ in 0..PER_CONNECTION {
-                    let Some(req) = read_request_with_body(&mut stream) else { break };
+                    let Some(req) = read_request_with_body(&mut stream) else {
+                        break;
+                    };
                     let range = req.header("range").unwrap_or("").to_string();
-                    thread_shots.lock().expect("线程侧记录锁").push((range.clone(), Instant::now()));
+                    thread_shots
+                        .lock()
+                        .expect("线程侧记录锁")
+                        .push((range.clone(), Instant::now()));
                     let shot = script.get(served).copied().unwrap_or(after);
                     served += 1;
                     match serve_scripted(&mut stream, &blob, total_len, &range, shot) {
@@ -1796,7 +1943,11 @@ fn serve_scripted(
     if let Shot::Status(code) = shot {
         let resp = format!(
             "HTTP/1.1 {code} {}\r\nContent-Length: 0\r\n\r\n",
-            if code == 503 { "Service Unavailable" } else { "Server Error" }
+            if code == 503 {
+                "Service Unavailable"
+            } else {
+                "Server Error"
+            }
         );
         stream.write_all(resp.as_bytes())?;
         return stream.flush().map(|_| true);
@@ -1819,7 +1970,15 @@ fn serve_scripted(
     let (start, end, status) = match parse_range(range) {
         Some((s, e)) => {
             let last = e.unwrap_or(total_len - 1).min(total_len - 1);
-            (s, last, if s >= total_len || s > last { 416u16 } else { 206 })
+            (
+                s,
+                last,
+                if s >= total_len || s > last {
+                    416u16
+                } else {
+                    206
+                },
+            )
         }
         None => (0, total_len.saturating_sub(1), 200),
     };
@@ -1836,10 +1995,16 @@ fn serve_scripted(
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: application/octet-stream\r\n\
          Content-Length: {span}\r\nAccept-Ranges: bytes\r\nETag: \"scripted-206\"\r\n",
-        if status == 206 { "Partial Content" } else { "OK" }
+        if status == 206 {
+            "Partial Content"
+        } else {
+            "OK"
+        }
     );
     if status == 206 {
-        head.push_str(&format!("Content-Range: bytes {start}-{end}/{total_len}\r\n"));
+        head.push_str(&format!(
+            "Content-Range: bytes {start}-{end}/{total_len}\r\n"
+        ));
     }
     // 截短那一支：头仍然按**整段**如实算（谎只写在"body 比头短"这一处，与 `/drop/<n>` 一样）。
     let give = match shot {
@@ -1863,4 +2028,3 @@ fn serve_scripted(
     }
     Ok(true)
 }
-

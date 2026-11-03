@@ -29,7 +29,10 @@ const MIN_SLEEP: Duration = Duration::from_millis(16);
 
 impl RateLimiter {
     pub fn new(bytes_per_second: u64) -> Self {
-        Self { bytes_per_second, next: Mutex::new(Instant::now()) }
+        Self {
+            bytes_per_second,
+            next: Mutex::new(Instant::now()),
+        }
     }
 
     /// 预约 `bytes` 个字节的读取时隙；返回调用方还需要等多久。
@@ -45,7 +48,9 @@ impl RateLimiter {
         let spacing = Duration::from_nanos(nanos);
         let mut next = self.next.lock().expect("rate limiter 的锁没有别的持有者");
         let ready = (*next).max(now);
-        *next = ready.checked_add(spacing).unwrap_or(ready + Duration::from_secs(3600));
+        *next = ready
+            .checked_add(spacing)
+            .unwrap_or(ready + Duration::from_secs(3600));
         ready.saturating_duration_since(now)
     }
 
@@ -76,7 +81,10 @@ mod tests {
         let now = Instant::now();
         assert_eq!(l.reserve(now, 65_536), Duration::ZERO);
         assert_eq!(l.reserve(now, 65_536), Duration::from_nanos(62_500_000));
-        assert_eq!(l.reserve(now + Duration::from_nanos(125_000_000), 65_536), Duration::ZERO);
+        assert_eq!(
+            l.reserve(now + Duration::from_nanos(125_000_000), 65_536),
+            Duration::ZERO
+        );
     }
 
     #[test]
@@ -84,7 +92,10 @@ mod tests {
         let l = RateLimiter::new(1_048_576);
         let now = Instant::now();
         assert_eq!(l.reserve(now, 65_536), Duration::ZERO);
-        assert_eq!(l.reserve(now + Duration::from_secs(600), 65_536), Duration::ZERO);
+        assert_eq!(
+            l.reserve(now + Duration::from_secs(600), 65_536),
+            Duration::ZERO
+        );
     }
 
     #[test]
@@ -92,7 +103,11 @@ mod tests {
         let l = RateLimiter::new(1_000);
         let now = Instant::now();
         assert_eq!(l.reserve(now, 0), Duration::ZERO);
-        assert_eq!(l.reserve(now, 1), Duration::ZERO, "零字节预约不许把时隙往后推");
+        assert_eq!(
+            l.reserve(now, 1),
+            Duration::ZERO,
+            "零字节预约不许把时隙往后推"
+        );
     }
 
     #[test]

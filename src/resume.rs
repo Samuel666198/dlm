@@ -303,9 +303,12 @@ pub fn decide(task: &Task, existing: Option<Snapshot>, probe: &ProbeFacts) -> De
     // `ignore_mtime` 取**本次**任务的旗标（`FLAG_IGNORE_MTIME`），不取 `snap.validator.ignore_mtime`
     // 那份历史记录 —— 裁定 3。
     if !task.ignore_mtime() && snap.validator.last_modified != probe.last_modified {
-        if snap.validator.last_modified.as_deref().is_some_and(|saved| {
-            carries_our_password(saved, task.password.as_deref())
-        }) {
+        if snap
+            .validator
+            .last_modified
+            .as_deref()
+            .is_some_and(|saved| carries_our_password(saved, task.password.as_deref()))
+        {
             return fresh(
                 "Last-Modified 与断点不符（断点里那一份带着本任务的凭据形状，两个值都不回显）：文件被改过，\
                  从头下载；确认那只是无害的时间戳抖动可以加 --ignore-mtime"
@@ -379,7 +382,9 @@ fn changed_request(saved: &TaskView, now: &Task) -> Option<&'static str> {
 
 /// `Fresh` 但一定带原因：①b②③④⑤ 每一条都必须说得出"哪条判据不同意"（Task 9 会打这句）。
 fn fresh(reason: String) -> Decision {
-    Decision::Fresh { reason: Some(reason) }
+    Decision::Fresh {
+        reason: Some(reason),
+    }
 }
 
 #[cfg(test)]
@@ -416,7 +421,13 @@ mod tests {
         task_with(0, None)
     }
 
-    fn facts(etag: Option<&str>, last_modified: Option<&str>, total_len: u64, final_url: &str, accept_ranges: bool) -> ProbeFacts {
+    fn facts(
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        total_len: u64,
+        final_url: &str,
+        accept_ranges: bool,
+    ) -> ProbeFacts {
         ProbeFacts {
             etag: etag.map(str::to_string),
             last_modified: last_modified.map(str::to_string),
@@ -431,7 +442,12 @@ mod tests {
         facts(Some("E"), Some("L"), 100, URL, true)
     }
 
-    fn val_opt(etag: Option<&str>, last_modified: Option<&str>, total_len: u64, final_url: &str) -> Validator {
+    fn val_opt(
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        total_len: u64,
+        final_url: &str,
+    ) -> Validator {
         Validator {
             etag: etag.map(str::to_string),
             last_modified: last_modified.map(str::to_string),
@@ -454,12 +470,25 @@ mod tests {
     /// 直接拒掉的形状（磁盘上不可能存在），而 `stub_for_test` 与它同一条闸 ⇒ 写相邻行会当场 panic。
     fn snap_multi(v: Validator, n: usize) -> Snapshot {
         let span = (v.total_len as usize) / n.max(1);
-        assert!(span > 10, "夹具：total_len={} 撑不出 {n} 行带洞的表", v.total_len);
+        assert!(
+            span > 10,
+            "夹具：total_len={} 撑不出 {n} 行带洞的表",
+            v.total_len
+        );
         let rows = (0..n)
-            .map(|i| SegView::from(Interval { start: (i * span) as u64, end: (i * span + 9) as u64 }))
+            .map(|i| {
+                SegView::from(Interval {
+                    start: (i * span) as u64,
+                    end: (i * span + 9) as u64,
+                })
+            })
             .collect::<Vec<_>>();
         let got = Snapshot::stub_for_test(v, rows);
-        assert_eq!(got.segments.len(), n, "夹具：段数必须真的是 {n}（⑤ 判的就是这个数）");
+        assert_eq!(
+            got.segments.len(),
+            n,
+            "夹具：段数必须真的是 {n}（⑤ 判的就是这个数）"
+        );
         got
     }
 
@@ -484,38 +513,68 @@ mod tests {
         assert!(matches!(d, Decision::Fresh { reason: Some(_) }), "{d:?}");
         // 3 只有 Last-Modified 变 + ignore_mtime ⇒ Resume
         assert!(
-            matches!(decide(&task(), Some(snap(val("E", "L2", 100, URL))), &p), Decision::Resume(_)),
+            matches!(
+                decide(&task(), Some(snap(val("E", "L2", 100, URL))), &p),
+                Decision::Resume(_)
+            ),
             "task() 需带 FLAG_IGNORE_MTIME"
         );
         // 4 只有 Last-Modified 变、未开 ignore ⇒ Fresh
         assert!(
-            matches!(decide(&task_plain(), Some(snap(val("E", "L2", 100, URL))), &p), Decision::Fresh { .. }),
+            matches!(
+                decide(&task_plain(), Some(snap(val("E", "L2", 100, URL))), &p),
+                Decision::Fresh { .. }
+            ),
             "没开 ignore_mtime 时 Last-Modified 变了必须重来"
         );
         // 5 总长变 ⇒ Fresh
         assert!(
-            matches!(decide(&task_plain(), Some(snap(val("E", "L", 99, URL))), &p), Decision::Fresh { .. }),
+            matches!(
+                decide(&task_plain(), Some(snap(val("E", "L", 99, URL))), &p),
+                Decision::Fresh { .. }
+            ),
             "长度变了必须重来"
         );
         // 6 needs_secret 且本次没给口令 ⇒ Abort
         let mut s = snap(val("E", "L", 100, URL));
         s.needs_secret = true;
         assert!(
-            matches!(decide(&task_plain(), Some(s.clone()), &p), Decision::Abort(_)),
+            matches!(
+                decide(&task_plain(), Some(s.clone()), &p),
+                Decision::Abort(_)
+            ),
             "缺口令要拒绝续传，而不是悄悄从头下"
         );
         // 7 服务器不支持 Range 但断点多段 ⇒ Fresh
         let mut b = base();
         b.accept_ranges = false;
         assert!(
-            matches!(decide(&task_plain(), Some(snap_multi(val("E", "L", 100, URL), 2)), &b), Decision::Fresh { .. }),
+            matches!(
+                decide(
+                    &task_plain(),
+                    Some(snap_multi(val("E", "L", 100, URL), 2)),
+                    &b
+                ),
+                Decision::Fresh { .. }
+            ),
             "不认 Range 却留着多段进度 ⇒ 重来"
         );
         // 同一份多段断点在认 Range 的服务器下必须**能**续（挡掉"⑤ 写成无条件拒绝"的伪装修法）
         assert!(
-            matches!(decide(&task_plain(), Some(snap_multi(val("E", "L", 100, URL), 2)), &base()), Decision::Resume(_)),
+            matches!(
+                decide(
+                    &task_plain(),
+                    Some(snap_multi(val("E", "L", 100, URL), 2)),
+                    &base()
+                ),
+                Decision::Resume(_)
+            ),
             "{:?}：Range 可用时多段进度是本工具的正常形状",
-            decide(&task_plain(), Some(snap_multi(val("E", "L", 100, URL), 2)), &base())
+            decide(
+                &task_plain(),
+                Some(snap_multi(val("E", "L", 100, URL), 2)),
+                &base()
+            )
         );
     }
 
@@ -523,7 +582,14 @@ mod tests {
 
     /// (断点 etag, 断点 last_modified, 服务器 etag, 服务器 last_modified, 本次 ignore_mtime, 期望)
     /// 期望：`"RESUME"`，或 `Fresh` 原因里必须出现的判据名。
-    type Matrix = (Option<&'static str>, Option<&'static str>, Option<&'static str>, Option<&'static str>, bool, &'static str);
+    type Matrix = (
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+        &'static str,
+    );
 
     #[test]
     fn every_etag_and_last_modified_presence_combination_is_ruled() {
@@ -534,14 +600,35 @@ mod tests {
             (Some("E2"), Some("L"), Some("E"), Some("L"), true, "ETag"), // 裁定 1：旗标救不了 ETag
             (Some("E2"), Some("L2"), Some("E"), Some("L"), true, "ETag"), // 同上，mtime 也变了仍先说 ETag
             // ETag 相等之后**仍比** Last-Modified（裁定 1 / spec §6.3 / 简报分支 3+4）
-            (Some("E"), Some("L2"), Some("E"), Some("L"), false, "Last-Modified"), // = 简报分支 4
+            (
+                Some("E"),
+                Some("L2"),
+                Some("E"),
+                Some("L"),
+                false,
+                "Last-Modified",
+            ), // = 简报分支 4
             (Some("E"), Some("L2"), Some("E"), Some("L"), true, "RESUME"), // = 简报分支 3
-            (Some("E"), Some("L"), Some("E"), None, false, "Last-Modified"), // 一边有一边没有，ETag 相等也拦
+            (
+                Some("E"),
+                Some("L"),
+                Some("E"),
+                None,
+                false,
+                "Last-Modified",
+            ), // 一边有一边没有，ETag 相等也拦
             (Some("E"), Some("L"), Some("E"), None, true, "RESUME"),
             (Some("E"), None, Some("E"), None, false, "RESUME"), // 都有 etag、都没有 mtime ⇒ None==None 放行
             // 任一 ETag 缺失 ⇒ 只剩 Last-Modified 可比
             (None, Some("L"), Some("E"), Some("L"), false, "RESUME"), // 断点没记 etag，mtime 相等即放行
-            (None, Some("L"), Some("E"), Some("L2"), false, "Last-Modified"),
+            (
+                None,
+                Some("L"),
+                Some("E"),
+                Some("L2"),
+                false,
+                "Last-Modified",
+            ),
             (None, Some("L"), Some("E"), Some("L2"), true, "RESUME"), // 整支跳过
             (Some("E"), Some("L"), None, Some("L"), false, "RESUME"), // 服务器不再发 etag
             (Some("E"), Some("L"), None, None, false, "Last-Modified"), // 一边有一边没有 ⇒ 不符
@@ -563,7 +650,9 @@ mod tests {
                 ),
                 keyword => {
                     let Some(text) = reason(&d) else {
-                        panic!("断点({s_etag:?},{s_lm:?}) vs 服务器({p_etag:?},{p_lm:?}) ignore={ignore} 该 Fresh 并给原因，实际 {d:?}");
+                        panic!(
+                            "断点({s_etag:?},{s_lm:?}) vs 服务器({p_etag:?},{p_lm:?}) ignore={ignore} 该 Fresh 并给原因，实际 {d:?}"
+                        );
                     };
                     assert!(
                         matches!(d, Decision::Fresh { .. }),
@@ -594,7 +683,10 @@ mod tests {
         // ignore_mtime 与 ETag 相等都救不了这一支（② 排在 ③ 之前）
         let mut s = snap(val("E", "L", 100, URL));
         s.validator.ignore_mtime = true;
-        assert!(matches!(decide(&task(), Some(s), &p), Decision::Fresh { .. }));
+        assert!(matches!(
+            decide(&task(), Some(s), &p),
+            Decision::Fresh { .. }
+        ));
     }
 
     // ---- ① needs_secret 的两个方向 ----
@@ -610,19 +702,34 @@ mod tests {
             };
             assert!(why.contains("口令"), "原因要说明缺的是口令：{why}");
             assert!(why.contains("--password"), "原因要告诉用户怎么补：{why}");
-            assert!(why.contains("断点"), "原因要说清是这份断点记录在提要求，而不是一句\"需要口令\"：{why}");
-            assert!(!why.contains('\n'), "原因是一行话（Task 9 直接打在进度行里）：{why}");
+            assert!(
+                why.contains("断点"),
+                "原因要说清是这份断点记录在提要求，而不是一句\"需要口令\"：{why}"
+            );
+            assert!(
+                !why.contains('\n'),
+                "原因是一行话（Task 9 直接打在进度行里）：{why}"
+            );
         }
         // 反方向：补了口令就正常续传（本模块拿不到旧口令，**无法**比对，只做"有没有给"这一件事）。
         let with_secret = task_with(0, Some(SECRET));
         assert!(
-            matches!(decide(&with_secret, Some(s.clone()), &base()), Decision::Resume(_)),
+            matches!(
+                decide(&with_secret, Some(s.clone()), &base()),
+                Decision::Resume(_)
+            ),
             "重新给了口令就该继续，别再拦"
         );
         // 断点没记 needs_secret 时，带不带口令都照续（不能反过来要求一个并不需要的口令）。
         let plain = snap(val("E", "L", 100, URL));
-        assert!(matches!(decide(&task_plain(), Some(plain.clone()), &base()), Decision::Resume(_)));
-        assert!(matches!(decide(&with_secret, Some(plain), &base()), Decision::Resume(_)));
+        assert!(matches!(
+            decide(&task_plain(), Some(plain.clone()), &base()),
+            Decision::Resume(_)
+        ));
+        assert!(matches!(
+            decide(&with_secret, Some(plain), &base()),
+            Decision::Resume(_)
+        ));
     }
 
     #[test]
@@ -659,36 +766,90 @@ mod tests {
         let p = facts(None, None, 100, URL, true);
         let cases: Vec<(Task, Task, &str)> = vec![
             // (上一轮的请求, 本次的请求, 原因里必须点名的那一部分)
-            (plain_prev_run(), Task { url: "https://x/a?retry=2".into(), ..plain_prev_run() }, "URL"),
             (
-                Task { referer: Some("https://ref/a".into()), ..plain_prev_run() },
+                plain_prev_run(),
+                Task {
+                    url: "https://x/a?retry=2".into(),
+                    ..plain_prev_run()
+                },
+                "URL",
+            ),
+            (
+                Task {
+                    referer: Some("https://ref/a".into()),
+                    ..plain_prev_run()
+                },
                 plain_prev_run(),
                 "Referer",
             ),
-            (Task { cookies: Some("sid=42".into()), ..plain_prev_run() }, plain_prev_run(), "Cookie"),
             (
-                Task { data_file: Some("bodyA".into()), ..plain_prev_run() },
-                Task { data_file: Some("bodyB".into()), ..plain_prev_run() },
+                Task {
+                    cookies: Some("sid=42".into()),
+                    ..plain_prev_run()
+                },
+                plain_prev_run(),
+                "Cookie",
+            ),
+            (
+                Task {
+                    data_file: Some("bodyA".into()),
+                    ..plain_prev_run()
+                },
+                Task {
+                    data_file: Some("bodyB".into()),
+                    ..plain_prev_run()
+                },
                 "POST",
             ),
             (
-                Task { data_file: Some("bodyA".into()), ..plain_prev_run() },
+                Task {
+                    data_file: Some("bodyA".into()),
+                    ..plain_prev_run()
+                },
                 plain_prev_run(),
                 "POST",
             ),
-            (Task { user: Some("alice".into()), ..plain_prev_run() }, plain_prev_run(), "用户"),
+            (
+                Task {
+                    user: Some("alice".into()),
+                    ..plain_prev_run()
+                },
+                plain_prev_run(),
+                "用户",
+            ),
         ];
         for (prev, now, keyword) in cases {
             // 对照：请求字段没变的同一份夹具必须能续 —— 少了这条，上面的断言可能在测夹具本身。
-            let same = decide(&prev, Some(snap_after(val_opt(None, None, 100, URL), &prev)), &p);
-            assert!(matches!(same, Decision::Resume(_)), "请求没变时这一支该续（否则下面的断言测的是别的东西）：{same:?}");
+            let same = decide(
+                &prev,
+                Some(snap_after(val_opt(None, None, 100, URL), &prev)),
+                &p,
+            );
+            assert!(
+                matches!(same, Decision::Resume(_)),
+                "请求没变时这一支该续（否则下面的断言测的是别的东西）：{same:?}"
+            );
 
-            let d = decide(&now, Some(snap_after(val_opt(None, None, 100, URL), &prev)), &p);
-            let text = reason(&d).unwrap_or_else(|| panic!("请求变了也要给原因（{keyword}）：{d:?}"));
-            assert!(matches!(d, Decision::Fresh { .. }), "换了请求字段必须 Fresh，实际 {d:?}");
-            assert!(text.contains(keyword), "原因要说出是哪一部分的请求变了（{keyword}）：{text}");
+            let d = decide(
+                &now,
+                Some(snap_after(val_opt(None, None, 100, URL), &prev)),
+                &p,
+            );
+            let text =
+                reason(&d).unwrap_or_else(|| panic!("请求变了也要给原因（{keyword}）：{d:?}"));
+            assert!(
+                matches!(d, Decision::Fresh { .. }),
+                "换了请求字段必须 Fresh，实际 {d:?}"
+            );
+            assert!(
+                text.contains(keyword),
+                "原因要说出是哪一部分的请求变了（{keyword}）：{text}"
+            );
             assert!(!text.contains('\n'), "原因必须是一行：{text}");
-            assert!(text.chars().count() <= 200, "原因太长了，进度行放不下：{text}");
+            assert!(
+                text.chars().count() <= 200,
+                "原因太长了，进度行放不下：{text}"
+            );
         }
     }
 
@@ -700,33 +861,66 @@ mod tests {
         // 每支**只改一个字段**：①b 报的是"第一条不符"，同时改两处会把原因归到别的头上。
         let cases: Vec<(Task, Task, &str)> = vec![
             (
-                Task { referer: Some("https://ref/?t=OLDTOKEN".into()), ..plain_prev_run() },
+                Task {
+                    referer: Some("https://ref/?t=OLDTOKEN".into()),
+                    ..plain_prev_run()
+                },
                 plain_prev_run(),
                 "Referer",
             ),
             (
-                Task { cookies: Some("sid=OLDTOKEN".into()), ..plain_prev_run() },
-                Task { cookies: Some("sid=NEWTOKEN".into()), ..plain_prev_run() },
+                Task {
+                    cookies: Some("sid=OLDTOKEN".into()),
+                    ..plain_prev_run()
+                },
+                Task {
+                    cookies: Some("sid=NEWTOKEN".into()),
+                    ..plain_prev_run()
+                },
                 "Cookie",
             ),
             (
-                Task { user: Some("alice".into()), ..plain_prev_run() },
-                Task { user: Some("bob".into()), ..plain_prev_run() },
+                Task {
+                    user: Some("alice".into()),
+                    ..plain_prev_run()
+                },
+                Task {
+                    user: Some("bob".into()),
+                    ..plain_prev_run()
+                },
                 "用户",
             ),
             (
-                Task { data_file: Some("bodyA".into()), ..plain_prev_run() },
-                Task { data_file: Some("bodyB".into()), ..plain_prev_run() },
+                Task {
+                    data_file: Some("bodyA".into()),
+                    ..plain_prev_run()
+                },
+                Task {
+                    data_file: Some("bodyB".into()),
+                    ..plain_prev_run()
+                },
                 "POST",
             ),
         ];
         for (prev, now, keyword) in cases {
-            let d = decide(&now, Some(snap_after(val("E", "L", 100, URL), &prev)), &base());
+            let d = decide(
+                &now,
+                Some(snap_after(val("E", "L", 100, URL), &prev)),
+                &base(),
+            );
             let text = reason(&d).unwrap_or_else(|| panic!("{keyword} 变了要给原因：{d:?}"));
             assert!(text.contains(keyword), "原因该点名 {keyword}：{text}");
-            for value in ["OLDTOKEN", "NEWTOKEN", "alice", "bob", "bodyA", "bodyB", "sid="] {
-                assert!(!text.contains(value), "原因里把字段的值抄出去了（{value}）：{text}");
-                assert!(!format!("{d:?}").contains(value), "Debug 里也不该有（{value}）：{d:?}");
+            for value in [
+                "OLDTOKEN", "NEWTOKEN", "alice", "bob", "bodyA", "bodyB", "sid=",
+            ] {
+                assert!(
+                    !text.contains(value),
+                    "原因里把字段的值抄出去了（{value}）：{text}"
+                );
+                assert!(
+                    !format!("{d:?}").contains(value),
+                    "Debug 里也不该有（{value}）：{d:?}"
+                );
             }
         }
     }
@@ -735,22 +929,48 @@ mod tests {
     fn the_two_headline_shapes_from_the_finding_are_caught_and_name_their_flag() {
         // 派发点名的两条具体路径各钉一支，并要求原因把**参数名**写出来（用户要能照着改）。
         let p = facts(None, None, 100, URL, true); // 没有验证子、长度还照样相等
-        let saved_post = Task { data_file: Some("bodyA".into()), ..plain_prev_run() };
-        let now_post = Task { data_file: Some("bodyB".into()), ..plain_prev_run() };
-        let d = decide(&now_post, Some(snap_after(val_opt(None, None, 100, URL), &saved_post)), &p);
+        let saved_post = Task {
+            data_file: Some("bodyA".into()),
+            ..plain_prev_run()
+        };
+        let now_post = Task {
+            data_file: Some("bodyB".into()),
+            ..plain_prev_run()
+        };
+        let d = decide(
+            &now_post,
+            Some(snap_after(val_opt(None, None, 100, URL), &saved_post)),
+            &p,
+        );
         let text = reason(&d).expect("换了 POST 体也要给原因");
         assert!(
             matches!(d, Decision::Fresh { .. }),
             "F1 的正主：bodyA 确认的字节不能接着给 bodyB 用，{d:?}"
         );
-        assert!(text.contains("--data-file"), "原因要指名是哪个参数变了：{text}");
+        assert!(
+            text.contains("--data-file"),
+            "原因要指名是哪个参数变了：{text}"
+        );
 
-        let saved_cookie = Task { cookies: Some("sid=42".into()), ..plain_prev_run() };
+        let saved_cookie = Task {
+            cookies: Some("sid=42".into()),
+            ..plain_prev_run()
+        };
         let now_cookie = plain_prev_run(); // 本次没带 cookie
-        let d = decide(&now_cookie, Some(snap_after(val_opt(None, None, 100, URL), &saved_cookie)), &p);
+        let d = decide(
+            &now_cookie,
+            Some(snap_after(val_opt(None, None, 100, URL), &saved_cookie)),
+            &p,
+        );
         let text = reason(&d).expect("换了 Cookie 也要给原因");
-        assert!(matches!(d, Decision::Fresh { .. }), "同一份文件在另一个身份下可能是另一个资源：{d:?}");
-        assert!(text.contains("--cookie"), "原因要指名是哪个参数变了：{text}");
+        assert!(
+            matches!(d, Decision::Fresh { .. }),
+            "同一份文件在另一个身份下可能是另一个资源：{d:?}"
+        );
+        assert!(
+            text.contains("--cookie"),
+            "原因要指名是哪个参数变了：{text}"
+        );
     }
 
     #[test]
@@ -763,19 +983,44 @@ mod tests {
         assert_eq!(now.flags, FLAG_IGNORE_MTIME, "夹具：两个任务只差那一个旗标");
         // 请求字段全同、mtime 真的变了 ⇒ 说话的是 ③b 的旗标豁免，不是 ①b。
         assert!(
-            matches!(decide(&now, Some(snap_after(val("E", "L2", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            matches!(
+                decide(
+                    &now,
+                    Some(snap_after(val("E", "L2", 100, URL), &prev)),
+                    &base()
+                ),
+                Decision::Resume(_)
+            ),
             "加了 --ignore-mtime 反而变成 Fresh，就是这个旗标被 ①b 吃掉了"
         );
         // 反方向：上一轮开了旗标、这一轮没开，其余全等（mtime 也相等）⇒ 同样不是"请求变了"。
         assert!(
-            matches!(decide(&prev, Some(snap_after(val("E", "L", 100, URL), &now)), &base()), Decision::Resume(_)),
+            matches!(
+                decide(
+                    &prev,
+                    Some(snap_after(val("E", "L", 100, URL), &now)),
+                    &base()
+                ),
+                Decision::Resume(_)
+            ),
             "旧文件带过的旗标不该在本次反向绑架判定（这里没有任何不符可言）"
         );
         // 其余旗标（完成后保留断点 / 只入队不下）都不影响对端返回什么字节 ⇒ 照样不参与比较。
         let others = task_with(FLAG_KEEP_STATE | FLAG_ADD_ONLY, None);
-        assert_eq!(others.flags, prev.flags ^ (FLAG_KEEP_STATE | FLAG_ADD_ONLY), "夹具：只动了旗标");
+        assert_eq!(
+            others.flags,
+            prev.flags ^ (FLAG_KEEP_STATE | FLAG_ADD_ONLY),
+            "夹具：只动了旗标"
+        );
         assert!(
-            matches!(decide(&others, Some(snap_after(val("E", "L", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            matches!(
+                decide(
+                    &others,
+                    Some(snap_after(val("E", "L", 100, URL), &prev)),
+                    &base()
+                ),
+                Decision::Resume(_)
+            ),
             "旗标差异一律不构成 Fresh"
         );
     }
@@ -787,16 +1032,44 @@ mod tests {
         // 读不到），这里根本没有需要对账的东西；把它们纳入比较只会让"换个目录继续下"变成整份重下。
         // 这条用例是给后来人挡"顺手把比较集扩成整个 `TaskView`"的。
         let prev = plain_prev_run();
-        let moved = Task { dir: "D:/other/place".into(), ..plain_prev_run() };
-        assert_ne!(moved.target_path(), prev.target_path(), "夹具：落点确实换了");
+        let moved = Task {
+            dir: "D:/other/place".into(),
+            ..plain_prev_run()
+        };
+        assert_ne!(
+            moved.target_path(),
+            prev.target_path(),
+            "夹具：落点确实换了"
+        );
         assert!(
-            matches!(decide(&moved, Some(snap_after(val("E", "L", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            matches!(
+                decide(
+                    &moved,
+                    Some(snap_after(val("E", "L", 100, URL), &prev)),
+                    &base()
+                ),
+                Decision::Resume(_)
+            ),
             "只换输出目录不构成 Fresh"
         );
-        let renamed = Task { name: Some("renamed.bin".into()), ..plain_prev_run() };
-        assert_ne!(renamed.target_path(), prev.target_path(), "夹具：目标文件名确实换了");
+        let renamed = Task {
+            name: Some("renamed.bin".into()),
+            ..plain_prev_run()
+        };
+        assert_ne!(
+            renamed.target_path(),
+            prev.target_path(),
+            "夹具：目标文件名确实换了"
+        );
         assert!(
-            matches!(decide(&renamed, Some(snap_after(val("E", "L", 100, URL), &prev)), &base()), Decision::Resume(_)),
+            matches!(
+                decide(
+                    &renamed,
+                    Some(snap_after(val("E", "L", 100, URL), &prev)),
+                    &base()
+                ),
+                Decision::Resume(_)
+            ),
             "只换目标文件名不构成 Fresh"
         );
     }
@@ -807,15 +1080,27 @@ mod tests {
         // （请求换了比落地地址换了更早、更可行动 —— 后者是服务器做的事）。
         let mut secret = snap_after(val("E", "L", 100, URL), &plain_prev_run());
         secret.needs_secret = true;
-        let new_request = Task { cookies: Some("sid=9".into()), ..plain_prev_run() };
+        let new_request = Task {
+            cookies: Some("sid=9".into()),
+            ..plain_prev_run()
+        };
         assert!(
-            matches!(decide(&new_request, Some(secret), &base()), Decision::Abort(_)),
+            matches!(
+                decide(&new_request, Some(secret), &base()),
+                Decision::Abort(_)
+            ),
             "① 必须仍排在 ①b 之前"
         );
         let redirected = facts(Some("E"), Some("L"), 100, "https://cdn.example/b.bin", true);
         let d = decide(
             &new_request,
-            Some(snap_after(val("E", "L", 100, URL), &Task { cookies: Some("sid=1".into()), ..plain_prev_run() })),
+            Some(snap_after(
+                val("E", "L", 100, URL),
+                &Task {
+                    cookies: Some("sid=1".into()),
+                    ..plain_prev_run()
+                },
+            )),
             &redirected,
         );
         let text = reason(&d).expect("两处不符也要给原因");
@@ -831,21 +1116,37 @@ mod tests {
         no_ranges.accept_ranges = false;
         // 起点为 0 的一条连续前缀：不认 Range 的服务器本来就只能产出这种形状。
         let prefix = snap_with_rows(100, &[(0, 59)]);
-        assert!(matches!(decide(&task_plain(), Some(prefix), &no_ranges), Decision::Resume(_)));
+        assert!(matches!(
+            decide(&task_plain(), Some(prefix), &no_ranges),
+            Decision::Resume(_)
+        ));
         // 起点不是 0 的一条：E7③ 明写这种行在退化模式里真会出现（Task 7 负责丢前缀），必须照样能续。
         let tail = snap_with_rows(100, &[(40, 99)]);
         assert!(
-            matches!(decide(&task_plain(), Some(tail), &no_ranges), Decision::Resume(_)),
+            matches!(
+                decide(&task_plain(), Some(tail), &no_ranges),
+                Decision::Resume(_)
+            ),
             "裁定 4：单行不以 0 开头也要放行给 Task 7 的退化路径处理"
         );
         // 空表（什么都没确认过）不是"多段"。
-        assert!(matches!(decide(&task_plain(), Some(snap(val("E", "L", 100, URL))), &no_ranges), Decision::Resume(_)));
+        assert!(matches!(
+            decide(
+                &task_plain(),
+                Some(snap(val("E", "L", 100, URL))),
+                &no_ranges
+            ),
+            Decision::Resume(_)
+        ));
         // 三行带洞才是 ⑤ 要拦的形状；边界取 >1，两行就该拦。
         let two = snap_with_rows(100, &[(0, 9), (50, 59)]);
         let d = decide(&task_plain(), Some(two), &no_ranges);
         let text = reason(&d).expect("⑤ 重来也要给原因");
         assert!(matches!(d, Decision::Fresh { .. }), "{d:?}");
-        assert!(text.contains("Range"), "原因要说出是 Range/段数这条判据：{text}");
+        assert!(
+            text.contains("Range"),
+            "原因要说出是 Range/段数这条判据：{text}"
+        );
     }
 
     fn snap_with_rows(total_len: u64, spec: &[(u64, u64)]) -> Snapshot {
@@ -865,7 +1166,10 @@ mod tests {
         let mut recorded_true = changed_mtime.clone();
         recorded_true.validator.ignore_mtime = true;
         assert!(
-            matches!(decide(&task_plain(), Some(recorded_true), &base()), Decision::Fresh { .. }),
+            matches!(
+                decide(&task_plain(), Some(recorded_true), &base()),
+                Decision::Fresh { .. }
+            ),
             "旧文件的宽松记录不能替用户做一次他没要求的放行"
         );
         // 旧文件记 false，本次开了 --ignore-mtime ⇒ 按本次的宽松判据续。
@@ -874,7 +1178,10 @@ mod tests {
             "夹具：简报的 val(...) 落盘的 ignore_mtime 是 false"
         );
         assert!(
-            matches!(decide(&task(), Some(changed_mtime), &base()), Decision::Resume(_)),
+            matches!(
+                decide(&task(), Some(changed_mtime), &base()),
+                Decision::Resume(_)
+            ),
             "本次的旗标才说话（简报分支 3 正是这一支）"
         );
     }
@@ -888,16 +1195,25 @@ mod tests {
         let d = decide(&task_plain(), Some(snap(val("E2", "L9", 100, URL))), &p);
         let text = reason(&d).expect("多处不符也要给原因");
         assert!(text.contains("URL"), "该先说最终 URL：{text}");
-        assert!(!text.contains("ETag") && !text.contains("长度"), "原因只能有一条：{text}");
+        assert!(
+            !text.contains("ETag") && !text.contains("长度"),
+            "原因只能有一条：{text}"
+        );
         // ③+④ 同时不符 ⇒ 说 ETag。
         let p2 = facts(Some("E"), Some("L"), 999, URL, true);
         let d2 = decide(&task_plain(), Some(snap(val("E2", "L9", 100, URL))), &p2);
         let text2 = reason(&d2).expect("ETag 与长度同时不符也要给原因");
-        assert!(text2.contains("ETag") && !text2.contains("长度"), "该先说 ETag：{text2}");
+        assert!(
+            text2.contains("ETag") && !text2.contains("长度"),
+            "该先说 ETag：{text2}"
+        );
         // ① 排在最前：缺口令时连比对都不做。
         let mut s = snap(val("E2", "L9", 100, URL));
         s.needs_secret = true;
-        assert!(matches!(decide(&task_plain(), Some(s), &p), Decision::Abort(_)), "① 必须最先");
+        assert!(
+            matches!(decide(&task_plain(), Some(s), &p), Decision::Abort(_)),
+            "① 必须最先"
+        );
     }
 
     // ---- 交回给 Task 8 的东西：快照原样、原因能读 ----
@@ -906,10 +1222,18 @@ mod tests {
     fn resume_hands_the_snapshot_back_untouched() {
         let original = snap_multi(val("E", "L", 100, URL), 3);
         let d = decide(&task(), Some(original.clone()), &base());
-        let Decision::Resume(got) = d else { panic!("这一支该续：{d:?}") };
-        assert_eq!(got, original, "判定模块不许改快照（stats/segments/validator 都得原样）");
+        let Decision::Resume(got) = d else {
+            panic!("这一支该续：{d:?}")
+        };
+        assert_eq!(
+            got, original,
+            "判定模块不许改快照（stats/segments/validator 都得原样）"
+        );
         assert_eq!(got.segments.len(), 3);
-        assert_eq!(got.stats.bytes_duplicated, 0, "计数归 Task 8 累加，本模块不动");
+        assert_eq!(
+            got.stats.bytes_duplicated, 0,
+            "计数归 Task 8 累加，本模块不动"
+        );
     }
 
     #[test]
@@ -923,20 +1247,41 @@ mod tests {
         secret.needs_secret = true;
         let cases: Vec<(Task, Snapshot, ProbeFacts, &str)> = vec![
             (task_plain(), snap(val("E2", "L", 100, URL)), base(), "ETag"),
-            (task_plain(), snap(val("E", "L2", 100, URL)), base(), "Last-Modified"),
+            (
+                task_plain(),
+                snap(val("E", "L2", 100, URL)),
+                base(),
+                "Last-Modified",
+            ),
             (task_plain(), snap(val("E", "L", 99, URL)), base(), "长度"),
             // 夹具修复（F1 的比对让这里不能再图省事）：`stub_for_test` 把 `task.url` 落成了
             // `validator.final_url`，于是这份夹具读起来像"上一轮请求的就是 /elsewhere"⇒ 会先撞上 ①b
             // （换了 URL）而不是本用例要测的 ②（最终 URL 与断点不符）。讲得通的上一轮是
             // "请求 /a、被重定向带到 /elsewhere"，所以请求视图取 `task_plain()` 自己。
-            (task_plain(), snap_after(val("E", "L", 100, "https://x/elsewhere"), &task_plain()), base(), "URL"),
-            (task_plain(), snap_multi(val("E", "L", 100, URL), 2), no_ranges, "Range"),
+            (
+                task_plain(),
+                snap_after(val("E", "L", 100, "https://x/elsewhere"), &task_plain()),
+                base(),
+                "URL",
+            ),
+            (
+                task_plain(),
+                snap_multi(val("E", "L", 100, URL), 2),
+                no_ranges,
+                "Range",
+            ),
             (task_plain(), secret, base(), "口令"),
-            (task_plain(), s_len, facts(Some("E"), Some("L"), 100, URL, true), "Last-Modified"),
+            (
+                task_plain(),
+                s_len,
+                facts(Some("E"), Some("L"), 100, URL, true),
+                "Last-Modified",
+            ),
         ];
         for (t, s, p, keyword) in cases {
             let d = decide(&t, Some(s), &p);
-            let text = reason(&d).unwrap_or_else(|| panic!("{keyword} 的冲突必须给出一句话原因：{d:?}"));
+            let text =
+                reason(&d).unwrap_or_else(|| panic!("{keyword} 的冲突必须给出一句话原因：{d:?}"));
             assert!(!text.is_empty(), "原因不能是空串：{d:?}");
             assert!(!text.contains('\n'), "原因必须是一行：{text}");
             assert!(
@@ -944,7 +1289,10 @@ mod tests {
                 "原因太长了，进度行放不下：{} 字：{text}",
                 text.chars().count()
             );
-            assert!(text.contains(keyword), "原因要说出是哪条判据不同意（{keyword}）：{text}");
+            assert!(
+                text.contains(keyword),
+                "原因要说出是哪条判据不同意（{keyword}）：{text}"
+            );
         }
     }
 
@@ -957,7 +1305,11 @@ mod tests {
         let given = task_with(FLAG_IGNORE_MTIME, Some(SECRET));
         let battery: Vec<(Task, Option<Snapshot>, ProbeFacts)> = vec![
             (given.clone(), Some(secret.clone()), base()),
-            (given.clone(), Some(secret), facts(Some("E2"), Some("L"), 9, "https://x/z", false)),
+            (
+                given.clone(),
+                Some(secret),
+                facts(Some("E2"), Some("L"), 9, "https://x/z", false),
+            ),
             (
                 given.clone(),
                 // 夹具修复（同上）：这份断点记的落地地址是 /z，而本次请求的是 URL ⇒ 旧写法把
@@ -966,7 +1318,11 @@ mod tests {
                 Some(snap_after(val("E2", "L2", 9, "https://x/z"), &given)),
                 facts(Some("E"), Some("L"), 100, URL, true),
             ),
-            (task_with(0, Some(SECRET)), Some(snap(val("E", "L2", 100, URL))), base()),
+            (
+                task_with(0, Some(SECRET)),
+                Some(snap(val("E", "L2", 100, URL))),
+                base(),
+            ),
             (task_with(0, Some(SECRET)), None, base()),
         ];
         for (t, s, p) in battery {
@@ -974,7 +1330,10 @@ mod tests {
             if let Some(text) = reason(&d) {
                 assert!(!text.contains(SECRET), "决策原因里出现了口令本尊：{text}");
             }
-            assert!(!format!("{d:?}").contains(SECRET), "Debug 里也不该有（{d:?}）");
+            assert!(
+                !format!("{d:?}").contains(SECRET),
+                "Debug 里也不该有（{d:?}）"
+            );
         }
     }
 
@@ -1000,8 +1359,20 @@ mod tests {
         let given = task_with(0, Some(SECRET));
         let cases: Vec<(Validator, Task, &ProbeFacts, &str, &str)> = vec![
             // (断点里的 validator, 本次任务, 本轮事实, 期望点名的判据, 原因里不许出现的串)
-            (val("E", "L", 100, tainted_url), given.clone(), &moved, "最终 URL", SECRET),
-            (val("\"hunter2\"", "L", 100, URL), given.clone(), &moved, "ETag", SECRET),
+            (
+                val("E", "L", 100, tainted_url),
+                given.clone(),
+                &moved,
+                "最终 URL",
+                SECRET,
+            ),
+            (
+                val("\"hunter2\"", "L", 100, URL),
+                given.clone(),
+                &moved,
+                "ETag",
+                SECRET,
+            ),
             // 这一支 ETag 两侧相等（否则 ③ 第一步抢先），只有 Last-Modified 不符 ⇒ 钉的是第二句。
             (
                 val("E", "\"aHVudGVyMg\"", 100, URL),
@@ -1013,7 +1384,10 @@ mod tests {
             // §1 的第二组在读侧同样开火：这一格的串里**没有**口令的字面，只有那份线上凭据对。
             (
                 val("E", "L", 100, pair_blob),
-                Task { user: Some("aliceX".into()), ..given.clone() },
+                Task {
+                    user: Some("aliceX".into()),
+                    ..given.clone()
+                },
                 &moved,
                 "最终 URL",
                 "YWxpY2VYOmh1bnRlcjI=",
@@ -1023,22 +1397,45 @@ mod tests {
             let s = snap_after(v, &t);
             assert!(!s.needs_secret, "夹具前提：这一格要走 ②③ 而不是 ①");
             let d = decide(&t, Some(s), p);
-            assert!(matches!(d, Decision::Fresh { .. }), "命中也要照常决策，不许变成 Abort/Resume：{d:?}");
+            assert!(
+                matches!(d, Decision::Fresh { .. }),
+                "命中也要照常决策，不许变成 Abort/Resume：{d:?}"
+            );
             let text = reason(&d).expect("冲突必须给出一句话原因");
-            assert!(text.contains(keyword), "原因要说清是哪条判据不同意（{keyword}）：{text}");
-            assert!(!text.contains(forbidden), "断点里那份值被回显了（{forbidden}）：{text}");
+            assert!(
+                text.contains(keyword),
+                "原因要说清是哪条判据不同意（{keyword}）：{text}"
+            );
+            assert!(
+                !text.contains(forbidden),
+                "断点里那份值被回显了（{forbidden}）：{text}"
+            );
             assert!(!text.contains(SECRET), "原因里出现了口令本尊：{text}");
-            assert!(!text.contains("127.0.0.1"), "落地地址的片段被抄出来了：{text}");
-            assert!(!text.contains('\n') && text.chars().count() <= 200, "原因必须是一行、进度行放得下：{text}");
+            assert!(
+                !text.contains("127.0.0.1"),
+                "落地地址的片段被抄出来了：{text}"
+            );
+            assert!(
+                !text.contains('\n') && text.chars().count() <= 200,
+                "原因必须是一行、进度行放得下：{text}"
+            );
         }
 
         // 本次没给口令那一族：① 先 `Abort`（那份断点记着"当初带了口令"），同样一个字都不回显。
         let mut legacy = snap_after(val("E", "L", 100, tainted_url), &task_plain());
         legacy.needs_secret = true;
         let d = decide(&task_plain(), Some(legacy), &base());
-        let Decision::Abort(why) = d else { panic!("缺口令必须是 Abort，不能退化成回显旧值的 Fresh：{d:?}") };
-        assert!(!why.contains(SECRET) && !why.contains("127.0.0.1"), "① 那句把旧值抄出来了：{why}");
-        assert!(why.contains("口令") && why.contains("--password"), "① 要可行动：{why}");
+        let Decision::Abort(why) = d else {
+            panic!("缺口令必须是 Abort，不能退化成回显旧值的 Fresh：{d:?}")
+        };
+        assert!(
+            !why.contains(SECRET) && !why.contains("127.0.0.1"),
+            "① 那句把旧值抄出来了：{why}"
+        );
+        assert!(
+            why.contains("口令") && why.contains("--password"),
+            "① 要可行动：{why}"
+        );
     }
 
     /// 读侧那道闸的**未命中臂**（复审 I-3 同一条论证的另一半）：串里没有本任务口令的形状时，
@@ -1051,18 +1448,30 @@ mod tests {
         let now = facts(Some("\"fresh-etag\""), Some("L"), 100, URL, true);
 
         // ② 那句：断点里那个 URL 与现在这条都要出现在原因里（旧写法一字未动）。
-        let d = decide(&unrelated, Some(snap_after(val("E", "L", 100, tainted_url), &unrelated)), &now);
+        let d = decide(
+            &unrelated,
+            Some(snap_after(val("E", "L", 100, tainted_url), &unrelated)),
+            &now,
+        );
         let text = reason(&d).expect("② 的冲突必须给原因");
         assert!(
-            text.contains(tainted_url) && text.contains(URL) && text.contains("重定向把请求带到了别处"),
+            text.contains(tainted_url)
+                && text.contains(URL)
+                && text.contains("重定向把请求带到了别处"),
             "未命中时 ② 那三条原因之一被这道闸吃掉了：{text}"
         );
 
         // ③ 第一句（ETag）：两侧值都出现，含 `{saved:?}` 那一层 Debug 引号。
-        let d = decide(&unrelated, Some(snap_after(val("\"hunter2\"", "L", 100, URL), &unrelated)), &now);
+        let d = decide(
+            &unrelated,
+            Some(snap_after(val("\"hunter2\"", "L", 100, URL), &unrelated)),
+            &now,
+        );
         let text = reason(&d).expect("③ 的 ETag 冲突必须给原因");
         assert!(
-            text.contains("\"\\\"hunter2\\\"\"") && text.contains("fresh-etag") && text.contains("--ignore-mtime"),
+            text.contains("\"\\\"hunter2\\\"\"")
+                && text.contains("fresh-etag")
+                && text.contains("--ignore-mtime"),
             "未命中时 ETag 那句的值被抹掉了：{text}"
         );
 
@@ -1070,10 +1479,16 @@ mod tests {
         // 于是照原样回显 ⇒ 这一格同时钉住"判据按本任务那份口令比"这件事（不是"看见 base64 就抹"）。
         // 这一支的 ETag 两侧相等，否则 ③ 第一步抢先、测不到第二句。
         let only_mtime = facts(Some("E"), Some("L"), 100, URL, true);
-        let d = decide(&unrelated, Some(snap_after(val("E", "\"aHVudGVyMg\"", 100, URL), &unrelated)), &only_mtime);
+        let d = decide(
+            &unrelated,
+            Some(snap_after(val("E", "\"aHVudGVyMg\"", 100, URL), &unrelated)),
+            &only_mtime,
+        );
         let text = reason(&d).expect("③ 的 Last-Modified 冲突必须给原因");
         assert!(
-            text.contains("aHVudGVyMg") && text.contains("\"L\"") && text.contains("--ignore-mtime"),
+            text.contains("aHVudGVyMg")
+                && text.contains("\"L\"")
+                && text.contains("--ignore-mtime"),
             "未命中时 Last-Modified 那句的值被抹掉了：{text}"
         );
     }
@@ -1088,12 +1503,20 @@ mod tests {
     /// 都要连同这根针一起改，并且要说清为什么值得。
     #[test]
     fn the_read_side_gate_calls_the_shared_criterion_three_times_and_reimplements_nothing() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("resume.rs");
-        let all = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）", path.display()));
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("resume.rs");
+        let all = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）",
+                path.display()
+            )
+        });
         let src = match all.find("#[cfg(test)]") {
             Some(at) => &all[..at],
-            None => panic!("src/resume.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"),
+            None => panic!(
+                "src/resume.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"
+            ),
         };
         let lines: Vec<&str> = src
             .lines()
@@ -1120,7 +1543,10 @@ mod tests {
             assert!(!site.contains("(None"), "调用点交回裸 None：{site}");
         }
         assert_eq!(
-            lines.iter().filter(|l| l.contains("fn carries_our_password")).count(),
+            lines
+                .iter()
+                .filter(|l| l.contains("fn carries_our_password"))
+                .count(),
             0,
             "src/resume.rs 里不许有第二份判据实现（两本账）——判据只住在 `src/probe.rs`"
         );
@@ -1137,7 +1563,11 @@ mod tests {
             final_url: URL.into(),
             accept_ranges: true,
         };
-        assert_eq!(p, base(), "字段名/类型即 plan 第 673 行的 Produces，且逐字段可比");
+        assert_eq!(
+            p,
+            base(),
+            "字段名/类型即 plan 第 673 行的 Produces，且逐字段可比"
+        );
         let fresh = Decision::Fresh { reason: None };
         assert!(matches!(fresh, Decision::Fresh { reason: None }));
         let abort = Decision::Abort("x".into());
@@ -1151,41 +1581,83 @@ mod tests {
     fn total_len_is_the_last_line_of_defence_when_no_validator_exists() {
         // 裁定 2 的另一半：两把验证子全缺时，长度仍然拦得住 —— 不是"没验证子就无条件续"。
         let s = snap(val_opt(None, None, 100, URL));
-        let ok = decide(&task_plain(), Some(s.clone()), &facts(None, None, 100, URL, true));
+        let ok = decide(
+            &task_plain(),
+            Some(s.clone()),
+            &facts(None, None, 100, URL, true),
+        );
         assert!(matches!(ok, Decision::Resume(_)), "{ok:?}");
         let short = decide(&task_plain(), Some(s), &facts(None, None, 101, URL, true));
         let text = reason(&short).expect("长度不符要给原因");
         assert!(matches!(short, Decision::Fresh { .. }), "{short:?}");
-        assert!(text.contains("长度"), "原因要说 100 → 101 是长度不符：{text}");
+        assert!(
+            text.contains("长度"),
+            "原因要说 100 → 101 是长度不符：{text}"
+        );
         // 边界：0 字节的资源 + 空段表也能续（别让"长度为 0"退化成"肯定不符"）。
         let empty = snap(val_opt(None, None, 0, URL));
-        assert!(matches!(decide(&task_plain(), Some(empty), &facts(None, None, 0, URL, false)), Decision::Resume(_)));
+        assert!(matches!(
+            decide(
+                &task_plain(),
+                Some(empty),
+                &facts(None, None, 0, URL, false)
+            ),
+            Decision::Resume(_)
+        ));
     }
 
     // ---- A1：If-Range 取值（R17）----
 
     #[test]
     fn if_range_prefers_a_strong_etag() {
-        let v = val_opt(Some("\"abc\""), Some("Wed, 21 Oct 2015 07:28:00 GMT"), 100, URL);
+        let v = val_opt(
+            Some("\"abc\""),
+            Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+            100,
+            URL,
+        );
         assert_eq!(if_range_value(&v, false).as_deref(), Some("\"abc\""));
-        assert_eq!(if_range_value(&v, true).as_deref(), Some("\"abc\""), "ETag 不受 ignore_mtime 豁免");
+        assert_eq!(
+            if_range_value(&v, true).as_deref(),
+            Some("\"abc\""),
+            "ETag 不受 ignore_mtime 豁免"
+        );
     }
 
     #[test]
     fn if_range_falls_back_to_last_modified_only_without_ignore_mtime() {
         let v = val_opt(None, Some("Wed, 21 Oct 2015 07:28:00 GMT"), 100, URL);
-        assert_eq!(if_range_value(&v, false).as_deref(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
-        assert_eq!(if_range_value(&v, true), None, "开了 --ignore-mtime 就不许再按时间戳问对端");
+        assert_eq!(
+            if_range_value(&v, false).as_deref(),
+            Some("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
+        assert_eq!(
+            if_range_value(&v, true),
+            None,
+            "开了 --ignore-mtime 就不许再按时间戳问对端"
+        );
     }
 
     #[test]
     fn if_range_rejects_weak_or_unquoted_etags_and_uses_the_fallback() {
         let v = val_opt(Some("W/\"weak\""), Some("LM"), 100, URL);
-        assert_eq!(if_range_value(&v, false).as_deref(), Some("LM"), "弱 ETag 不能用，退 Last-Modified");
+        assert_eq!(
+            if_range_value(&v, false).as_deref(),
+            Some("LM"),
+            "弱 ETag 不能用，退 Last-Modified"
+        );
         let no_lm = val_opt(Some("W/\"weak\""), None, 100, URL);
-        assert_eq!(if_range_value(&no_lm, false), None, "弱 ETag 不能单独当 If-Range");
+        assert_eq!(
+            if_range_value(&no_lm, false),
+            None,
+            "弱 ETag 不能单独当 If-Range"
+        );
         let unquoted = val_opt(Some("abc"), None, 100, URL);
-        assert_eq!(if_range_value(&unquoted, false), None, "不带引号的 ETag 不是强验证器");
+        assert_eq!(
+            if_range_value(&unquoted, false),
+            None,
+            "不带引号的 ETag 不是强验证器"
+        );
     }
 
     #[test]

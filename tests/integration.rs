@@ -55,24 +55,48 @@ fn probe_reads_prelude_and_reports_ranges_supported() -> anyhow::Result<()> {
     );
     assert_eq!(
         r.facts.total_len, announced.size,
-        "长度要取 Content-Range 的分母（整份文件），不是本次响应的 {}", PROBE_READ_BYTES
+        "长度要取 Content-Range 的分母（整份文件），不是本次响应的 {}",
+        PROBE_READ_BYTES
     );
-    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES, "预读要正好读满限量");
+    assert_eq!(
+        r.prelude.len() as u64,
+        PROBE_READ_BYTES,
+        "预读要正好读满限量"
+    );
     // 派发第 7 条：与服务器宣布的值比（而不是历史字面量），且**非空**。
     let etag = r.facts.etag.as_deref().unwrap_or_default();
-    assert!(!etag.is_empty(), "ETag 必须取到了非空值：{:?}", r.facts.etag);
+    assert!(
+        !etag.is_empty(),
+        "ETag 必须取到了非空值：{:?}",
+        r.facts.etag
+    );
     assert_eq!(r.facts.etag.as_deref(), Some(announced.etag.as_str()));
-    assert_eq!(r.facts.last_modified.as_deref(), Some(announced.last_modified.as_str()));
-    assert_eq!(r.facts.final_url, format!("{base}/blob"), "没有重定向时落地 URL 就是请求的那条");
+    assert_eq!(
+        r.facts.last_modified.as_deref(),
+        Some(announced.last_modified.as_str())
+    );
+    assert_eq!(
+        r.facts.final_url,
+        format!("{base}/blob"),
+        "没有重定向时落地 URL 就是请求的那条"
+    );
     // 内容取证：字节本身对得上 blob 的块号（光看长度看不出错位/漏段）。
     harness::assert_blob_block_numbers(&r.prelude, 0)?;
-    assert_eq!(r.facts, r.facts(), "ProbeResult::facts() 交回的就是同一份事实（Task 5 的闸按值比）");
+    assert_eq!(
+        r.facts,
+        r.facts(),
+        "ProbeResult::facts() 交回的就是同一份事实（Task 5 的闸按值比）"
+    );
 
     // 发出去的请求确实是限量那一条（响应侧证明不了这件事，见 Server::requests 的文档）。
     let reqs = srv.requests_at_least(1)?;
     assert_eq!(reqs.len(), 1, "试探只该发一条请求：{reqs:?}");
     assert_eq!(reqs[0]["url"], "/blob");
-    assert_eq!(reqs[0]["range"], prelude_range(), "试探必须带限量 Range，而不是无 Range 后靠 drop");
+    assert_eq!(
+        reqs[0]["range"],
+        prelude_range(),
+        "试探必须带限量 Range，而不是无 Range 后靠 drop"
+    );
     Ok(())
 }
 
@@ -85,23 +109,40 @@ fn probe_reads_prelude_and_reports_ranges_supported() -> anyhow::Result<()> {
 fn probe_detects_server_without_ranges() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let announced = srv.announced()?;
-    let t = Task { url: format!("{base}/noranges"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/noranges"),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
 
     assert!(!r.facts.accept_ranges, "这条路由故意不回 Accept-Ranges");
     // 派发第 8 条：断真实数，不写"应该是 48 MiB"，也不为此再发第二枪去打听长度。
-    assert_eq!(r.facts.total_len, 1_048_576, "退化路径的长度就是这一次响应交出来的字节数");
-    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES, "限量照样守得住（服务端发了 1 MiB）");
+    assert_eq!(
+        r.facts.total_len, 1_048_576,
+        "退化路径的长度就是这一次响应交出来的字节数"
+    );
+    assert_eq!(
+        r.prelude.len() as u64,
+        PROBE_READ_BYTES,
+        "限量照样守得住（服务端发了 1 MiB）"
+    );
     harness::assert_blob_block_numbers(&r.prelude, 0)?;
     assert_eq!(
         r.facts.etag.as_deref(),
         Some(announced.etag.as_str()),
         "/noranges 也发 ETag，不能因为这一支退化就丢掉验证子"
     );
-    assert_eq!(r.facts.last_modified, None, "这条路由根本不发 Last-Modified（诚实的形状）");
+    assert_eq!(
+        r.facts.last_modified, None,
+        "这条路由根本不发 Last-Modified（诚实的形状）"
+    );
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs.len(), 1, "退化路径同样只发一枪，不再补一发问长度：{reqs:?}");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "退化路径同样只发一枪，不再补一发问长度：{reqs:?}"
+    );
     Ok(())
 }
 
@@ -132,8 +173,14 @@ fn prelude_range_and_degraded_headers_are_what_the_wire_actually_carries() -> an
         Some(PROBE_READ_BYTES.to_string().as_str()),
         "Content-Length 是**本次响应**的字节数，与全长不是一回事"
     );
-    assert_eq!(harness::head_header(&ranged, "accept-ranges").as_deref(), Some("bytes"));
-    assert_eq!(harness::head_header(&ranged, "etag").as_deref(), Some(announced.etag.as_str()));
+    assert_eq!(
+        harness::head_header(&ranged, "accept-ranges").as_deref(),
+        Some("bytes")
+    );
+    assert_eq!(
+        harness::head_header(&ranged, "etag").as_deref(),
+        Some(announced.etag.as_str())
+    );
     assert_eq!(
         harness::head_header(&ranged, "last-modified").as_deref(),
         Some(announced.last_modified.as_str())
@@ -142,27 +189,49 @@ fn prelude_range_and_degraded_headers_are_what_the_wire_actually_carries() -> an
     // ② 不认 Range 的那条：200 + 只有 1 MiB + **没有** Accept-Ranges 这一行。
     let degraded = harness::raw_response_head(port, "/noranges", &[("Range", &prelude_range())])?;
     eprintln!("---- 线上响应头 /noranges + Range ----\n{degraded}");
-    assert_eq!(harness::head_status(&degraded)?, 200, "无视 Range ⇒ 200，不是 206");
-    assert!(!harness::head_has(&degraded, "accept-ranges"), "退化路由就是不该发这个头");
+    assert_eq!(
+        harness::head_status(&degraded)?,
+        200,
+        "无视 Range ⇒ 200，不是 206"
+    );
+    assert!(
+        !harness::head_has(&degraded, "accept-ranges"),
+        "退化路由就是不该发这个头"
+    );
     assert!(!harness::head_has(&degraded, "content-range"));
-    assert_eq!(harness::head_header(&degraded, "content-length").as_deref(), Some("1048576"));
+    assert_eq!(
+        harness::head_header(&degraded, "content-length").as_deref(),
+        Some("1048576")
+    );
 
     // ③ 同一个对端、两条线上形状，与 probe 的解读逐字对上。
     let client = harness::client()?;
     let on = probe::run(
-        &Task { url: format!("http://127.0.0.1:{port}/blob"), ..harness::blank_task() },
+        &Task {
+            url: format!("http://127.0.0.1:{port}/blob"),
+            ..harness::blank_task()
+        },
         &client,
         PROBE_READ_BYTES,
     )?;
     let off = probe::run(
-        &Task { url: format!("http://127.0.0.1:{port}/noranges"), ..harness::blank_task() },
+        &Task {
+            url: format!("http://127.0.0.1:{port}/noranges"),
+            ..harness::blank_task()
+        },
         &client,
         PROBE_READ_BYTES,
     )?;
     assert!(on.facts.accept_ranges, "认 Range 的那条：{on:?}");
     assert!(!off.facts.accept_ranges, "不认 Range 的那条：{off:?}");
-    assert_eq!(on.facts.total_len, announced.size, "全长来自 Content-Range 的分母");
-    assert_eq!(off.facts.total_len, 1_048_576, "没有 Content-Range 时退到 Content-Length");
+    assert_eq!(
+        on.facts.total_len, announced.size,
+        "全长来自 Content-Range 的分母"
+    );
+    assert_eq!(
+        off.facts.total_len, 1_048_576,
+        "没有 Content-Range 时退到 Content-Length"
+    );
     Ok(())
 }
 
@@ -204,29 +273,54 @@ fn a_data_file_task_is_refused_before_the_probe_touches_the_wire() -> anyhow::Re
         user: Some("alice".into()), // 只有用户名：明文 HTTP 上合法（口令那一半另有闸）
         ..harness::blank_task()
     };
-    assert!(!t.segmentable(), "夹具：带 POST 体的任务不分段（Task::segmentable 的语义）");
+    assert!(
+        !t.segmentable(),
+        "夹具：带 POST 体的任务不分段（Task::segmentable 的语义）"
+    );
 
     let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
         panic!("带 --data-file 的任务必须被 probe 拒掉，不许退化成一条无体的 GET");
     };
     let msg = err.to_string();
     eprintln!("---- 带 --data-file 的拒绝原文 ----\n{msg}");
-    assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
-    assert!(!msg.contains(SENTINEL) && !msg.contains("cvv"), "错误里抄了体的字节：{msg}");
     assert!(
-        srv.requests_within(std::time::Duration::from_millis(500))?.is_empty(),
+        msg.contains("--data-file"),
+        "错误要点名那个参数，用户才知道改什么：{msg}"
+    );
+    assert!(
+        !msg.contains(SENTINEL) && !msg.contains("cvv"),
+        "错误里抄了体的字节：{msg}"
+    );
+    assert!(
+        srv.requests_within(std::time::Duration::from_millis(500))?
+            .is_empty(),
         "被拒的试探一个字节都不该上网（GET 打出去 = 拿另一条请求的事实冒充这条）"
     );
 
     // 对照：同一 URL、同一客户端，去掉 data_file ⇒ 必须照常试探成功。
-    let plain = Task { url: format!("{base}/blob"), data_file: None, ..t.clone() };
+    let plain = Task {
+        url: format!("{base}/blob"),
+        data_file: None,
+        ..t.clone()
+    };
     let r = probe::run(&plain, &client, PROBE_READ_BYTES)?;
-    assert_eq!(r.facts.total_len, announced.size, "对照组要真下得出结论，否则上面那支可以靠\"全都拒\"绿");
+    assert_eq!(
+        r.facts.total_len, announced.size,
+        "对照组要真下得出结论，否则上面那支可以靠\"全都拒\"绿"
+    );
     assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES);
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs.len(), 1, "被拒那一枪不该留下请求行，只有对照组的：{reqs:?}");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "被拒那一枪不该留下请求行，只有对照组的：{reqs:?}"
+    );
     assert_eq!(reqs[0]["url"], "/blob");
-    assert_eq!(reqs[0]["range"], prelude_range(), "对照组走的是限量 Range 那一支");
+    assert_eq!(
+        reqs[0]["range"],
+        prelude_range(),
+        "对照组走的是限量 Range 那一支"
+    );
     let _ = std::fs::remove_file(&body);
     Ok(())
 }
@@ -239,13 +333,24 @@ fn a_data_file_task_is_refused_before_the_probe_touches_the_wire() -> anyhow::Re
 fn a_zero_prelude_limit_reads_no_body_and_sends_no_range() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let announced = srv.announced()?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &harness::client()?, 0)?;
-    assert!(r.prelude.is_empty(), "上限 0 ⇒ 一个字节都不取：{}", r.prelude.len());
+    assert!(
+        r.prelude.is_empty(),
+        "上限 0 ⇒ 一个字节都不取：{}",
+        r.prelude.len()
+    );
     assert_eq!(r.facts.total_len, announced.size, "头照样要读出全长");
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs[0]["range"], serde_json::Value::Null, "上限 0 不许发 `bytes=0--1` 那种谎话：{reqs:?}");
+    assert_eq!(
+        reqs[0]["range"],
+        serde_json::Value::Null,
+        "上限 0 不许发 `bytes=0--1` 那种谎话：{reqs:?}"
+    );
     Ok(())
 }
 
@@ -253,12 +358,19 @@ fn a_zero_prelude_limit_reads_no_body_and_sends_no_range() -> anyhow::Result<()>
 #[test]
 fn a_file_smaller_than_the_prelude_is_reported_at_its_real_length() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
-    let t = Task { url: format!("{base}/sz/1024"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/sz/1024"),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
 
     assert_eq!(r.facts.total_len, 1024, "Content-Range 的分母才是文件全长");
-    assert_eq!(r.prelude.len(), 1024, "整份文件比预读量小 ⇒ 预读就是整份文件");
+    assert_eq!(
+        r.prelude.len(),
+        1024,
+        "整份文件比预读量小 ⇒ 预读就是整份文件"
+    );
     harness::assert_blob_block_numbers(&r.prelude, 0)?;
     assert!(r.facts.accept_ranges);
     // 服务器确实只发了 1024 字节（不是 probe 自己截的）：限量 Range 的终点被服务端收到上限截短。
@@ -266,7 +378,10 @@ fn a_file_smaller_than_the_prelude_is_reported_at_its_real_length() -> anyhow::R
     assert_eq!(reqs[0]["url"], "/sz/1024");
     assert_eq!(reqs[0]["range"], prelude_range());
     let evs = srv.events_while(|evs| evs.iter().any(|e| e["ev"] == "response_done"))?;
-    let done = evs.iter().find(|e| e["ev"] == "response_done").expect("上面已等过 response_done");
+    let done = evs
+        .iter()
+        .find(|e| e["ev"] == "response_done")
+        .expect("上面已等过 response_done");
     eprintln!("---- /sz/1024 的服务端收尾记录 ----\n{done}");
     assert_eq!(done["bytes"], 1024, "服务端自己记的实发字节数");
     assert_eq!(done["status"], 206);
@@ -290,17 +405,27 @@ fn a_file_smaller_than_the_prelude_is_reported_at_its_real_length() -> anyhow::R
 #[test]
 fn a_zero_length_file_yields_zero_length_facts_instead_of_an_error() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
-    let t = Task { url: format!("{base}/sz/0"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/sz/0"),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
 
-    assert_eq!(r.facts.total_len, 0, "`bytes */0` 的分母就是全长，不是猜出来的");
+    assert_eq!(
+        r.facts.total_len, 0,
+        "`bytes */0` 的分母就是全长，不是猜出来的"
+    );
     assert!(r.prelude.is_empty(), "空文件的预读必须是空的");
     assert!(
         r.facts.accept_ranges,
         "416 是按 Range 语义给的回答 ⇒ 记成认 Range（这一味来自解读，见用例文档 ③）"
     );
-    assert_eq!(r.facts.final_url, format!("{base}/sz/0"), "落地 URL 照样要记下");
+    assert_eq!(
+        r.facts.final_url,
+        format!("{base}/sz/0"),
+        "落地 URL 照样要记下"
+    );
     // 416 那一支的响应头里没有 ETag/Last-Modified（harness 的 416 分支只发两个头），照实为空。
     assert_eq!(r.facts.etag, None);
     assert_eq!(r.facts.last_modified, None);
@@ -309,10 +434,19 @@ fn a_zero_length_file_yields_zero_length_facts_instead_of_an_error() -> anyhow::
     let head = harness::raw_response_head(srv.port(), "/sz/0", &[("Range", &prelude_range())])?;
     eprintln!("---- 线上响应头 /sz/0 + Range ----\n{head}");
     assert_eq!(harness::head_status(&head)?, 416);
-    assert_eq!(harness::head_header(&head, "content-range").as_deref(), Some("bytes */0"));
-    assert_eq!(harness::head_header(&head, "content-length").as_deref(), Some("0"));
+    assert_eq!(
+        harness::head_header(&head, "content-range").as_deref(),
+        Some("bytes */0")
+    );
+    assert_eq!(
+        harness::head_header(&head, "content-length").as_deref(),
+        Some("0")
+    );
     // ③ 解读与线上文本必须对得上：这个 416 里**没有** `Accept-Ranges` 可抄。
-    assert!(!harness::head_has(&head, "accept-ranges"), "若哪天它发了这个头，上面的 `true` 就该改成抄头");
+    assert!(
+        !harness::head_has(&head, "accept-ranges"),
+        "若哪天它发了这个头，上面的 `true` 就该改成抄头"
+    );
     assert!(
         r.facts.accept_ranges,
         "两头都没有却给了 true ⇒ 只能是那三条并列的判据在起作用，不是解析失误"
@@ -321,9 +455,19 @@ fn a_zero_length_file_yields_zero_length_facts_instead_of_an_error() -> anyhow::
     // ② 同一-route、不带 Range：诚实的 200 + `Content-Length: 0` + `Accept-Ranges: bytes`。
     let plain = harness::raw_response_head(srv.port(), "/sz/0", &[])?;
     eprintln!("---- 线上响应头 /sz/0 无 Range ----\n{plain}");
-    assert_eq!(harness::head_status(&plain)?, 200, "0 字节文件在这台服务器上是既有事实，不是 Range 逼出来的");
-    assert_eq!(harness::head_header(&plain, "content-length").as_deref(), Some("0"));
-    assert_eq!(harness::head_header(&plain, "accept-ranges").as_deref(), Some("bytes"));
+    assert_eq!(
+        harness::head_status(&plain)?,
+        200,
+        "0 字节文件在这台服务器上是既有事实，不是 Range 逼出来的"
+    );
+    assert_eq!(
+        harness::head_header(&plain, "content-length").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        harness::head_header(&plain, "accept-ranges").as_deref(),
+        Some("bytes")
+    );
     Ok(())
 }
 
@@ -340,7 +484,10 @@ fn a_416_that_is_not_the_empty_file_shape_is_still_an_error() -> anyhow::Result<
 
     // 支一：416 + `bytes */4194304`（分母非 0）⇒ 拒。伪修"416 一律 total_len=0"在这里红：
     // 那份事实会在引擎里读成"这活儿已经干完了"，把一个 4 MiB 的文件当成下完了。
-    let t = Task { url: format!("{}/total/4194304", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/total/4194304", stub.base()),
+        ..harness::blank_task()
+    };
     let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
         panic!("416 + bytes */4194304 不是空文件形状，必须报错而不是给一份 total_len = 0 的事实");
     };
@@ -353,14 +500,20 @@ fn a_416_that_is_not_the_empty_file_shape_is_still_an_error() -> anyhow::Result<
     // 支二：**我们没发 Range**（`prelude_max == 0` 的形状）却收到 416 + `bytes */0` ⇒ 仍要拒。
     // 这一支钉的是"三条并列"里的第三条：分母 0 只有在"我们问过 Range"时才说得通。
     // 放过去的话，一个把 416 当默认回答的畸形对端会让 probe 交出一份"0 字节的空文件"。
-    let no_range = Task { url: format!("{}/total/0", stub.base()), ..harness::blank_task() };
+    let no_range = Task {
+        url: format!("{}/total/0", stub.base()),
+        ..harness::blank_task()
+    };
     let Err(err) = probe::run(&no_range, &client, 0) else {
         panic!("本次没发 Range，416 就不是\"空文件\"的证据，必须报错");
     };
     let msg = err.to_string();
     eprintln!("---- 416（本次没发 Range）的拒绝原文 ----\n{msg}");
     assert!(msg.contains("416"), "错误要点名状态码：{msg}");
-    assert!(msg.contains("没发 Range"), "错误要说清是我们没问 Range：{msg}");
+    assert!(
+        msg.contains("没发 Range"),
+        "错误要说清是我们没问 Range：{msg}"
+    );
 
     assert!(
         stub.saw("/total/4194304") && stub.saw("/total/0"),
@@ -375,7 +528,10 @@ fn a_416_that_is_not_the_empty_file_shape_is_still_an_error() -> anyhow::Result<
 #[test]
 fn a_response_without_any_length_header_is_refused_not_guessed() -> anyhow::Result<()> {
     let stub = harness::spawn_lengthless_stub()?;
-    let t = Task { url: format!("{}/no-length", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/no-length", stub.base()),
+        ..harness::blank_task()
+    };
 
     let Err(err) = probe::run(&t, &harness::client()?, PROBE_READ_BYTES) else {
         panic!("对端不说长度时 probe 不许猜一个数出来");
@@ -383,7 +539,11 @@ fn a_response_without_any_length_header_is_refused_not_guessed() -> anyhow::Resu
     let msg = err.to_string();
     eprintln!("---- 长度取不到时的错误原文 ----\n{msg}");
     assert!(msg.contains("长度"), "错误要说清是长度定不下来：{msg}");
-    assert!(stub.saw("/no-length"), "本用例必须真的打到对端上：{:?}", stub.seen());
+    assert!(
+        stub.saw("/no-length"),
+        "本用例必须真的打到对端上：{:?}",
+        stub.seen()
+    );
     Ok(())
 }
 
@@ -401,18 +561,24 @@ fn a_response_without_any_length_header_is_refused_not_guessed() -> anyhow::Resu
 /// 第四条 `/known-total` 是**对照组**：分母可用时必须照常读出 48 MiB（不是窗口）——
 /// 没有它，"把所有 206 都拒掉"也算修好了。
 #[test]
-fn a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_length(
-) -> anyhow::Result<()> {
+fn a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_length()
+-> anyhow::Result<()> {
     let fake = PROBE_READ_BYTES.to_string(); // 那个假数字就是窗口大小 = 236032
     let stub = harness::spawn_unknown_total_stub(PROBE_READ_BYTES)?;
     let client = harness::client()?;
 
     for (route, shape) in [
-        ("/unknown-total", "Content-Range 的总长写成 `*`（RFC 9110 允许的未知总长）"),
+        (
+            "/unknown-total",
+            "Content-Range 的总长写成 `*`（RFC 9110 允许的未知总长）",
+        ),
         ("/garbage-total", "Content-Range 的分母不是数字"),
         ("/no-content-range", "206 根本不带 Content-Range"),
     ] {
-        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
+        let t = Task {
+            url: format!("{}{route}", stub.base()),
+            ..harness::blank_task()
+        };
         // 用 `match` 而不是 `let Err(..) else`：后者在 else 分支里叫不出那份"成功"，
         // 而本轮要的恰恰是把它的 `total_len` 打出来当证据。
         let err = match probe::run(&t, &client, PROBE_READ_BYTES) {
@@ -437,12 +603,22 @@ fn a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_
     }
 
     // 对照组：同一台对端、分母可用 ⇒ 全长来自分母，不是窗口。
-    let t = Task { url: format!("{}/known-total", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/known-total", stub.base()),
+        ..harness::blank_task()
+    };
     let r = probe::run(&t, &client, PROBE_READ_BYTES)?;
     eprintln!("---- 对照组（分母可用的 206）----\n{:?}", r.facts);
-    assert_eq!(r.facts.total_len, 48 * 1024 * 1024, "读的是 Content-Range 的分母，不是 Content-Length");
+    assert_eq!(
+        r.facts.total_len,
+        48 * 1024 * 1024,
+        "读的是 Content-Range 的分母，不是 Content-Length"
+    );
     assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES, "窗口照样读满");
-    assert!(r.facts.accept_ranges, "206 + 可用的 Content-Range ⇒ 认 Range（不受 I1 的合取影响）");
+    assert!(
+        r.facts.accept_ranges,
+        "206 + 可用的 Content-Range ⇒ 认 Range（不受 I1 的合取影响）"
+    );
     Ok(())
 }
 
@@ -462,7 +638,8 @@ fn a_206_without_a_usable_total_is_refused_instead_of_reading_the_window_as_the_
 /// `https` 那一侧的方向在单元层断（`build_request_...` 那几条）：本仓库的 node 对端不做 TLS，
 /// 装一条真 https 服务不在本轮授权里，所以那条是"请求构造层"的证据而不是"线上"的证据。
 #[test]
-fn probe_puts_the_task_headers_on_the_wire_but_not_credentials_in_the_clear() -> anyhow::Result<()> {
+fn probe_puts_the_task_headers_on_the_wire_but_not_credentials_in_the_clear() -> anyhow::Result<()>
+{
     let (srv, base) = harness::spawn()?;
     let t = Task {
         url: format!("{base}/sz/4096"),
@@ -474,13 +651,25 @@ fn probe_puts_the_task_headers_on_the_wire_but_not_credentials_in_the_clear() ->
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
     let reqs = srv.requests_at_least(1)?;
-    eprintln!("---- 服务端看到的请求行 ----\n{}", serde_json::to_string_pretty(&reqs[0])?);
+    eprintln!(
+        "---- 服务端看到的请求行 ----\n{}",
+        serde_json::to_string_pretty(&reqs[0])?
+    );
     assert_eq!(reqs[0]["referer"], "https://ref.example/page");
-    assert_eq!(reqs[0]["cookie"], "sid=42", "Cookie 不看 scheme 照发（E9/R6：它是按设计持久化的字段）");
-    assert_eq!(reqs[0]["accept_encoding"], "identity", "分段下载不能让中间人压体（Content-Length 会失真）");
+    assert_eq!(
+        reqs[0]["cookie"], "sid=42",
+        "Cookie 不看 scheme 照发（E9/R6：它是按设计持久化的字段）"
+    );
+    assert_eq!(
+        reqs[0]["accept_encoding"], "identity",
+        "分段下载不能让中间人压体（Content-Length 会失真）"
+    );
     // 服务端把非标准头单独记在 `extra_headers` 里（`authorization` 属于那一堆），这里直接查那张表：
     // 用 `["authorization"] == Null` 那种写法的话，`extra_headers` 整个缺失时也等于 Null ⇒ 恒绿。
-    let extra = reqs[0]["extra_headers"].as_object().cloned().unwrap_or_default();
+    let extra = reqs[0]["extra_headers"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     assert!(
         !extra.contains_key("authorization"),
         "明文 HTTP 上 Authorization 一个字节都不许到服务端（用户名本身也是半副凭据）。实际收到的头：{extra:?}"
@@ -507,9 +696,13 @@ fn a_password_over_plain_http_never_leaves_the_socket() -> anyhow::Result<()> {
     };
     let msg = err.to_string();
     assert!(msg.contains("口令"), "错误要说清是口令规则：{msg}");
-    assert!(!msg.contains("hunter2"), "错误消息自己不该把口令抄一遍：{msg}");
     assert!(
-        srv.requests_within(std::time::Duration::from_millis(500))?.is_empty(),
+        !msg.contains("hunter2"),
+        "错误消息自己不该把口令抄一遍：{msg}"
+    );
+    assert!(
+        srv.requests_within(std::time::Duration::from_millis(500))?
+            .is_empty(),
         "被拒的试探不该已经打到服务器上"
     );
     Ok(())
@@ -547,19 +740,26 @@ fn a_password_over_plain_http_never_leaves_the_socket() -> anyhow::Result<()> {
 ///    **path** 里（L1/L3/L4 实测两闸都放行、`probe::run` 交回 `Ok`），那一族的后果登记在
 ///    `t99-G1e-report.md` §2，不在本用例的射程内。
 #[test]
-fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() -> anyhow::Result<()> {
+fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() -> anyhow::Result<()>
+{
     let (srv, base) = harness::spawn()?;
     let dir = harness::tmp_dir("g1c-leak")?;
     let out_dir = dir.path().display().to_string();
     // authority 从 harness 自己报的 base 上取（端口是 bind 之后才知道的，不许写死）。
-    let authority = base.strip_prefix("http://")
+    let authority = base
+        .strip_prefix("http://")
         .context("harness 的 base 不以 http:// 开头，本用例的形状拼不出来")?
         .to_string();
 
     // ① 正向控制臂：规范 http、不带凭据 ⇒ 必须真的下载、真的在日志里留下一条请求。
     let ok = run_dlm(&[
-        "--url", &format!("{base}/sz/4096"), "--out-dir", &out_dir,
-        "--out-name", "control.bin", "--quiet",
+        "--url",
+        &format!("{base}/sz/4096"),
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "control.bin",
+        "--quiet",
     ])?;
     assert_eq!(
         ok.status.code(),
@@ -569,8 +769,14 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
         stderr_of(&ok),
     );
     let before = srv.requests_at_least(1)?;
-    assert!(!before.is_empty(), "正向臂的请求没落进日志 ⇒ 日志读法本身是坏的");
-    assert!(dir.path().join("control.bin").exists(), "对照臂的目标文件要在盘上");
+    assert!(
+        !before.is_empty(),
+        "正向臂的请求没落进日志 ⇒ 日志读法本身是坏的"
+    );
+    assert!(
+        dir.path().join("control.bin").exists(),
+        "对照臂的目标文件要在盘上"
+    );
 
     // ② 被拒的那些：头 14 支每一支都**真指向本对端** ⇒ 一旦放行，`authorization` 就会落在日志里，
     //    而不是"发不出去所以没证据"。形状来源是 G1b 报告 §6.1 的第三族 + G1/G1b 两族 + 规范对照
@@ -578,17 +784,17 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
     //    每格 = (形状, 凭据走不走 `--password`)。
     const CRED: &str = "u:PASS@";
     let refused: Vec<(String, bool)> = vec![
-        (format!("http://{CRED}{authority}/x0.bin"), false),   // 规范写法（对照：这一支从 G1 之前就该退 2）
-        (format!("http:/{CRED}{authority}/x1.bin"), false),    // 第三族：单斜杠
-        (format!("http:/\\{CRED}{authority}/x2.bin"), false),  // 第三族：斜杠 + 反斜杠
+        (format!("http://{CRED}{authority}/x0.bin"), false), // 规范写法（对照：这一支从 G1 之前就该退 2）
+        (format!("http:/{CRED}{authority}/x1.bin"), false),  // 第三族：单斜杠
+        (format!("http:/\\{CRED}{authority}/x2.bin"), false), // 第三族：斜杠 + 反斜杠
         (format!("http:////{CRED}{authority}/x3.bin"), false), // 第三族：四斜杠
         (format!("http:\\\\{CRED}{authority}/x4.bin"), false), // 反斜杠两支
-        (format!("http:{CRED}{authority}/x5.bin"), false),     // 什么分隔符都没有
-        (format!("http:///{CRED}{authority}/x6.bin"), false),  // 三斜杠
-        (format!("\u{1}http://{CRED}{authority}/x7.bin"), false),  // 前导 C0（G1b 那一族）
-        (format!("http\t://{CRED}{authority}/x8.bin"), false),     // scheme 分隔符里插 Tab
-        (format!(" \thttp://{CRED}{authority}/x9.bin"), false),    // 前导空白（G1 那一族）
-        (format!("ht\ntp://{CRED}{authority}/x10.bin"), false),    // scheme 里插 LF
+        (format!("http:{CRED}{authority}/x5.bin"), false),   // 什么分隔符都没有
+        (format!("http:///{CRED}{authority}/x6.bin"), false), // 三斜杠
+        (format!("\u{1}http://{CRED}{authority}/x7.bin"), false), // 前导 C0（G1b 那一族）
+        (format!("http\t://{CRED}{authority}/x8.bin"), false), // scheme 分隔符里插 Tab
+        (format!(" \thttp://{CRED}{authority}/x9.bin"), false), // 前导空白（G1 那一族）
+        (format!("ht\ntp://{CRED}{authority}/x10.bin"), false), // scheme 里插 LF
         // 同一族的另一半：**凭据走 `--password`**、形状仍是分隔符变体。这一组是"零命中"抓不住的那一半 ——
         // 放行它不会让 `authorization` 上线（`url_is_https` 给假），但会**真打出一枪**并交出非 2 的码，
         // 所以下面那条"请求条数不许多"才是它的针。G1b 报告 §6.1 末尾登记的就是这一支。
@@ -600,13 +806,18 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
         // 这一句是**用户可见承诺**，进程级以前没有针（复审 I-3）；R1.6 那六行证据在 `target/` 里，随清理即失。
         // 两臂都不指向本对端 ⇒ 下面那段循环的三条判据（退码 2、stderr 不含"跑不起来"、
         // 请求条数不许多）**自动适用**，不为它们单开断言、不放宽任何一条既有判据。
-        ("https://".to_string(), true),            // 空 host：R1 裁定三那一族
+        ("https://".to_string(), true), // 空 host：R1 裁定三那一族
         ("https://:8443/d.bin".to_string(), true), // 空 host + 端口：本发裁定一新夹的那一族
     ];
     for (shape, with_password) in &refused {
         let mut args: Vec<&str> = vec![
-            "--url", shape.as_str(), "--out-dir", out_dir.as_str(),
-            "--out-name", "leak-check.bin", "--quiet",
+            "--url",
+            shape.as_str(),
+            "--out-dir",
+            out_dir.as_str(),
+            "--out-name",
+            "leak-check.bin",
+            "--quiet",
         ];
         if *with_password {
             args.extend_from_slice(&["--user", "alice", "--password", "hunter2"]);
@@ -624,9 +835,18 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
             so.is_empty(),
             "{shape:?} 的 stdout 有输出 ⇒ 这一趟走到了打印摘要或结果行那一步，参数闸没拦住：{so}"
         );
-        assert!(!es.contains("PASS"), "stderr 不许把 URL 里的口令抄一遍：{es}");
-        assert!(!es.contains("hunter2"), "stderr 不许把 --password 抄一遍：{es}");
-        assert!(!es.contains("跑不起来"), "出现引擎那句就说明这趟走进了装配：{es}");
+        assert!(
+            !es.contains("PASS"),
+            "stderr 不许把 URL 里的口令抄一遍：{es}"
+        );
+        assert!(
+            !es.contains("hunter2"),
+            "stderr 不许把 --password 抄一遍：{es}"
+        );
+        assert!(
+            !es.contains("跑不起来"),
+            "出现引擎那句就说明这趟走进了装配：{es}"
+        );
         assert!(
             !dir.path().join("leak-check.bin").exists(),
             "{shape:?} 被拒之后磁盘上不该有目标文件（闸排在任何 I/O 之前）"
@@ -635,8 +855,17 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
 
     // ② 的另一半：规范 http + `--password` 同样退 2，但走的是**口令**那一支。
     let plain = run_dlm(&[
-        "--url", &format!("{base}/blob"), "--out-dir", &out_dir, "--out-name", "plain.bin",
-        "--user", "alice", "--password", "hunter2", "--quiet",
+        "--url",
+        &format!("{base}/blob"),
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "plain.bin",
+        "--user",
+        "alice",
+        "--password",
+        "hunter2",
+        "--quiet",
     ])?;
     assert_eq!(
         plain.status.code(),
@@ -645,13 +874,25 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
         stderr_of(&plain)
     );
     let es = stderr_of(&plain);
-    assert!(es.contains("明文 HTTP 不发送口令"), "对照臂要走的那一支：{es}");
+    assert!(
+        es.contains("明文 HTTP 不发送口令"),
+        "对照臂要走的那一支：{es}"
+    );
     assert!(!es.contains("hunter2"), "错误消息不许抄口令：{es}");
 
     // ③ 规范 https + 凭据 + `--no-start` ⇒ 退 0：严格化没把合法写法一起杀（这一格不联网）。
     let secure = run_dlm(&[
-        "--url", "https://example.invalid/dir/a.bin", "--out-dir", &out_dir,
-        "--out-name", "secure.bin", "--user", "alice", "--password", "hunter2", "--no-start",
+        "--url",
+        "https://example.invalid/dir/a.bin",
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "secure.bin",
+        "--user",
+        "alice",
+        "--password",
+        "hunter2",
+        "--no-start",
     ])?;
     assert_eq!(
         secure.status.code(),
@@ -675,8 +916,7 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
         .filter(|r| r["extra_headers"].get("authorization").is_some())
         .count();
     assert_eq!(
-        auth_hits,
-        0,
+        auth_hits, 0,
         "对端按字段名记的 `extra_headers.authorization` 命中 {auth_hits} 次 ⇒ 有凭据上了明文线：{after:?}"
     );
     Ok(())
@@ -693,7 +933,10 @@ fn every_rejected_credential_shape_leaves_no_authorization_header_on_the_wire() 
 #[test]
 fn a_credentialed_landing_url_is_refused_and_never_echoed() -> anyhow::Result<()> {
     let (stub, land_url) = harness::spawn_redirect_stub("alice:s3cret@127.0.0.1:{port}")?;
-    let t = Task { url: format!("{}/start", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/start", stub.base()),
+        ..harness::blank_task()
+    };
 
     let Err(err) = probe::run(&t, &harness::client()?, PROBE_READ_BYTES) else {
         panic!(
@@ -706,10 +949,19 @@ fn a_credentialed_landing_url_is_refused_and_never_echoed() -> anyhow::Result<()
     // 措辞同步（T99-J1 §3，复审 I-3）：旧那句要求 `contains("重定向")`＝替用户断言了一件**没发生**的
     // 事（这一支命中的是内容形，authority 里也没有 `@`）。现在要求的是"给出两种来源"，
     // 并把两个假指认点各自钉成负断言 —— 判据方向是**收紧**，不是放宽。
-    assert!(msg.contains("--url") && msg.contains("可能"), "措辞要给出两种来源：{msg}");
-    assert!(!msg.contains("重定向后的地址") && !msg.contains("userinfo") && !msg.contains("主机名前面"), "措辞不许假指认：{msg}");
+    assert!(
+        msg.contains("--url") && msg.contains("可能"),
+        "措辞要给出两种来源：{msg}"
+    );
+    assert!(
+        !msg.contains("重定向后的地址") && !msg.contains("userinfo") && !msg.contains("主机名前面"),
+        "措辞不许假指认：{msg}"
+    );
     for leak in ["s3cret", "alice", "landed"] {
-        assert!(!msg.contains(leak), "错误里回显了落地 URL 的一部分（{leak}）：{msg}");
+        assert!(
+            !msg.contains(leak),
+            "错误里回显了落地 URL 的一部分（{leak}）：{msg}"
+        );
     }
     // 假断言防护：只有**真的跟随了**重定向，本用例才在测落地 URL 这一环。
     assert!(
@@ -724,10 +976,16 @@ fn a_credentialed_landing_url_is_refused_and_never_echoed() -> anyhow::Result<()
 #[test]
 fn an_ordinary_redirect_still_lands_and_is_reported() -> anyhow::Result<()> {
     let (stub, land_url) = harness::spawn_redirect_stub("127.0.0.1:{port}")?;
-    let t = Task { url: format!("{}/start", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/start", stub.base()),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
-    assert_eq!(r.facts.final_url, land_url, "落地 URL 要如实记下（spec §6.5：续传按它比对）");
+    assert_eq!(
+        r.facts.final_url, land_url,
+        "落地 URL 要如实记下（spec §6.5：续传按它比对）"
+    );
     // **期望更正（评审 I1），不是削弱断言**：落地那条自己发了 `Accept-Ranges: bytes`，却对我们那条
     // `bytes=0-236031` 回 `200` ⇒ 这个对端**不**按 Range 答话。原写法 `assert!(.., "落地那条自己发了
     // Accept-Ranges: bytes")` 钉的正是缺陷本身（把"头怎么说"当成"行为上做没做"）：那种读法下
@@ -738,9 +996,17 @@ fn an_ordinary_redirect_still_lands_and_is_reported() -> anyhow::Result<()> {
         "对我们那条 Range 回了 200 ⇒ 头里的 Accept-Ranges 不作数（spec §2.2 第二条）：{:?}",
         r.facts
     );
-    assert_eq!(r.facts.etag.as_deref(), Some("\"stub\""), "ETag 原样保留，含协议要求的引号");
+    assert_eq!(
+        r.facts.etag.as_deref(),
+        Some("\"stub\""),
+        "ETag 原样保留，含协议要求的引号"
+    );
     assert_eq!(r.facts.total_len, 0, "落地那条是 Content-Length: 0");
-    assert!(stub.saw("/landed"), "必须真的跟随了重定向：{:?}", stub.seen());
+    assert!(
+        stub.saw("/landed"),
+        "必须真的跟随了重定向：{:?}",
+        stub.seen()
+    );
     Ok(())
 }
 
@@ -762,8 +1028,8 @@ fn an_ordinary_redirect_still_lands_and_is_reported() -> anyhow::Result<()> {
 ///   （里面看得见那条 URL —— 这一族是已登记的边界，见 README「凭证与边界」①/②）。
 ///   这一臂防的是"判据把连接失败一起吞掉"：只断正臂的那四格挡不住"恒拒"。
 #[test]
-fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branch_and_keeps_the_stage(
-) -> anyhow::Result<()> {
+fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branch_and_keeps_the_stage()
+-> anyhow::Result<()> {
     let (srv, _base) = harness::spawn()?;
     let port = srv.port();
     let client = harness::client()?;
@@ -774,10 +1040,20 @@ fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branc
 
     // (用户名, 线上那份凭据对 base64("<user>:<口令>") 的值, 这一格钉的是哪一档, 旧判据撞不撞得中)
     let cases = [
-        (Some("aliceX"), "YWxpY2VYOmh1bnRlcjI=", "mod 1（aliceX:hunter2）", false),
+        (
+            Some("aliceX"),
+            "YWxpY2VYOmh1bnRlcjI=",
+            "mod 1（aliceX:hunter2）",
+            false,
+        ),
         (Some("a"), "YTpodW50ZXIy", "mod 2（a:hunter2）", false),
         (None, "Omh1bnRlcjI=", "不给 --user（:hunter2）", false),
-        (Some("alice"), "YWxpY2U6aHVudGVyMg==", "mod 0 对照（alice:hunter2，旧判据已绿）", true),
+        (
+            Some("alice"),
+            "YWxpY2U6aHVudGVyMg==",
+            "mod 0 对照（alice:hunter2，旧判据已绿）",
+            true,
+        ),
     ];
     let mut failures: Vec<String> = vec![];
     for (user, blob, arm, old_hits) in cases {
@@ -794,25 +1070,36 @@ fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branc
             ..harness::blank_task()
         };
         let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
-            failures.push(format!("{arm}：明文对端上 TLS 居然成功了 ⇒ 这一格测的是不存在的形状"));
+            failures.push(format!(
+                "{arm}：明文对端上 TLS 居然成功了 ⇒ 这一格测的是不存在的形状"
+            ));
             continue;
         };
         // 用户看得见的是**整条链**（`src/main.rs` 打的是 `{err:#}`），所以量具也按整条链读。
         let msg = format!("{err:#}");
         eprintln!("---- {arm}（--user {user:?}）的原文 ----\n{msg}");
         if !msg.contains("凭据") || msg.contains("error sending request") {
-            failures.push(format!("{arm}：没被换成那句不回显的拒绝 ⇒ 第二组在活体仪器上没开火：{msg}"));
+            failures.push(format!(
+                "{arm}：没被换成那句不回显的拒绝 ⇒ 第二组在活体仪器上没开火：{msg}"
+            ));
             continue;
         }
         // 措辞族（§3）：不许假指认，也不许把失败原因整条丢掉。
-        if msg.contains("重定向后的地址") || msg.contains("userinfo") || msg.contains("主机名前面") {
-            failures.push(format!("{arm}：措辞又回去断言了一件没发生的事／一个不存在的形状：{msg}"));
+        if msg.contains("重定向后的地址") || msg.contains("userinfo") || msg.contains("主机名前面")
+        {
+            failures.push(format!(
+                "{arm}：措辞又回去断言了一件没发生的事／一个不存在的形状：{msg}"
+            ));
         }
         if !msg.contains("--url") {
-            failures.push(format!("{arm}：措辞没给出\"也可能是你自己写的那条\"这一半：{msg}"));
+            failures.push(format!(
+                "{arm}：措辞没给出\"也可能是你自己写的那条\"这一半：{msg}"
+            ));
         }
         if !msg.contains("失败阶段") {
-            failures.push(format!("{arm}：错误支那半句（失败阶段）没了 ⇒ 真原因又被吞掉：{msg}"));
+            failures.push(format!(
+                "{arm}：错误支那半句（失败阶段）没了 ⇒ 真原因又被吞掉：{msg}"
+            ));
         }
         // 不回显：口令本尊、那份 blob、以及地址的任何片段都不许进这一行。
         for leak in [SECRET, blob, "127.0.0.1", "http://", "https://", "@"] {
@@ -821,18 +1108,31 @@ fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branc
             }
         }
     }
-    assert!(failures.is_empty(), "错误支那三道臂有 {} 条不合：\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "错误支那三道臂有 {} 条不合：\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 
     // 反臂（牙）：与凭据无关的一段 base64 ⇒ 判据不开火 ⇒ 真错误整条打出来。
     let plain_blob = "YWJjZA"; // base64("abcd")，本任务口令是 hunter2
     let url = format!("https://127.0.0.1:{port}/x/{plain_blob}");
-    let t = Task { url: url.clone(), user: Some("aliceX".into()), password: Some(SECRET.into()), ..harness::blank_task() };
+    let t = Task {
+        url: url.clone(),
+        user: Some("aliceX".into()),
+        password: Some(SECRET.into()),
+        ..harness::blank_task()
+    };
     let Err(err) = probe::run(&t, &client, PROBE_READ_BYTES) else {
         panic!("明文对端上 TLS 不该成功 ⇒ 这一格测的是不存在的形状");
     };
     let msg = format!("{err:#}");
     eprintln!("---- 反臂（没有凭据形状）的原文 ----\n{msg}");
-    assert!(!msg.contains("凭据"), "反臂被判据吞掉了（判据不许把连接失败一起拒掉）：{msg}");
+    assert!(
+        !msg.contains("凭据"),
+        "反臂被判据吞掉了（判据不许把连接失败一起拒掉）：{msg}"
+    );
     assert!(
         msg.contains("试探请求发不出去") && msg.contains("error sending request"),
         "这一臂要看得见 reqwest 的真错误（原始错误类别不许丢）：{msg}"
@@ -871,7 +1171,8 @@ fn a_landing_url_carrying_the_wire_credential_pair_is_refused_on_the_error_branc
 ///   这是**现役闸的真缺陷**，与"半支 2 要不要接进四处"是两条独立的问题，报告 §2 单独标出。
 ///   按"已知坏行为不许钉成测试期望"，这三支**只登记反应、不钉 `Ok`**（见 `Read::RegisterOnly`）。
 #[test]
-fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations() -> anyhow::Result<()> {
+fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations()
+-> anyhow::Result<()> {
     /// 落地串拿到之后**这一支断什么**（任务三的三个口径，外加两支"对面压根没跟"）。
     #[derive(Copy, Clone)]
     enum Read {
@@ -1000,7 +1301,12 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
         let direct = harness::client()?.get(&start).send();
         match &direct {
             Ok(resp) => {
-                eprintln!("{} 直连 status={}，resp.url()={}", row.id, resp.status(), resp.url());
+                eprintln!(
+                    "{} 直连 status={}，resp.url()={}",
+                    row.id,
+                    resp.status(),
+                    resp.url()
+                );
             }
             Err(err) => {
                 eprintln!("{} 直连报错：{err}", row.id);
@@ -1009,7 +1315,10 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
         }
         let observed_url = match &direct {
             Ok(resp) => resp.url().as_str().to_string(),
-            Err(err) => err.url().map(|u| u.as_str().to_string()).unwrap_or_default(),
+            Err(err) => err
+                .url()
+                .map(|u| u.as_str().to_string())
+                .unwrap_or_default(),
         };
         // 任务三第 2 条：reqwest 交回的串**从此有测试钉着**（而不是有文档说着）。
         assert_eq!(
@@ -1020,22 +1329,42 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
         match row.read {
             Read::NotFollowedWithError => {
                 if let Ok(resp) = &direct {
-                    panic!("{}：非 http/https 的 Location 本该让 reqwest 当场报错，实际交回 {}", row.id, resp.status());
+                    panic!(
+                        "{}：非 http/https 的 Location 本该让 reqwest 当场报错，实际交回 {}",
+                        row.id,
+                        resp.status()
+                    );
                 }
             }
             Read::NotFollowedSilently => {
                 let resp = match &direct {
                     Ok(resp) => resp,
-                    Err(err) => panic!("{}：解析不出的 Location 本该被对面当成\"没有重定向\"原样交回，实际直连报错：{err}", row.id),
+                    Err(err) => panic!(
+                        "{}：解析不出的 Location 本该被对面当成\"没有重定向\"原样交回，实际直连报错：{err}",
+                        row.id
+                    ),
                 };
-                assert_eq!(resp.status(), 302, "{}：这一支的状态必须还是那条 302（对面压根没跟）", row.id);
+                assert_eq!(
+                    resp.status(),
+                    302,
+                    "{}：这一支的状态必须还是那条 302（对面压根没跟）",
+                    row.id
+                );
             }
             _ => {
                 let resp = match &direct {
                     Ok(resp) => resp,
-                    Err(err) => panic!("{}：这一支 reqwest 必须真跟随重定向并交回 200，实际直连报错：{err}", row.id),
+                    Err(err) => panic!(
+                        "{}：这一支 reqwest 必须真跟随重定向并交回 200，实际直连报错：{err}",
+                        row.id
+                    ),
                 };
-                assert_eq!(resp.status(), 200, "{}：落地那条必须是桩交回的诚实 200", row.id);
+                assert_eq!(
+                    resp.status(),
+                    200,
+                    "{}：落地那条必须是桩交回的诚实 200",
+                    row.id
+                );
             }
         }
         // 假断言防护（读法同现役那发凭据用例）：要么落地那条**真打到**对端，要么**一条都不许多**。
@@ -1055,7 +1384,10 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
         }
 
         // ── ② 同一条路走 probe::run：每一支都打原文，之后按 `read` 决定钉不钉。
-        let t = Task { url: start.clone(), ..harness::blank_task() };
+        let t = Task {
+            url: start.clone(),
+            ..harness::blank_task()
+        };
         let outcome = probe::run(&t, &harness::client()?, PROBE_READ_BYTES);
         match &outcome {
             Ok(r) => eprintln!("{} probe::run Ok：{r:?}", row.id),
@@ -1089,8 +1421,16 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
                     "{}：ETag 只能来自落地那条 200（含协议要求的引号）",
                     row.id
                 );
-                assert_eq!(r.facts.total_len, 0, "{}：落地那条是 Content-Length: 0", row.id);
-                assert!(r.prelude.is_empty(), "{}：落地那条没有体 ⇒ 预读为空", row.id);
+                assert_eq!(
+                    r.facts.total_len, 0,
+                    "{}：落地那条是 Content-Length: 0",
+                    row.id
+                );
+                assert!(
+                    r.prelude.is_empty(),
+                    "{}：落地那条没有体 ⇒ 预读为空",
+                    row.id
+                );
                 assert!(
                     !r.facts.accept_ranges,
                     "{}：对我们那条 Range 回了 200 ⇒ 头里的 Accept-Ranges 不作数（读法同\
@@ -1106,7 +1446,11 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
                     );
                 };
                 let msg = err.to_string();
-                assert!(msg.contains("凭据"), "{}：错误要说清拒的是凭据：{msg}", row.id);
+                assert!(
+                    msg.contains("凭据"),
+                    "{}：错误要说清拒的是凭据：{msg}",
+                    row.id
+                );
                 // 措辞同步（T99-J1 §3）：旧那句断言了"重定向后的地址"，而这一族命中时**可能压根
                 // 没有重定向**、authority 里也没有 `@` ⇒ 换成"给出两种来源"＋两个假指认点的负断言。
                 assert!(
@@ -1115,7 +1459,9 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
                     row.id
                 );
                 assert!(
-                    !msg.contains("重定向后的地址") && !msg.contains("userinfo") && !msg.contains("主机名前面"),
+                    !msg.contains("重定向后的地址")
+                        && !msg.contains("userinfo")
+                        && !msg.contains("主机名前面"),
                     "{}：措辞不许假指认一件没发生的事或一个不存在的形状：{msg}",
                     row.id
                 );
@@ -1164,8 +1510,8 @@ fn measure_the_landing_strings_reqwest_hands_back_for_server_supplied_locations(
 /// 真 TLS 维持具名欠账。反臂／空口令臂（连同 `!p.is_empty()` 那一刀的 m1 针）因此钉在
 /// `src/probe.rs` 单元层直调 `landed_url_is_refused` / `facts_from_response` 的三发用例里。
 #[test]
-fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_password(
-) -> anyhow::Result<()> {
+fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_password()
+-> anyhow::Result<()> {
     // 量具用现成的（G1e 任务一）：Location 是**字面量**，`{port}` 由桩换成实际端口。
     let (stub, _location) =
         harness::spawn_raw_redirect_stub("http:/someone:else@127.0.0.1:{port}/landed")?;
@@ -1178,13 +1524,27 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
     let want_url = format!("http://{authority}/someone:else@{authority}/landed");
     let want_target = format!("/someone:else@{authority}/landed");
 
-    let t = Task { url: format!("{}/start", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/start", stub.base()),
+        ..harness::blank_task()
+    };
     let r = probe::run(&t, &harness::client()?, PROBE_READ_BYTES).map_err(|err| {
         anyhow::anyhow!("任务没有口令 ⇒ 第三判据无从开火，这条落地路必须照旧 Ok（正臂红了＝统一判据在误杀）：{err}")
     })?;
-    assert_eq!(r.facts.final_url, want_url, "落地串必须按原样进 final_url（它就是会落盘、会进 ② 原因串的那一条）");
-    assert_eq!(r.facts.etag.as_deref(), Some("\"stub\""), "ETag 只能来自落地那条 200（证明真跟随了重定向）");
-    assert!(stub.saw(&want_target), "对端没收到落地那条 ⇒ 本发没测到落地这一环，实际收到：{:?}", stub.seen());
+    assert_eq!(
+        r.facts.final_url, want_url,
+        "落地串必须按原样进 final_url（它就是会落盘、会进 ② 原因串的那一条）"
+    );
+    assert_eq!(
+        r.facts.etag.as_deref(),
+        Some("\"stub\""),
+        "ETag 只能来自落地那条 200（证明真跟随了重定向）"
+    );
+    assert!(
+        stub.saw(&want_target),
+        "对端没收到落地那条 ⇒ 本发没测到落地这一环，实际收到：{:?}",
+        stub.seen()
+    );
     Ok(())
 }
 
@@ -1247,7 +1607,8 @@ fn the_unified_landing_gate_still_lands_a_password_shaped_path_without_a_task_pa
 ///   blast radius 覆盖所有请求（含四场景验收里的重定向那一路），而它要防的那一面实测为零；
 ///   对面哪天改了剥离条件，红的是这根针，不是用户。
 #[test]
-fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it() -> anyhow::Result<()> {
+fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it()
+-> anyhow::Result<()> {
     const SENTINEL: &str = "session=SENTINEL";
     // 一格 = (臂名, Location 模板, 第二跳该不该带着 Cookie, 要不要先起一只**独立**的落地对端)。
     // 前两臂**只差 Location 里的主机名**，第一跳的 base 由 `RedirectPeer::base()` 恒写成
@@ -1255,8 +1616,18 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
     // Location 里必须写**另一只**对端的端口，而那只有起来才知道 ⇒ 模板进不了常数表（`{port}` 换的是
     // 它自己的端口），由第 4 格在循环里现算，`"-"` 那一格因此不参与任何判断。
     const ARMS: &[(&str, &str, bool, bool)] = &[
-        ("跨 host（127.0.0.1 → localhost）", "http://localhost:{port}/landed", false, false),
-        ("同 host（127.0.0.1 → 127.0.0.1）", "http://127.0.0.1:{port}/landed", true, false),
+        (
+            "跨 host（127.0.0.1 → localhost）",
+            "http://localhost:{port}/landed",
+            false,
+            false,
+        ),
+        (
+            "同 host（127.0.0.1 → 127.0.0.1）",
+            "http://127.0.0.1:{port}/landed",
+            true,
+            false,
+        ),
         (
             "跨端口（127.0.0.1 → 127.0.0.1，但落到另一只端口上）",
             "-",
@@ -1285,7 +1656,14 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
         let out_dir = dir.path().display().to_string();
         let start = format!("{}/start", stub.base());
         let run = run_dlm(&[
-            "--url", &start, "--out-dir", &out_dir, "--out-name", "h3.bin", "--cookie", SENTINEL,
+            "--url",
+            &start,
+            "--out-dir",
+            &out_dir,
+            "--out-name",
+            "h3.bin",
+            "--cookie",
+            SENTINEL,
         ])
         .with_context(|| format!("{label}：起真二进制失败"))?;
         // 跑完这一趟是**三臂共同的前提**：任务被我们自己的闸拒掉时第二跳压根不会发生，
@@ -1302,13 +1680,20 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
         let hop1_all = stub.requests();
         let landing_all = landed.as_ref().map(|peer| peer.requests());
         let hop2_all: &[harness::ReceivedRequest] = landing_all.as_deref().unwrap_or(&hop1_all);
-        let hop1: Vec<&harness::ReceivedRequest> =
-            hop1_all.iter().filter(|r| r.target.starts_with("/start")).collect();
-        let hop2: Vec<&harness::ReceivedRequest> =
-            hop2_all.iter().filter(|r| !r.target.starts_with("/start")).collect();
+        let hop1: Vec<&harness::ReceivedRequest> = hop1_all
+            .iter()
+            .filter(|r| r.target.starts_with("/start"))
+            .collect();
+        let hop2: Vec<&harness::ReceivedRequest> = hop2_all
+            .iter()
+            .filter(|r| !r.target.starts_with("/start"))
+            .collect();
 
         // 共同正臂 1：哨兵确实上过线 —— 第一跳每一枪都带着它。
-        assert!(!hop1.is_empty(), "{label}：对端一条 /start 都没收到 ⇒ 三臂都没测到东西：{hop1_all:?}");
+        assert!(
+            !hop1.is_empty(),
+            "{label}：对端一条 /start 都没收到 ⇒ 三臂都没测到东西：{hop1_all:?}"
+        );
         for r in &hop1 {
             assert_eq!(
                 r.header("cookie"),
@@ -1319,8 +1704,7 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
         // 共同正臂 2：重定向**真被跟随过**（这是负向断言的对照臂，缺它整发就是恒真）。
         // `saw` 也要问**落地那只**：第三臂的第二跳压根不经过重定向那只。
         assert!(
-            !hop2.is_empty()
-                && landed.as_ref().unwrap_or(&stub).saw("/landed"),
+            !hop2.is_empty() && landed.as_ref().unwrap_or(&stub).saw("/landed"),
             "{label}：第二跳（落地那条 {landed_location}）压根没到达对端 ⇒ 下面那圈判据扫的是空集合：{hop2_all:?}"
         );
         for r in &hop2 {
@@ -1348,7 +1732,9 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
             "{label}：Location={landed_location}，第一跳 {} 枪、第二跳 {} 枪，第二跳 cookie={:?}",
             hop1.len(),
             hop2.len(),
-            hop2.iter().map(|r| r.header("cookie").unwrap_or("<无此头>")).collect::<Vec<_>>()
+            hop2.iter()
+                .map(|r| r.header("cookie").unwrap_or("<无此头>"))
+                .collect::<Vec<_>>()
         );
     }
     Ok(())
@@ -1416,9 +1802,15 @@ fn a_cross_host_redirect_drops_the_cookie_header_while_a_same_host_one_keeps_it(
 /// 更不是把源码抄进测试当字符串 —— 抄一份的针改不动实现，也测不到实现。
 #[test]
 fn the_four_landing_ports_in_fetch_all_go_through_the_unified_criterion() -> anyhow::Result<()> {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("fetch.rs");
-    let src = std::fs::read_to_string(&path)
-        .with_context(|| format!("读 {} 的源码文本失败（本发是源码扫描针，读不到就是没有判据）", path.display()))?;
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("fetch.rs");
+    let src = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "读 {} 的源码文本失败（本发是源码扫描针，读不到就是没有判据）",
+            path.display()
+        )
+    })?;
 
     // 判据一（禁字）：旧判据不许在这文件里再被直接调用。
     const OLD_CRITERION: &str = "authority_has_userinfo(";
@@ -1481,8 +1873,8 @@ fn the_four_landing_ports_in_fetch_all_go_through_the_unified_criterion() -> any
 /// 用窄对端而不是 node 服务器：本仓库的服务器是诚实的，`Range` 要么答 206 要么整个不发那个头，
 /// 造不出这个自相矛盾的形状（它也不该被改造成骗子 —— `probe-server.mjs` 不在本轮授权里）。
 #[test]
-fn a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads() -> anyhow::Result<()>
-{
+fn a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_reads()
+-> anyhow::Result<()> {
     const BODY: u64 = 4096;
     let stub = harness::spawn_range_ignoring_stub(BODY)?;
     let t = Task {
@@ -1500,8 +1892,16 @@ fn a_peer_that_answers_200_to_our_range_is_not_range_capable_however_its_header_
         r.facts.total_len, BODY,
         "退化读法：全长退到 Content-Length（这一支是诚实 200 交出来的整个 body）"
     );
-    assert_eq!(r.prelude.len() as u64, BODY, "body 比预读量小 ⇒ 预读就是整份 body");
-    assert_eq!(r.facts.etag.as_deref(), Some("\"stub-ignores-range\""), "退化不丢验证子");
+    assert_eq!(
+        r.prelude.len() as u64,
+        BODY,
+        "body 比预读量小 ⇒ 预读就是整份 body"
+    );
+    assert_eq!(
+        r.facts.etag.as_deref(),
+        Some("\"stub-ignores-range\""),
+        "退化不丢验证子"
+    );
     assert!(
         stub.saw("/claims-bytes-answers-200"),
         "必须真打到对端（否则本用例没测到任何请求行为）：{:?}",
@@ -1549,20 +1949,35 @@ fn same_connection_drained_206_then_416_both_complete() -> anyhow::Result<()> {
     };
     assert_eq!(second.status().as_u16(), 416);
     assert_eq!(
-        second.headers().get("content-range").and_then(|v| v.to_str().ok()),
+        second
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok()),
         Some(format!("bytes */{}", announced.size).as_str()),
         "416 要把全长说回来（harness 的 416 分支发的是 `bytes */<sendLen>`）"
     );
 
     // ③ 守卫的承重那一条：两次请求落在**同一条连接**上，否则本用例测的是"新开一条连接"。
     let reqs = srv.requests_at_least(2)?;
-    eprintln!("---- E3：服务端看到的请求行 ----\n{}", serde_json::to_string_pretty(&reqs)?);
-    assert_eq!(reqs[0]["conn"], reqs[1]["conn"], "两条请求必须在同一条连接上：{reqs:?}");
+    eprintln!(
+        "---- E3：服务端看到的请求行 ----\n{}",
+        serde_json::to_string_pretty(&reqs)?
+    );
+    assert_eq!(
+        reqs[0]["conn"], reqs[1]["conn"],
+        "两条请求必须在同一条连接上：{reqs:?}"
+    );
     assert_eq!(reqs[0]["reqNoOnConn"], 1);
-    assert_eq!(reqs[1]["reqNoOnConn"], 2, "第二条必须是那条连接上的第 2 枪（复用）");
+    assert_eq!(
+        reqs[1]["reqNoOnConn"], 2,
+        "第二条必须是那条连接上的第 2 枪（复用）"
+    );
 
     // ④ 第一条的响应确实**收尾**了：`response_done` 出现在第二条请求之前。
-    let evs = srv.events_while(|evs| evs.iter().any(|e| e["ev"] == "request" && e["reqNoOnConn"] == 2))?;
+    let evs = srv.events_while(|evs| {
+        evs.iter()
+            .any(|e| e["ev"] == "request" && e["reqNoOnConn"] == 2)
+    })?;
     let idx_done = evs
         .iter()
         .position(|e| e["ev"] == "response_done")
@@ -1571,7 +1986,10 @@ fn same_connection_drained_206_then_416_both_complete() -> anyhow::Result<()> {
         .iter()
         .position(|e| e["ev"] == "request" && e["reqNoOnConn"] == 2)
         .expect("上面已等过 reqNoOnConn=2");
-    assert!(idx_done < idx_second, "第一条响应必须已收尾才谈得上\"干净入池\"：事件序 {idx_done} vs {idx_second}");
+    assert!(
+        idx_done < idx_second,
+        "第一条响应必须已收尾才谈得上\"干净入池\"：事件序 {idx_done} vs {idx_second}"
+    );
     Ok(())
 }
 
@@ -1582,10 +2000,17 @@ fn probe_own_drained_prelude_then_a_416_on_the_same_client() -> anyhow::Result<(
     let (srv, base) = harness::spawn()?;
     let announced = srv.announced()?;
     let client = harness::client()?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &client, PROBE_READ_BYTES)?;
-    assert_eq!(r.prelude.len() as u64, PROBE_READ_BYTES, "夹具：这一枪读满了 ⇒ 连接干净");
+    assert_eq!(
+        r.prelude.len() as u64,
+        PROBE_READ_BYTES,
+        "夹具：这一枪读满了 ⇒ 连接干净"
+    );
 
     let second = client
         .get(format!("{base}/blob"))
@@ -1594,7 +2019,10 @@ fn probe_own_drained_prelude_then_a_416_on_the_same_client() -> anyhow::Result<(
         .context("probe 读满预读之后，同一客户端的 416 没完成")?;
     assert_eq!(second.status().as_u16(), 416);
     let reqs = srv.requests_at_least(2)?;
-    assert_eq!(reqs[0]["conn"], reqs[1]["conn"], "两枪共用一条连接才是本用例的形状：{reqs:?}");
+    assert_eq!(
+        reqs[0]["conn"], reqs[1]["conn"],
+        "两枪共用一条连接才是本用例的形状：{reqs:?}"
+    );
     assert_eq!(reqs[1]["reqNoOnConn"], 2);
     assert_eq!(r.facts.total_len, announced.size);
     Ok(())
@@ -1606,7 +2034,10 @@ fn probe_own_drained_prelude_then_a_416_on_the_same_client() -> anyhow::Result<(
 #[test]
 fn probe_result_shape_is_the_one_task_5_and_task_8_consume() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
-    let t = Task { url: format!("{base}/sz/8192"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/sz/8192"),
+        ..harness::blank_task()
+    };
     let r: ProbeResult = probe::run(&t, &harness::client()?, PROBE_READ_BYTES)?;
 
     let facts = r.facts(); // 派发第 5 条：Task 5 的闸口靠这个方法取事实
@@ -1614,9 +2045,15 @@ fn probe_result_shape_is_the_one_task_5_and_task_8_consume() -> anyhow::Result<(
     assert_eq!(facts.total_len, 8192);
     assert_eq!(r.prelude.len(), 8192);
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs[0]["url"], "/sz/8192", "这一枪打的确实是本用例那条路由：{reqs:?}");
+    assert_eq!(
+        reqs[0]["url"], "/sz/8192",
+        "这一枪打的确实是本用例那条路由：{reqs:?}"
+    );
     // 字段名是 plan 第 717 行的 Produces，用解构把它钉住（改名即编译失败）。
-    let ProbeResult { facts: _, prelude: _ } = &r;
+    let ProbeResult {
+        facts: _,
+        prelude: _,
+    } = &r;
     Ok(())
 }
 
@@ -1624,14 +2061,33 @@ fn probe_result_shape_is_the_one_task_5_and_task_8_consume() -> anyhow::Result<(
 #[test]
 fn prelude_max_is_honoured_rather_than_the_baked_in_constant() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
 
     let r = probe::run(&t, &harness::client()?, 4096)?;
-    assert_eq!(r.prelude.len(), 4096, "上限小就用小的：Task 9 会把预读量做成可覆盖的参数");
-    assert_eq!(r.facts.total_len, srv.announced()?.size, "长度仍取 Content-Range 的分母");
+    assert_eq!(
+        r.prelude.len(),
+        4096,
+        "上限小就用小的：Task 9 会把预读量做成可覆盖的参数"
+    );
+    assert_eq!(
+        r.facts.total_len,
+        srv.announced()?.size,
+        "长度仍取 Content-Range 的分母"
+    );
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs[0]["range"], range_upto(4096), "Range 的终点跟着上限走：{reqs:?}");
-    assert_ne!(reqs[0]["range"], prelude_range(), "上限换了头也得跟着换（写死常量就是假参数化）");
+    assert_eq!(
+        reqs[0]["range"],
+        range_upto(4096),
+        "Range 的终点跟着上限走：{reqs:?}"
+    );
+    assert_ne!(
+        reqs[0]["range"],
+        prelude_range(),
+        "上限换了头也得跟着换（写死常量就是假参数化）"
+    );
     Ok(())
 }
 
@@ -1654,13 +2110,37 @@ fn window_writes_at_offset_and_stops_at_window_edge() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let total = srv.announced()?.size;
     let (store, path) = harness::store("t7-window.bin")?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
     // 区间比一个窗口**宽一倍**：收手的必须是窗口，不是区间终点。
-    let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES * 2 - 1 };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + WINDOW_BYTES * 2 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    eprintln!("---- 裁定 5：窗口那一枪 ----\n{out:?}\nlen={}", store.len()?);
-    assert_eq!(out, Outcome::Advanced { bytes: WINDOW_BYTES }, "{out:?}");
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    eprintln!(
+        "---- 裁定 5：窗口那一枪 ----\n{out:?}\nlen={}",
+        store.len()?
+    );
+    assert_eq!(
+        out,
+        Outcome::Advanced {
+            bytes: WINDOW_BYTES
+        },
+        "{out:?}"
+    );
     assert_eq!(
         store.len()?,
         ALIGNED + WINDOW_BYTES,
@@ -1669,7 +2149,11 @@ fn window_writes_at_offset_and_stops_at_window_edge() -> anyhow::Result<()> {
     );
     // 真内容：每个 4 KiB 块首的块号等于它所在的块 ⇒ 字节确实来自这些偏移，没错位也没掉段。
     harness::require_block_alignment(&path, ALIGNED, WINDOW_BYTES)?;
-    assert!(store.len()? <= iv.end, "收手条件写错了（长度越过区间终点）：len={}", store.len()?);
+    assert!(
+        store.len()? <= iv.end,
+        "收手条件写错了（长度越过区间终点）：len={}",
+        store.len()?
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -1689,30 +2173,83 @@ fn range_start_open_ended_but_respects_explicit_end() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let total = srv.announced()?.size;
     let client = harness::client()?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
 
     // ① 区间伸到 EOF、窗口填不满 ⇒ 问窗口那一格（E14②）。这一枪仍然只读一个窗口。
-    let last = Interval { start: ALIGNED, end: total - 1 };
+    let last = Interval {
+        start: ALIGNED,
+        end: total - 1,
+    };
     let (store_open, path_open) = harness::store("t7-open.bin")?;
-    let out = fetch::run_window(&client, &t, last, &store_open, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    assert!(matches!(out, Outcome::Advanced { bytes } if bytes == WINDOW_BYTES), "{out:?}");
+    let out = fetch::run_window(
+        &client,
+        &t,
+        last,
+        &store_open,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert!(
+        matches!(out, Outcome::Advanced { bytes } if bytes == WINDOW_BYTES),
+        "{out:?}"
+    );
 
     // ② 非末段：终点在文件中间 ⇒ 必须带上显式终点（少带一个字节就是对端多送一整个窗口）。
-    let mid = Interval { start: ALIGNED, end: ALIGNED + 65_536 - 1 };
+    let mid = Interval {
+        start: ALIGNED,
+        end: ALIGNED + 65_536 - 1,
+    };
     let (store, path) = harness::store("t7-closed.bin")?;
-    let out = fetch::run_window(&client, &t, mid, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    assert_eq!(out, Outcome::Complete, "整段读完（区间比窗口窄）⇒ Complete：{out:?}");
+    let out = fetch::run_window(
+        &client,
+        &t,
+        mid,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert_eq!(
+        out,
+        Outcome::Complete,
+        "整段读完（区间比窗口窄）⇒ Complete：{out:?}"
+    );
     assert_eq!(store.len()?, ALIGNED + 65_536, "终点说了算：只写到 iv.end");
     harness::require_block_alignment(&path, ALIGNED, 65_536)?;
 
     // ③ 文件真正那一尾：起点 = 全长 - 一个窗口 ⇒ 窗口终点正好是 `total_len - 1` ⇒ 开放终点。
-    let tail = Interval { start: total - WINDOW_BYTES, end: total - 1 };
+    let tail = Interval {
+        start: total - WINDOW_BYTES,
+        end: total - 1,
+    };
     let (store_tail, path_tail) = harness::store("t7-tail.bin")?;
-    let out = fetch::run_window(&client, &t, tail, &store_tail, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    assert_eq!(out, Outcome::Complete, "整尾就是一次窗口：读完 ⇒ Complete：{out:?}");
+    let out = fetch::run_window(
+        &client,
+        &t,
+        tail,
+        &store_tail,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert_eq!(
+        out,
+        Outcome::Complete,
+        "整尾就是一次窗口：读完 ⇒ Complete：{out:?}"
+    );
 
     let reqs = srv.requests_at_least(3)?;
-    eprintln!("---- 开放终点/显式终点：服务端收到的 Range ----\n{}", serde_json::to_string_pretty(&reqs)?);
+    eprintln!(
+        "---- 开放终点/显式终点：服务端收到的 Range ----\n{}",
+        serde_json::to_string_pretty(&reqs)?
+    );
     assert_eq!(
         reqs[0]["range"],
         format!("bytes={ALIGNED}-{}", ALIGNED + WINDOW_BYTES - 1),
@@ -1728,9 +2265,15 @@ fn range_start_open_ended_but_respects_explicit_end() -> anyhow::Result<()> {
         format!("bytes={}-", total - WINDOW_BYTES),
         "文件真正那一尾仍然发开放终点：IDM 的观察（spec §3）不许被 E14② 一起改掉"
     );
-    assert_ne!(reqs[0]["range"], reqs[2]["range"], "同样是伸到 EOF 的区间，窗口够得着与够不着必须分岔");
+    assert_ne!(
+        reqs[0]["range"], reqs[2]["range"],
+        "同样是伸到 EOF 的区间，窗口够得着与够不着必须分岔"
+    );
     for r in &reqs {
-        assert!(r["connection"].is_null(), "不得发 Connection: close（spec §10 R5 / 计划 E2）：{r:?}");
+        assert!(
+            r["connection"].is_null(),
+            "不得发 Connection: close（spec §10 R5 / 计划 E2）：{r:?}"
+        );
     }
     drop((store, store_open));
     let _ = std::fs::remove_file(&path);
@@ -1754,23 +2297,53 @@ fn fetch_carries_the_nine_item_contract_headers_on_the_wire() -> anyhow::Result<
         user: Some("alice".into()),
         ..harness::blank_task()
     };
-    let iv = Interval { start: ALIGNED, end: ALIGNED + 4096 * 3 - 1 };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + 4096 * 3 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     assert!(matches!(out, Outcome::Complete), "{out:?}");
     let reqs = srv.requests_at_least(1)?;
-    eprintln!("---- 契约头：服务端收到什么 ----\n{}", serde_json::to_string_pretty(&reqs)?);
+    eprintln!(
+        "---- 契约头：服务端收到什么 ----\n{}",
+        serde_json::to_string_pretty(&reqs)?
+    );
     let r = &reqs[0];
-    assert_eq!(r["referer"], "http://example.com/from", "Referer 要上线（退化路径靠它拿同一份文档）");
+    assert_eq!(
+        r["referer"], "http://example.com/from",
+        "Referer 要上线（退化路径靠它拿同一份文档）"
+    );
     assert_eq!(r["cookie"], "sid=42; pref=fast", "Cookie 要上线（同上）");
-    assert_eq!(r["accept_encoding"], "identity", "Accept-Encoding: identity（压缩过的字节不能按偏移落盘）");
-    assert_eq!(r["extra_headers"]["accept"], "*/*", "Accept: */* 由契约构造器带上");
+    assert_eq!(
+        r["accept_encoding"], "identity",
+        "Accept-Encoding: identity（压缩过的字节不能按偏移落盘）"
+    );
+    assert_eq!(
+        r["extra_headers"]["accept"], "*/*",
+        "Accept: */* 由契约构造器带上"
+    );
     assert!(
         r["extra_headers"].get("authorization").is_none(),
         "明文 http 上半副凭据也不许出去（F2 那道闸在 fetch 这一枪同样成立）：{r:?}"
     );
-    assert!(r["connection"].is_null(), "不得发 Connection: close（R5/E2）：{r:?}");
-    assert_eq!(r["method"], "GET", "本轮 fetch 只发 GET（POST 那一支是待裁事项，见报告）");
+    assert!(
+        r["connection"].is_null(),
+        "不得发 Connection: close（R5/E2）：{r:?}"
+    );
+    assert_eq!(
+        r["method"], "GET",
+        "本轮 fetch 只发 GET（POST 那一支是待裁事项，见报告）"
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -1788,13 +2361,30 @@ fn the_password_gate_is_enforced_before_fetch_touches_the_wire() -> anyhow::Resu
         password: Some("hunter2".into()),
         ..harness::blank_task()
     };
-    let iv = Interval { start: ALIGNED, end: ALIGNED + 4096 - 1 };
-    let Err(err) = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)
-    else {
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + 4096 - 1,
+    };
+    let Err(err) = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    ) else {
         panic!("明文 HTTP 带口令的任务必须被 validate() 拒掉，不许发出请求");
     };
-    assert!(err.to_string().contains("--password"), "错误要指使用法：{err}");
-    assert!(srv.requests_within(Duration::from_millis(300))?.is_empty(), "拒在上网之前：服务器一条请求都不该看到");
+    assert!(
+        err.to_string().contains("--password"),
+        "错误要指使用法：{err}"
+    );
+    assert!(
+        srv.requests_within(Duration::from_millis(300))?.is_empty(),
+        "拒在上网之前：服务器一条请求都不该看到"
+    );
     assert_eq!(store.len()?, 0, "被拒的任务不该动过盘");
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -1808,18 +2398,47 @@ fn the_password_gate_is_enforced_before_fetch_touches_the_wire() -> anyhow::Resu
 fn a_beyond_length_interval_on_a_shorter_server_is_validator_changed() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-flaky.bin")?;
-    let t = Task { url: format!("{base}/flaky"), ..harness::blank_task() };
-    let iv = Interval { start: 5_000_000, end: 5_100_000 };
+    let t = Task {
+        url: format!("{base}/flaky"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 5_000_000,
+        end: 5_100_000,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     eprintln!("---- 裁定 3(a)/2：/flaky 越界那一枪 ----\n{out:?}");
     assert_eq!(out, Outcome::Failed(FailKind::ValidatorChanged), "{out:?}");
     assert_eq!(store.len()?, 0, "416 这一支一个字节都不该落盘");
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs[0]["range"], format!("bytes={}-{}", iv.start, iv.end), "线上发的确实是越界那一条");
-    let evs = srv.events_while(|evs| evs.iter().any(|e| e["ev"] == "response" && e["status"] == 416))?;
-    let resp416 = evs.iter().rev().find(|e| e["ev"] == "response" && e["status"] == 416).expect("上面已等到 416");
-    eprintln!("---- 416 的服务器侧记录 ----\n{}", serde_json::to_string_pretty(resp416)?);
+    assert_eq!(
+        reqs[0]["range"],
+        format!("bytes={}-{}", iv.start, iv.end),
+        "线上发的确实是越界那一条"
+    );
+    let evs = srv.events_while(|evs| {
+        evs.iter()
+            .any(|e| e["ev"] == "response" && e["status"] == 416)
+    })?;
+    let resp416 = evs
+        .iter()
+        .rev()
+        .find(|e| e["ev"] == "response" && e["status"] == 416)
+        .expect("上面已等到 416");
+    eprintln!(
+        "---- 416 的服务器侧记录 ----\n{}",
+        serde_json::to_string_pretty(resp416)?
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -1839,18 +2458,37 @@ fn a_416_whose_denominator_is_our_length_is_complete() -> anyhow::Result<()> {
     let stub = harness::spawn_416_stub()?;
     let (store, path) = harness::store("t7-416-agrees.bin")?;
     let total = 4_194_304;
-    let t = Task { url: format!("{}/total/{total}", stub.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/total/{total}", stub.base()),
+        ..harness::blank_task()
+    };
     // 起点**越过**全长 4096 个字节（不是正好落在全长上）：`total_len` 与 `iv.start` 必须是两个数。
-    let iv = Interval { start: total + 4_096, end: total * 3 - 1 };
+    let iv = Interval {
+        start: total + 4_096,
+        end: total * 3 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     assert_eq!(
         out,
         Outcome::Complete,
         "N 与我们的 total_len 相等（而 `iv.start` 是另一个数）⇒ 确实无字节可取：{out:?}"
     );
     assert_eq!(store.len()?, 0);
-    assert!(stub.saw("/total/"), "必须真打到对端（否则测的是连接失败）：{:?}", stub.seen());
+    assert!(
+        stub.saw("/total/"),
+        "必须真打到对端（否则测的是连接失败）：{:?}",
+        stub.seen()
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -1879,16 +2517,40 @@ fn a_416_that_answers_with_our_interval_start_is_validator_changed() -> anyhow::
     let client = harness::client()?;
     let (store, path) = harness::store("t7-416-start-not-length.bin")?;
     let total = 4_194_304;
-    let iv = Interval { start: total + 4_096, end: total * 3 - 1 };
+    let iv = Interval {
+        start: total + 4_096,
+        end: total * 3 - 1,
+    };
 
     for (route, shape) in [
-        (format!("/total/{}", iv.start), "分母**等于我们问的起点**、却不等于 total_len（C 点名的那一格）"),
-        (String::from("/no-content-range"), "416 压根不带 Content-Range"),
+        (
+            format!("/total/{}", iv.start),
+            "分母**等于我们问的起点**、却不等于 total_len（C 点名的那一格）",
+        ),
+        (
+            String::from("/no-content-range"),
+            "416 压根不带 Content-Range",
+        ),
         (String::from("/garbage-total"), "416 的分母读不出来"),
     ] {
-        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
-        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-        eprintln!("---- C 反支：我们的 total_len={total}、iv.start={} ----\n{route} ⇒ {out:?}", iv.start);
+        let t = Task {
+            url: format!("{}{route}", stub.base()),
+            ..harness::blank_task()
+        };
+        let out = fetch::run_window(
+            &client,
+            &t,
+            iv,
+            &store,
+            10_000_000,
+            total,
+            &harness::uncapped(),
+            fetch::BodyShape::Windowed,
+        )?;
+        eprintln!(
+            "---- C 反支：我们的 total_len={total}、iv.start={} ----\n{route} ⇒ {out:?}",
+            iv.start
+        );
         assert_eq!(
             out,
             Outcome::Failed(FailKind::ValidatorChanged),
@@ -1909,7 +2571,10 @@ fn a_416_with_a_disagreeing_or_missing_denominator_is_validator_changed() -> any
     let stub = harness::spawn_416_stub()?;
     let client = harness::client()?;
     let total = 4_194_304;
-    let iv = Interval { start: total, end: total * 2 - 1 };
+    let iv = Interval {
+        start: total,
+        end: total * 2 - 1,
+    };
     let (store, path) = harness::store("t7-416-disagrees.bin")?;
 
     for (route, want) in [
@@ -1918,8 +2583,20 @@ fn a_416_with_a_disagreeing_or_missing_denominator_is_validator_changed() -> any
         (String::from("/garbage-total"), "分母不是数字"),
         (String::from("/no-content-range"), "压根没发 Content-Range"),
     ] {
-        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
-        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+        let t = Task {
+            url: format!("{}{route}", stub.base()),
+            ..harness::blank_task()
+        };
+        let out = fetch::run_window(
+            &client,
+            &t,
+            iv,
+            &store,
+            10_000_000,
+            total,
+            &harness::uncapped(),
+            fetch::BodyShape::Windowed,
+        )?;
         assert_eq!(
             out,
             Outcome::Failed(FailKind::ValidatorChanged),
@@ -1939,18 +2616,54 @@ fn a_416_with_a_disagreeing_or_missing_denominator_is_validator_changed() -> any
 fn a_body_cut_off_midway_keeps_the_bytes_it_actually_wrote() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-drop.bin")?;
-    let t = Task { url: format!("{base}/drop/65536"), ..harness::blank_task() };
-    let iv = Interval { start: ALIGNED, end: ALIGNED + 2 * 1024 * 1024 - 1 };
+    let t = Task {
+        url: format!("{base}/drop/65536"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + 2 * 1024 * 1024 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    eprintln!("---- 裁定 4：/drop/65536 那一枪 ----\n{out:?}\nlen={}", store.len()?);
-    assert_eq!(out, Outcome::Advanced { bytes: 65_536 }, "被掐断前写下去的字节必须交回，不许折成 0：{out:?}");
-    assert_eq!(store.len()?, ALIGNED + 65_536, "长度就是交回的那 65536 字节");
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    eprintln!(
+        "---- 裁定 4：/drop/65536 那一枪 ----\n{out:?}\nlen={}",
+        store.len()?
+    );
+    assert_eq!(
+        out,
+        Outcome::Advanced { bytes: 65_536 },
+        "被掐断前写下去的字节必须交回，不许折成 0：{out:?}"
+    );
+    assert_eq!(
+        store.len()?,
+        ALIGNED + 65_536,
+        "长度就是交回的那 65536 字节"
+    );
     harness::require_block_alignment(&path, ALIGNED, 65_536)?;
     let evs = srv.events_while(|evs| evs.iter().any(|e| e["ev"] == "response_drop"))?;
-    let dropped = evs.iter().rev().find(|e| e["ev"] == "response_drop").expect("上面已等到 response_drop");
-    eprintln!("---- 服务器侧的截断记录 ----\n{}", serde_json::to_string_pretty(dropped)?);
-    assert_eq!(dropped["bytes"], 65_536, "对端确实只写出 65536 字节就拆了 socket");
+    let dropped = evs
+        .iter()
+        .rev()
+        .find(|e| e["ev"] == "response_drop")
+        .expect("上面已等到 response_drop");
+    eprintln!(
+        "---- 服务器侧的截断记录 ----\n{}",
+        serde_json::to_string_pretty(dropped)?
+    );
+    assert_eq!(
+        dropped["bytes"], 65_536,
+        "对端确实只写出 65536 字节就拆了 socket"
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -1962,10 +2675,25 @@ fn a_body_cut_off_midway_keeps_the_bytes_it_actually_wrote() -> anyhow::Result<(
 fn a_body_that_never_starts_is_a_countable_transport_failure() -> anyhow::Result<()> {
     let (_srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-drop0.bin")?;
-    let t = Task { url: format!("{base}/drop/0"), ..harness::blank_task() };
-    let iv = Interval { start: ALIGNED, end: ALIGNED + 65_536 - 1 };
+    let t = Task {
+        url: format!("{base}/drop/0"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + 65_536 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     // 本轮 D：变体判断没有变松（`take_transport_note` 不是 Transport 就当场 panic），只是 additionally
     // 要求这一支**带着那句原因**回来 —— 这一支的 `err` 是 reqwest 包过一层的 `io::Error`（对端拆线，
     // 不是超时），所以那句话取自库的 message + `source()` 链首句。
@@ -1988,18 +2716,43 @@ fn a_body_that_never_starts_is_a_countable_transport_failure() -> anyhow::Result
 fn an_empty_degraded_body_for_a_non_empty_interval_is_a_countable_failure() -> anyhow::Result<()> {
     let stub = harness::spawn_range_ignoring_stub(0)?;
     let (store, path) = harness::store("t7-empty-body.bin")?;
-    let t = Task { url: format!("{}/claims-bytes-answers-200", stub.base()), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: 4096 * 4 - 1 };
+    let t = Task {
+        url: format!("{}/claims-bytes-answers-200", stub.base()),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: 4096 * 4 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     // 本轮 D：这一支的 `read` 给的是 `Ok(0)`（**没有**错误对象），所以那句原因是我们自己写的
     // （`src/fetch.rs` 的 `WINDOW_EOF_WITHOUT_BYTES`），它要**说清是哪一种零进度**，
     // 而不是留给 Task 8 一句"网络错了"。M9 那条纪律（零进度必须是可数的失败）原样保留。
-    let note = take_transport_note(&out, "区间要 16 KiB、对端交了 0 字节 ⇒ 零进度必须计一次失败");
+    let note = take_transport_note(
+        &out,
+        "区间要 16 KiB、对端交了 0 字节 ⇒ 零进度必须计一次失败",
+    );
     eprintln!("---- D：干净 EOF 而零字节那一支的原因原文 ----\n{note}");
-    assert!(note.contains("响应体") && note.contains("干净结束"), "原因要说清是\"body 干净结束、一个字节都没到\"：{note}");
+    assert!(
+        note.contains("响应体") && note.contains("干净结束"),
+        "原因要说清是\"body 干净结束、一个字节都没到\"：{note}"
+    );
     assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
-    assert!(stub.saw("/claims-bytes-answers-200"), "必须真打到对端：{:?}", stub.seen());
+    assert!(
+        stub.saw("/claims-bytes-answers-200"),
+        "必须真打到对端：{:?}",
+        stub.seen()
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -2014,16 +2767,38 @@ fn an_empty_degraded_body_for_a_non_empty_interval_is_a_countable_failure() -> a
 fn a_peer_that_never_answers_is_stalled() -> anyhow::Result<()> {
     let stub = harness::spawn_silent_stub()?;
     let (store, path) = harness::store("t7-silent.bin")?;
-    let t = Task { url: format!("{}/silent", stub.base()), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: 65_536 - 1 };
+    let t = Task {
+        url: format!("{}/silent", stub.base()),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: 65_536 - 1,
+    };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let took = started.elapsed();
     eprintln!("---- 裁定 3(c)：静默对端 ----\n{out:?} 用时 {took:?}");
-    assert_eq!(out, Outcome::Stalled, "预算内一个字节都没等到 ⇒ Stalled：{out:?}");
+    assert_eq!(
+        out,
+        Outcome::Stalled,
+        "预算内一个字节都没等到 ⇒ Stalled：{out:?}"
+    );
     assert_eq!(store.len()?, 0);
-    assert!(took >= Duration::from_secs(14), "预算下界 15 s，不该提前收手：{took:?}");
+    assert!(
+        took >= Duration::from_secs(14),
+        "预算下界 15 s，不该提前收手：{took:?}"
+    );
     assert!(stub.saw("/silent"), "必须真打到对端：{:?}", stub.seen());
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2035,19 +2810,42 @@ fn a_peer_that_never_answers_is_stalled() -> anyhow::Result<()> {
 /// payload），**不是** `reqwest::Error`。只按 `kind()` 分的话这一支会掉进 `Failed(Transport)`，
 /// 于是"卡住"被重试上限计成"传输失败"，而两者的措辞与退避时长都不一样。
 #[test]
-fn a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure() -> anyhow::Result<()> {
+fn a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure() -> anyhow::Result<()>
+{
     let stub = harness::spawn_head_only_stub(8 * 1024 * 1024)?;
     let (store, path) = harness::store("t7-headonly.bin")?;
-    let t = Task { url: format!("{}/hangs", stub.base()), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
+    let t = Task {
+        url: format!("{}/hangs", stub.base()),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: WINDOW_BYTES - 1,
+    };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 8 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        8 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let took = started.elapsed();
     eprintln!("---- 读侧超时（is_timeout 分类）----\n{out:?} 用时 {took:?}");
-    assert_eq!(out, Outcome::Stalled, "头收了、body 一个字节没到 ⇒ 判 Stalled，不是 Transport：{out:?}");
+    assert_eq!(
+        out,
+        Outcome::Stalled,
+        "头收了、body 一个字节没到 ⇒ 判 Stalled，不是 Transport：{out:?}"
+    );
     assert_eq!(store.len()?, 0);
-    assert!(took >= Duration::from_secs(14), "读侧预算同样是 15 s 下界：{took:?}");
+    assert!(
+        took >= Duration::from_secs(14),
+        "读侧预算同样是 15 s 下界：{took:?}"
+    );
     assert!(stub.saw("/hangs"), "必须真打到对端：{:?}", stub.seen());
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2065,16 +2863,41 @@ fn a_peer_that_answers_but_sends_no_body_is_stalled_not_a_transport_failure() ->
 fn a_live_but_paced_peer_is_advanced_rather_than_misread_as_stalled() -> anyhow::Result<()> {
     let (_srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-paced.bin")?;
-    let t = Task { url: format!("{base}/sz/524288s"), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
+    let t = Task {
+        url: format!("{base}/sz/524288s"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: WINDOW_BYTES - 1,
+    };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 327_680, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        327_680,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let took = started.elapsed();
     eprintln!("---- 限速对端 ----\n{out:?} 用时 {took:?}");
-    assert!(!matches!(out, Outcome::Stalled), "一直在送字节 ⇒ 不是卡死：{out:?}");
-    assert_eq!(out, Outcome::Advanced { bytes: 524_288 }, "节拍送完的 512 KiB 都是真进度：{out:?}");
-    assert!(took < Duration::from_secs(10), "预算之内就该收手（这条对端 ~1.6 s 送完）：{took:?}");
+    assert!(
+        !matches!(out, Outcome::Stalled),
+        "一直在送字节 ⇒ 不是卡死：{out:?}"
+    );
+    assert_eq!(
+        out,
+        Outcome::Advanced { bytes: 524_288 },
+        "节拍送完的 512 KiB 都是真进度：{out:?}"
+    );
+    assert!(
+        took < Duration::from_secs(10),
+        "预算之内就该收手（这条对端 ~1.6 s 送完）：{took:?}"
+    );
     assert_eq!(store.len()?, 524_288);
     harness::require_block_alignment(&path, 0, 524_288)?;
     drop(store);
@@ -2088,11 +2911,29 @@ fn a_live_but_paced_peer_is_advanced_rather_than_misread_as_stalled() -> anyhow:
 fn a_shorter_body_than_the_interval_is_never_reported_complete() -> anyhow::Result<()> {
     let (_srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-short.bin")?;
-    let t = Task { url: format!("{base}/sz/4096"), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: 8191 };
+    let t = Task {
+        url: format!("{base}/sz/4096"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: 8191,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 8192, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    assert!(!matches!(out, Outcome::Complete), "只拿到 4096 字节却报 Complete ⇒ 尾巴会被封存：{out:?}");
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        8192,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert!(
+        !matches!(out, Outcome::Complete),
+        "只拿到 4096 字节却报 Complete ⇒ 尾巴会被封存：{out:?}"
+    );
     assert_eq!(out, Outcome::Advanced { bytes: 4096 }, "{out:?}");
     assert_eq!(store.len()?, 4096);
     harness::require_block_alignment(&path, 0, 4096)?;
@@ -2108,20 +2949,51 @@ fn a_shorter_body_than_the_interval_is_never_reported_complete() -> anyhow::Resu
 fn a_degraded_200_body_is_skipped_not_written_at_the_wrong_offset() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-degraded.bin")?;
-    let t = Task { url: format!("{base}/noranges"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/noranges"),
+        ..harness::blank_task()
+    };
     let half: u64 = 512 * 1024; // 1 MiB 的后半段：起点是 4096 的整数倍，块号取证才成立
-    let iv = Interval { start: half, end: 1_048_576 - 1 };
+    let iv = Interval {
+        start: half,
+        end: 1_048_576 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 1_048_576, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    assert_eq!(out, Outcome::Complete, "区间 = body 的后半段 ⇒ 丢掉前半后正好读完：{out:?}");
-    assert_eq!(store.len()?, 1_048_576, "写到 iv.end 就该停：len={}", store.len()?);
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        1_048_576,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert_eq!(
+        out,
+        Outcome::Complete,
+        "区间 = body 的后半段 ⇒ 丢掉前半后正好读完：{out:?}"
+    );
+    assert_eq!(
+        store.len()?,
+        1_048_576,
+        "写到 iv.end 就该停：len={}",
+        store.len()?
+    );
     // 内容取证：**这是唯一分辨"丢没丢"的断言**。不丢的话 `iv.start` 处躺的是块 0 的字节。
     harness::require_block_alignment(&path, half, half)?;
     // 丢掉的那 512 KiB 不许在任何偏移留下痕迹（`[0, iv.start)` 仍是从未写过的空洞）。
     let head = harness::bytes_at(&path, 0, 4096)?;
-    assert!(head.iter().all(|b| *b == 0), "区间之前的字节仍是空洞 ⇒ 降级支不许写偏移 0");
+    assert!(
+        head.iter().all(|b| *b == 0),
+        "区间之前的字节仍是空洞 ⇒ 降级支不许写偏移 0"
+    );
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs[0]["range"], format!("bytes={half}-"), "我们确实发了 Range（才会撞上 200 这一支）");
+    assert_eq!(
+        reqs[0]["range"],
+        format!("bytes={half}-"),
+        "我们确实发了 Range（才会撞上 200 这一支）"
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -2136,13 +3008,32 @@ fn a_degraded_200_body_is_skipped_not_written_at_the_wrong_offset() -> anyhow::R
 /// （流式 / 先吸完）都会把 body 读完 ⇒ 那条断言是瞎的。
 #[test]
 fn a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body() -> anyhow::Result<()> {
-    let peer = harness::spawn_paced_range_ignoring_stub(8 * 1024 * 1024, 64 * 1024, Duration::from_millis(20))?;
+    let peer = harness::spawn_paced_range_ignoring_stub(
+        8 * 1024 * 1024,
+        64 * 1024,
+        Duration::from_millis(20),
+    )?;
     let (store, path) = harness::store("t7-degraded-stream.bin")?;
-    let t = Task { url: format!("{}/ignores-range", peer.base()), ..harness::blank_task() };
-    let iv = Interval { start: 262_144, end: 262_144 + 131_072 - 1 };
+    let t = Task {
+        url: format!("{}/ignores-range", peer.base()),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 262_144,
+        end: 262_144 + 131_072 - 1,
+    };
     let started = Instant::now();
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let took = started.elapsed();
     let written = peer.written();
     eprintln!("---- 裁定 6：流式跳字节 ----\n{out:?} 用时 {took:?} 对端写出 {written}");
@@ -2153,7 +3044,11 @@ fn a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body() -> anyhow::Resul
         written < 4 * 1024 * 1024,
         "对端写出 {written} 字节（整份 body 是 8 MiB）⇒ 我们把整个 body 吸完了 = 缓冲进内存"
     );
-    assert!(peer.saw("/ignores-range"), "必须真打到对端：{:?}", peer.seen());
+    assert!(
+        peer.saw("/ignores-range"),
+        "必须真打到对端：{:?}",
+        peer.seen()
+    );
     drop(store);
     // **复审 B-Minor 5**：上面那次读数发生在对端**还在写**的时候（节拍 64 KiB / 20 ms，
     // 内核缓冲里还有一截没出手）⇒ 那是一条对增长量读一次就断的上界，与本轮修的恒真窗口同一形状
@@ -2175,11 +3070,30 @@ fn a_degraded_200_is_skipped_as_stream_not_as_a_buffered_body() -> anyhow::Resul
 fn a_206_that_cannot_show_its_offset_is_validator_changed() -> anyhow::Result<()> {
     let stub = harness::spawn_unknown_total_stub(1024)?;
     let (store, path) = harness::store("t7-206-blind.bin")?;
-    let t = Task { url: format!("{}/no-content-range", stub.base()), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: 1023 };
+    let t = Task {
+        url: format!("{}/no-content-range", stub.base()),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: 1023,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    assert_eq!(out, Outcome::Failed(FailKind::ValidatorChanged), "206 没带 Content-Range ⇒ 偏移不可核对：{out:?}");
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    assert_eq!(
+        out,
+        Outcome::Failed(FailKind::ValidatorChanged),
+        "206 没带 Content-Range ⇒ 偏移不可核对：{out:?}"
+    );
     assert_eq!(store.len()?, 0, "核对不了偏移就一个字节都不许写");
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2191,13 +3105,31 @@ fn a_206_that_cannot_show_its_offset_is_validator_changed() -> anyhow::Result<()
 fn an_empty_interval_needs_no_request() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let (store, path) = harness::store("t7-empty.bin")?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
-    let iv = Interval { start: ALIGNED, end: ALIGNED - 1 };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     assert_eq!(out, Outcome::Complete, "{out:?}");
     assert_eq!(store.len()?, 0);
-    assert!(srv.requests_within(Duration::from_millis(300))?.is_empty(), "空区间不许打出任何一枪");
+    assert!(
+        srv.requests_within(Duration::from_millis(300))?.is_empty(),
+        "空区间不许打出任何一枪"
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -2214,11 +3146,26 @@ fn a_drained_window_leaves_the_connection_reusable() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let total = srv.announced()?.size;
     let client = harness::client()?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
     let (store, path) = harness::store("t7-reuse.bin")?;
-    let iv = Interval { start: 0, end: 65_536 - 1 };
+    let iv = Interval {
+        start: 0,
+        end: 65_536 - 1,
+    };
 
-    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &client,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     assert_eq!(out, Outcome::Complete, "区间比窗口窄 ⇒ 读满整段：{out:?}");
     assert_eq!(store.len()?, 65_536);
 
@@ -2231,10 +3178,19 @@ fn a_drained_window_leaves_the_connection_reusable() -> anyhow::Result<()> {
     assert_eq!(second.status().as_u16(), 416);
 
     let reqs = srv.requests_at_least(2)?;
-    eprintln!("---- fetch 的 E3 守卫：服务端看到的两条请求 ----\n{}", serde_json::to_string_pretty(&reqs)?);
-    assert_eq!(reqs[0]["conn"], reqs[1]["conn"], "两条请求必须在同一条连接上：{reqs:?}");
+    eprintln!(
+        "---- fetch 的 E3 守卫：服务端看到的两条请求 ----\n{}",
+        serde_json::to_string_pretty(&reqs)?
+    );
+    assert_eq!(
+        reqs[0]["conn"], reqs[1]["conn"],
+        "两条请求必须在同一条连接上：{reqs:?}"
+    );
     assert_eq!(reqs[0]["reqNoOnConn"], 1);
-    assert_eq!(reqs[1]["reqNoOnConn"], 2, "第二枪必须是那条连接上的第 2 个请求（真复用）");
+    assert_eq!(
+        reqs[1]["reqNoOnConn"], 2,
+        "第二枪必须是那条连接上的第 2 个请求（真复用）"
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -2256,7 +3212,8 @@ fn a_drained_window_leaves_the_connection_reusable() -> anyhow::Result<()> {
 ///
 /// 取证 = 收体对端**实际收到**的东西（`spawn_post_stub` 连 body 一起收，node 服务器看不到 body）。
 #[test]
-fn a_data_file_task_never_reaches_the_wire_as_a_bodyless_get_through_the_window_path() -> anyhow::Result<()> {
+fn a_data_file_task_never_reaches_the_wire_as_a_bodyless_get_through_the_window_path()
+-> anyhow::Result<()> {
     let peer = harness::spawn_post_stub(None, b"the-guessed-response-body".to_vec())?;
     let (store, path) = harness::store("t7-f1-window.bin")?;
     let body = harness::scratch_body("f1-window-body.bin", b"session=abc&cvv=999")?;
@@ -2265,13 +3222,30 @@ fn a_data_file_task_never_reaches_the_wire_as_a_bodyless_get_through_the_window_
         data_file: Some(body.clone()),
         ..harness::blank_task()
     };
-    let iv = Interval { start: 0, end: 4096 * 4 - 1 };
-    let result = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed);
+    let iv = Interval {
+        start: 0,
+        end: 4096 * 4 - 1,
+    };
+    let result = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    );
     let reqs = peer.requests();
     eprintln!(
         "---- F1：窗口那条路对带体任务实际发出去什么 ----\n{}\n结论 {result:?}\nlen={}",
         reqs.iter()
-            .map(|r| format!("method={} range={:?} body={:?}", r.method, r.header("range"), r.body_text()))
+            .map(|r| format!(
+                "method={} range={:?} body={:?}",
+                r.method,
+                r.header("range"),
+                r.body_text()
+            ))
             .collect::<Vec<_>>()
             .join("\n"),
         store.len()?
@@ -2286,10 +3260,22 @@ fn a_data_file_task_never_reaches_the_wire_as_a_bodyless_get_through_the_window_
         );
     };
     let msg = err.to_string();
-    assert!(msg.contains("--data-file"), "错误要点名那个参数，调用方才知道换哪条路：{msg}");
-    assert!(msg.contains("run_whole"), "错误要指出正确的入口（Task 8 照着这句接线）：{msg}");
-    assert!(!msg.contains("cvv") && !msg.contains("session=abc"), "错误里抄了体的字节：{msg}");
-    assert!(reqs.is_empty(), "拒在上网之前：对端一条请求都不该看到：{reqs:?}");
+    assert!(
+        msg.contains("--data-file"),
+        "错误要点名那个参数，调用方才知道换哪条路：{msg}"
+    );
+    assert!(
+        msg.contains("run_whole"),
+        "错误要指出正确的入口（Task 8 照着这句接线）：{msg}"
+    );
+    assert!(
+        !msg.contains("cvv") && !msg.contains("session=abc"),
+        "错误里抄了体的字节：{msg}"
+    );
+    assert!(
+        reqs.is_empty(),
+        "拒在上网之前：对端一条请求都不该看到：{reqs:?}"
+    );
     assert_eq!(store.len()?, 0, "被拒的任务不许动过盘");
     let _ = std::fs::remove_file(&body);
     drop(store);
@@ -2311,7 +3297,8 @@ const FORM_BODY: &[u8] = b"user=alice&password=hunter2&cvv=999";
 /// 顺带钉住三条：契约头与 `probe` 同源（`Referer`/`Cookie`/`identity`/`*/*`）、明文 socket 上
 /// `Authorization` 仍然一条不出去（Task 6 评审 F2 那道闸在这一支同样成立）、不发 `Connection: close`（R5/E2）。
 #[test]
-fn a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_body() -> anyhow::Result<()> {
+fn a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_body()
+-> anyhow::Result<()> {
     let response_body = harness::positioned_body(65_536); // 与请求体刻意不同长也不同内容
     let peer = harness::spawn_post_stub(Some("bytes"), response_body.clone())?;
     let (store, path) = harness::store("t7-f1-post.bin")?;
@@ -2340,37 +3327,91 @@ fn a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_b
     );
     assert_eq!(reqs.len(), 1, "整份那一枪就该只有一发请求：{reqs:?}");
     let req = &reqs[0];
-    assert_eq!(req.method, "POST", "带体的任务必须发 POST（GET 就是把另一条请求的字节当成果子）");
-    assert!(!req.has("range"), "POST 上一条 Range 都不许出现（spec §2.2 第一条）：{:?}", req.headers);
-    assert_eq!(req.body, file_bytes, "上线的 body 必须逐字节等于 `--data-file` 那份文件");
+    assert_eq!(
+        req.method, "POST",
+        "带体的任务必须发 POST（GET 就是把另一条请求的字节当成果子）"
+    );
+    assert!(
+        !req.has("range"),
+        "POST 上一条 Range 都不许出现（spec §2.2 第一条）：{:?}",
+        req.headers
+    );
+    assert_eq!(
+        req.body, file_bytes,
+        "上线的 body 必须逐字节等于 `--data-file` 那份文件"
+    );
     assert_eq!(
         req.header("content-length"),
         Some(file_bytes.len().to_string().as_str()),
         "Content-Length 由体文件的长度写出（reqwest 在发送那一步补，`build()` 那一步看不到）"
     );
-    assert!(!req.has("transfer-encoding"), "不许把这份体写成 chunked（本夹具据此收 body）：{:?}", req.headers);
+    assert!(
+        !req.has("transfer-encoding"),
+        "不许把这份体写成 chunked（本夹具据此收 body）：{:?}",
+        req.headers
+    );
     // 契约头同源 + 口令闸（F2）+ 不发 close（R5/E2）。
     assert_eq!(req.header("referer"), Some("http://example.com/form"));
     assert_eq!(req.header("cookie"), Some("sid=42; pref=fast"));
-    assert_eq!(req.header("accept-encoding"), Some("identity"), "压缩过的字节不能按偏移落盘");
+    assert_eq!(
+        req.header("accept-encoding"),
+        Some("identity"),
+        "压缩过的字节不能按偏移落盘"
+    );
     assert_eq!(req.header("accept"), Some("*/*"));
-    assert!(!req.has("authorization"), "明文 socket 上半副凭据也不许出去（F2 那道闸在这一支同样成立）：{:?}", req.headers);
-    assert!(!req.has("connection"), "不发 Connection: close（R5/E2）：{:?}", req.headers);
-    assert!(!req.has("content-type"), "不许凭空发明 Content-Type（留给 Task 9 的开放问题）：{:?}", req.headers);
+    assert!(
+        !req.has("authorization"),
+        "明文 socket 上半副凭据也不许出去（F2 那道闸在这一支同样成立）：{:?}",
+        req.headers
+    );
+    assert!(
+        !req.has("connection"),
+        "不发 Connection: close（R5/E2）：{:?}",
+        req.headers
+    );
+    assert!(
+        !req.has("content-type"),
+        "不许凭空发明 Content-Type（留给 Task 9 的开放问题）：{:?}",
+        req.headers
+    );
 
     // 落盘的是**响应体**：长度、内容、偏移三样都对上响应那一侧。
     assert_eq!(out, Outcome::Complete, "{out:?}");
-    assert_eq!(store.len()?, 65_536, "落盘长度 = 响应体长度，不是请求体长度（{} 字节）", file_bytes.len());
+    assert_eq!(
+        store.len()?,
+        65_536,
+        "落盘长度 = 响应体长度，不是请求体长度（{} 字节）",
+        file_bytes.len()
+    );
     harness::require_block_alignment(&path, 0, 65_536)?;
-    assert_ne!(harness::bytes_at(&path, 0, file_bytes.len())?, file_bytes, "盘上的字节居然是**请求体** ⇒ 那是把表单当成了成果子");
-    assert_eq!(harness::bytes_at(&path, 0, response_body.len())?, response_body, "盘上的字节必须逐字节等于响应体");
+    assert_ne!(
+        harness::bytes_at(&path, 0, file_bytes.len())?,
+        file_bytes,
+        "盘上的字节居然是**请求体** ⇒ 那是把表单当成了成果子"
+    );
+    assert_eq!(
+        harness::bytes_at(&path, 0, response_body.len())?,
+        response_body,
+        "盘上的字节必须逐字节等于响应体"
+    );
 
     // **F2**：事实取自**这一枪自己的响应**。
     assert_eq!(facts.total_len, 65_536, "长度取自这一枪的 Content-Length");
-    assert_eq!(facts.etag.as_deref(), Some("\"stub-post-peer\""), "验证子取自这一枪的头");
-    assert_eq!(facts.last_modified, None, "这一枪的头里没有它就是没有（不许编一个）");
+    assert_eq!(
+        facts.etag.as_deref(),
+        Some("\"stub-post-peer\""),
+        "验证子取自这一枪的头"
+    );
+    assert_eq!(
+        facts.last_modified, None,
+        "这一枪的头里没有它就是没有（不许编一个）"
+    );
     assert!(facts.accept_ranges, "对端这一枪说了 `Accept-Ranges: bytes`");
-    assert_eq!(facts.final_url, format!("{}/submit", peer.base()), "落地 URL 就是这一枪的 URL");
+    assert_eq!(
+        facts.final_url,
+        format!("{}/submit", peer.base()),
+        "落地 URL 就是这一枪的 URL"
+    );
     let _ = std::fs::remove_file(&file);
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2398,10 +3439,21 @@ fn the_harvested_facts_are_read_from_this_posts_own_response() -> anyhow::Result
         let (out, facts) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000)?;
         let facts = facts.expect("2xx 的响应必须有事实");
         let shown = declared.unwrap_or("(没有这个头)");
-        eprintln!("---- F2：这一枪的头说 {shown} ⇒ accept_ranges = {} ----", facts.accept_ranges);
-        assert_eq!(facts.accept_ranges, want, "对端说 {shown} ⇒ 该读成 {want}，实际 {:?}", facts.accept_ranges);
+        eprintln!(
+            "---- F2：这一枪的头说 {shown} ⇒ accept_ranges = {} ----",
+            facts.accept_ranges
+        );
+        assert_eq!(
+            facts.accept_ranges, want,
+            "对端说 {shown} ⇒ 该读成 {want}，实际 {:?}",
+            facts.accept_ranges
+        );
         assert_eq!(out, Outcome::Complete, "{out:?}");
-        assert_eq!(store.len()?, 4096, "这一格的字节也得真落盘（否则测的是失败路径）");
+        assert_eq!(
+            store.len()?,
+            4096,
+            "这一格的字节也得真落盘（否则测的是失败路径）"
+        );
         assert_eq!(facts.total_len, 4096);
         let _ = std::fs::remove_file(&file);
         drop(store);
@@ -2425,12 +3477,26 @@ fn a_whole_shot_without_a_success_response_hands_back_no_facts() -> anyhow::Resu
         ..harness::blank_task()
     };
     let (out, facts) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000)?;
-    eprintln!("---- 非 2xx 那一支 ----\n{out:?} 事实 {facts:?} len={}", store.len()?);
-    assert_eq!(out, Outcome::Failed(FailKind::Http(404)), "状态码要交给 Task 8 记账：{out:?}");
-    assert!(facts.is_none(), "404 的响应头里没有一个可用长度，不许硬凑一份事实：{facts:?}");
+    eprintln!(
+        "---- 非 2xx 那一支 ----\n{out:?} 事实 {facts:?} len={}",
+        store.len()?
+    );
+    assert_eq!(
+        out,
+        Outcome::Failed(FailKind::Http(404)),
+        "状态码要交给 Task 8 记账：{out:?}"
+    );
+    assert!(
+        facts.is_none(),
+        "404 的响应头里没有一个可用长度，不许硬凑一份事实：{facts:?}"
+    );
     assert_eq!(store.len()?, 0, "非 2xx 不许写盘");
     let reqs = peer.requests();
-    assert_eq!(reqs.len(), 1, "这一枪确实打出去了（否则测的是连接失败）：{reqs:?}");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "这一枪确实打出去了（否则测的是连接失败）：{reqs:?}"
+    );
     assert_eq!(reqs[0].method, "POST");
     let _ = std::fs::remove_file(&file);
     drop(store);
@@ -2445,7 +3511,8 @@ fn a_whole_shot_without_a_success_response_hands_back_no_facts() -> anyhow::Resu
 /// 整份这一支**没有区间**，"文档本来就是空的"是合法的对端对象（Task 6 评审 **F3** 同一条立场）。
 /// 弄混的话，空文件的下载会变成无限重试。
 #[test]
-fn an_empty_document_is_a_complete_with_zero_length_facts_not_a_countable_failure() -> anyhow::Result<()> {
+fn an_empty_document_is_a_complete_with_zero_length_facts_not_a_countable_failure()
+-> anyhow::Result<()> {
     let peer = harness::spawn_post_stub(Some("bytes"), vec![])?;
     let (store, path) = harness::store("t7-f1-empty-doc.bin")?;
     let file = harness::scratch_body("f1-empty-doc-body.bin", FORM_BODY)?;
@@ -2456,7 +3523,11 @@ fn an_empty_document_is_a_complete_with_zero_length_facts_not_a_countable_failur
     };
     let (out, facts) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000)?;
     eprintln!("---- 空文档那一支 ----\n{out:?} 事实 {facts:?}");
-    assert_eq!(out, Outcome::Complete, "对端声明 0 字节并干净收尾 ⇒ 这一份文档拿全了：{out:?}");
+    assert_eq!(
+        out,
+        Outcome::Complete,
+        "对端声明 0 字节并干净收尾 ⇒ 这一份文档拿全了：{out:?}"
+    );
     let facts = facts.expect("2xx 的响应必须有事实");
     assert_eq!(facts.total_len, 0, "长度照着响应说，不许改成 1 或猜一个");
     assert_eq!(store.len()?, 0, "0 字节的文档不该把盘撑大");
@@ -2484,18 +3555,46 @@ fn a_short_body_on_the_whole_shot_keeps_its_bytes_and_is_never_complete() -> any
         ..harness::blank_task()
     };
     let (out, facts) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000)?;
-    eprintln!("---- 整份 + 短 body ----\n{out:?} len={} 事实 {facts:?}", store.len()?);
-    assert_eq!(out, Outcome::Advanced { bytes: 65_536 }, "被掐断前写下去的字节必须交回，且不许折成 Complete：{out:?}");
+    eprintln!(
+        "---- 整份 + 短 body ----\n{out:?} len={} 事实 {facts:?}",
+        store.len()?
+    );
+    assert_eq!(
+        out,
+        Outcome::Advanced { bytes: 65_536 },
+        "被掐断前写下去的字节必须交回，且不许折成 Complete：{out:?}"
+    );
     assert_eq!(store.len()?, 65_536);
     harness::require_block_alignment(&path, 0, 65_536)?;
     let facts = facts.expect("响应头先到，事实就有了（与 body 拿没拿全无关）");
-    assert_eq!(facts.total_len, 48 * 1024 * 1024, "长度是**对端声明的** 48 MiB，不是我们拿到的 65536");
-    assert!(facts.accept_ranges, "/drop 的头是诚实的（`Accept-Ranges: bytes`）");
+    assert_eq!(
+        facts.total_len,
+        48 * 1024 * 1024,
+        "长度是**对端声明的** 48 MiB，不是我们拿到的 65536"
+    );
+    assert!(
+        facts.accept_ranges,
+        "/drop 的头是诚实的（`Accept-Ranges: bytes`）"
+    );
     let reqs = srv.requests_at_least(1)?;
-    eprintln!("---- node 那台观察者看到的 ----\n{}", serde_json::to_string_pretty(&reqs)?);
-    assert_eq!(reqs[0]["method"], "POST", "第二台观察者也得看到 POST（不是我们自证的）");
-    assert!(reqs[0]["range"].is_null(), "POST 那一支一条 Range 都不许上线：{:?}", reqs[0]);
-    assert!(reqs[0]["connection"].is_null(), "不发 Connection: close（R5/E2）：{:?}", reqs[0]);
+    eprintln!(
+        "---- node 那台观察者看到的 ----\n{}",
+        serde_json::to_string_pretty(&reqs)?
+    );
+    assert_eq!(
+        reqs[0]["method"], "POST",
+        "第二台观察者也得看到 POST（不是我们自证的）"
+    );
+    assert!(
+        reqs[0]["range"].is_null(),
+        "POST 那一支一条 Range 都不许上线：{:?}",
+        reqs[0]
+    );
+    assert!(
+        reqs[0]["connection"].is_null(),
+        "不发 Connection: close（R5/E2）：{:?}",
+        reqs[0]
+    );
     let _ = std::fs::remove_file(&file);
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2505,7 +3604,8 @@ fn a_short_body_on_the_whole_shot_keeps_its_bytes_and_is_never_complete() -> any
 /// **E9 那道闸在整份这一支同样成立**：`run_whole` 交回的 `ProbeFacts.final_url` 就是落地 URL，
 /// 而落地时带着 userinfo ⇒ 拒，且那句消息**不回显**那条地址（与 `probe` 同一个常量、同一个判据）。
 #[test]
-fn a_data_file_task_redirected_onto_a_credentialed_landing_url_is_refused_and_never_echoed() -> anyhow::Result<()> {
+fn a_data_file_task_redirected_onto_a_credentialed_landing_url_is_refused_and_never_echoed()
+-> anyhow::Result<()> {
     let (stub, _land_url) = harness::spawn_redirect_stub("alice:s3cret@127.0.0.1:{port}")?;
     let (store, path) = harness::store("t7-f1-landing.bin")?;
     let file = harness::scratch_body("f1-landing-body.bin", FORM_BODY)?;
@@ -2521,14 +3621,30 @@ fn a_data_file_task_redirected_onto_a_credentialed_landing_url_is_refused_and_ne
     eprintln!("---- 落地 URL 带凭据那一支（消息照抄，它本身不含任何地址成分）----\n{msg}");
     // 措辞同步（T99-J1 §3）：`contains("重定向")` 那半句替用户断言了一件没发生过的事 ⇒ 换成
     // "给出两种来源"，并把两个假指认点钉成负断言（方向是收紧）。
-    assert!(msg.contains("凭据") && msg.contains("--url") && msg.contains("可能"), "措辞要可行动且给出两种来源：{msg}");
-    assert!(!msg.contains("重定向后的地址") && !msg.contains("userinfo"), "措辞不许假指认：{msg}");
+    assert!(
+        msg.contains("凭据") && msg.contains("--url") && msg.contains("可能"),
+        "措辞要可行动且给出两种来源：{msg}"
+    );
+    assert!(
+        !msg.contains("重定向后的地址") && !msg.contains("userinfo"),
+        "措辞不许假指认：{msg}"
+    );
     for leak in ["alice", "s3cret", "@", "http://", "https://"] {
-        assert!(!msg.contains(leak), "拒绝文本里出现了 URL 的成分（{leak}）：{msg}");
+        assert!(
+            !msg.contains(leak),
+            "拒绝文本里出现了 URL 的成分（{leak}）：{msg}"
+        );
     }
-    assert!(!msg.contains("cvv") && !msg.contains("hunter2"), "顺手抄了请求体：{msg}");
+    assert!(
+        !msg.contains("cvv") && !msg.contains("hunter2"),
+        "顺手抄了请求体：{msg}"
+    );
     assert_eq!(store.len()?, 0, "被拒的这一枪不许落过任何字节");
-    assert!(stub.saw("/landed"), "重定向必须真跟随到了那条带凭据的地址（否则测的是连接失败）：{:?}", stub.seen());
+    assert!(
+        stub.saw("/landed"),
+        "重定向必须真跟随到了那条带凭据的地址（否则测的是连接失败）：{:?}",
+        stub.seen()
+    );
     let _ = std::fs::remove_file(&file);
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2541,7 +3657,8 @@ fn a_data_file_task_redirected_onto_a_credentialed_landing_url_is_refused_and_ne
 /// `a_data_file_task_is_posted_with_the_file_as_its_body_and_lands_the_response_body`
 /// 里**确实**被我们读出来并送上了线 ⇒ 那些字节到过我们手里；这里断的是它们不进消息。
 #[test]
-fn a_missing_data_file_stops_the_whole_shot_before_the_wire_and_never_echoes_the_body() -> anyhow::Result<()> {
+fn a_missing_data_file_stops_the_whole_shot_before_the_wire_and_never_echoes_the_body()
+-> anyhow::Result<()> {
     let peer = harness::spawn_post_stub(Some("bytes"), harness::positioned_body(4096))?;
     let (store, path) = harness::store("t7-f1-nofile.bin")?;
     let file = harness::scratch_body("f1-gone-body.bin", FORM_BODY)?;
@@ -2557,11 +3674,18 @@ fn a_missing_data_file_stops_the_whole_shot_before_the_wire_and_never_echoes_the
     let msg = err.to_string();
     eprintln!("---- 体文件不在 ----\n{msg}");
     assert!(msg.contains("--data-file"), "错误要点名那个参数：{msg}");
-    assert!(msg.contains("f1-gone-body.bin"), "路径要点名（那是用户能给对的东西）：{msg}");
+    assert!(
+        msg.contains("f1-gone-body.bin"),
+        "路径要点名（那是用户能给对的东西）：{msg}"
+    );
     for leak in ["cvv", "hunter2", "session", "user=alice"] {
         assert!(!msg.contains(leak), "错误里抄了体的字节（{leak}）：{msg}");
     }
-    assert!(peer.requests().is_empty(), "拒在上网之前：对端一条请求都不该看到：{:?}", peer.requests());
+    assert!(
+        peer.requests().is_empty(),
+        "拒在上网之前：对端一条请求都不该看到：{:?}",
+        peer.requests()
+    );
     assert_eq!(store.len()?, 0);
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2588,11 +3712,22 @@ fn a_whole_shot_with_a_head_and_no_body_is_stalled_with_the_facts_it_saw() -> an
     let (out, facts) = fetch::run_whole(&harness::client()?, &t, &store, 10_000_000)?;
     let took = started.elapsed();
     eprintln!("---- 整份 + 只有头 ----\n{out:?} 用时 {took:?} 事实 {facts:?}");
-    assert_eq!(out, Outcome::Stalled, "头收了、body 一个字节没到 ⇒ 零进制的预算到点，只能是 Stalled：{out:?}");
-    assert!(took >= Duration::from_secs(14), "读侧预算同样是 15 s 下界：{took:?}");
+    assert_eq!(
+        out,
+        Outcome::Stalled,
+        "头收了、body 一个字节没到 ⇒ 零进制的预算到点，只能是 Stalled：{out:?}"
+    );
+    assert!(
+        took >= Duration::from_secs(14),
+        "读侧预算同样是 15 s 下界：{took:?}"
+    );
     assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
     let facts = facts.expect("响应头到了，事实就是读到的东西，不许跟失败结论一起丢");
-    assert_eq!(facts.total_len, 8 * 1024 * 1024, "长度取自这一枪的 Content-Length");
+    assert_eq!(
+        facts.total_len,
+        8 * 1024 * 1024,
+        "长度取自这一枪的 Content-Length"
+    );
     assert!(facts.accept_ranges, "对端这一枪说了 `Accept-Ranges: bytes`");
     assert!(stub.saw("/hangs"), "必须真打到对端：{:?}", stub.seen());
     let _ = std::fs::remove_file(&file);
@@ -2631,7 +3766,11 @@ fn a_whole_shot_cut_off_before_the_first_byte_is_a_countable_failure() -> anyhow
     }
     assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
     let facts = facts.expect("响应头到了，事实就是读到的东西");
-    assert_eq!(facts.total_len, 48 * 1024 * 1024, "长度照响应自己说的，不改成我们拿到的 0");
+    assert_eq!(
+        facts.total_len,
+        48 * 1024 * 1024,
+        "长度照响应自己说的，不改成我们拿到的 0"
+    );
     let _ = std::fs::remove_file(&file);
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -2654,15 +3793,31 @@ fn a_whole_shot_cut_off_before_the_first_byte_is_a_countable_failure() -> anyhow
 /// 钉着；两条路径语义**相同**这一点由这两条用例合起来覆盖（派发要求"若不同就各钉一条"）。
 #[test]
 fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyhow::Result<()> {
-    let peer = harness::spawn_paced_partial_stub(6 * 1024 * 1024, 64 * 1024, Duration::from_millis(260))?;
+    let peer =
+        harness::spawn_paced_partial_stub(6 * 1024 * 1024, 64 * 1024, Duration::from_millis(260))?;
     let client = harness::client()?;
-    let t = Task { url: format!("{}/blob", peer.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        ..harness::blank_task()
+    };
     let (store, path) = harness::store("t7-budget-cut.bin")?;
-    let iv = Interval { start: 0, end: WINDOW_BYTES * 2 - 1 };
+    let iv = Interval {
+        start: 0,
+        end: WINDOW_BYTES * 2 - 1,
+    };
     let started = Instant::now();
 
     // 速率取 `WINDOW_BYTES` ⇒ 式子给 2 s，被下界夹成 15 s —— 正是要让"填满一个窗口"比预算更久。
-    let out = fetch::run_window(&client, &t, iv, &store, WINDOW_BYTES, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &client,
+        &t,
+        iv,
+        &store,
+        WINDOW_BYTES,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let took = started.elapsed();
     let Outcome::Advanced { bytes } = out else {
         panic!("被自己的期限掐在一个窗口中间 ⇒ 必须是 Advanced（带着已落盘的字节），实际 {out:?}");
@@ -2671,13 +3826,25 @@ fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyho
         "---- 整请求期限（读侧）----\n{out:?} 用时 {took:?} 对端写出 {} 字节（它承认的 body 是 6 MiB）",
         peer.written()
     );
-    assert!(took >= Duration::from_secs(14), "这一枪要跑到预算那一档才说明响的是期限，不是别的东西：{took:?}");
-    assert!(took < Duration::from_secs(30), "到点就收手，不许再等第二个 15 s 或撞上客户端默认的 30 s：{took:?}");
-    assert!(bytes < WINDOW_BYTES, "对端每块之间只静默 260 ms（远小于 15 s 预算）仍然被掐 ⇒ 期限算的是整请求；若是静默期限，这里应该是正好 {WINDOW_BYTES}");
+    assert!(
+        took >= Duration::from_secs(14),
+        "这一枪要跑到预算那一档才说明响的是期限，不是别的东西：{took:?}"
+    );
+    assert!(
+        took < Duration::from_secs(30),
+        "到点就收手，不许再等第二个 15 s 或撞上客户端默认的 30 s：{took:?}"
+    );
+    assert!(
+        bytes < WINDOW_BYTES,
+        "对端每块之间只静默 260 ms（远小于 15 s 预算）仍然被掐 ⇒ 期限算的是整请求；若是静默期限，这里应该是正好 {WINDOW_BYTES}"
+    );
     assert!(bytes > 0, "被掐之前写下去的字节是真进度（裁定 4）");
     assert_eq!(store.len()?, bytes, "交回的字节数与盘上的量同源");
     harness::require_block_alignment(&path, 0, bytes)?;
-    assert!(peer.written() >= bytes, "对端至少写出了我们读到的那么多 ⇒ 它没停，停的是我们");
+    assert!(
+        peer.written() >= bytes,
+        "对端至少写出了我们读到的那么多 ⇒ 它没停，停的是我们"
+    );
     assert_eq!(
         peer.ranges()[0],
         format!("bytes=0-{}", WINDOW_BYTES - 1),
@@ -2687,14 +3854,33 @@ fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyho
     );
 
     // 同一个节拍、总时长在预算内 ⇒ 必须完整读完（否则上一段红的原因就说不清是哪一种）。
-    let small = Interval { start: 0, end: 512 * 1024 - 1 };
+    let small = Interval {
+        start: 0,
+        end: 512 * 1024 - 1,
+    };
     let (store2, path2) = harness::store("t7-budget-ok.bin")?;
     let started2 = Instant::now();
-    let out2 = fetch::run_window(&client, &t, small, &store2, WINDOW_BYTES, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let out2 = fetch::run_window(
+        &client,
+        &t,
+        small,
+        &store2,
+        WINDOW_BYTES,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let took2 = started2.elapsed();
     eprintln!("---- 同一台对端，只要总时长在预算内 ----\n{out2:?} 用时 {took2:?}");
-    assert_eq!(out2, Outcome::Complete, "512 KiB 在 ~1.8 s 内读完 ⇒ 同一个期限没响，区间读完就是 Complete：{out2:?}");
-    assert!(took2 < Duration::from_secs(10), "这一段必须明显快过预算，否则对照不成立：{took2:?}");
+    assert_eq!(
+        out2,
+        Outcome::Complete,
+        "512 KiB 在 ~1.8 s 内读完 ⇒ 同一个期限没响，区间读完就是 Complete：{out2:?}"
+    );
+    assert!(
+        took2 < Duration::from_secs(10),
+        "这一段必须明显快过预算，否则对照不成立：{took2:?}"
+    );
     harness::require_block_alignment(&path2, 0, 512 * 1024)?;
 
     drop((store, store2));
@@ -2727,15 +3913,31 @@ fn the_window_budget_is_a_whole_request_deadline_on_the_read_side_too() -> anyho
 ///   第二条另外挡掉"把 0 当成我们的起点"那种写法（`asked_at != Some(0)`），那种写法在第一条上
 ///   与正确实现同判、在真服务器上（起点 0 是合法起点）却会把骗子放行。
 #[test]
-fn a_206_that_claims_another_offset_than_the_one_we_asked_for_writes_nothing() -> anyhow::Result<()> {
+fn a_206_that_claims_another_offset_than_the_one_we_asked_for_writes_nothing() -> anyhow::Result<()>
+{
     let stub = harness::spawn_unknown_total_stub(1024)?;
     let client = harness::client()?;
     let (store, path) = harness::store("t7-206-wrong-offset.bin")?;
-    let iv = Interval { start: 4_096, end: 4_096 + 1_024 - 1 };
+    let iv = Interval {
+        start: 4_096,
+        end: 4_096 + 1_024 - 1,
+    };
 
     for (route, claimed) in [("/known-total", 0u64), ("/wrong-start", 1_024)] {
-        let t = Task { url: format!("{}{route}", stub.base()), ..harness::blank_task() };
-        let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+        let t = Task {
+            url: format!("{}{route}", stub.base()),
+            ..harness::blank_task()
+        };
+        let out = fetch::run_window(
+            &client,
+            &t,
+            iv,
+            &store,
+            10_000_000,
+            48 * 1024 * 1024,
+            &harness::uncapped(),
+            fetch::BodyShape::Windowed,
+        )?;
         eprintln!(
             "---- A：我们问 {}，{route} 声称 {claimed} ----\n{out:?} len={}",
             iv.start,
@@ -2753,8 +3955,17 @@ fn a_206_that_claims_another_offset_than_the_one_we_asked_for_writes_nothing() -
         assert_eq!(store.len()?, 0, "{route}：起点不符 ⇒ 一个字节都不许落盘");
     }
     // "没被吸进文件"由**独立读者**证（不经 Store）：文件长度真的还是 0，不是"写过又缩回去"。
-    assert_eq!(std::fs::metadata(&path)?.len(), 0, "响应体被落进文件了（长度不是 0）");
-    assert_eq!(stub.seen().len(), 2, "两枪都要真打到对端（否则测的是连接失败）：{:?}", stub.seen());
+    assert_eq!(
+        std::fs::metadata(&path)?.len(),
+        0,
+        "响应体被落进文件了（长度不是 0）"
+    );
+    assert_eq!(
+        stub.seen().len(),
+        2,
+        "两枪都要真打到对端（否则测的是连接失败）：{:?}",
+        stub.seen()
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -2772,14 +3983,44 @@ fn an_interval_of_exactly_one_window_is_complete() -> anyhow::Result<()> {
     let (srv, base) = harness::spawn()?;
     let total = srv.announced()?.size;
     let (store, path) = harness::store("t7-window-exact.bin")?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
-    let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES - 1 };
-    assert_eq!(iv.len(), WINDOW_BYTES, "这一条要的就是「正好一个窗口」那个形状");
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + WINDOW_BYTES - 1,
+    };
+    assert_eq!(
+        iv.len(),
+        WINDOW_BYTES,
+        "这一条要的就是「正好一个窗口」那个形状"
+    );
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    eprintln!("---- B 左半边：len(iv) == WINDOW_BYTES ----\n{out:?} len={}", store.len()?);
-    assert_eq!(out, Outcome::Complete, "区间正好一个窗口 ⇒ 最后一个字节落盘了，必须 Complete：{out:?}");
-    assert_eq!(store.len()?, iv.end + 1, "含端点：写完 iv.len() 个字节 ⇒ 长度是 iv.end + 1");
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    eprintln!(
+        "---- B 左半边：len(iv) == WINDOW_BYTES ----\n{out:?} len={}",
+        store.len()?
+    );
+    assert_eq!(
+        out,
+        Outcome::Complete,
+        "区间正好一个窗口 ⇒ 最后一个字节落盘了，必须 Complete：{out:?}"
+    );
+    assert_eq!(
+        store.len()?,
+        iv.end + 1,
+        "含端点：写完 iv.len() 个字节 ⇒ 长度是 iv.end + 1"
+    );
     // 块号取证覆盖窗口内每一个 4 KiB 块首（最后一块是第 1279 块，起点 5238784）⇒ 落盘的内容
     // 确实来自 `[ALIGNED, ALIGNED+WINDOW_BYTES)`，没错位也没掉段。
     harness::require_block_alignment(&path, ALIGNED, WINDOW_BYTES)?;
@@ -2809,19 +4050,47 @@ fn an_interval_one_byte_wider_than_the_window_is_never_complete() -> anyhow::Res
     let (srv, base) = harness::spawn()?;
     let total = srv.announced()?.size;
     let (store, path) = harness::store("t7-window-plus-one.bin")?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
-    let iv = Interval { start: ALIGNED, end: ALIGNED + WINDOW_BYTES };
-    assert_eq!(iv.len(), WINDOW_BYTES + 1, "多一个字节 ⇒ 窗口填不满这个区间");
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: ALIGNED,
+        end: ALIGNED + WINDOW_BYTES,
+    };
+    assert_eq!(
+        iv.len(),
+        WINDOW_BYTES + 1,
+        "多一个字节 ⇒ 窗口填不满这个区间"
+    );
     let edge = iv.end; // 区间最后一个字节所在的**下标**（格式串里不支持字段访问，取个局部名）
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, total, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    eprintln!("---- B 右半边：len(iv) == WINDOW_BYTES + 1 ----\n{out:?} len={}", store.len()?);
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        total,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    eprintln!(
+        "---- B 右半边：len(iv) == WINDOW_BYTES + 1 ----\n{out:?} len={}",
+        store.len()?
+    );
     assert_eq!(
         out,
-        Outcome::Advanced { bytes: WINDOW_BYTES },
+        Outcome::Advanced {
+            bytes: WINDOW_BYTES
+        },
         "区间比窗口多一个字节 ⇒ 交回「正好一个窗口」，并如实说那个尾巴还没到：{out:?}"
     );
-    assert_eq!(store.len()?, edge, "长度停在 iv.end ⇒ 下标 iv.end 那个字节不在盘上");
+    assert_eq!(
+        store.len()?,
+        edge,
+        "长度停在 iv.end ⇒ 下标 iv.end 那个字节不在盘上"
+    );
     let on_disk = std::fs::metadata(&path)?.len();
     assert!(
         on_disk <= edge,
@@ -2854,8 +4123,14 @@ fn take_transport_note(out: &Outcome, shape: &str) -> String {
     let Outcome::Failed(FailKind::Transport(note)) = out else {
         panic!("{shape} ⇒ 期待 Failed(Transport(那句原因))，实际是 {out:?}");
     };
-    assert!(!note.is_empty(), "{shape}：Transport 不许带空原因（空话与裸枚举一样没法行动）");
-    assert!(!note.contains('\n') && !note.contains('\r'), "{shape}：原因必须是一行：{note:?}");
+    assert!(
+        !note.is_empty(),
+        "{shape}：Transport 不许带空原因（空话与裸枚举一样没法行动）"
+    );
+    assert!(
+        !note.contains('\n') && !note.contains('\r'),
+        "{shape}：原因必须是一行：{note:?}"
+    );
     assert!(
         note.chars().count() <= 200,
         "{shape}：原因超过 200 个字符（{} 个）：{note}",
@@ -2875,7 +4150,8 @@ fn take_transport_note(out: &Outcome, shape: &str) -> String {
 /// 打印这句时旁边就站着这条 URL，留着等于说两遍）；③ 还没看到响应 ⇒ `run_whole` 交不回事实（`None`），
 /// 且盘上仍然是空的。
 #[test]
-fn a_transport_failure_from_the_execute_side_names_the_cause_without_repeating_the_url() -> anyhow::Result<()> {
+fn a_transport_failure_from_the_execute_side_names_the_cause_without_repeating_the_url()
+-> anyhow::Result<()> {
     let port = {
         let listener = std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .context("向 OS 要一个空闲端口失败")?;
@@ -2886,22 +4162,50 @@ fn a_transport_failure_from_the_execute_side_names_the_cause_without_repeating_t
     let (store, path) = harness::store("t7-transport-exec.bin")?;
 
     // ① 窗口那一支（GET + Range）
-    let t = Task { url: format!("{dead}/blob"), ..harness::blank_task() };
-    let out = fetch::run_window(&client, &t, Interval { start: 0, end: 4_095 }, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
+    let t = Task {
+        url: format!("{dead}/blob"),
+        ..harness::blank_task()
+    };
+    let out = fetch::run_window(
+        &client,
+        &t,
+        Interval {
+            start: 0,
+            end: 4_095,
+        },
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
     let note = take_transport_note(&out, "窗口那一枪连响应头都没等到（端口没人听）");
     eprintln!("---- D：run_window 的 execute 支 ----\n{out:?}\n原因原文：{note}");
     assert!(!note.contains("http"), "原因里还有 URL 的成分：{note}");
-    assert!(!note.contains(&port.to_string()), "原因里抄了这次的目标端口（Task 8 打印时旁边就有 URL）：{note}");
+    assert!(
+        !note.contains(&port.to_string()),
+        "原因里抄了这次的目标端口（Task 8 打印时旁边就有 URL）：{note}"
+    );
     assert_eq!(store.len()?, 0, "连接都没成 ⇒ 盘上必须还是空的");
 
     // ② 整份那一支（POST）：同一个构造器、同一条规则，而且**没有**事实可交（没看到响应）。
     let file = harness::scratch_body("f1-exec-dead-body.bin", FORM_BODY)?;
-    let pt = Task { url: format!("{dead}/submit"), data_file: Some(file.clone()), ..harness::blank_task() };
+    let pt = Task {
+        url: format!("{dead}/submit"),
+        data_file: Some(file.clone()),
+        ..harness::blank_task()
+    };
     let (out2, facts) = fetch::run_whole(&client, &pt, &store, 10_000_000)?;
     let note2 = take_transport_note(&out2, "整份那一枪连响应头都没等到（同一个端口）");
     eprintln!("---- D：run_whole 的 execute 支 ----\n{out2:?}\n原因原文：{note2}");
-    assert!(facts.is_none(), "还没看到响应就失败 ⇒ 不许硬凑一份事实：{facts:?}");
-    assert!(!note2.contains("http") && !note2.contains(&port.to_string()), "同一支规则不许在两条入口上分岔：{note2}");
+    assert!(
+        facts.is_none(),
+        "还没看到响应就失败 ⇒ 不许硬凑一份事实：{facts:?}"
+    );
+    assert!(
+        !note2.contains("http") && !note2.contains(&port.to_string()),
+        "同一支规则不许在两条入口上分岔：{note2}"
+    );
     for leak in ["cvv", "hunter2", "session", "user=alice"] {
         assert!(!note2.contains(leak), "原因里抄了请求体（{leak}）：{note2}");
     }
@@ -2928,20 +4232,49 @@ fn a_transport_note_holds_no_byte_of_the_body_it_handed_back() -> anyhow::Result
     const BODY: u64 = 4_096;
     let stub = harness::spawn_range_ignoring_stub(BODY)?;
     let (store, path) = harness::store("t7-note-holds-no-body.bin")?;
-    let t = Task { url: format!("{}/claims-bytes-answers-200", stub.base()), ..harness::blank_task() };
-    let iv = Interval { start: BODY, end: BODY * 2 - 1 };
+    let t = Task {
+        url: format!("{}/claims-bytes-answers-200", stub.base()),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: BODY,
+        end: BODY * 2 - 1,
+    };
 
-    let out = fetch::run_window(&harness::client()?, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &harness::uncapped(), fetch::BodyShape::Windowed)?;
-    let note = take_transport_note(&out, "区间要 4096 字节、对端那 4096 字节全是要丢的前导 ⇒ 零进度");
+    let out = fetch::run_window(
+        &harness::client()?,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &harness::uncapped(),
+        fetch::BodyShape::Windowed,
+    )?;
+    let note = take_transport_note(
+        &out,
+        "区间要 4096 字节、对端那 4096 字节全是要丢的前导 ⇒ 零进度",
+    );
     eprintln!("---- D：那句原因的原文（4096 个 'r' 一个字节都没进账）----\n{note}");
     assert!(
         note.chars().all(|c| !c.is_ascii_alphanumeric()),
         "原因里出现了 ASCII 字母或数字 ⇒ 那是 body 的字节（对端交的 4096 个 'r'）或它的长度：{note}"
     );
-    assert!(note.contains("响应体") && note.contains("干净结束"), "原因要说清是哪一种零进度：{note}");
+    assert!(
+        note.contains("响应体") && note.contains("干净结束"),
+        "原因要说清是哪一种零进度：{note}"
+    );
     assert_eq!(store.len()?, 0, "零进度不许悄悄写过盘");
-    assert_eq!(std::fs::metadata(&path)?.len(), 0, "那 4096 个字节没被落进文件（独立读者）");
-    assert!(stub.saw("/claims-bytes-answers-200"), "必须真打到对端（否则测的是连接失败）：{:?}", stub.seen());
+    assert_eq!(
+        std::fs::metadata(&path)?.len(),
+        0,
+        "那 4096 个字节没被落进文件（独立读者）"
+    );
+    assert!(
+        stub.saw("/claims-bytes-answers-200"),
+        "必须真打到对端（否则测的是连接失败）：{:?}",
+        stub.seen()
+    );
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
     Ok(())
@@ -2958,7 +4291,8 @@ fn a_transport_note_holds_no_byte_of_the_body_it_handed_back() -> anyhow::Result
 /// 那条性质从此由构造保证而不是由运气保证。摘掉 `ensure!` 之后本用例红在"普通文件"那一条断言上
 /// （消息变成"读 --data-file 的请求体文件失败：…"），取证见报告。
 #[test]
-fn a_directory_handed_to_data_file_is_refused_before_the_wire_and_names_the_path() -> anyhow::Result<()> {
+fn a_directory_handed_to_data_file_is_refused_before_the_wire_and_names_the_path()
+-> anyhow::Result<()> {
     let peer = harness::spawn_post_stub(Some("bytes"), harness::positioned_body(4096))?;
     let (store, path) = harness::store("t7-dir-as-body.bin")?;
     // 一个**真的目录**：`harness::blank_task()` 的 `dir`（`target/harness-scratch`，夹具建好的那个）。
@@ -2976,12 +4310,28 @@ fn a_directory_handed_to_data_file_is_refused_before_the_wire_and_names_the_path
     };
     let msg = err.to_string();
     eprintln!("---- drive-by：目录当体 ----\n{msg}\n原因链：{err:?}");
-    assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
-    assert!(msg.contains("普通文件"), "错误要说清是「不是文件」，而不是「打不开」：{msg}");
-    assert!(!msg.contains("拒绝访问") && !msg.contains("权限"), "把「你给的是目录」报成权限问题会把用户支到 ACL 上去查：{msg}");
-    assert!(msg.contains("harness-scratch"), "路径要点名（那是用户能给对的东西）：{msg}");
+    assert!(
+        msg.contains("--data-file"),
+        "错误要点名那个参数，用户才知道改什么：{msg}"
+    );
+    assert!(
+        msg.contains("普通文件"),
+        "错误要说清是「不是文件」，而不是「打不开」：{msg}"
+    );
+    assert!(
+        !msg.contains("拒绝访问") && !msg.contains("权限"),
+        "把「你给的是目录」报成权限问题会把用户支到 ACL 上去查：{msg}"
+    );
+    assert!(
+        msg.contains("harness-scratch"),
+        "路径要点名（那是用户能给对的东西）：{msg}"
+    );
     assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
-    assert!(peer.requests().is_empty(), "拒在上网之前：对端一条请求都不该看到（POST 一旦上线就是真提交）：{:?}", peer.requests());
+    assert!(
+        peer.requests().is_empty(),
+        "拒在上网之前：对端一条请求都不该看到（POST 一旦上线就是真提交）：{:?}",
+        peer.requests()
+    );
     assert_eq!(store.len()?, 0, "被拒的这一枪不许动过盘");
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -3036,7 +4386,10 @@ fn full_download_is_byte_exact() -> anyhow::Result<()> {
     assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
 
     // 独立读者（harness 自己那份 sha2）与引擎的判定分开：两边都说对，才算对。
-    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len));
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len)
+    );
     Ok(())
 }
 
@@ -3074,11 +4427,21 @@ fn a_shot_stops_at_the_end_cap_lowered_mid_body_and_keeps_what_it_wrote() -> any
     const CAP_BYTES: u64 = 20 * CHUNK; // 帽：允许写到偏移 `CAP_BYTES - 1`（含端点）
     const WINDOW_CHUNKS: u64 = WINDOW_BYTES / CHUNK;
 
-    let peer = harness::spawn_paced_partial_stub(6 * 1024 * 1024, CHUNK as usize, Duration::from_millis(15))?;
+    let peer = harness::spawn_paced_partial_stub(
+        6 * 1024 * 1024,
+        CHUNK as usize,
+        Duration::from_millis(15),
+    )?;
     let client = harness::client()?;
-    let t = Task { url: format!("{}/blob", peer.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        ..harness::blank_task()
+    };
     let (store, path) = harness::store("t8a-cap-mid-body.bin")?;
-    let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
+    let iv = Interval {
+        start: 0,
+        end: WINDOW_BYTES - 1,
+    };
     let cap = std::sync::Arc::new(dlm::fetch::EndCap::new(dlm::fetch::NO_END_CAP));
 
     let (watch_cap, watch_path, lowered) = (
@@ -3100,13 +4463,25 @@ fn a_shot_stops_at_the_end_cap_lowered_mid_body_and_keeps_what_it_wrote() -> any
             std::thread::sleep(Duration::from_millis(2));
         }
     });
-    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &cap, fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &client,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &cap,
+        fetch::BodyShape::Windowed,
+    )?;
     watcher.join().expect("看盘线程不该崩");
 
     let Outcome::Advanced { bytes } = out else {
         panic!("帽掐在 body 中间 ⇒ 必须是 Advanced（带着已落盘的字节），实际 {out:?}");
     };
-    assert!(lowered.load(std::sync::atomic::Ordering::SeqCst), "夹具：看盘线程没在 30 s 内等到第 8 块 ⇒ 这一枪根本没读起来");
+    assert!(
+        lowered.load(std::sync::atomic::Ordering::SeqCst),
+        "夹具：看盘线程没在 30 s 内等到第 8 块 ⇒ 这一枪根本没读起来"
+    );
     assert!(
         bytes >= TRIGGER_BYTES,
         "帽之前写下去的字节都是真进度（裁定 4）：{bytes}"
@@ -3125,7 +4500,11 @@ fn a_shot_stops_at_the_end_cap_lowered_mid_body_and_keeps_what_it_wrote() -> any
         "文件里不该有帽 + 一块之外的字节"
     );
     harness::require_block_alignment(&path, 0, bytes)?;
-    assert!(peer.written() >= bytes, "对端至少写出了我们读到的那么多：written={}", peer.written());
+    assert!(
+        peer.written() >= bytes,
+        "对端至少写出了我们读到的那么多：written={}",
+        peer.written()
+    );
 
     drop(store);
     let _ = std::fs::remove_file(&path);
@@ -3140,17 +4519,37 @@ fn a_shot_stops_at_the_end_cap_lowered_mid_body_and_keeps_what_it_wrote() -> any
 /// 与单元用例 `end_cap_lowering_is_monotonic_downward_only`（钉 `lower_end_cap` 那个原语本身）的分工：
 /// 那里证"写更大的值不算话"，这里证"那一枪真的不会因为自己的窗口而忘掉别人的帽"。
 #[test]
-fn an_end_cap_already_lowered_before_the_shot_starts_survives_the_shots_own_window() -> anyhow::Result<()> {
+fn an_end_cap_already_lowered_before_the_shot_starts_survives_the_shots_own_window()
+-> anyhow::Result<()> {
     const CHUNK: u64 = 64 * 1024;
-    let peer = harness::spawn_paced_partial_stub(6 * 1024 * 1024, CHUNK as usize, Duration::from_millis(5))?;
+    let peer = harness::spawn_paced_partial_stub(
+        6 * 1024 * 1024,
+        CHUNK as usize,
+        Duration::from_millis(5),
+    )?;
     let client = harness::client()?;
-    let t = Task { url: format!("{}/blob", peer.base()), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{}/blob", peer.base()),
+        ..harness::blank_task()
+    };
     let (store, path) = harness::store("t8a-cap-first.bin")?;
-    let iv = Interval { start: 0, end: WINDOW_BYTES - 1 };
+    let iv = Interval {
+        start: 0,
+        end: WINDOW_BYTES - 1,
+    };
     // 帽先说话：只许写到第 4 块末（含端点 ⇒ `4 * CHUNK - 1`）。
     let cap = dlm::fetch::EndCap::new(4 * CHUNK - 1);
 
-    let out = fetch::run_window(&client, &t, iv, &store, 10_000_000, 48 * 1024 * 1024, &cap, fetch::BodyShape::Windowed)?;
+    let out = fetch::run_window(
+        &client,
+        &t,
+        iv,
+        &store,
+        10_000_000,
+        48 * 1024 * 1024,
+        &cap,
+        fetch::BodyShape::Windowed,
+    )?;
     let Outcome::Advanced { bytes } = out else {
         panic!("区间比帽宽 ⇒ 只能 Advanced，实际 {out:?}");
     };
@@ -3185,7 +4584,8 @@ fn an_end_cap_already_lowered_before_the_shot_starts_survives_the_shots_own_wind
 ///
 /// 顺带钉"两种形状都真的出现过"：一条都没有的话，上面两句就退化成恒真（本项目已经踩过三次恒绿夹具）。
 #[test]
-fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open_ended() -> anyhow::Result<()> {
+fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open_ended()
+-> anyhow::Result<()> {
     // `_srv` 必须活到断言跑完：`Server::Drop` 会杀进程并**删掉日志**。
     let (srv, base) = harness::spawn()?;
     let dir = harness::tmp_dir("eng-cap1")?;
@@ -3275,8 +4675,14 @@ fn every_engine_request_asks_for_at_most_a_window_and_only_the_true_tail_is_open
             }
         }
     }
-    assert!(open_ended > 0, "这一形状里一条开放终点都没有 ⇒ 两头都断不到，判据退化成恒真");
-    assert!(full_window_asks > 0, "没有一问就是整个窗口的枪 ⇒ 窗口终点那条分支没被走过（戊的正面形状没测到）");
+    assert!(
+        open_ended > 0,
+        "这一形状里一条开放终点都没有 ⇒ 两头都断不到，判据退化成恒真"
+    );
+    assert!(
+        full_window_asks > 0,
+        "没有一问就是整个窗口的枪 ⇒ 窗口终点那条分支没被走过（戊的正面形状没测到）"
+    );
     Ok(())
 }
 
@@ -3403,7 +4809,10 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
     assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
 
     let tightened = rep.tightened().len() as u64;
-    assert!(tightened > 0, "这个形状本来就要收紧好几次；一次都没有 ⇒ 账单这条用例什么都没测（这一条钉的是**引擎自己的计数**，不是量具活体针）");
+    assert!(
+        tightened > 0,
+        "这个形状本来就要收紧好几次；一次都没有 ⇒ 账单这条用例什么都没测（这一条钉的是**引擎自己的计数**，不是量具活体针）"
+    );
 
     // **量具活体针**（评审 C-I-1① 起手，**复审 B-I-1 把它的形状修对**）：日志落盘晚于响应收尾，
     // 裸读一次 `events()` 会在"一条 `conn_close_side` 都没记上"的时候给出 written = 0 ⇒
@@ -3459,7 +4868,10 @@ fn the_tightening_bill_on_a_paced_peer_is_priced_by_chunk_not_by_window() -> any
          帽没赶上在途那一枪（阶段4 的形状：按 E14 附记表线上 excess = 8,465,356，\
          而 15 次收紧的额度是 5,898,240 —— 那两个数出自两次运行，见本条用例的文档）"
     );
-    assert!(rep.duplicated > 0, "E14③：这笔账不许折成 0（不许为了让用例好看把它抹掉）");
+    assert!(
+        rep.duplicated > 0,
+        "E14③：这笔账不许折成 0（不许为了让用例好看把它抹掉）"
+    );
     assert!(
         rep.duplicated <= excess + (WORKERS as u64) * CHUNK,
         "引擎报的重复账 {} 比线上真实多打的 {excess} 还多出一大块以上 ⇒ 那本账又在替另一件事说话",
@@ -3573,8 +4985,16 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
         "链接一（收紧那一半）：回放的 Retighten 必须与记下的收紧逐条同序相等"
     );
     // 两头都得真的有东西可比，否则上面两条退化成"空表 == 空表"（本项目踩过三次恒绿夹具）。
-    assert!(rep.dispatched().len() > 1, "这个形状该打出很多枪，只记到 {}: {:?}", rep.dispatched().len(), rep.dispatched());
-    assert!(!rep.tightened().is_empty(), "这个形状本来要收紧好几次；一次都没记 ⇒ 链接一的第二半没被走过");
+    assert!(
+        rep.dispatched().len() > 1,
+        "这个形状该打出很多枪，只记到 {}: {:?}",
+        rep.dispatched().len(),
+        rep.dispatched()
+    );
+    assert!(
+        !rep.tightened().is_empty(),
+        "这个形状本来要收紧好几次；一次都没记 ⇒ 链接一的第二半没被走过"
+    );
 
     // —— 链接二：引擎派的每一枪，线上真的收到那条 Range 吗 ——
     // **先守卫条数再读**（评审 C-I-4）：这条用例期望的线上条数**可知** ——
@@ -3602,8 +5022,12 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
         expected_lines,
     );
     let ranges = harness::ranges_of(&requests);
-    let probe_lines: Vec<usize> =
-        ranges.iter().enumerate().filter(|(_, r)| r.as_deref() == Some(probe_range.as_str())).map(|(i, _)| i).collect();
+    let probe_lines: Vec<usize> = ranges
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.as_deref() == Some(probe_range.as_str()))
+        .map(|(i, _)| i)
+        .collect();
     assert_eq!(
         probe_lines,
         vec![0],
@@ -3623,7 +5047,12 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
     let dispatched: Vec<(u64, u64)> = rep
         .dispatched()
         .iter()
-        .map(|iv| (iv.start, iv.end.min(iv.start.saturating_add(WINDOW_BYTES - 1))))
+        .map(|iv| {
+            (
+                iv.start,
+                iv.end.min(iv.start.saturating_add(WINDOW_BYTES - 1)),
+            )
+        })
         .collect();
     assert_eq!(
         wire.len(),
@@ -3637,15 +5066,16 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
     wire_sorted.sort();
     dispatched_sorted.sort();
     assert_eq!(
-        wire_sorted,
-        dispatched_sorted,
+        wire_sorted, dispatched_sorted,
         "链接二：引擎派出去的区间集合与线上真收到的 Range 集合不是同一批（不是顺序问题，是**有没有这一条**的问题）"
     );
     // 顺序：同一连接上的请求必须按派单顺序到达（跨连接不保证，见用例文档）。
     let mut conns: Vec<u64> = vec![];
     let mut per_conn: Vec<Vec<(u64, u64)>> = vec![];
     for (rec, span) in shot_reqs.iter().zip(wire.iter()) {
-        let conn = rec["conn"].as_u64().context("服务端记的 request 没有 conn 字段")?;
+        let conn = rec["conn"]
+            .as_u64()
+            .context("服务端记的 request 没有 conn 字段")?;
         match conns.iter().position(|c| *c == conn) {
             Some(k) => per_conn[k].push(*span),
             None => {
@@ -3668,7 +5098,11 @@ fn the_replayed_trace_matches_the_dispatched_shots_and_the_wire() -> anyhow::Res
     }
 
     // —— 链接三：下下来的字节是那份文件吗 ——
-    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "链接三：落盘字节与服务器那份不是一字不差");
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len),
+        "链接三：落盘字节与服务器那份不是一字不差"
+    );
     assert_eq!(rep.delivered, len, "收尾时盘上真有这么多字节");
     Ok(())
 }
@@ -3713,7 +5147,10 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         ..harness::blank_task()
     };
     let state_path = dlm::state::path_for(&t.target_path());
-    let (want, want_file) = sha_of_expected("5b-kill-expected.bin", &harness::positioned_body(TOTAL as usize))?;
+    let (want, want_file) = sha_of_expected(
+        "5b-kill-expected.bin",
+        &harness::positioned_body(TOTAL as usize),
+    )?;
 
     // —— 第一轮：真的停在半路 ——
     let cfg = dlm::engine::Config {
@@ -3728,12 +5165,26 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         on_tick: None,
     };
     let first = dlm::engine::run(&t, cfg.clone())?;
-    assert!(!first.ok, "这一轮的脚本就是要它停在半路，`ok` 却给了真：{:?}", first.message);
-    assert_eq!(first.delivered, watermark, "第一轮结束时盘上就该有这么多字节：一半都没下完");
-    assert!(state_path.exists(), "停在半路必须留下断点文件，否则下一轮无从续（spec §4）");
+    assert!(
+        !first.ok,
+        "这一轮的脚本就是要它停在半路，`ok` 却给了真：{:?}",
+        first.message
+    );
+    assert_eq!(
+        first.delivered, watermark,
+        "第一轮结束时盘上就该有这么多字节：一半都没下完"
+    );
+    assert!(
+        state_path.exists(),
+        "停在半路必须留下断点文件，否则下一轮无从续（spec §4）"
+    );
     let snap = dlm::state::load(&state_path)?.expect("上面已断言文件在，读回来却什么都没有");
     let covered: Vec<(u64, u64)> = snap.segments.iter().map(|s| (s.start, s.end)).collect();
-    assert_eq!(covered, vec![(0, watermark - 1)], "断点文件说的覆盖集必须是「已确认的那些字节」：{snap:?}");
+    assert_eq!(
+        covered,
+        vec![(0, watermark - 1)],
+        "断点文件说的覆盖集必须是「已确认的那些字节」：{snap:?}"
+    );
 
     // —— 第二轮：同一 URL、同一台对端，脚本用完之后每枪诚实 ——
     let cfg_ok = dlm::engine::Config {
@@ -3749,11 +5200,19 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
     };
     let second = dlm::engine::run(&t, cfg_ok)?;
     assert!(second.ok, "第二轮该把剩下的下完：{:?}", second.message);
-    assert!(second.fresh_reason.is_none(), "第二轮走的是 `Resume`，没有「从头重来」要解释：{:?}", second.fresh_reason);
+    assert!(
+        second.fresh_reason.is_none(),
+        "第二轮走的是 `Resume`，没有「从头重来」要解释：{:?}",
+        second.fresh_reason
+    );
 
     // 线上取证：前 3 枪属于第一轮，第二轮从下标 3 开始。
     let ranges = peer.shot_ranges();
-    assert_eq!(ranges.len(), 5, "第一轮 3 枪 + 第二轮 2 枪 = 5，实际 {ranges:?}");
+    assert_eq!(
+        ranges.len(),
+        5,
+        "第一轮 3 枪 + 第二轮 2 枪 = 5，实际 {ranges:?}"
+    );
     let (run1, run2) = ranges.split_at(3);
     assert_eq!(
         run1[0],
@@ -3767,7 +5226,10 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
     );
     let resumed_wire: Vec<Option<String>> = run2[1..].iter().cloned().map(Some).collect();
     let resumed = harness::wire_spans(&resumed_wire, TOTAL)?;
-    assert!(!resumed.is_empty(), "第二轮一枪都没打 ⇒ 下面两条判据全是空的（恒绿）");
+    assert!(
+        !resumed.is_empty(),
+        "第二轮一枪都没打 ⇒ 下面两条判据全是空的（恒绿）"
+    );
     for (index, (start, end)) in resumed.iter().enumerate() {
         assert!(
             *start >= watermark,
@@ -3783,13 +5245,19 @@ fn resume_after_kill_does_not_redownload_done_segments() -> anyhow::Result<()> {
         }
     }
     assert_eq!(
-        resumed[0].0,
-        watermark,
+        resumed[0].0, watermark,
         "第二轮第一枪的起点必须**正好**是已确认覆盖的下一个字节（简报 Step 1 第 2 条的原话）"
     );
 
-    assert_eq!(harness::sha256_of(&t.target_path())?, want, "续完之后文件必须与整份内容一字不差");
-    assert!(!state_path.exists(), "跑完之后断点文件该删（spec §4，本轮没给 --keep-state）");
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        want,
+        "续完之后文件必须与整份内容一字不差"
+    );
+    assert!(
+        !state_path.exists(),
+        "跑完之后断点文件该删（spec §4，本轮没给 --keep-state）"
+    );
     let _ = std::fs::remove_file(&want_file);
     Ok(())
 }
@@ -3839,18 +5307,45 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
         },
     )?;
     assert!(rep.ok, "退化形状也该跑得完：{:?}", rep.message);
-    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "对端不认 Range 也得一字不差");
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len),
+        "对端不认 Range 也得一字不差"
+    );
 
     // **先守卫条数再读**（评审 C-I-4 的同一形状，本文件里另外两处同类裸读一并修）：
     // 期望条数由这条用例自己的形状给出 = 试探 + 恰好一枪。裸读一次日志会把还没落盘的尾巴漏掉，
     // 而"漏掉后面的行"正好会让下面那条 `== 2` 在真分段了的情况下碰巧为真。
     let requests = srv.requests_at_least(2)?;
-    assert_eq!(requests.len(), 2, "试探 + 恰好一枪 = 2 条请求，实际 {requests:?}：分段了就不止 2 条");
-    assert_eq!(rep.dispatched().len(), 1, "退化模式一次只许有一段在途：{:?}", rep.dispatched());
-    assert!(rep.tightened().is_empty(), "退化模式永不劈分 ⇒ 不该有任何收紧：{:?}", rep.tightened());
-    let asks = rep.fed().iter().filter(|e| matches!(e, dlm::scheduler::Event::Connected(_))).count();
-    assert!(asks >= 4, "四个 worker 都该报过就绪（否则「并发=1」是因为只有一个 worker，不是退化规则）：{asks}");
-    let asked = requests[1].get("range").and_then(|v| v.as_str()).map(str::to_string);
+    assert_eq!(
+        requests.len(),
+        2,
+        "试探 + 恰好一枪 = 2 条请求，实际 {requests:?}：分段了就不止 2 条"
+    );
+    assert_eq!(
+        rep.dispatched().len(),
+        1,
+        "退化模式一次只许有一段在途：{:?}",
+        rep.dispatched()
+    );
+    assert!(
+        rep.tightened().is_empty(),
+        "退化模式永不劈分 ⇒ 不该有任何收紧：{:?}",
+        rep.tightened()
+    );
+    let asks = rep
+        .fed()
+        .iter()
+        .filter(|e| matches!(e, dlm::scheduler::Event::Connected(_)))
+        .count();
+    assert!(
+        asks >= 4,
+        "四个 worker 都该报过就绪（否则「并发=1」是因为只有一个 worker，不是退化规则）：{asks}"
+    );
+    let asked = requests[1]
+        .get("range")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let first_shot = harness::wire_spans(&[asked], len)?;
     assert_eq!(
         first_shot[0],
@@ -3872,7 +5367,10 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
     let big = 5 * 1024 * 1024u64;
     let peer = harness::spawn_scripted_peer(big, vec![], harness::Shot::IgnoresRange)?;
     let dir2 = harness::tmp_dir("eng-5b-noranges-big")?;
-    let (want, want_file) = sha_of_expected("5b-degraded-expected.bin", &harness::positioned_body(big as usize))?;
+    let (want, want_file) = sha_of_expected(
+        "5b-degraded-expected.bin",
+        &harness::positioned_body(big as usize),
+    )?;
     let t2 = Task {
         url: format!("{}/blob", peer.base()),
         dir: dir2.path().to_path_buf(),
@@ -3894,12 +5392,20 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
             on_tick: None,
         },
     )?;
-    assert!(rep2.ok, "退化形状（进程内对端）也该跑得完：{:?}", rep2.message);
+    assert!(
+        rep2.ok,
+        "退化形状（进程内对端）也该跑得完：{:?}",
+        rep2.message
+    );
     let spans = harness::wire_spans(
         &peer.shot_ranges().into_iter().map(Some).collect::<Vec<_>>(),
         big,
     )?;
-    assert_eq!(spans.len(), 2, "试探 + **一枪**下完剩余整条 body = 2 条（E16 R-B2），实际 {spans:?}");
+    assert_eq!(
+        spans.len(),
+        2,
+        "试探 + **一枪**下完剩余整条 body = 2 条（E16 R-B2），实际 {spans:?}"
+    );
     assert_eq!(spans[0], (0, PROBE_READ_BYTES - 1), "第一枪是试探");
     // 线上并发=1 的影子：这两条 Range 严格按文件顺序、首尾相接、彼此不重叠
     // （试探读过的那一截之后，body 那一枪必须**接上**而不是**回头**）。
@@ -3915,8 +5421,16 @@ fn no_ranges_falls_back_to_single_worker_and_is_correct() -> anyhow::Result<()> 
         assert!(b.1 > a.1, "后一条必须往后走，不许回头：{spans:?}");
     }
     assert_eq!(spans[1].1, big - 1, "那一枪该正好够到 EOF：{spans:?}");
-    assert!(rep2.tightened().is_empty(), "退化模式不劈分：{:?}", rep2.tightened());
-    assert_eq!(harness::sha256_of(&t2.target_path())?, want, "一枪下完的文件也要一字不差");
+    assert!(
+        rep2.tightened().is_empty(),
+        "退化模式不劈分：{:?}",
+        rep2.tightened()
+    );
+    assert_eq!(
+        harness::sha256_of(&t2.target_path())?,
+        want,
+        "一枪下完的文件也要一字不差"
+    );
     let _ = std::fs::remove_file(&want_file);
     Ok(())
 }
@@ -3979,9 +5493,16 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
          要改就同时改判据 1 与文档，别把这条守卫放宽成恒真。"
     );
     let len = PROBE_READ_BYTES + REMAINING_WINDOWS * WINDOW_BYTES;
-    let peer = harness::spawn_scripted_peer(len, vec![harness::Shot::IgnoresRange], harness::Shot::IgnoresRange)?;
+    let peer = harness::spawn_scripted_peer(
+        len,
+        vec![harness::Shot::IgnoresRange],
+        harness::Shot::IgnoresRange,
+    )?;
     let dir = harness::tmp_dir("e16-degraded-one-shot")?;
-    let (want, want_file) = sha_of_expected("e16-degraded-expected.bin", &harness::positioned_body(len as usize))?;
+    let (want, want_file) = sha_of_expected(
+        "e16-degraded-expected.bin",
+        &harness::positioned_body(len as usize),
+    )?;
     let t = Task {
         url: format!("{}/blob", peer.base()),
         dir: dir.path().to_path_buf(),
@@ -4005,7 +5526,11 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
             on_tick: None,
         },
     )?;
-    assert!(rep.ok, "退化形状（三个窗口的整条 body）也该跑得完：{:?}", rep.message);
+    assert!(
+        rep.ok,
+        "退化形状（三个窗口的整条 body）也该跑得完：{:?}",
+        rep.message
+    );
 
     // —— 判据 1：枪数。对端记下的请求条数（试探 + body）。
     let ranges = peer.shot_ranges();
@@ -4020,7 +5545,11 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
 
     // —— 判据 2：线上区间（含"那一枪问到 EOF、写法是开放终点"）。
     let spans = harness::wire_spans(&ranges.iter().cloned().map(Some).collect::<Vec<_>>(), len)?;
-    assert_eq!(spans[0], (0, PROBE_READ_BYTES - 1), "第一条必须是试探那一枪：{spans:?}");
+    assert_eq!(
+        spans[0],
+        (0, PROBE_READ_BYTES - 1),
+        "第一条必须是试探那一枪：{spans:?}"
+    );
     // **原文串**那一半（复审 B-I-5：`wire_spans` 把开放终点按 `total_len` 补齐 ⇒ 只看补齐后的
     // 闭区间，`bytes=236032-12818943` 这种显式终点写法**同样绿** ⇒ "开放终点"那一轴没有针）：
     // 这里比的是对端记下来的那串字符本身，不经过任何补齐。
@@ -4039,7 +5568,11 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
 
     // —— 判据 3：内容。整份散列（独立读者算的期望）+ 块号取证（起点 4096 对齐的尾部区段）。
     let path = t.target_path();
-    assert_eq!(harness::sha256_of(&path)?, want, "一枪下完的 body 也要一字不差");
+    assert_eq!(
+        harness::sha256_of(&path)?,
+        want,
+        "一枪下完的 body 也要一字不差"
+    );
     // 从 3 MiB 到文件尾这一段（`len - tail_start` = 9,673,216 个字节）只有"那一枪"写过：
     // 起点取 3 MiB 处（4096 的整数倍，取证工具的硬要求）。
     // 复审 B-Minor 1：这一句原先写"尾部这 236,032 个字节"，那是 `PROBE_READ_BYTES`（试探那一枪的量），
@@ -4077,15 +5610,22 @@ fn a_degraded_peer_is_fetched_in_one_body_shot_not_one_per_window() -> anyhow::R
 /// `eof` 分支，M6 在它上面**不红**（`/drop/65536` 那一枪交回的 65,536 字节由
 /// `a_body_cut_off_midway_keeps_the_bytes_it_actually_wrote` 钉，两条分工不同）。
 #[test]
-fn a_whole_body_shot_that_ends_at_a_clean_eof_is_advanced_and_reads_past_the_window() -> anyhow::Result<()> {
+fn a_whole_body_shot_that_ends_at_a_clean_eof_is_advanced_and_reads_past_the_window()
+-> anyhow::Result<()> {
     let (_srv, base) = harness::spawn()?;
     let give = 5 * 1024 * 1024u64; // 对端只肯交 5 MiB：比一个窗口宽、比三个窗口窄
-    let iv = Interval { start: 0, end: 3 * WINDOW_BYTES - 1 };
+    let iv = Interval {
+        start: 0,
+        end: 3 * WINDOW_BYTES - 1,
+    };
     let total = 48 * 1024 * 1024;
 
     // —— 臂一：`ToEof` 读到对端收线为止 ⇒ 交回**整条 body**，且绝不报 `Complete`。
     let (store, path) = harness::store("e16-toeof-eof.bin")?;
-    let t = Task { url: format!("{base}/sz/{give}"), ..harness::blank_task() };
+    let t = Task {
+        url: format!("{base}/sz/{give}"),
+        ..harness::blank_task()
+    };
     let out = fetch::run_window(
         &harness::client()?,
         &t,
@@ -4101,7 +5641,11 @@ fn a_whole_body_shot_that_ends_at_a_clean_eof_is_advanced_and_reads_past_the_win
         Outcome::Advanced { bytes: give },
         "E16②：body 比整条区间短 ⇒ 交回真落盘的字节数，**不许**报成 `Complete`（那会把尾巴永远封存）：{out:?}"
     );
-    assert_eq!(store.len()?, give, "`ToEof` 该一路读到对端收线：交回的就是那 {give} 个字节");
+    assert_eq!(
+        store.len()?,
+        give,
+        "`ToEof` 该一路读到对端收线：交回的就是那 {give} 个字节"
+    );
     harness::require_block_alignment(&path, 0, WINDOW_BYTES)?;
     drop(store);
     std::fs::remove_file(&path).context("清测试文件")?;
@@ -4120,7 +5664,9 @@ fn a_whole_body_shot_that_ends_at_a_clean_eof_is_advanced_and_reads_past_the_win
     )?;
     assert_eq!(
         out_w,
-        Outcome::Advanced { bytes: WINDOW_BYTES },
+        Outcome::Advanced {
+            bytes: WINDOW_BYTES
+        },
         "窗口那一支必须**在窗口处自己收手**（对端还有 1 MiB 没交完也不读）：{out_w:?}"
     );
     assert_eq!(store_w.len()?, WINDOW_BYTES);
@@ -4149,7 +5695,10 @@ fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<
         harness::Shot::Honest,
     )?;
     let dir = harness::tmp_dir("eng-5b-backoff")?;
-    let (want, want_file) = sha_of_expected("5b-backoff-expected.bin", &harness::positioned_body(TOTAL as usize))?;
+    let (want, want_file) = sha_of_expected(
+        "5b-backoff-expected.bin",
+        &harness::positioned_body(TOTAL as usize),
+    )?;
     let t = Task {
         url: format!("{}/blob", peer.base()),
         dir: dir.path().to_path_buf(),
@@ -4175,9 +5724,15 @@ fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<
     )?;
     assert!(rep.ok, "退避之后该把这一轮跑完：{:?}", rep.message);
     assert_eq!(rep.retries, 1, "只许失败一次 ⇒ 一次重试：{rep:?}");
-    assert_eq!(peer.shot_count(), 3, "试探 + 失败那一枪 + 重试那一枪 = 3，实际 {:?}", peer.shot_ranges());
     assert_eq!(
-        peer.shot_ranges()[1], peer.shot_ranges()[2],
+        peer.shot_count(),
+        3,
+        "试探 + 失败那一枪 + 重试那一枪 = 3，实际 {:?}",
+        peer.shot_ranges()
+    );
+    assert_eq!(
+        peer.shot_ranges()[1],
+        peer.shot_ranges()[2],
         "重试打的就是同一区间（等的是时间，不是换个地方下）"
     );
     let gap = peer.arrival_gap(1, 2)?;
@@ -4192,8 +5747,15 @@ fn the_first_retry_actually_waits_the_whole_one_second_step() -> anyhow::Result<
 
     let state_path = dlm::state::path_for(&t.target_path());
     let snap = dlm::state::load(&state_path)?.context("给了 --keep-state，断点文件却不在")?;
-    assert_eq!(snap.stats.retries, 1, "重试计数必须落到盘上那本账（跨轮的账不归本轮计数器）：{snap:?}");
-    assert_eq!(harness::sha256_of(&t.target_path())?, want, "等过一秒之后下来的字节照样一字不差");
+    assert_eq!(
+        snap.stats.retries, 1,
+        "重试计数必须落到盘上那本账（跨轮的账不归本轮计数器）：{snap:?}"
+    );
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        want,
+        "等过一秒之后下来的字节照样一字不差"
+    );
     let _ = std::fs::remove_file(&want_file);
     Ok(())
 }
@@ -4250,7 +5812,10 @@ fn a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice() -> an
     let snap = dlm::state::load(&dlm::state::path_for(&t.target_path()))?
         .context("失败那一支必须留着断点文件（下一轮才续得上）")?;
     assert_eq!(
-        snap.segments.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(),
+        snap.segments
+            .iter()
+            .map(|s| (s.start, s.end))
+            .collect::<Vec<_>>(),
         vec![(0, watermark - 1)],
         "已写前缀必须留在覆盖集里；失败就把整段交回队列的写法在这里红：{snap:?}"
     );
@@ -4261,7 +5826,11 @@ fn a_failed_segments_written_prefix_survives_and_is_not_downloaded_twice() -> an
         format!("bytes={watermark}-"),
         "失败之后重派的那一枪必须从**已写前缀之后**开始，不许从区间起点 {PROBE_READ_BYTES} 重来"
     );
-    assert_eq!(dlm::store::Store::open(&t.target_path(), false)?.len()?, watermark, "已写的字节不许被失败抹掉");
+    assert_eq!(
+        dlm::store::Store::open(&t.target_path(), false)?.len()?,
+        watermark,
+        "已写的字节不许被失败抹掉"
+    );
     // 块号取证取一个跨过边界的对齐窗口：证明那 100 000 字节确实落在自己的偏移上，不是抄来的形状。
     harness::require_block_alignment(&t.target_path(), 4096 * 57, 4096)?;
     Ok(())
@@ -4305,18 +5874,33 @@ fn exhausted_retries_report_failure_with_a_message_and_keep_the_state_file() -> 
             on_tick: None,
         },
     )?;
-    assert!(!rep.ok, "--max-retries=0 而第一枪就失败，居然报成功：{rep:?}");
+    assert!(
+        !rep.ok,
+        "--max-retries=0 而第一枪就失败，居然报成功：{rep:?}"
+    );
     let note = rep.message.clone().unwrap_or_default();
-    assert!(!note.trim().is_empty(), "ok=false 却不带一句人话（Task 9 只能打出个空行）：{rep:?}");
+    assert!(
+        !note.trim().is_empty(),
+        "ok=false 却不带一句人话（Task 9 只能打出个空行）：{rep:?}"
+    );
     assert!(note.contains("重试"), "消息没说是重试到顶：{note:?}");
-    assert!(note.contains("503"), "消息丢了那一枪的原文（E12⑦ 要求原因走到用户眼前）：{note:?}");
+    assert!(
+        note.contains("503"),
+        "消息丢了那一枪的原文（E12⑦ 要求原因走到用户眼前）：{note:?}"
+    );
     assert_eq!(rep.retries, 0, "封顶 0 次 ⇒ 一次都不该重试：{rep:?}");
 
     let state_path = dlm::state::path_for(&t.target_path());
-    assert!(state_path.exists(), "失败之后断点文件被删了（下一轮就只能从 0 重下）");
+    assert!(
+        state_path.exists(),
+        "失败之后断点文件被删了（下一轮就只能从 0 重下）"
+    );
     let snap = dlm::state::load(&state_path)?.context("断点文件在却读不回来")?;
     assert_eq!(
-        snap.segments.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(),
+        snap.segments
+            .iter()
+            .map(|s| (s.start, s.end))
+            .collect::<Vec<_>>(),
         vec![(0, PROBE_READ_BYTES - 1)],
         "断点里的覆盖集就是试探那份字节：{snap:?}"
     );
@@ -4366,11 +5950,20 @@ fn a_corrupt_state_file_is_an_error_while_an_absent_one_is_not() -> anyhow::Resu
         on_tick: None,
     };
     let Err(e) = dlm::engine::run(&t, cfg.clone()) else {
-        panic!("断点文件是坏的，`engine::run` 却跑成功了 —— 把损坏读成\"没有断点\"就是这句话的后果");
+        panic!(
+            "断点文件是坏的，`engine::run` 却跑成功了 —— 把损坏读成\"没有断点\"就是这句话的后果"
+        );
     };
     let text = format!("{e:#}");
-    assert!(text.contains("断点文件"), "错误没点名是断点文件的问题：{text:?}");
-    assert_eq!(std::fs::read(&state_path)?.as_slice(), &garbage[..], "引擎把看不懂的那份改写了（用户就再也看不出自己坏了什么）");
+    assert!(
+        text.contains("断点文件"),
+        "错误没点名是断点文件的问题：{text:?}"
+    );
+    assert_eq!(
+        std::fs::read(&state_path)?.as_slice(),
+        &garbage[..],
+        "引擎把看不懂的那份改写了（用户就再也看不出自己坏了什么）"
+    );
     assert!(!target.exists(), "拒绝开工就不该碰目标文件");
     assert!(
         srv.requests_within(Duration::from_millis(250))?.is_empty(),
@@ -4419,20 +6012,50 @@ fn the_fresh_reason_reaches_the_report_for_the_cli_to_print() -> anyhow::Result<
         on_tick: None,
     };
     let first = dlm::engine::run(&t, cfg.clone())?;
-    assert!(first.ok, "第一轮（根本没有断点）该成功：{:?}", first.message);
-    assert_eq!(first.fresh_reason, None, "没有断点就没有冲突，那句原因必须是 `None`（Task 9 不该为没发生的事打一行）");
-    assert!(dlm::state::path_for(&t.target_path()).exists(), "给了 --keep-state 就该留着断点文件");
+    assert!(
+        first.ok,
+        "第一轮（根本没有断点）该成功：{:?}",
+        first.message
+    );
+    assert_eq!(
+        first.fresh_reason, None,
+        "没有断点就没有冲突，那句原因必须是 `None`（Task 9 不该为没发生的事打一行）"
+    );
+    assert!(
+        dlm::state::path_for(&t.target_path()).exists(),
+        "给了 --keep-state 就该留着断点文件"
+    );
 
     let second = dlm::engine::run(
-        &Task { referer: Some("http://referer.example/page".to_string()), ..t.clone() },
+        &Task {
+            referer: Some("http://referer.example/page".to_string()),
+            ..t.clone()
+        },
         cfg,
     )?;
-    assert!(second.ok, "换了 Referer 判从头重来，那一轮也该成功：{:?}", second.message);
+    assert!(
+        second.ok,
+        "换了 Referer 判从头重来，那一轮也该成功：{:?}",
+        second.message
+    );
     let reason = second.fresh_reason.clone().unwrap_or_default();
-    assert!(!reason.trim().is_empty(), "①b 那条冲突必须带着一句话走到 Report，实际 None/空串");
-    assert!(reason.contains("请求与断点不符"), "那句得手到「为什么重来」：{reason:?}");
-    assert!(reason.contains("Referer"), "那句得点名换了哪一项：{reason:?}");
-    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "重来那一支也得把文件下对");
+    assert!(
+        !reason.trim().is_empty(),
+        "①b 那条冲突必须带着一句话走到 Report，实际 None/空串"
+    );
+    assert!(
+        reason.contains("请求与断点不符"),
+        "那句得手到「为什么重来」：{reason:?}"
+    );
+    assert!(
+        reason.contains("Referer"),
+        "那句得点名换了哪一项：{reason:?}"
+    );
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len),
+        "重来那一支也得把文件下对"
+    );
     // 两轮都上过快照：守卫数由**这两轮真实期望的条数**推出（每轮 = 试探那一枪 + 引擎派出的枪数，
     // T8-R2 的"dispatched 与线上一对一"），不是裸读一次日志再断"> 2"（评审 C-I-4 的同一形状）。
     let expected_lines = first.dispatched().len() + second.dispatched().len() + 2;
@@ -4480,7 +6103,11 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
             on_tick: None,
         },
     )?;
-    assert!(rep.ok, "POST 那一枪该把这份文档整份拿回来：{:?}", rep.message);
+    assert!(
+        rep.ok,
+        "POST 那一枪该把这份文档整份拿回来：{:?}",
+        rep.message
+    );
 
     // **复审 B-Minor 6**：这一格原先的形状是"守 1 条落盘 → 裸读一次 → 断 `== 1`"——
     // 那条纪律（`Server::requests_within` 的文档）只管"有没有**任何**一条"，管不到"**不许更多**"
@@ -4489,7 +6116,11 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
     // `requests_quiet` **守满**一段时间保证不多读。
     srv.requests_at_least(1)?;
     let requests = srv.requests_quiet(Duration::from_millis(300))?;
-    assert_eq!(requests.len(), 1, "带体的形状全程只许有一发请求（试探 + POST = 2 条就是缺陷）：{requests:?}");
+    assert_eq!(
+        requests.len(),
+        1,
+        "带体的形状全程只许有一发请求（试探 + POST = 2 条就是缺陷）：{requests:?}"
+    );
     // **收口复审 B2 第 6 条**：这一句原先读的是 `Server::methods()` —— 那个入口裸读一次日志、
     // 不带任何条数守卫，是 `ranges_at_least` 头顶那句"一律带条数守卫"当时**唯一**的反例。
     // 守卫数取上面那条等式刚钉死的 `requests.len()`：等式先保证"至少这么多条已经落盘"，
@@ -4504,10 +6135,24 @@ fn a_data_file_task_is_never_probed_and_posts_exactly_once() -> anyhow::Result<(
         None,
         "POST 那一枪不许带 Range：带了就等于把整份那一条请求切成几发重交（R7）"
     );
-    assert_eq!(rep.retries, 0, "这一支不重试（重发＝二次提交表单）：{rep:?}");
-    assert!(rep.trace.is_empty(), "这一支没有调度器，trace 里不该有任何派单：{:?}", rep.trace);
-    assert!(!dlm::state::path_for(&t.target_path()).exists(), "该形状既不读也不写断点（E13④）");
-    assert_eq!(harness::sha256_of(&t.target_path())?, harness::expected_sha(len), "落盘的得是那份响应体，一字不差");
+    assert_eq!(
+        rep.retries, 0,
+        "这一支不重试（重发＝二次提交表单）：{rep:?}"
+    );
+    assert!(
+        rep.trace.is_empty(),
+        "这一支没有调度器，trace 里不该有任何派单：{:?}",
+        rep.trace
+    );
+    assert!(
+        !dlm::state::path_for(&t.target_path()).exists(),
+        "该形状既不读也不写断点（E13④）"
+    );
+    assert_eq!(
+        harness::sha256_of(&t.target_path())?,
+        harness::expected_sha(len),
+        "落盘的得是那份响应体，一字不差"
+    );
     let _ = std::fs::remove_file(&body);
     Ok(())
 }
@@ -4538,7 +6183,8 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
     let state_path = dlm::state::path_for(&target);
     // 半截目标文件 + 一份"当初带了口令"的断点：断点的其余字段与本轮探到的事实完全对得上，
     // 好让 `Abort` 是**唯一**的结论（不是被 ①b/②/④ 抢先判成 `Fresh`）。
-    std::fs::write(&target, vec![0xABu8; (PROBE_READ_BYTES / 2) as usize]).context("铺半截目标文件失败")?;
+    std::fs::write(&target, vec![0xABu8; (PROBE_READ_BYTES / 2) as usize])
+        .context("铺半截目标文件失败")?;
     let snap = dlm::state::Snapshot {
         v: dlm::state::STATE_VERSION,
         task: dlm::state::TaskView::from(&t),
@@ -4549,8 +6195,15 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
             final_url: url.clone(),
             ignore_mtime: false,
         },
-        segments: vec![dlm::state::SegView { start: 0, end: PROBE_READ_BYTES / 2 - 1 }],
-        stats: dlm::state::Stats { bytes_delivered: PROBE_READ_BYTES / 2, bytes_duplicated: 0, retries: 3 },
+        segments: vec![dlm::state::SegView {
+            start: 0,
+            end: PROBE_READ_BYTES / 2 - 1,
+        }],
+        stats: dlm::state::Stats {
+            bytes_delivered: PROBE_READ_BYTES / 2,
+            bytes_duplicated: 0,
+            retries: 3,
+        },
         needs_secret: true,
         saved_at: dlm::state::utc_now(),
     };
@@ -4573,13 +6226,26 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
             on_tick: None,
         },
     );
-    let Err(e) = outcome else { panic!("断点要口令而本次没给，`engine::run` 却跑下去了：{outcome:?}") };
+    let Err(e) = outcome else {
+        panic!("断点要口令而本次没给，`engine::run` 却跑下去了：{outcome:?}")
+    };
     let text = e.to_string();
-    assert!(text.contains("口令"), "那句拒绝得说得出为什么不停：{text:?}");
+    assert!(
+        text.contains("口令"),
+        "那句拒绝得说得出为什么不停：{text:?}"
+    );
 
-    assert_eq!(std::fs::read(&state_path)?.as_slice(), &before[..], "Abort 之后断点文件被改写过（T5 转派第 ④ 条）");
+    assert_eq!(
+        std::fs::read(&state_path)?.as_slice(),
+        &before[..],
+        "Abort 之后断点文件被改写过（T5 转派第 ④ 条）"
+    );
     let after_meta = std::fs::metadata(&state_path)?;
-    assert_eq!(after_meta.modified()?, mtime_before, "断点文件的 mtime 动了 —— 内容没动也说明有人写过它");
+    assert_eq!(
+        after_meta.modified()?,
+        mtime_before,
+        "断点文件的 mtime 动了 —— 内容没动也说明有人写过它"
+    );
     assert_eq!(
         std::fs::metadata(&target)?.len(),
         PROBE_READ_BYTES / 2,
@@ -4591,10 +6257,17 @@ fn an_abort_leaves_the_state_file_and_the_target_untouched() -> anyhow::Result<(
     // 上面那一步只保证不漏读，下面这一步 `requests_quiet` **守满**一段时间保证不多读。
     srv.requests_at_least(1)?;
     let requests = srv.requests_quiet(Duration::from_millis(300))?;
-    assert_eq!(requests.len(), 1, "只许有试探那一枪（判完就拒）：{requests:?}");
+    assert_eq!(
+        requests.len(),
+        1,
+        "只许有试探那一枪（判完就拒）：{requests:?}"
+    );
     assert_eq!(requests[0]["method"], "GET", "那一枪是试探：{requests:?}");
     assert_eq!(
-        dlm::state::load(&state_path)?.context("断点文件读不回来了")?.stats.retries,
+        dlm::state::load(&state_path)?
+            .context("断点文件读不回来了")?
+            .stats
+            .retries,
         3,
         "断点里那本账必须原样留着"
     );
@@ -4687,7 +6360,11 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
 
     // 权威仍然是 `Report`（E21⑧）：本用例不断 tick 的条数，只断"至少一发"。
     assert!(rep.ok, "引擎没跑完：{:?}", rep.message);
-    assert_eq!((rep.bytes_total, rep.delivered), (len, len), "服务器说的长度与盘上真有的字节");
+    assert_eq!(
+        (rep.bytes_total, rep.delivered),
+        (len, len),
+        "服务器说的长度与盘上真有的字节"
+    );
 
     let seen = beats.lock().unwrap();
     assert!(
@@ -4696,20 +6373,39 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
     );
     for (line, snap) in seen.iter() {
         // 快照侧：八格各自落在文档说的范围内（**E21①②③⑤**）。
-        assert_eq!(snap.total_len, len, "`total_len` 那格取的是试探到的全长（E21②）：{snap:?}");
-        assert!(snap.covered_bytes <= snap.total_len, "覆盖集不可能超过全长：{snap:?}");
-        assert_eq!(snap.workers_total, 4, "`workers_total` 就是 cfg.workers：{snap:?}");
-        assert!(snap.active_workers <= snap.workers_total, "在途的不可能比总数还多：{snap:?}");
+        assert_eq!(
+            snap.total_len, len,
+            "`total_len` 那格取的是试探到的全长（E21②）：{snap:?}"
+        );
+        assert!(
+            snap.covered_bytes <= snap.total_len,
+            "覆盖集不可能超过全长：{snap:?}"
+        );
+        assert_eq!(
+            snap.workers_total, 4,
+            "`workers_total` 就是 cfg.workers：{snap:?}"
+        );
+        assert!(
+            snap.active_workers <= snap.workers_total,
+            "在途的不可能比总数还多：{snap:?}"
+        );
         // 渲染侧：形状必须拆得开，而且每一格都是**可读的数**（不是 `None`、不是 `NaN`、不是空白）。
         let cells = tick_cells(line);
         assert!(
             (4..=6).contains(&cells.len()),
             "一行该是 4~6 格（百分比 / 已下对 / 速率 / 连接数 + 可选 dup + 可选 slow-retry）：{line:?}"
         );
-        let pct = cells[0].strip_suffix('%').unwrap_or_else(|| panic!("第一格不是百分比：{line:?}"));
+        let pct = cells[0]
+            .strip_suffix('%')
+            .unwrap_or_else(|| panic!("第一格不是百分比：{line:?}"));
         assert!(is_one_decimal(pct), "百分比要是一位小数的数：{line:?}");
         // `unwrap_or(u64::MAX)`：拆不出整数的话就让**这一格红**，而不是让测试炸在解析错误上。
-        let pct_whole = pct.split('.').next().unwrap_or("").parse::<u64>().unwrap_or(u64::MAX);
+        let pct_whole = pct
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .parse::<u64>()
+            .unwrap_or(u64::MAX);
         assert!(
             pct_whole < 100 || (pct_whole == 100 && pct.ends_with(".0")),
             "文件百分比不许超过 100%（`100.0%` 是满的那一格，E25③）：{line:?}"
@@ -4718,10 +6414,18 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
             .strip_suffix(" MiB")
             .and_then(|s| s.split_once(" MiB/"))
             .unwrap_or_else(|| panic!("第二格该是 `<已下> MiB/<全长> MiB`：{line:?}"));
-        assert!(is_one_decimal(done) && is_one_decimal(total), "那对 MiB 都要是一位小数：{line:?}");
+        assert!(
+            is_one_decimal(done) && is_one_decimal(total),
+            "那对 MiB 都要是一位小数：{line:?}"
+        );
         assert_eq!(total, "8.0", "8 MiB 的全长手算就是 `8.0`（E25①）：{line:?}");
         assert!(
-            done.split('.').next().unwrap_or("").parse::<u64>().unwrap_or(u64::MAX) <= 8,
+            done.split('.')
+                .next()
+                .unwrap_or("")
+                .parse::<u64>()
+                .unwrap_or(u64::MAX)
+                <= 8,
             "已下的整数部分不许超过全长（8 MiB）：{line:?}"
         );
         let rate = cells[2]
@@ -4732,7 +6436,10 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
             .strip_prefix('x')
             .and_then(|s| s.split_once('/'))
             .unwrap_or_else(|| panic!("第四格是 `x<在途>/<总数>`：{line:?}"));
-        assert!(active.chars().all(|c| c.is_ascii_digit()) && !active.is_empty(), "在途那格是整数：{line:?}");
+        assert!(
+            active.chars().all(|c| c.is_ascii_digit()) && !active.is_empty(),
+            "在途那格是整数：{line:?}"
+        );
         assert_eq!(
             workers, "4",
             "分母就是 `workers_total`（它的字段文档写着\"进度行里那个 x4 的分母\"）：{line:?}"
@@ -4740,7 +6447,9 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
         // 后面两格各自独立出现或不出现（E25④⑤）：一旦出现就必须是那个形状。
         for extra in &cells[4..] {
             if let Some(dup) = extra.strip_prefix("dup ") {
-                let p = dup.strip_suffix('%').unwrap_or_else(|| panic!("dup 那格该带百分号：{line:?}"));
+                let p = dup
+                    .strip_suffix('%')
+                    .unwrap_or_else(|| panic!("dup 那格该带百分号：{line:?}"));
                 assert!(is_one_decimal(p), "dup 那格要是一位小数的数：{line:?}");
             } else if let Some(rounds) = extra.strip_prefix("slow-retry x") {
                 assert!(
@@ -4755,8 +6464,14 @@ fn a_real_run_hands_the_renderer_cells_a_human_can_read() -> anyhow::Result<()> 
     // 终值那一发（E21⑦ 的第二处调用点）必须说"下完了"：`ok` ⇒ 调度器没有未归属字节 ⇒
     // `covered_bytes == total_len`（判据①那条减法）⇒ 渲染出来就是手算的两格字面量。
     let (last_line, last) = seen.last().expect("上面已经断过非空");
-    assert_eq!(last.covered_bytes, last.total_len, "收尾那一拍的覆盖集应当是满的：{last:?}");
-    assert!(last.run_delivered > 0, "这一轮在网线上确实动过字节：{last:?}");
+    assert_eq!(
+        last.covered_bytes, last.total_len,
+        "收尾那一拍的覆盖集应当是满的：{last:?}"
+    );
+    assert!(
+        last.run_delivered > 0,
+        "这一轮在网线上确实动过字节：{last:?}"
+    );
     assert!(
         last_line.starts_with("100.0%  8.0 MiB/8.0 MiB  "),
         "终值那一发的头两格是手算的字面量（8 MiB ⇒ `8.0`、覆盖满 ⇒ `100.0%`）：{last_line:?}"
@@ -4777,10 +6492,23 @@ fn the_binary_exits_zero_for_help_and_keeps_clap_code_for_a_usage_error() -> any
     );
     let h = stdout_of(&help);
     assert!(h.contains("Usage"), "帮助要真打到 stdout 上：{h}");
-    for opt in ["--url", "--out-dir", "--data-file", "--sha256", "--quiet", "--no-start"] {
-        assert!(h.contains(opt), "帮助里少了 {opt}（第 15 条长选项 `--no-start` 也在这一面上，E23②）：{h}");
+    for opt in [
+        "--url",
+        "--out-dir",
+        "--data-file",
+        "--sha256",
+        "--quiet",
+        "--no-start",
+    ] {
+        assert!(
+            h.contains(opt),
+            "帮助里少了 {opt}（第 15 条长选项 `--no-start` 也在这一面上，E23②）：{h}"
+        );
     }
-    assert!(run_dlm(&["--version"])?.status.success(), "`--version` 与 `--help` 同一档（E24②）");
+    assert!(
+        run_dlm(&["--version"])?.status.success(),
+        "`--version` 与 `--help` 同一档（E24②）"
+    );
 
     let bad = run_dlm(&["--quiet"])?; // 少了必填的 --url
     assert_eq!(
@@ -4790,7 +6518,11 @@ fn the_binary_exits_zero_for_help_and_keeps_clap_code_for_a_usage_error() -> any
         bad.status.code(),
         stderr_of(&bad)
     );
-    assert!(stderr_of(&bad).contains("--url"), "那句报错要指出缺的是 --url：{}", stderr_of(&bad));
+    assert!(
+        stderr_of(&bad).contains("--url"),
+        "那句报错要指出缺的是 --url：{}",
+        stderr_of(&bad)
+    );
     Ok(())
 }
 
@@ -4803,7 +6535,15 @@ fn the_binary_short_circuits_no_start_without_touching_the_wire() -> anyhow::Res
     let out_dir = dir.path().display().to_string();
     let url = format!("{base}/blob");
 
-    let out = run_dlm(&["--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--no-start"])?;
+    let out = run_dlm(&[
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "blob.bin",
+        "--no-start",
+    ])?;
     assert!(
         out.status.success(),
         "`--no-start` 的语义是\"打印任务摘要后退出\"，不是失败（E20④）：exit={:?}，stderr：{}",
@@ -4812,16 +6552,29 @@ fn the_binary_short_circuits_no_start_without_touching_the_wire() -> anyhow::Res
     );
     let so = stdout_of(&out);
     assert!(so.contains("任务摘要"), "摘要那一行该说清这是什么：{so}");
-    assert!(so.contains(&url), "摘要要逐字段打，URL 是其中一格（E23⑥：不许拿 Debug 当渲染器）：{so}");
+    assert!(
+        so.contains(&url),
+        "摘要要逐字段打，URL 是其中一格（E23⑥：不许拿 Debug 当渲染器）：{so}"
+    );
     assert!(so.contains("blob.bin"), "输出文件名那一格：{so}");
     for verdict in ["下载已完成", "下载未完成"] {
-        assert!(!so.contains(verdict), "短路之后不该有最终结果行（引擎压根没进）：{so}");
+        assert!(
+            !so.contains(verdict),
+            "短路之后不该有最终结果行（引擎压根没进）：{so}"
+        );
     }
-    assert!(!dir.path().join("blob.bin").exists(), "目标文件被创建了 —— 摘要之后还动了磁盘");
+    assert!(
+        !dir.path().join("blob.bin").exists(),
+        "目标文件被创建了 —— 摘要之后还动了磁盘"
+    );
     // 负向判据按 harness 的纪律下：**守满**一段时间而不是裸读一次日志（日志行落盘晚于客户端拿到
     // 响应，裸读的"一条都没有"会在真故障上碰巧为真）。
     let reqs = srv.requests_within(Duration::from_millis(500))?;
-    assert!(reqs.is_empty(), "bit0 说\"一个字节都不许多打\"，对端却看到 {} 条请求：{reqs:?}", reqs.len());
+    assert!(
+        reqs.is_empty(),
+        "bit0 说\"一个字节都不许多打\"，对端却看到 {} 条请求：{reqs:?}",
+        reqs.len()
+    );
 
     // 口令那一格连 `[redacted]` 都不许出现（E23⑥/E24③）。走 https 是因为 `http://` + 口令
     // 在解析期就被拒（E3），而 https 那条路在 `--no-start` 下根本不会上网。
@@ -4842,9 +6595,15 @@ fn the_binary_short_circuits_no_start_without_touching_the_wire() -> anyhow::Res
         stderr_of(&via_alias)
     );
     let so2 = stdout_of(&via_alias);
-    assert!(so2.contains("alice"), "用户那一格照打（掩码只属于 `Debug`，摘要不是日志）：{so2}");
+    assert!(
+        so2.contains("alice"),
+        "用户那一格照打（掩码只属于 `Debug`，摘要不是日志）：{so2}"
+    );
     for banned in ["hunter2", "[redacted]", "password", "口令"] {
-        assert!(!so2.contains(banned), "摘要里不许出现 {banned}（E24③：口令这个话题整个不在摘要里）：{so2}");
+        assert!(
+            !so2.contains(banned),
+            "摘要里不许出现 {banned}（E24③：口令这个话题整个不在摘要里）：{so2}"
+        );
     }
     assert_eq!(
         srv.requests_within(Duration::from_millis(300))?.len(),
@@ -4857,7 +6616,8 @@ fn the_binary_short_circuits_no_start_without_touching_the_wire() -> anyhow::Res
 /// **E24① / E20⑦**：`--quiet` 的落点是"一次都不挂 sink"（不是"挂了但里面不打印"），
 /// 最终结果照打；非零退出码的**唯一**判据是 `!ok`；`trace` 一个字都不进 stdout。
 #[test]
-fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() -> anyhow::Result<()> {
+fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() -> anyhow::Result<()>
+{
     let (_srv, base) = harness::spawn()?;
     let dir = harness::tmp_dir("bin-exit")?;
     let out_dir = dir.path().display().to_string();
@@ -4867,8 +6627,16 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
 
     // ① 成功 + 非静默 ⇒ 退出码 0，stdout 里既有进度行（`\r`）也有最终结果。
     let ok = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "ok.bin",
-        "--connections", "2", "--sha256", &good_sha,
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "ok.bin",
+        "--connections",
+        "2",
+        "--sha256",
+        &good_sha,
     ])?;
     let sok = stdout_of(&ok);
     assert!(
@@ -4877,43 +6645,95 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
         ok.status.code(),
         stderr_of(&ok)
     );
-    assert!(sok.contains('\r'), "非静默必须挂上 sink 并打出那一行进度（E24①）：{sok:?}");
+    assert!(
+        sok.contains('\r'),
+        "非静默必须挂上 sink 并打出那一行进度（E24①）：{sok:?}"
+    );
     // **E28⑧-3 补的那一格**（本轮追加，上面那几行一字未动）：不只"有 `\r`"，而是**整个 stdout 以进度行
     // 开头** —— `tick_sink` 把 `\r` 放在最前（先回行首再写这一行），所以第一发就写在第 0 列。
-    assert!(sok.starts_with('\r'), "非静默那一趟的 stdout **以进度行开头**（`\r` 打在最前，E25 的分工）：{sok:?}");
+    assert!(
+        sok.starts_with('\r'),
+        "非静默那一趟的 stdout **以进度行开头**（`\r` 打在最前，E25 的分工）：{sok:?}"
+    );
     assert!(sok.contains("下载已完成"), "最终结果行照打：{sok}");
-    assert!(sok.contains("这个断点文件从建立起一共重试"), "那两格是跨断点文件的账（E20⑧/E25⑥）：{sok}");
-    assert!(sok.contains("归属之外可能被重下"), "`duplicated` 不是账单，措辞不许漂（E14③）：{sok}");
+    assert!(
+        sok.contains("这个断点文件从建立起一共重试"),
+        "那两格是跨断点文件的账（E20⑧/E25⑥）：{sok}"
+    );
+    assert!(
+        sok.contains("归属之外可能被重下"),
+        "`duplicated` 不是账单，措辞不许漂（E14③）：{sok}"
+    );
     // **E28⑧-3 的另一半 + E28①(1) 的对照**（本轮追加）：可分段那一路**收尾那一发换行还在** ——
     // 进度行是 `\r` 原地覆盖的，结果行必须由那一发换行让它独占一行，而不是盖在残行后面，
     // 也不是被两个换行抬成一空行（那正是带体那一路今天犯的错的反面，见
     // `the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick` 的第一臂）。
-    assert!(sok.contains("\n下载已完成"), "结果行前面必须有且只有**一个**让行换行：{sok:?}");
-    assert!(!sok.contains("\n\n下载已完成"), "让行只该出现一次；出现空行说明有人多打了一发：{sok:?}");
+    assert!(
+        sok.contains("\n下载已完成"),
+        "结果行前面必须有且只有**一个**让行换行：{sok:?}"
+    );
+    assert!(
+        !sok.contains("\n\n下载已完成"),
+        "让行只该出现一次；出现空行说明有人多打了一发：{sok:?}"
+    );
     for trace_word in ["Seeded", "Dispatched", "TraceStep", "Interval"] {
-        assert!(!sok.contains(trace_word), "`trace` 一个字都不许进 stdout（E20⑨）：{trace_word} 出现了：{sok}");
+        assert!(
+            !sok.contains(trace_word),
+            "`trace` 一个字都不许进 stdout（E20⑨）：{trace_word} 出现了：{sok}"
+        );
     }
 
     // ② 同一件事走 `--quiet` ⇒ **一个 `\r` 都不许有**（sink 一次都没挂），而结果照打。
     let quiet = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "quiet.bin",
-        "--connections", "2", "--quiet",
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "quiet.bin",
+        "--connections",
+        "2",
+        "--quiet",
     ])?;
     let sq = stdout_of(&quiet);
-    assert!(quiet.status.success(), "静默不等于失败：stderr：{}", stderr_of(&quiet));
-    assert!(!sq.contains('\r'), "`--quiet` 的落点是\"一次都不挂 sink\"（E24①），实测 stdout：{sq:?}");
-    assert!(sq.contains("下载已完成"), "静默关的是刷新的那一行，不是结果（E24①）：{sq}");
+    assert!(
+        quiet.status.success(),
+        "静默不等于失败：stderr：{}",
+        stderr_of(&quiet)
+    );
+    assert!(
+        !sq.contains('\r'),
+        "`--quiet` 的落点是\"一次都不挂 sink\"（E24①），实测 stdout：{sq:?}"
+    );
+    assert!(
+        sq.contains("下载已完成"),
+        "静默关的是刷新的那一行，不是结果（E24①）：{sq}"
+    );
     // **E28⑧-3 补的那一格**（本轮追加）：静默那一支的 stdout **第一格就是结果行** ——
     // 既不是空行（收尾那发换行跟着 sink 一起没挂），也不是被 `\r` 开头的进度行顶到前面去。
     // 前一句挡住"多一个换行"那一族回归，后一句挡住"少一句话"那一族 ⇒ 两句不是同一条判据。
-    assert!(!sq.starts_with('\n'), "静默那一支不许以换行开头（没有进度行就没有让行那一发）：{sq:?}");
-    assert!(sq.starts_with("下载已完成"), "静默那一支的 stdout 第一个字符就是结果行：{sq:?}");
+    assert!(
+        !sq.starts_with('\n'),
+        "静默那一支不许以换行开头（没有进度行就没有让行那一发）：{sq:?}"
+    );
+    assert!(
+        sq.starts_with("下载已完成"),
+        "静默那一支的 stdout 第一个字符就是结果行：{sq:?}"
+    );
 
     // ③ 下完了但校验不符 ⇒ `ok = false` ⇒ 退出码 1，`message` 那句原样打（裁定 9：不再截断不拼接）。
     let wrong_sha = "0".repeat(64);
     let bad = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "bad.bin",
-        "--connections", "2", "--sha256", &wrong_sha,
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "bad.bin",
+        "--connections",
+        "2",
+        "--sha256",
+        &wrong_sha,
     ])?;
     let sbad = stdout_of(&bad);
     assert_eq!(
@@ -4922,15 +6742,28 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
         "非零档的唯一判据是 `!ok`（E20⑦）：exit={:?}",
         bad.status.code()
     );
-    assert!(sbad.contains("下载未完成"), "结论那一句要跟着 `ok` 走：{sbad}");
-    assert!(sbad.contains("sha256 不符"), "引擎那句人话要原样到达用户：{sbad}");
+    assert!(
+        sbad.contains("下载未完成"),
+        "结论那一句要跟着 `ok` 走：{sbad}"
+    );
+    assert!(
+        sbad.contains("sha256 不符"),
+        "引擎那句人话要原样到达用户：{sbad}"
+    );
 
     // ④ 引擎侧 `Err`（断点文件损坏，`run` 根本跑不起来）⇒ 也是非零，且那句原因进 stderr。
     let corrupt_target = dir.path().join("corrupt.bin");
     let corrupt_state = dlm::state::path_for(&corrupt_target);
     std::fs::write(&corrupt_state, "{ 这不是 JSON").context("铺坏断点文件失败")?;
     let err = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "corrupt.bin", "--connections", "2",
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "corrupt.bin",
+        "--connections",
+        "2",
     ])?;
     assert_ne!(
         err.status.code(),
@@ -4939,8 +6772,14 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
         err.status.code()
     );
     let se = stderr_of(&err);
-    assert!(se.contains("跑不起来"), "那支的措辞要说\"跑不起来\"，与 `ok = false` 分得开：{se}");
-    assert!(!se.contains("Seeded"), "错误路径上也不许漏 trace（E20⑨）：{se}");
+    assert!(
+        se.contains("跑不起来"),
+        "那支的措辞要说\"跑不起来\"，与 `ok = false` 分得开：{se}"
+    );
+    assert!(
+        !se.contains("Seeded"),
+        "错误路径上也不许漏 trace（E20⑨）：{se}"
+    );
     Ok(())
 }
 
@@ -4965,7 +6804,14 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
     //    `Config::verify_sha256` 上是完全合法的形状，**只有** `check_boundaries` 这一层拦得住它
     //    （**E23⑤** 把这一格判给 CLI 的原话），所以"没走到引擎"这句断言在这里不是空话。
     let sha = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--sha256", "xyz",
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "blob.bin",
+        "--sha256",
+        "xyz",
     ])?;
     let es = stderr_of(&sha);
     let so = stdout_of(&sha);
@@ -4975,8 +6821,14 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
         "形状错的退出档是 `BAD_ARGS`（E26/C3，与 clap 的用法错同码）：exit={:?}，stderr：{es}",
         sha.status.code()
     );
-    assert!(es.contains("参数写错了"), "参数层的措辞要原样到达 stderr（E23⑤）：{es}");
-    assert!(es.contains("--sha256"), "那句话还得点名是哪一格写错了，否则用户没法改：{es}");
+    assert!(
+        es.contains("参数写错了"),
+        "参数层的措辞要原样到达 stderr（E23⑤）：{es}"
+    );
+    assert!(
+        es.contains("--sha256"),
+        "那句话还得点名是哪一格写错了，否则用户没法改：{es}"
+    );
     for engine_wording in ["校验不符", "sha256 不符", "跑不起来", "下载未完成"] {
         assert!(
             !es.contains(engine_wording) && !so.contains(engine_wording),
@@ -4989,7 +6841,10 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
         !es.contains("Usage"),
         "码是 2，但这一支**不是** clap 的用法块 —— 两个来源同码，靠这句措辞分开（见本用例文档）：{es}"
     );
-    assert!(!dir.path().join("blob.bin").exists(), "参数层失败之后磁盘上一个字节都不该动过");
+    assert!(
+        !dir.path().join("blob.bin").exists(),
+        "参数层失败之后磁盘上一个字节都不该动过"
+    );
     // 负向判据按 harness 的纪律下：**守满**一段时间（日志行落盘晚于客户端拿到响应）。
     let reqs = srv.requests_within(Duration::from_millis(500))?;
     assert!(
@@ -5003,7 +6858,14 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
     //    `ensure_parent_dir` 之前 ⇒ 按符号名指，不写行号：本项目"注释抄现状"已经漂过多次），所以 CLI 这一格拦的**不是崩溃**，而是**档与措辞** ——
     //    "话没说对"（2 + "参数写错了"）不该被报成"跑不起来"（1 + 引擎那句）。
     let conns = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--connections", "0",
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "blob.bin",
+        "--connections",
+        "0",
     ])?;
     let ec = stderr_of(&conns);
     assert_eq!(
@@ -5022,7 +6884,10 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
             "出现 {engine_wording:?} 就说明这一格是被引擎拦下的，不是 CLI（E23 附记① 的更正就落在这里）：{ec}"
         );
     }
-    assert!(!dir.path().join("blob.bin").exists(), "第二格同样不该动磁盘");
+    assert!(
+        !dir.path().join("blob.bin").exists(),
+        "第二格同样不该动磁盘"
+    );
     assert_eq!(
         srv.requests_within(Duration::from_millis(300))?.len(),
         0,
@@ -5055,7 +6920,13 @@ fn the_binary_holds_an_escaping_out_name_at_the_parameter_tier() -> anyhow::Resu
 
     // 负臂：越目录的名字。
     let esc = run_dlm(&[
-        "--url", url, "--out-dir", &out_dir, "--out-name", "../escaped.bin", "--no-start",
+        "--url",
+        url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "../escaped.bin",
+        "--no-start",
     ])?;
     let e = stderr_of(&esc);
     assert_eq!(
@@ -5074,13 +6945,20 @@ fn the_binary_holds_an_escaping_out_name_at_the_parameter_tier() -> anyhow::Resu
         stdout_of(&esc)
     );
     assert!(
-        !dir.path().join("escaped.bin").exists() && !dir.path().join("..").join("escaped.bin").exists(),
+        !dir.path().join("escaped.bin").exists()
+            && !dir.path().join("..").join("escaped.bin").exists(),
         "参数层失败之后磁盘上（含 --out-dir 的上一级）一个字节都不该动过"
     );
 
     // 正臂（对照）：相对子目录不是越目录。
     let sub = run_dlm(&[
-        "--url", url, "--out-dir", &out_dir, "--out-name", "sub/inside.bin", "--no-start",
+        "--url",
+        url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "sub/inside.bin",
+        "--no-start",
     ])?;
     assert_eq!(
         sub.status.code(),
@@ -5091,7 +6969,10 @@ fn the_binary_holds_an_escaping_out_name_at_the_parameter_tier() -> anyhow::Resu
     );
     let s = stdout_of(&sub);
     assert!(s.contains("任务摘要"), "对照臂的摘要照打（E20④/E23⑥）：{s}");
-    let landing = s.lines().find(|l| l.starts_with("落点：")).expect("摘要必须有落点那一行");
+    let landing = s
+        .lines()
+        .find(|l| l.starts_with("落点："))
+        .expect("摘要必须有落点那一行");
     assert!(
         landing.contains(&out_dir) && landing.contains("sub/inside.bin"),
         "落点那一行必须仍是 --out-dir 底下的那个子路径（简报实测\"输出目录/落点两行自相矛盾\"的形状不许回来）：{landing}"
@@ -5129,7 +7010,11 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
 
     // 负臂：末段就是 `..`，而且用户没给 --out-name。
     let esc = run_dlm(&[
-        "--url", "http://x.example/..", "--out-dir", &out_dir, "--no-start",
+        "--url",
+        "http://x.example/..",
+        "--out-dir",
+        &out_dir,
+        "--no-start",
     ])?;
     let e = stderr_of(&esc);
     assert_eq!(
@@ -5147,8 +7032,14 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
         "推导名那一支不许复用显式名那句措辞，否则两条来源又并回一本账：{e}"
     );
     let s = stdout_of(&esc);
-    assert!(!s.contains("任务摘要"), "闸在 `into_task()` 里 ⇒ 摘要一行都不该打：{s}");
-    assert!(!s.contains("落点："), "简报实测\"输出目录/落点两行自相矛盾\"的形状不许回来：{s}");
+    assert!(
+        !s.contains("任务摘要"),
+        "闸在 `into_task()` 里 ⇒ 摘要一行都不该打：{s}"
+    );
+    assert!(
+        !s.contains("落点："),
+        "简报实测\"输出目录/落点两行自相矛盾\"的形状不许回来：{s}"
+    );
     assert_eq!(
         dir.path().read_dir()?.count(),
         0,
@@ -5157,7 +7048,11 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
 
     // 正臂（对照）：末段只是带点的正常名字 ⇒ 同一条闸必须放行。
     let dot = run_dlm(&[
-        "--url", "http://x.example/v1.2.bin", "--out-dir", &out_dir, "--no-start",
+        "--url",
+        "http://x.example/v1.2.bin",
+        "--out-dir",
+        &out_dir,
+        "--no-start",
     ])?;
     assert_eq!(
         dot.status.code(),
@@ -5167,8 +7062,14 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
         stderr_of(&dot)
     );
     let ds = stdout_of(&dot);
-    assert!(ds.contains("任务摘要"), "对照臂的摘要照打（E20④/E23⑥）：{ds}");
-    let landing = ds.lines().find(|l| l.starts_with("落点：")).expect("摘要必须有落点那一行");
+    assert!(
+        ds.contains("任务摘要"),
+        "对照臂的摘要照打（E20④/E23⑥）：{ds}"
+    );
+    let landing = ds
+        .lines()
+        .find(|l| l.starts_with("落点："))
+        .expect("摘要必须有落点那一行");
     assert!(
         landing.contains(&out_dir) && landing.ends_with("v1.2.bin"),
         "落点那一行必须仍是 --out-dir 底下的 v1.2.bin（闸判的那份名字就是落盘那份）：{landing}"
@@ -5194,8 +7095,10 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
             "负臂 `{tail:?}` 要走参数层措辞并点名末段（这五族没有 `--out-name` 可指）：{e}"
         );
         let s = stdout_of(&esc);
-        assert!(!s.contains("任务摘要") && !s.contains("落点："),
-            "负臂 `{tail:?}` 摘要一行都不许打——把目录之外的落点印给用户看正是这一族的病：{s}");
+        assert!(
+            !s.contains("任务摘要") && !s.contains("落点："),
+            "负臂 `{tail:?}` 摘要一行都不许打——把目录之外的落点印给用户看正是这一族的病：{s}"
+        );
         assert_eq!(
             dir.path().read_dir()?.count(),
             0,
@@ -5218,10 +7121,14 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
             ok.status.code(),
             Some(0),
             "H1 对照臂 `{url}` 必须放行（背板不许砸宽正常名字）：exit={:?}，stderr：{}",
-            ok.status.code(), stderr_of(&ok)
+            ok.status.code(),
+            stderr_of(&ok)
         );
         let s = stdout_of(&ok);
-        let landing = s.lines().find(|l| l.starts_with("落点：")).expect("摘要必须有落点那一行");
+        let landing = s
+            .lines()
+            .find(|l| l.starts_with("落点："))
+            .expect("摘要必须有落点那一行");
         assert!(
             landing.contains(&out_dir) && landing.ends_with(want),
             "对照臂 `{url}` 的落点必须逐字是 --out-dir 底下的 `{want}`：{landing}"
@@ -5234,7 +7141,13 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
     // 实测不红在这里，正因如此。
     for name in [r"C:x\y", r"\evil\x$"] {
         let esc = run_dlm(&[
-            "--url", "http://x.example/good.bin", "--out-dir", &out_dir, "--out-name", name, "--no-start",
+            "--url",
+            "http://x.example/good.bin",
+            "--out-dir",
+            &out_dir,
+            "--out-name",
+            name,
+            "--no-start",
         ])?;
         let e = stderr_of(&esc);
         assert_eq!(
@@ -5243,8 +7156,10 @@ fn the_binary_holds_an_escaping_derived_name_at_the_parameter_tier() -> anyhow::
             "显式支 `{name:?}` 必须退 2（全判据存量＋并联背板，两支都在）：exit={:?}，stderr：{e}",
             esc.status.code()
         );
-        assert!(e.contains("参数写错了") && e.contains("--out-name"),
-            "显式支措辞必须点名 --out-name，否则用户分不清矛头在哪一格：{e}");
+        assert!(
+            e.contains("参数写错了") && e.contains("--out-name"),
+            "显式支措辞必须点名 --out-name，否则用户分不清矛头在哪一格：{e}"
+        );
     }
     Ok(())
 }
@@ -5264,7 +7179,15 @@ fn the_binary_still_prints_the_summary_when_quiet_meets_no_start() -> anyhow::Re
     let dir = harness::tmp_dir("bin-quiet-no-start")?;
     let out_dir = dir.path().display().to_string();
     let url = format!("{base}/blob");
-    let without_quiet = ["--url", &url, "--out-dir", &out_dir, "--out-name", "blob.bin", "--no-start"];
+    let without_quiet = [
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "blob.bin",
+        "--no-start",
+    ];
     let mut both = without_quiet.to_vec();
     both.push("--quiet");
 
@@ -5277,11 +7200,23 @@ fn the_binary_still_prints_the_summary_when_quiet_meets_no_start() -> anyhow::Re
         stderr_of(&out)
     );
     let sq = stdout_of(&out);
-    assert!(sq.contains("任务摘要"), "`--quiet` 吞掉摘要就是越权（E24①：静默只关刷新的那一行）：{sq}");
-    assert!(sq.contains(&url) && sq.contains("blob.bin"), "摘要仍要逐字段打（E23⑥：不许拿 Debug 当渲染器）：{sq}");
-    assert!(!sq.contains('\r'), "这一支上永远不该有进度行（引擎压根没进，也就没有进度源）：实测 stdout {sq:?}");
+    assert!(
+        sq.contains("任务摘要"),
+        "`--quiet` 吞掉摘要就是越权（E24①：静默只关刷新的那一行）：{sq}"
+    );
+    assert!(
+        sq.contains(&url) && sq.contains("blob.bin"),
+        "摘要仍要逐字段打（E23⑥：不许拿 Debug 当渲染器）：{sq}"
+    );
+    assert!(
+        !sq.contains('\r'),
+        "这一支上永远不该有进度行（引擎压根没进，也就没有进度源）：实测 stdout {sq:?}"
+    );
     for verdict in ["下载已完成", "下载未完成"] {
-        assert!(!sq.contains(verdict), "短路之后不该有最终结果行（E20④）：{sq}");
+        assert!(
+            !sq.contains(verdict),
+            "短路之后不该有最终结果行（E20④）：{sq}"
+        );
     }
     assert!(
         stderr_of(&out).is_empty(),
@@ -5293,14 +7228,22 @@ fn the_binary_still_prints_the_summary_when_quiet_meets_no_start() -> anyhow::Re
     // 所以"静默与否"在只入队这一支上必须是一个可观测的**恒等**，而不只是"摘要还在"——
     // 这一句才是那根反针：它挡住"quiet 顺手改了某几格"这种比"整个吞掉"难得多的回归。
     let plain = run_dlm(&without_quiet)?;
-    assert_eq!(plain.status.code(), Some(0), "对照组（只 `--no-start`）也是 0：{}", stderr_of(&plain));
+    assert_eq!(
+        plain.status.code(),
+        Some(0),
+        "对照组（只 `--no-start`）也是 0：{}",
+        stderr_of(&plain)
+    );
     assert_eq!(
         sq,
         stdout_of(&plain),
         "`--quiet` 在 `--no-start` 这一支上不该改变 stdout 的任何一个字节（E24① 的收窄版）"
     );
 
-    assert!(!dir.path().join("blob.bin").exists(), "摘要之后动了磁盘 ⇒ 这一支又开始下载了（E20④）");
+    assert!(
+        !dir.path().join("blob.bin").exists(),
+        "摘要之后动了磁盘 ⇒ 这一支又开始下载了（E20④）"
+    );
     let reqs = srv.requests_within(Duration::from_millis(500))?;
     assert!(
         reqs.is_empty(),
@@ -5321,7 +7264,9 @@ fn counts_long_options(text: &str) -> bool {
                 break;
             }
             // 数字落在 gap 位上，中间那些字符只许是空格或量词。
-            let mid_ok = before[before.len() - gap..].iter().all(|c| matches!(c, ' ' | '条' | '个'));
+            let mid_ok = before[before.len() - gap..]
+                .iter()
+                .all(|c| matches!(c, ' ' | '条' | '个'));
             if mid_ok && before[before.len() - 1 - gap].is_ascii_digit() {
                 return true;
             }
@@ -5337,12 +7282,21 @@ fn counts_long_options(text: &str) -> bool {
 /// 分组注释留着是为了"哪一条是哪一发加的"仍然可辨，**不再是"哪一摊扫哪一面"的依据**。
 const BANNED_USER_SURFACE_TERMS: &[&str] = &[
     // E28③ 原有八条（逐字符照旧）。
-    "勘误", "§", "clap", "别名层", "long_about", "暗道", "into_task", "into_config",
+    "勘误",
+    "§",
+    "clap",
+    "别名层",
+    "long_about",
+    "暗道",
+    "into_task",
+    "into_config",
     // T99-G5 第 2 条：内部文档坐标里那个词（`§` 上面已有）。
     "spec",
     // T99-H3 第 2 节：上游取证编号的仓库名、"取证"这个**词**本身、对面库名。
     // 立这三条的现场就是 `未知别名 /z：… recon C3 表里那八个 … 没有取证支撑` 那句 stderr。
-    "recon", "取证", "reqwest",
+    "recon",
+    "取证",
+    "reqwest",
 ];
 
 /// 串里有没有「内部编号字母 ＋ 一个 ASCII 数字」这种**内部编号形状**。
@@ -5398,7 +7352,9 @@ fn internal_commit_shape(text: &str) -> Option<String> {
         let run: String = chars[start..at].iter().collect();
         if run.len() == 7
             && run.chars().any(|c| c.is_ascii_digit())
-            && run.chars().any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit())
+            && run
+                .chars()
+                .any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit())
         {
             return Some(run);
         }
@@ -5442,10 +7398,14 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
             );
         }
         if let Some(hit) = internal_number_shape(text) {
-            panic!("{label} 不许印「E/R/C/I/F ＋ 数字」的内部编号形状（命中 {hit:?}，T99-H3 第 2 节扩的就是这一族）：{text}");
+            panic!(
+                "{label} 不许印「E/R/C/I/F ＋ 数字」的内部编号形状（命中 {hit:?}，T99-H3 第 2 节扩的就是这一族）：{text}"
+            );
         }
         if let Some(hit) = internal_commit_shape(text) {
-            panic!("{label} 不许印提交号形状的 7 位十六进制段（命中 {hit:?}，T99-H3 第 2 节新立的第四条模式）：{text}");
+            panic!(
+                "{label} 不许印提交号形状的 7 位十六进制段（命中 {hit:?}，T99-H3 第 2 节新立的第四条模式）：{text}"
+            );
         }
     };
 
@@ -5460,8 +7420,18 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
 
     // 对照臂（正向）：这六条长选项必须出现在帮助里。缺任何一条 ⇒ 帮助面坏了，
     // 下面那一串"没印内部措辞"的负向断言就不再是它声称在测的东西。
-    for opt in ["--url", "--out-dir", "--out-name", "--connections", "--quiet", "--no-start"] {
-        assert!(h.contains(opt), "对照臂：帮助里少了 {opt} —— 此时负向扫描测的已是\"坏帮助\"而非\"禁串\"：{h}");
+    for opt in [
+        "--url",
+        "--out-dir",
+        "--out-name",
+        "--connections",
+        "--quiet",
+        "--no-start",
+    ] {
+        assert!(
+            h.contains(opt),
+            "对照臂：帮助里少了 {opt} —— 此时负向扫描测的已是\"坏帮助\"而非\"禁串\"：{h}"
+        );
     }
     // **T99-G5b 1c-2**：同一族判据补第二格正臂，因为上面那圈六条只断"名字在场"，而
     // **名字出现在帮助里 ≠ 帮助教了东西**（`c3a3cfd` 那一版 16 条名字全在、说明一格都没有，
@@ -5469,14 +7439,20 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     // "接受并忽略"项，两种各来一条，缺任何一条 ⇒ 别名表只剩报错信息那一个去处。
     // ⚠ 方向仍是**正向对照**（与下面的禁串扫描成对，E28⑧-1）；既有六条与全部负向判据一字未动。
     for token in ["/d", "/onboot"] {
-        assert!(h.contains(token), "对照臂：`--help` 里少了别名 token {token:?}（T99-G5b：别名映射必须进帮助面）：{h}");
+        assert!(
+            h.contains(token),
+            "对照臂：`--help` 里少了别名 token {token:?}（T99-G5b：别名映射必须进帮助面）：{h}"
+        );
     }
 
     // 禁串与编号／提交号形状：走那一面共用的判据（T99-H3 之前这里内联着一支只认 `E` 的窄版本，
     // 它与真跑那一臂的 `E`/`R` 版本并存＝同一个形状两把尺子；本发把宽的这支合上去，只变严不变宽）。
     scan_no_internal_coordinates("`--help` 的 stdout", &h);
     // 计数形状：`<数字> 条长选项`（`c6ac42e` 纪律：数量不进文档，而这里进的是用户面）。
-    assert!(!counts_long_options(&h), "帮助面不许印\"<数字> 条/个长选项\"的计数（E27②：这个数已经错过一次）：{h}");
+    assert!(
+        !counts_long_options(&h),
+        "帮助面不许印\"<数字> 条/个长选项\"的计数（E27②：这个数已经错过一次）：{h}"
+    );
 
     // ---- T99-G5 第 2 条：同一族判据扩到**一次真跑的 stdout ＋ stderr** ----
     // 夹具用现成的形状（`the_binary_maps_ok_to_the_exit_code_…` 的 ③ 那一路）：真下载完成、
@@ -5487,8 +7463,16 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     let out_dir = dir.path().display().to_string();
     let len = 64 * 1024u64;
     let bad = run_dlm(&[
-        "--url", &format!("{base}/sz/{len}"), "--out-dir", &out_dir, "--out-name", "nocoords.bin",
-        "--connections", "2", "--sha256", &"0".repeat(64),
+        "--url",
+        &format!("{base}/sz/{len}"),
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "nocoords.bin",
+        "--connections",
+        "2",
+        "--sha256",
+        &"0".repeat(64),
     ])?;
     assert_eq!(
         bad.status.code(),
@@ -5502,7 +7486,10 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
 
     // 正臂（与下面的禁串扫描**成对**，E28⑧-1）：那句话确实到达了用户，三件事一个都不许少 ——
     // 没有这一臂，"把整句删空"与"把坐标删掉但顺手丢了信息"都能骗过纯禁字扫描。
-    assert!(so.contains("sha256 不符"), "这一臂扫的必须是校验不符那一路的输出：{so}");
+    assert!(
+        so.contains("sha256 不符"),
+        "这一臂扫的必须是校验不符那一路的输出：{so}"
+    );
     assert!(
         so.contains("算得 ") && so.contains("期望 "),
         "\"算得 … 期望 …\" 那两格必须在场（否则下面那串禁字扫的是空输出）：{so}"
@@ -5534,7 +7521,10 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     let alias_text = format!("{}{}", stdout_of(&alias), stderr_of(&alias));
     // 正臂（两格）：① 这句确实是"未知别名"那句；② **别名清单本身还在**（T99-H3 第 2 节裁的口径：
     // 那句是现役最有用的半句，改措辞只许删内部坐标、不许把它一起删掉）。
-    assert!(alias_text.contains("未知别名"), "这一臂扫的必须是未知别名那一路的输出：{alias_text}");
+    assert!(
+        alias_text.contains("未知别名"),
+        "这一臂扫的必须是未知别名那一路的输出：{alias_text}"
+    );
     for token in ["/d", "/p", "/f", "/n", "/a", "/q", "/s", "/onboot"] {
         assert!(
             alias_text.contains(token),
@@ -5544,7 +7534,13 @@ fn the_binary_help_prints_no_internal_review_prose() -> anyhow::Result<()> {
     scan_no_internal_coordinates("未知别名那一档的用户表面", &alias_text);
 
     // 参数档：`--connections 0` 由 `check_boundaries` 当场拒，同样只住在 `src/cli.rs`。
-    let bound = run_dlm(&["--url", "https://example.invalid/a.bin", "--no-start", "--connections", "0"])?;
+    let bound = run_dlm(&[
+        "--url",
+        "https://example.invalid/a.bin",
+        "--no-start",
+        "--connections",
+        "0",
+    ])?;
     assert_eq!(
         bound.status.code(),
         Some(2),
@@ -5594,7 +7590,10 @@ fn the_binary_stops_expanding_aliases_after_the_double_dash() -> anyhow::Result<
         stderr_of(&ddash_q)
     );
     let eq = stderr_of(&ddash_q);
-    assert!(eq.contains("unexpected argument '/q' found"), "错误要点名 token 原文 '/q'：{eq}");
+    assert!(
+        eq.contains("unexpected argument '/q' found"),
+        "错误要点名 token 原文 '/q'：{eq}"
+    );
 
     // 第三行（有牙）：`--` 之后的 `/d` 同样不展开。
     let ddash_d = run_dlm(&["--url", "http://x.example/A", "--", "/d", "--no-start"])?;
@@ -5640,7 +7639,8 @@ fn the_binary_stops_expanding_aliases_after_the_double_dash() -> anyhow::Result<
 /// 负向判据带**对照臂**（同一台对端、同一条 URL、只是不给 `--data-file`）：
 /// 没有对照，那一串"不许有 `\r` / 不许有跨轮账"就是恒真。
 #[test]
-fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() -> anyhow::Result<()> {
+fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() -> anyhow::Result<()>
+{
     let (srv, base) = harness::spawn()?;
     let dir = harness::tmp_dir("bin-data-file")?;
     let out_dir = dir.path().display().to_string();
@@ -5651,8 +7651,14 @@ fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() 
 
     // -------------------------------------------------- 第一臂：带体，**不给** `--quiet`
     let out = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "posted.bin",
-        "--data-file", &body.display().to_string(),
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "posted.bin",
+        "--data-file",
+        &body.display().to_string(),
     ])?;
     let s = stdout_of(&out);
     let target = dir.path().join("posted.bin");
@@ -5672,13 +7678,32 @@ fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() 
         !s.starts_with('\n'),
         "结果行前面多出一个空行 —— 让行那一发只在**能打出进度行**的那一支才有意义（E28① 的缺陷）：{s:?}"
     );
-    assert!(s.starts_with("下载已完成"), "第一行就是结果行（与上一句合起来钉死形状）：{s:?}");
-    assert!(s.contains("用时 "), "耗时那一格照打（`--quiet` 关的从来不是它）：{s}");
-    assert!(s.contains(&format!("全长 {len} B")), "结果行报的全长要等于对端宣布的那个数：{s}");
-    assert!(s.contains(&target.display().to_string()), "结果行要点名落点：{s}");
+    assert!(
+        s.starts_with("下载已完成"),
+        "第一行就是结果行（与上一句合起来钉死形状）：{s:?}"
+    );
+    assert!(
+        s.contains("用时 "),
+        "耗时那一格照打（`--quiet` 关的从来不是它）：{s}"
+    );
+    assert!(
+        s.contains(&format!("全长 {len} B")),
+        "结果行报的全长要等于对端宣布的那个数：{s}"
+    );
+    assert!(
+        s.contains(&target.display().to_string()),
+        "结果行要点名落点：{s}"
+    );
     // 该形状不落断点 ⇒ 跨轮那三格**整格不出现**，而不是印 0 冒充测过（E13④ + E25⑥ 末句）。
-    for unbilled in ["这个断点文件从建立起一共重试", "归属之外可能被重下", "归属已定"] {
-        assert!(!s.contains(unbilled), "带体那一支不许出现 {unbilled:?}（没有断点就没有跨轮的账）：{s}");
+    for unbilled in [
+        "这个断点文件从建立起一共重试",
+        "归属之外可能被重下",
+        "归属已定",
+    ] {
+        assert!(
+            !s.contains(unbilled),
+            "带体那一支不许出现 {unbilled:?}（没有断点就没有跨轮的账）：{s}"
+        );
     }
     assert!(
         stderr_of(&out).is_empty(),
@@ -5700,9 +7725,20 @@ fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() 
     // `requests_quiet` **守满**一段时间保证不多读。必须在对照臂之前读，否则读的是两趟的总和。
     srv.requests_at_least(1)?;
     let reqs = srv.requests_quiet(Duration::from_millis(500))?;
-    assert_eq!(reqs.len(), 1, "带体的形状全程只许一发请求（试探 + POST = 2 条就是缺陷）：{reqs:?}");
-    assert_eq!(reqs[0]["method"], "POST", "那一发是 POST；GET 就是试探（E11①）：{reqs:?}");
-    assert_eq!(reqs[0].get("range"), None, "POST 那一枪不许带 `Range`（R7/R13）：{reqs:?}");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "带体的形状全程只许一发请求（试探 + POST = 2 条就是缺陷）：{reqs:?}"
+    );
+    assert_eq!(
+        reqs[0]["method"], "POST",
+        "那一发是 POST；GET 就是试探（E11①）：{reqs:?}"
+    );
+    assert_eq!(
+        reqs[0].get("range"),
+        None,
+        "POST 那一枪不许带 `Range`（R7/R13）：{reqs:?}"
+    );
     let want_cl = form.len().to_string();
     assert_eq!(
         reqs[0]["extra_headers"]["content-length"].as_str(),
@@ -5714,7 +7750,14 @@ fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() 
     // 这一臂证明的是"进程级观察者**看得见**那一行 `\r`"——于是第一臂那句"看不见"才是结论，
     // 而不是仪器坏了（本项目对负向判据的硬要求：带对照，否则恒真）。
     let seg = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", "segmented.bin", "--connections", "2",
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        "segmented.bin",
+        "--connections",
+        "2",
     ])?;
     let ss = stdout_of(&seg);
     assert!(
@@ -5722,8 +7765,14 @@ fn the_data_file_route_downloads_everything_on_one_shot_without_a_single_tick() 
         "对照臂自己得先跑完，否则下面的形状断言测的是失败路径：{}",
         stderr_of(&seg)
     );
-    assert!(ss.starts_with('\r'), "对照臂（可分段）的 stdout 以进度行开头 —— 仪器看得见 `\\r`：{ss:?}");
-    assert!(ss.contains("\n下载已完成"), "可分段那一路的让行换行还在（结果行独占一行）：{ss:?}");
+    assert!(
+        ss.starts_with('\r'),
+        "对照臂（可分段）的 stdout 以进度行开头 —— 仪器看得见 `\\r`：{ss:?}"
+    );
+    assert!(
+        ss.contains("\n下载已完成"),
+        "可分段那一路的让行换行还在（结果行独占一行）：{ss:?}"
+    );
     assert!(!ss.contains("\n\n下载已完成"), "让行只该出现一次：{ss:?}");
     assert!(
         ss.contains("这个断点文件从建立起一共重试"),
@@ -5867,8 +7916,9 @@ fn split_records(rep: &dlm::engine::Report) -> Vec<(Interval, Interval)> {
         if is_tighten {
             // 调度器的 `split_tail` 只从 `longest_tail()`（= 某个 `active` 槽的尾巴）劈，
             // 而槽位为空时那条分支根本走不到 ⇒ 这里拿到 `None` 就是实现变了形状，如实崩给读者看。
-            let parent = current[worker]
-                .expect("调度器收紧了一条手上没有区间的 worker —— 本夹具的跟随逻辑跟不住，去看实现");
+            let parent = current[worker].expect(
+                "调度器收紧了一条手上没有区间的 worker —— 本夹具的跟随逻辑跟不住，去看实现",
+            );
             out.push((parent, iv));
         }
         current[worker] = Some(iv);
@@ -5930,7 +7980,11 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
         },
     )?;
     let wall = started.elapsed();
-    assert!(rep.ok, "限速那一跑该跑完（`verify_sha256` 那道闸也在引擎里跑过了）：{:?}", rep.message);
+    assert!(
+        rep.ok,
+        "限速那一跑该跑完（`verify_sha256` 那道闸也在引擎里跑过了）：{:?}",
+        rep.message
+    );
 
     // —— 判据①：字节级正确（同一个 oracle，独立读者）——
     assert_eq!(
@@ -5963,7 +8017,9 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
     let spans = harness::wire_spans(&ranges[1..], len)?;
     let mut conns: Vec<u64> = vec![];
     for rec in shots {
-        let c = rec["conn"].as_u64().context("服务端记的 request 没有 conn 字段")?;
+        let c = rec["conn"]
+            .as_u64()
+            .context("服务端记的 request 没有 conn 字段")?;
         if !conns.contains(&c) {
             conns.push(c);
         }
@@ -6014,17 +8070,23 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
             .dispatched()
             .into_iter()
             .find(|iv| iv.start == mid && iv.end == parent.end)
-            .with_context(|| format!("第 {index} 次劈分后没有把上半截 [{mid}, {}] 派给任何 worker", parent.end))?;
+            .with_context(|| {
+                format!(
+                    "第 {index} 次劈分后没有把上半截 [{mid}, {}] 派给任何 worker",
+                    parent.end
+                )
+            })?;
         assert!(
             upper.len() <= parent.len() / 2 + 1,
             "第 {index} 次劈分把超过一半的体量交给了新 worker：父 {parent:?} 上半截 {upper:?}"
         );
 
         // —— 判据②线上那一半：劈点必须真的以 `Range` 的样子出现过 ——
-        let split_shot = spans
-            .iter()
-            .position(|(s, _)| *s == mid)
-            .with_context(|| format!("劈分点 {mid} 只活在调度器的账里：线上没有任何一条 Range 从它开始（父 {parent:?}）"))?;
+        let split_shot = spans.iter().position(|(s, _)| *s == mid).with_context(|| {
+            format!(
+                "劈分点 {mid} 只活在调度器的账里：线上没有任何一条 Range 从它开始（父 {parent:?}）"
+            )
+        })?;
         // 被劈的那条区间也得真的上过线。**但不许要求"父那一枪先到、劈点那一枪后到"**：
         // `Tightened`/`Dispatched` 记进账的时刻是**派单**时刻，而请求要等 worker 线程真发出去才上线
         // （引擎与 worker 之间隔着一次投递）。一条刚派出去、请求还没上线的区间照样会被下一发
@@ -6038,15 +8100,23 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
         );
         let split_ms = shots[split_shot]["t"].as_u64().context("request 行缺 t")?;
         split_times.push(split_ms);
-        let parent_shot = spans[..split_shot].iter().rposition(|(s, _)| *s == parent.start);
+        let parent_shot = spans[..split_shot]
+            .iter()
+            .rposition(|(s, _)| *s == parent.start);
         if parent_shot.is_some() {
             parent_onlined += 1;
         }
         if let Some(ps) = parent_shot {
             let rec = &shots[ps];
-            let conn = rec["conn"].as_u64().context("服务端记的 request 没有 conn 字段")?;
-            let nth = usize::try_from(rec["reqNoOnConn"].as_u64().context("request 行缺 reqNoOnConn")?)
-                .context("reqNoOnConn 超出 usize")?;
+            let conn = rec["conn"]
+                .as_u64()
+                .context("服务端记的 request 没有 conn 字段")?;
+            let nth = usize::try_from(
+                rec["reqNoOnConn"]
+                    .as_u64()
+                    .context("request 行缺 reqNoOnConn")?,
+            )
+            .context("reqNoOnConn 超出 usize")?;
             // 父那一枪到劈点请求到达时**还没写完** ⇒ 这一刀砍在飞行中的响应上。
             let still_flying = match response_done_ms(conn, nth) {
                 Some(done) => done > split_ms,
@@ -6060,7 +8130,9 @@ fn scenario_b_throttled_splits_at_midpoints_and_respects_the_floor() -> anyhow::
             }
         }
 
-        if upper.len() < dlm::consts::MIN_SEGMENT_BYTES || head.len() < dlm::consts::MIN_SEGMENT_BYTES {
+        if upper.len() < dlm::consts::MIN_SEGMENT_BYTES
+            || head.len() < dlm::consts::MIN_SEGMENT_BYTES
+        {
             floor_hits.push(upper);
             floor_hits.push(*head);
         }
@@ -6187,7 +8259,8 @@ fn overlap_bytes(a: (u64, u64), b: (u64, u64)) -> u64 {
 ///   ⇒ 仍然走 `remotePort`，但用一条**不依赖任何计数器同步**的理由：它是这条 TCP 连接本身的身份，
 ///   跨进程、跨轮都稳定，也不受"服务器将来怎么改编号"影响。**别把这条当仪器缺陷记着。**
 #[test]
-fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() -> anyhow::Result<()> {
+fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() -> anyhow::Result<()>
+{
     const WORKERS: &str = "8";
     // 杀点等的是可观测量（覆盖集长到种子之外），不是 `sleep`。上限取 30 s 的理由写在下面那条
     // "前提没成立就如实失败"的判据旁边：`/slow` 上一枪 = 一个 4 MiB 窗口 ≈ 13 s，而断点里的
@@ -6203,8 +8276,17 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
     let out_name = "scen-c.bin";
     let target = dir.path().join(out_name);
     let state_path = dlm::state::path_for(&target);
-    let args =
-        ["--url", &url, "--out-dir", &out_dir, "--out-name", out_name, "--connections", WORKERS, "--quiet"];
+    let args = [
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        out_name,
+        "--connections",
+        WORKERS,
+        "--quiet",
+    ];
 
     // —— 第一轮：真进程，杀点从可观测量里取（固定 `sleep` 会把这一发变成计时彩票）——
     let started = Instant::now();
@@ -6251,8 +8333,12 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
     let partial_len = std::fs::metadata(&target)?.len();
     assert!(partial_len > 0, "半截目标文件长度是 0 ⇒ 这一拍什么都没落盘");
 
-    let snap = dlm::state::load(&state_path)?.context("上面已断言断点文件在，读回来却什么都没有")?;
-    assert_eq!(snap.validator.total_len, len, "断点记的全长要与这台服务器宣布的一致");
+    let snap =
+        dlm::state::load(&state_path)?.context("上面已断言断点文件在，读回来却什么都没有")?;
+    assert_eq!(
+        snap.validator.total_len, len,
+        "断点记的全长要与这台服务器宣布的一致"
+    );
     let covered = covered_at_kill;
     let covered_bytes: u64 = covered.iter().map(|(s, e)| e - s + 1).sum();
     assert!(
@@ -6260,7 +8346,10 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
         "断点说归我的字节（{covered_bytes} B）比盘上真有的（{partial_len} B）还多 ⇒ 断点对磁盘说谎（E17 那本账）"
     );
     let first_gap = first_uncovered(&covered, len);
-    assert!(first_gap < len, "覆盖集已经把整份文件说成归我了，第二轮无从续起：{covered:?}");
+    assert!(
+        first_gap < len,
+        "覆盖集已经把整份文件说成归我了，第二轮无从续起：{covered:?}"
+    );
 
     // —— 第二轮：同一条 URL、同一个命令，这次等它跑完 ——
     std::thread::sleep(Duration::from_millis(500)); // 让第一轮那些"客户端已经没了"的连接把收尾行写完
@@ -6268,7 +8357,11 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
     let boundary = before.len();
     let run1_requests = before.iter().filter(|e| e["ev"] == "request").count();
     let second = run_dlm(&args)?;
-    assert!(second.status.success(), "续的那一轮该退 0：{}", stderr_of(&second));
+    assert!(
+        second.status.success(),
+        "续的那一轮该退 0：{}",
+        stderr_of(&second)
+    );
     assert_eq!(
         harness::sha256_of(&target)?,
         harness::expected_sha(len),
@@ -6279,21 +8372,37 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
     srv.requests_at_least(run1_requests + 2)?;
     srv.requests_quiet(Duration::from_millis(300))?;
     let all = srv.events()?;
-    assert!(all.len() >= boundary, "对端日志会缩短？边界之后读回来的行比边界之前还少");
+    assert!(
+        all.len() >= boundary,
+        "对端日志会缩短？边界之后读回来的行比边界之前还少"
+    );
     let run2 = &all[boundary..];
     let run2_requests: Vec<_> = run2.iter().filter(|e| e["ev"] == "request").collect();
-    let opened: Vec<u64> =
-        run2.iter().filter(|e| e["ev"] == "socket_open").filter_map(|e| e["remotePort"].as_u64()).collect();
-    assert!(!run2_requests.is_empty(), "第二轮一条请求都没打出 ⇒ 下面所有判据都是空的（恒绿）");
+    let opened: Vec<u64> = run2
+        .iter()
+        .filter(|e| e["ev"] == "socket_open")
+        .filter_map(|e| e["remotePort"].as_u64())
+        .collect();
+    assert!(
+        !run2_requests.is_empty(),
+        "第二轮一条请求都没打出 ⇒ 下面所有判据都是空的（恒绿）"
+    );
     let probe_range = format!("bytes=0-{}", PROBE_READ_BYTES - 1);
     assert_eq!(
-        run2_requests[0].get("range").and_then(serde_json::Value::as_str),
+        run2_requests[0]
+            .get("range")
+            .and_then(serde_json::Value::as_str),
         Some(probe_range.as_str()),
         "第二轮第一枪该是试探那一枪"
     );
     for rec in &run2_requests {
-        let rp = rec["remotePort"].as_u64().context("request 行缺 remotePort")?;
-        assert!(opened.contains(&rp), "第二轮的请求挂在一条边界之前就存在的连接上（remotePort {rp}）⇒ 事件边界取错了");
+        let rp = rec["remotePort"]
+            .as_u64()
+            .context("request 行缺 remotePort")?;
+        assert!(
+            opened.contains(&rp),
+            "第二轮的请求挂在一条边界之前就存在的连接上（remotePort {rp}）⇒ 事件边界取错了"
+        );
     }
 
     // 对端自己记的"这条响应真写出了多少字节"：`conn_close_side` 按连接分组，组内第 k 条配该连接上第
@@ -6316,8 +8425,15 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
         }
     }
     for (c, n) in &per_conn {
-        let got = closes.iter().find(|(k, _)| k == c).map(|(_, v)| v.len()).unwrap_or(0);
-        assert_eq!(*n, got, "连接 {c} 上 {n} 条请求只等到 {got} 条 conn_close_side ⇒ 对端那份 sent 账配不平");
+        let got = closes
+            .iter()
+            .find(|(k, _)| k == c)
+            .map(|(_, v)| v.len())
+            .unwrap_or(0);
+        assert_eq!(
+            *n, got,
+            "连接 {c} 上 {n} 条请求只等到 {got} 条 conn_close_side ⇒ 对端那份 sent 账配不平"
+        );
     }
 
     let mut dup_total = 0u64;
@@ -6331,8 +8447,12 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
             .with_context(|| format!("第二轮第 {index} 枪没带 Range"))?;
         let (s, _) = harness::wire_span(range, len)?;
         let conn = rec["conn"].as_u64().context("request 行缺 conn")?;
-        let nth = usize::try_from(rec["reqNoOnConn"].as_u64().context("request 行缺 reqNoOnConn")?)
-            .context("reqNoOnConn 超出 usize")?;
+        let nth = usize::try_from(
+            rec["reqNoOnConn"]
+                .as_u64()
+                .context("request 行缺 reqNoOnConn")?,
+        )
+        .context("reqNoOnConn 超出 usize")?;
         let sent = closes
             .iter()
             .find(|(k, _)| *k == conn)
@@ -6356,8 +8476,7 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
             continue;
         }
         assert_eq!(
-            dup,
-            0,
+            dup, 0,
             "第二轮第 {index} 枪要走了断点文件说已归我的 {dup} B（交出去的那段 {served:?}）⇒ \
              判据③「不重下已完成段」断了。覆盖集 {covered:?}"
         );
@@ -6377,7 +8496,9 @@ fn scenario_c_real_process_kill_then_resume_does_not_redownload_covered_bytes() 
          断点覆盖 {} 格 / {covered_bytes} B；半截文件 {partial_len} B；第一个未覆盖字节 {first_gap}；\
          第二轮 {} 枪 / 交出 {sent_total} B / 落在覆盖集内 {dup_total} B（其中试探那一枪 {dup_probe} B）；\
          第二轮剔掉试探后最早起点 {min_resume_start} B",
-        first_save.map(|d| format!("{d:?}")).unwrap_or_else(|| "未出现".to_string()),
+        first_save
+            .map(|d| format!("{d:?}"))
+            .unwrap_or_else(|| "未出现".to_string()),
         covered.len(),
         run2_requests.len(),
     );
@@ -6429,8 +8550,16 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
 
     let started = Instant::now();
     let run = run_dlm(&[
-        "--url", &url, "--out-dir", &out_dir, "--out-name", out_name,
-        "--connections", "8", "--max-retries", "6",
+        "--url",
+        &url,
+        "--out-dir",
+        &out_dir,
+        "--out-name",
+        out_name,
+        "--connections",
+        "8",
+        "--max-retries",
+        "6",
     ])?;
     let wall = started.elapsed();
     let so = stdout_of(&run);
@@ -6454,7 +8583,10 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
     let mut max_rounds = 0u32;
     for line in &slow_lines {
         let cells = tick_cells(line);
-        assert!(cells.len() >= 4, "带 slow-retry 的行至少要有前四格（百分比 / MiB 对 / 速率 / x 连接数）：{line:?}");
+        assert!(
+            cells.len() >= 4,
+            "带 slow-retry 的行至少要有前四格（百分比 / MiB 对 / 速率 / x 连接数）：{line:?}"
+        );
         let pct = cells[0]
             .strip_suffix('%')
             .with_context(|| format!("进度行第一格不是百分比：{line:?}"))?;
@@ -6463,8 +8595,14 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
             .strip_suffix(" MiB")
             .and_then(|s| s.split_once(" MiB/"))
             .unwrap_or_else(|| panic!("第二格该是 `<已下> MiB/<全长> MiB`：{line:?}"));
-        assert!(is_one_decimal(done) && is_one_decimal(total), "那对 MiB 都要是一位小数：{line:?}");
-        assert_eq!(total, "48.0", "全长那一格就是这台服务器宣布的 48 MiB（E25① 的单位口径）：{line:?}");
+        assert!(
+            is_one_decimal(done) && is_one_decimal(total),
+            "那对 MiB 都要是一位小数：{line:?}"
+        );
+        assert_eq!(
+            total, "48.0",
+            "全长那一格就是这台服务器宣布的 48 MiB（E25① 的单位口径）：{line:?}"
+        );
         for extra in cells.iter().skip(4) {
             if let Some(rounds) = extra.strip_prefix("slow-retry x") {
                 assert!(
@@ -6474,7 +8612,10 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
                 // `unwrap_or(0)`：解析炸了就落在上面那条形状判据的红里，不让测试炸在解析上。
                 max_rounds = max_rounds.max(rounds.parse::<u32>().unwrap_or(0));
             } else {
-                assert!(extra.starts_with("dup "), "第四格之后只许是 `dup X%` 或 `slow-retry xN`：{line:?}");
+                assert!(
+                    extra.starts_with("dup "),
+                    "第四格之后只许是 `dup X%` 或 `slow-retry xN`：{line:?}"
+                );
             }
         }
     }
@@ -6490,8 +8631,14 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
         "全部 worker 枪被拒的整跑不许退 0：exit={:?}，stderr：{se}",
         run.status.code()
     );
-    assert!(so.contains("下载未完成"), "结果行要走 `main` 的 `ok=false` 那一支：{so}");
-    assert!(so.contains("重试到顶"), "那句说明要指名「重试到顶」，这是封顶那一支的专属措辞：{so}");
+    assert!(
+        so.contains("下载未完成"),
+        "结果行要走 `main` 的 `ok=false` 那一支：{so}"
+    );
+    assert!(
+        so.contains("重试到顶"),
+        "那句说明要指名「重试到顶」，这是封顶那一支的专属措辞：{so}"
+    );
     for banned in ["参数写错了", "跑不起来"] {
         assert!(
             !so.contains(banned) && !se.contains(banned),
@@ -6514,7 +8661,10 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
         state_path.display()
     );
     let snap = dlm::state::load(&state_path)?.context("断点文件存在却读不回来（损坏？）")?;
-    assert_eq!(snap.validator.total_len, len, "断点记的全长要与这台服务器宣布的一致");
+    assert_eq!(
+        snap.validator.total_len, len,
+        "断点记的全长要与这台服务器宣布的一致"
+    );
     let covered: Vec<(u64, u64)> = snap.segments.iter().map(|s| (s.start, s.end)).collect();
     let covered_bytes: u64 = covered.iter().map(|(s, e)| e - s + 1).sum();
     assert!(
@@ -6543,7 +8693,9 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
     // —— 对端自己的账：先守卫"两条形状都已落盘"，再取全量计数 ——
     srv.events_while(|evs| {
         evs.iter().any(|e| e["ev"] == "response_refuse")
-            && evs.iter().any(|e| e["ev"] == "response_done" && e["url"] == "/probe-only")
+            && evs
+                .iter()
+                .any(|e| e["ev"] == "response_done" && e["url"] == "/probe-only")
     })?;
     let evs = srv.events()?;
     let served: Vec<&serde_json::Value> = evs
@@ -6571,8 +8723,14 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
         .iter()
         .filter(|e| e["ev"] == "request" && e["range"].as_str() == Some(probe_range.as_str()))
         .count();
-    assert_eq!(probe_shots, 1, "带试探限量 Range 的请求必须恰好一条（多一条就是回头重取/重试探）：{probe_range}");
-    let refused: Vec<&serde_json::Value> = evs.iter().filter(|e| e["ev"] == "response_refuse").collect();
+    assert_eq!(
+        probe_shots, 1,
+        "带试探限量 Range 的请求必须恰好一条（多一条就是回头重取/重试探）：{probe_range}"
+    );
+    let refused: Vec<&serde_json::Value> = evs
+        .iter()
+        .filter(|e| e["ev"] == "response_refuse")
+        .collect();
     assert!(
         refused.len() >= 6,
         "封顶 6 的那条链要先被拒满 6 次才排下第一发慢重试 ⇒ 到顶时至少已有 6 条拒绝；实测 {} 条。\
@@ -6580,7 +8738,9 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
         refused.len()
     );
     for e in &refused {
-        let range = e["range"].as_str().with_context(|| format!("拒绝行没带 range：{e:?}"))?;
+        let range = e["range"]
+            .as_str()
+            .with_context(|| format!("拒绝行没带 range：{e:?}"))?;
         let (s, _) = harness::wire_span(range, len)?;
         assert!(
             s >= PROBE_READ_BYTES,
@@ -6602,9 +8762,11 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
         slow_lines
             .iter()
             .find(|line| {
-                tick_cells(line)
-                    .iter()
-                    .any(|c| c.strip_prefix("slow-retry x").and_then(|n| n.parse::<u32>().ok()) == Some(max_rounds))
+                tick_cells(line).iter().any(|c| {
+                    c.strip_prefix("slow-retry x")
+                        .and_then(|n| n.parse::<u32>().ok())
+                        == Some(max_rounds)
+                })
             })
             .copied()
             .unwrap_or_else(|| slow_lines[0])
@@ -6620,8 +8782,14 @@ fn a_window_request_carries_the_if_range_value_it_was_given() -> anyhow::Result<
     let (srv, base) = harness::spawn()?;
     let announced = srv.announced()?;
     let (store, path) = harness::store("a1-if-range-wire.bin")?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: 4095 };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: 4095,
+    };
     let out = fetch::run_window_with_if_range(
         &harness::client()?,
         &t,
@@ -6633,9 +8801,16 @@ fn a_window_request_carries_the_if_range_value_it_was_given() -> anyhow::Result<
         dlm::fetch::BodyShape::Windowed,
         Some(&announced.etag),
     )?;
-    assert!(matches!(out, Outcome::Complete | Outcome::Advanced { .. }), "{out:?}");
+    assert!(
+        matches!(out, Outcome::Complete | Outcome::Advanced { .. }),
+        "{out:?}"
+    );
     let reqs = srv.requests_at_least(1)?;
-    assert_eq!(reqs[0]["if_range"], announced.etag.as_str(), "If-Range 必须逐字上线");
+    assert_eq!(
+        reqs[0]["if_range"],
+        announced.etag.as_str(),
+        "If-Range 必须逐字上线"
+    );
     drop(store);
     std::fs::remove_file(&path)?;
     Ok(())
@@ -6648,8 +8823,14 @@ fn an_if_range_shot_that_gets_200_is_validator_changed_and_writes_nothing() -> a
     let peer = harness::spawn_scripted_peer(total, vec![], harness::Shot::IgnoresRange)?;
     let base = peer.base();
     let (store, path) = harness::store("a1-if-range-200.bin")?;
-    let t = Task { url: format!("{base}/blob"), ..harness::blank_task() };
-    let iv = Interval { start: 0, end: 4095 };
+    let t = Task {
+        url: format!("{base}/blob"),
+        ..harness::blank_task()
+    };
+    let iv = Interval {
+        start: 0,
+        end: 4095,
+    };
     let out = fetch::run_window_with_if_range(
         &harness::client()?,
         &t,
@@ -6723,7 +8904,11 @@ fn a_resumed_run_fails_cleanly_when_if_range_gets_200_after_the_probe() -> anyho
         "文案要点名 If-Range：{:?}",
         rep.message
     );
-    assert_eq!(std::fs::metadata(&target)?.len(), 1, "退化路径不许把 200 的 body 写到偏移 1");
+    assert_eq!(
+        std::fs::metadata(&target)?.len(),
+        1,
+        "退化路径不许把 200 的 body 写到偏移 1"
+    );
     assert!(state_path.exists(), "断点必须保留");
     drop(peer);
     Ok(())
@@ -6815,14 +9000,27 @@ fn a_completion_action_failure_does_not_change_a_successful_exit_code() -> anyho
     let dir = harness::tmp_dir("a3-action-fail")?;
     let dir_text = dir.path().to_str().context("临时目录不是 UTF-8")?;
     let out = run_dlm(&[
-        "--url", &format!("{base}/sz/65536"),
-        "--out-dir", dir_text,
-        "--out-name", "a3.bin",
+        "--url",
+        &format!("{base}/sz/65536"),
+        "--out-dir",
+        dir_text,
+        "--out-name",
+        "a3.bin",
         "--quiet",
-        "--on-complete", "run:dlm-no-such-completion-action-exe",
+        "--on-complete",
+        "run:dlm-no-such-completion-action-exe",
     ])?;
-    assert_eq!(out.status.code(), Some(0), "动作失败不许改下载成功档：{}", stderr_of(&out));
-    assert!(stderr_of(&out).contains("完成后动作失败"), "{}", stderr_of(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "动作失败不许改下载成功档：{}",
+        stderr_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("完成后动作失败"),
+        "{}",
+        stderr_of(&out)
+    );
     Ok(())
 }
 
@@ -6834,15 +9032,29 @@ fn a_failed_download_does_not_run_the_completion_action() -> anyhow::Result<()> 
     let dir_text = dir.path().to_str().context("临时目录不是 UTF-8")?;
     let zeros = "0".repeat(64);
     let out = run_dlm(&[
-        "--url", &format!("{base}/sz/65536"),
-        "--out-dir", dir_text,
-        "--out-name", "a3.bin",
+        "--url",
+        &format!("{base}/sz/65536"),
+        "--out-dir",
+        dir_text,
+        "--out-name",
+        "a3.bin",
         "--quiet",
-        "--sha256", zeros.as_str(),
-        "--on-complete", "run:dlm-no-such-completion-action-exe",
+        "--sha256",
+        zeros.as_str(),
+        "--on-complete",
+        "run:dlm-no-such-completion-action-exe",
     ])?;
-    assert_eq!(out.status.code(), Some(1), "校验不符仍是下载失败档：{}", stderr_of(&out));
-    assert!(stderr_of(&out).contains("完成后动作未执行"), "{}", stderr_of(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "校验不符仍是下载失败档：{}",
+        stderr_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("完成后动作未执行"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(
         !stderr_of(&out).contains("完成后动作失败"),
         "动作根本没该启动：{}",
@@ -6854,7 +9066,13 @@ fn a_failed_download_does_not_run_the_completion_action() -> anyhow::Result<()> 
 /// R20：`shutdown` 不带延迟在参数层就被拒，绝不上网、绝不关机。
 #[test]
 fn bare_shutdown_is_a_parameter_error_and_never_reaches_the_wire() -> anyhow::Result<()> {
-    let out = run_dlm(&["--url", "https://example.invalid/a", "--quiet", "--on-complete", "shutdown"])?;
+    let out = run_dlm(&[
+        "--url",
+        "https://example.invalid/a",
+        "--quiet",
+        "--on-complete",
+        "shutdown",
+    ])?;
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("延迟"), "{}", stderr_of(&out));
     Ok(())
@@ -6892,7 +9110,10 @@ fn residual_duplicate_traffic_is_bounded_by_one_chunk_per_retighten() -> anyhow:
     let bound = tightened * dlm::fetch::CHUNK_BYTES as u64;
     assert!(rep.ok, "{:?}", rep.message);
     assert_eq!(rep.delivered, len);
-    assert!(!rep.tightened().is_empty(), "8 个 worker 该至少有几次收紧；没有就说明这条判据空转");
+    assert!(
+        !rep.tightened().is_empty(),
+        "8 个 worker 该至少有几次收紧；没有就说明这条判据空转"
+    );
     assert!(
         rep.duplicated <= bound,
         "duplicated={} 超过 tightened={} × 64 KiB = {}：切点落到了 worker 已经读过的位置",
@@ -6992,7 +9213,9 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let task_id = loop {
-        let resp = client.get(format!("{gui_base}/api/tasks?t={token}")).send()?;
+        let resp = client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()?;
         let text = resp.text()?;
         let tasks: Vec<serde_json::Value> = serde_json::from_str(&text)?;
         if let Some(task) = tasks.iter().find(|t| t["name"] == "gui.bin") {
@@ -7021,7 +9244,10 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
     };
 
     let target = out_dir.join("gui.bin");
-    assert_eq!(std::fs::metadata(&target).context("下载文件不存在")?.len(), 65536);
+    assert_eq!(
+        std::fs::metadata(&target).context("下载文件不存在")?.len(),
+        65536
+    );
     let job_log = std::fs::read_to_string(log_dir.join(format!("{task_id}.log")))?;
     assert!(job_log.contains("下载已完成"), "job log: {job_log}");
 
@@ -7037,10 +9263,15 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
         .header("content-type", "application/json")
         .body(sched_body.to_string())
         .send()?;
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"], true);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"],
+        true
+    );
 
     let later_id = loop {
-        let resp = client.get(format!("{gui_base}/api/tasks?t={token}")).send()?;
+        let resp = client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()?;
         let tasks: Vec<serde_json::Value> = serde_json::from_str(&resp.text()?)?;
         if let Some(task) = tasks.iter().find(|t| t["name"] == "later.bin") {
             assert_eq!(task["status"], "queued", "未来 start_at 不该启动: {task}");
@@ -7057,12 +9288,23 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
             .header("content-type", "application/json")
             .body(serde_json::json!({"id": later_id}).to_string())
             .send()?;
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"], true);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"],
+            true
+        );
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            let tasks: Vec<serde_json::Value> =
-                serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
-            if tasks.iter().find(|t| t["id"] == later_id.as_str()).is_some_and(|t| t["status"] == want) {
+            let tasks: Vec<serde_json::Value> = serde_json::from_str(
+                &client
+                    .get(format!("{gui_base}/api/tasks?t={token}"))
+                    .send()?
+                    .text()?,
+            )?;
+            if tasks
+                .iter()
+                .find(|t| t["id"] == later_id.as_str())
+                .is_some_and(|t| t["status"] == want)
+            {
                 break;
             }
             if Instant::now() > until {
@@ -7076,11 +9318,18 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
         .header("content-type", "application/json")
         .body(serde_json::json!({"id": later_id}).to_string())
         .send()?;
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"], true);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&resp.text()?).expect("reply json")["ok"],
+        true
+    );
     let until = Instant::now() + Duration::from_secs(5);
     loop {
-        let tasks: Vec<serde_json::Value> =
-            serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(
+            &client
+                .get(format!("{gui_base}/api/tasks?t={token}"))
+                .send()?
+                .text()?,
+        )?;
         if tasks.iter().all(|t| t["id"] != later_id.as_str()) {
             break;
         }
@@ -7136,7 +9385,11 @@ fn the_binary_stops_at_the_byte_budget_and_resumes_to_completion() -> anyhow::Re
         stopped <= budget + 65_536,
         "越过帽的最多一整块（64 KiB）：stopped={stopped} budget={budget}"
     );
-    assert!(state.exists(), "预算停住时必须保留断点：{}", state.display());
+    assert!(
+        state.exists(),
+        "预算停住时必须保留断点：{}",
+        state.display()
+    );
     assert!(srv.requests()?.len() >= 2, "至少试探 + 一枪");
 
     let second = run_dlm(&[
@@ -7181,8 +9434,17 @@ fn max_bytes_with_data_file_is_a_parameter_error() -> anyhow::Result<()> {
         "--data-file",
         &body.to_string_lossy(),
     ])?;
-    assert_eq!(out.status.code(), Some(2), "应停在参数层：{}", stderr_of(&out));
-    assert!(stderr_of(&out).contains("--max-bytes"), "{}", stderr_of(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "应停在参数层：{}",
+        stderr_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("--max-bytes"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(srv.requests()?.is_empty(), "参数层拒绝时一个请求都不许发");
     Ok(())
 }
@@ -7262,8 +9524,12 @@ fn gui_quota_stops_and_resumes_across_a_window() -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let quota: serde_json::Value =
-        serde_json::from_str(&client.get(format!("{gui_base}/api/quota?t={token}")).send()?.text()?)?;
+    let quota: serde_json::Value = serde_json::from_str(
+        &client
+            .get(format!("{gui_base}/api/quota?t={token}"))
+            .send()?
+            .text()?,
+    )?;
     assert_eq!(quota["enabled"], true, "{quota}");
     assert_eq!(quota["limit"], 262144, "{quota}");
 
@@ -7288,8 +9554,12 @@ fn gui_quota_stops_and_resumes_across_a_window() -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut stopped_once = false;
     let text = loop {
-        let tasks: Vec<serde_json::Value> =
-            serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(
+            &client
+                .get(format!("{gui_base}/api/tasks?t={token}"))
+                .send()?
+                .text()?,
+        )?;
         let Some(task) = tasks.iter().find(|t| t["id"] == id.as_str()) else {
             if Instant::now() > deadline {
                 panic!("task never appeared: id={id} tasks={tasks:?}");
@@ -7330,7 +9600,10 @@ fn gui_quota_windows_are_validated() -> anyhow::Result<()> {
         "--queue".to_string(),
         queue.to_string_lossy().to_string(),
         "--endpoint".to_string(),
-        dir.path().join("endpoint.json").to_string_lossy().to_string(),
+        dir.path()
+            .join("endpoint.json")
+            .to_string_lossy()
+            .to_string(),
         "--token".to_string(),
         "x".to_string(),
     ];
@@ -7341,15 +9614,30 @@ fn gui_quota_windows_are_validated() -> anyhow::Result<()> {
         Ok(std::process::Command::new(bin).args(args).output()?)
     };
     let zero_window = run(&["--quota", "262144", "--quota-window", "0"])?;
-    assert_eq!(zero_window.status.code(), Some(2), "{}", String::from_utf8_lossy(&zero_window.stderr));
+    assert_eq!(
+        zero_window.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&zero_window.stderr)
+    );
     assert!(String::from_utf8_lossy(&zero_window.stderr).contains("--quota-window"));
 
     let tiny = run(&["--quota", "1024"])?;
-    assert_eq!(tiny.status.code(), Some(2), "{}", String::from_utf8_lossy(&tiny.stderr));
+    assert_eq!(
+        tiny.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&tiny.stderr)
+    );
     assert!(String::from_utf8_lossy(&tiny.stderr).contains("--quota"));
 
     let zero = run(&["--quota", "0", "--quota-window", "60"])?;
-    assert_eq!(zero.status.code(), Some(2), "{}", String::from_utf8_lossy(&zero.stderr));
+    assert_eq!(
+        zero.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
     Ok(())
 }
 
@@ -7435,11 +9723,17 @@ fn gui_rejects_shutdown_completion_action() -> anyhow::Result<()> {
     )?;
     assert_eq!(reply["ok"], false, "{reply}");
     assert!(
-        reply["error"].as_str().is_some_and(|e| e.contains("shutdown")),
+        reply["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("shutdown")),
         "{reply}"
     );
-    let tasks: Vec<serde_json::Value> =
-        serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+    let tasks: Vec<serde_json::Value> = serde_json::from_str(
+        &client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()?
+            .text()?,
+    )?;
     assert!(tasks.is_empty(), "被拒的任务不许入队：{tasks:?}");
     Ok(())
 }
@@ -7531,8 +9825,12 @@ fn host_to_queue_end_to_end() -> anyhow::Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let tasks: Vec<serde_json::Value> =
-            serde_json::from_str(&client.get(format!("{gui_base}/api/tasks?t={token}")).send()?.text()?)?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(
+            &client
+                .get(format!("{gui_base}/api/tasks?t={token}"))
+                .send()?
+                .text()?,
+        )?;
         if let Some(task) = tasks.iter().find(|t| t["id"] == id.as_str()) {
             match task["status"].as_str() {
                 Some("done") => break,
@@ -7547,7 +9845,10 @@ fn host_to_queue_end_to_end() -> anyhow::Result<()> {
     }
     assert_eq!(std::fs::metadata(out_dir.join("65536"))?.len(), 65_536);
     let queue_text = std::fs::read_to_string(&queue)?;
-    assert!(!queue_text.to_ascii_lowercase().contains("cookie"), "队列文件不许出现 Cookie：{queue_text}");
+    assert!(
+        !queue_text.to_ascii_lowercase().contains("cookie"),
+        "队列文件不许出现 Cookie：{queue_text}"
+    );
     Ok(())
 }
 
@@ -7622,7 +9923,9 @@ fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
         .build()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let update = loop {
-        let r = client.get(format!("{gui_base}/api/update?t={token}")).send();
+        let r = client
+            .get(format!("{gui_base}/api/update?t={token}"))
+            .send();
         if let Ok(resp) = r
             && resp.status().is_success()
         {
@@ -7645,7 +9948,13 @@ fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
 }
 
 /// B3a：本机 HLS stub。返回 (port, stop flag, join handle)；线程非阻塞轮询，测试结束停。
-fn hls_stub(routes: &'static [(&'static str, &'static str)]) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+fn hls_stub(
+    routes: &'static [(&'static str, &'static str)],
+) -> (
+    u16,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
     use std::io::{Read, Write};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -7772,7 +10081,10 @@ fn hls_is_refused_with_data_file_or_max_bytes() -> anyhow::Result<()> {
     let out_dir = dir.path().to_string_lossy().to_string();
     let base_url = format!("http://127.0.0.1:{port}/master.m3u8");
     for (label, extra) in [
-        ("data-file", vec!["--data-file", body.to_str().context("body utf8")?]),
+        (
+            "data-file",
+            vec!["--data-file", body.to_str().context("body utf8")?],
+        ),
         ("max-bytes", vec!["--max-bytes", "1"]),
     ] {
         let mut args = vec![

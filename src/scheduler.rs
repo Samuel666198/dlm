@@ -49,7 +49,11 @@ pub struct Interval {
 impl Interval {
     /// 区间内的字节数；`end < start` 视为空区间返回 0。
     pub fn len(&self) -> u64 {
-        if self.is_empty() { 0 } else { self.end - self.start + 1 }
+        if self.is_empty() {
+            0
+        } else {
+            self.end - self.start + 1
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.end < self.start
@@ -102,12 +106,26 @@ impl Active {
             None => self.iv.start,
             Some(w) => (w + 1).max(self.iv.start),
         };
-        if start > self.iv.end { None } else { Some(Interval { start, end: self.iv.end }) }
+        if start > self.iv.end {
+            None
+        } else {
+            Some(Interval {
+                start,
+                end: self.iv.end,
+            })
+        }
     }
     /// 已确认落盘的前缀；一个字节都没写 ⇒ `None`。
     fn completed(&self) -> Option<Interval> {
         let w = self.written?;
-        if w < self.iv.start { None } else { Some(Interval { start: self.iv.start, end: w.min(self.iv.end) }) }
+        if w < self.iv.start {
+            None
+        } else {
+            Some(Interval {
+                start: self.iv.start,
+                end: w.min(self.iv.end),
+            })
+        }
     }
 }
 
@@ -128,8 +146,22 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(total: u64, min_seg: u64) -> Self {
-        let queue = if total == 0 { vec![] } else { vec![Interval { start: 0, end: total - 1 }] };
-        Self { total, min_seg, queue, active: vec![], done: vec![], no_ranges: false }
+        let queue = if total == 0 {
+            vec![]
+        } else {
+            vec![Interval {
+                start: 0,
+                end: total - 1,
+            }]
+        };
+        Self {
+            total,
+            min_seg,
+            queue,
+            active: vec![],
+            done: vec![],
+            no_ranges: false,
+        }
     }
 
     /// **续传播种入口**（计划勘误 **E13①**）：把"上一轮已经确认的字节"当成既成事实交给调度器。
@@ -173,8 +205,13 @@ impl Scheduler {
     pub fn resume(total: u64, min_seg: u64, done: &[Interval]) -> Self {
         let mut sc = Self::new(total, min_seg);
         for iv in done {
-            let Some(clamped) = clamp_to_file(*iv, total) else { continue };
-            sc.active.push(Some(Active { iv: clamped, written: None }));
+            let Some(clamped) = clamp_to_file(*iv, total) else {
+                continue;
+            };
+            sc.active.push(Some(Active {
+                iv: clamped,
+                written: None,
+            }));
             let slot = sc.active.len() - 1;
             sc.seal(slot);
         }
@@ -191,7 +228,13 @@ impl Scheduler {
     /// 还差多少字节：队列里的整段 + 各在途段没写完的尾巴。不含已确认字节。
     pub fn pending_bytes(&self) -> u64 {
         let queued = self.queue.iter().map(Interval::len).sum::<u64>();
-        let in_flight = self.active.iter().flatten().filter_map(|a| a.remaining()).map(|iv| iv.len()).sum::<u64>();
+        let in_flight = self
+            .active
+            .iter()
+            .flatten()
+            .filter_map(|a| a.remaining())
+            .map(|iv| iv.len())
+            .sum::<u64>();
         queued.saturating_add(in_flight)
     }
 
@@ -231,14 +274,18 @@ impl Scheduler {
 
     /// 记下"写到哪了"：只前进、且夹到自己区间终点（越界上报会把在途尾算成负数）。
     fn note_progress(&mut self, worker: usize, abs_end: u64) {
-        let Some(Some(a)) = self.active.get_mut(worker) else { return };
+        let Some(Some(a)) = self.active.get_mut(worker) else {
+            return;
+        };
         let capped = abs_end.min(a.iv.end).min(self.total.saturating_sub(1));
         a.written = Some(a.written.map_or(capped, |prev| prev.max(capped)));
     }
 
     /// worker 交回它的区间。
     fn release(&mut self, worker: usize) {
-        let Some(Some(a)) = self.active.get(worker).cloned() else { return };
+        let Some(Some(a)) = self.active.get(worker).cloned() else {
+            return;
+        };
         self.active[worker] = None;
         if let Some(prefix) = a.completed() {
             self.push_done(prefix);
@@ -255,7 +302,9 @@ impl Scheduler {
     /// 记成"已确认落盘" ⇒ Task 4 的断点文件与 spec §7.2 的 sha256 门槛都被污染。
     /// 手上没活（或序号越界）⇒ 幂等空操作，`done` 靠 `push_done` 的合并保证同一段只记一次。
     fn seal(&mut self, worker: usize) {
-        let Some(Some(a)) = self.active.get(worker).cloned() else { return };
+        let Some(Some(a)) = self.active.get(worker).cloned() else {
+            return;
+        };
         self.active[worker] = None;
         self.push_done(a.iv);
     }
@@ -263,7 +312,10 @@ impl Scheduler {
     /// 最长的无人认领区间；等长时取起点最低的（保证测试可复现、Task 8 的回放一致）。
     /// **只在正常模式使用**：退化模式下对端不认 Range，派发顺序必须跟着文件顺序走（`first_pending`）。
     fn longest_pending(&self) -> Option<Interval> {
-        self.queue.iter().min_by_key(|i| (Reverse(i.len()), i.start)).copied()
+        self.queue
+            .iter()
+            .min_by_key(|i| (Reverse(i.len()), i.start))
+            .copied()
     }
 
     /// 起点最低的无人认领区间 —— 退化模式（spec §2.2）唯一的派法。
@@ -320,21 +372,38 @@ impl Scheduler {
     }
 
     /// 在剩余尾的中点劈开。任半截低于 `min_seg`（或只剩一个字节）⇒ 返回 `None`，不劈。
-    fn split_tail(&mut self, worker: usize, incumbent: usize, tail: Interval) -> Option<Vec<Action>> {
+    fn split_tail(
+        &mut self,
+        worker: usize,
+        incumbent: usize,
+        tail: Interval,
+    ) -> Option<Vec<Action>> {
         let half = tail.len() / 2;
         if half == 0 || half < self.min_seg {
             return None;
         }
         let mid = tail.start + half;
-        let upper = Interval { start: mid, end: tail.end };
+        let upper = Interval {
+            start: mid,
+            end: tail.end,
+        };
         let head = {
             let a = self.active[incumbent].as_mut()?;
             a.iv.end = mid - 1;
             a.iv
         };
-        self.active[worker] = Some(Active { iv: upper, written: None });
+        self.active[worker] = Some(Active {
+            iv: upper,
+            written: None,
+        });
         // 顺序固定：先收紧 incumbent（它在途的请求要改终点），再派新段。
-        Some(vec![Action::Retighten { worker: incumbent, iv: head }, Action::Assign { worker, iv: upper }])
+        Some(vec![
+            Action::Retighten {
+                worker: incumbent,
+                iv: head,
+            },
+            Action::Assign { worker, iv: upper },
+        ])
     }
 
     fn assign_whole(&mut self, worker: usize, iv: Interval) -> Vec<Action> {
@@ -376,7 +445,9 @@ impl Scheduler {
         let mut merged: Vec<Interval> = Vec::with_capacity(self.queue.len());
         for cur in std::mem::take(&mut self.queue) {
             match merged.last_mut() {
-                Some(last) if cur.start <= last.end.saturating_add(1) => last.end = last.end.max(cur.end),
+                Some(last) if cur.start <= last.end.saturating_add(1) => {
+                    last.end = last.end.max(cur.end)
+                }
                 _ => merged.push(cur),
             }
         }
@@ -394,7 +465,9 @@ impl Scheduler {
         self.done.clear();
         for cur in merged {
             match self.done.last_mut() {
-                Some(last) if cur.start <= last.end.saturating_add(1) => last.end = last.end.max(cur.end),
+                Some(last) if cur.start <= last.end.saturating_add(1) => {
+                    last.end = last.end.max(cur.end)
+                }
                 _ => self.done.push(cur),
             }
         }
@@ -423,7 +496,10 @@ fn clamp_to_file(iv: Interval, total: u64) -> Option<Interval> {
     if iv.start > last {
         return None;
     }
-    Some(Interval { start: iv.start, end: iv.end.min(last) })
+    Some(Interval {
+        start: iv.start,
+        end: iv.end.min(last),
+    })
 }
 
 /// 覆盖集 `done` 在 `[0, total-1]` 里的**补集** —— 播种后队列该有的那些"还没归属的连续空位"。
@@ -434,12 +510,18 @@ fn uncovered(done: &[Interval], total: u64) -> Vec<Interval> {
     let mut cursor = 0u64;
     for d in done {
         if d.start > cursor {
-            gaps.push(Interval { start: cursor, end: d.start - 1 });
+            gaps.push(Interval {
+                start: cursor,
+                end: d.start - 1,
+            });
         }
         cursor = cursor.max(d.end.saturating_add(1));
     }
     if total > 0 && cursor < total {
-        gaps.push(Interval { start: cursor, end: total - 1 });
+        gaps.push(Interval {
+            start: cursor,
+            end: total - 1,
+        });
     }
     gaps
 }
@@ -448,7 +530,9 @@ fn uncovered(done: &[Interval], total: u64) -> Vec<Interval> {
 mod tests {
     use super::*;
 
-    fn s() -> Scheduler { Scheduler::new(1000, 100) }   // total=1000, min_seg=100
+    fn s() -> Scheduler {
+        Scheduler::new(1000, 100)
+    } // total=1000, min_seg=100
 
     /// 记账不变量：`done` 里的段必须升序、互不重叠、互不相邻；
     /// `done` 与 `pending_bytes()` 不得重复计入同一字节；`is_done()` 为真时 `done` 整段覆盖文件。
@@ -458,7 +542,10 @@ mod tests {
         for iv in &snap {
             assert!(!iv.is_empty(), "{label}: done 里出现空区间 {snap:?}");
             if let Some(p) = prev_end {
-                assert!(iv.start > p + 1, "{label}: done 段未排序或未合并相邻段 {snap:?}");
+                assert!(
+                    iv.start > p + 1,
+                    "{label}: done 段未排序或未合并相邻段 {snap:?}"
+                );
             }
             prev_end = Some(iv.end);
         }
@@ -470,14 +557,22 @@ mod tests {
         );
         if sc.is_done() {
             assert_eq!(pending, 0, "{label}: is_done() 为真却仍有待下载字节");
-            assert_eq!(done, total, "{label}: is_done() 为真但 done 没有覆盖整个文件 {snap:?}");
+            assert_eq!(
+                done, total,
+                "{label}: is_done() 为真但 done 没有覆盖整个文件 {snap:?}"
+            );
         }
     }
 
     #[test]
     fn first_connection_gets_whole_file() {
-        assert_eq!(s().on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 999 } }]);
+        assert_eq!(
+            s().on(Event::Connected(0)),
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval { start: 0, end: 999 }
+            }]
+        );
     }
     #[test]
     fn second_connection_splits_longest_at_midpoint() {
@@ -485,45 +580,81 @@ mod tests {
         sc.on(Event::Connected(0));
         let acts = sc.on(Event::Connected(1));
         // 老段收紧到上半截之前，新连接从中点起
-        assert!(acts.iter().any(|a| matches!(a, Action::Assign { worker: 1, iv }
-            if iv.start == 500 && iv.end == 999)), "{acts:?}");
-        assert!(acts.iter().any(|a| matches!(a, Action::Retighten { worker: 0, iv }
-            if iv.start == 0 && iv.end == 499)), "{acts:?}");
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::Assign { worker: 1, iv }
+            if iv.start == 500 && iv.end == 999)),
+            "{acts:?}"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::Retighten { worker: 0, iv }
+            if iv.start == 0 && iv.end == 499)),
+            "{acts:?}"
+        );
     }
     #[test]
     fn split_uses_remaining_part_of_active_segment() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Connected(1));               // 中点 500
-        sc.on(Event::Progress { worker: 1, abs_end: 600 });
-        let acts = sc.on(Event::Connected(2));    // 最大区间是 [601,999] 还是 [0,499]？取最长
-        let assign = acts.iter().find_map(|a| if let Action::Assign { iv, .. } = a { Some(*iv) } else { None })
+        sc.on(Event::Connected(1)); // 中点 500
+        sc.on(Event::Progress {
+            worker: 1,
+            abs_end: 600,
+        });
+        let acts = sc.on(Event::Connected(2)); // 最大区间是 [601,999] 还是 [0,499]？取最长
+        let assign = acts
+            .iter()
+            .find_map(|a| {
+                if let Action::Assign { iv, .. } = a {
+                    Some(*iv)
+                } else {
+                    None
+                }
+            })
             .expect("应有新分配");
         // 简报原文写作 `499 - 0` 与 `... - ((...) / 2 + 1) % 1`：`x - 0` 触发 clippy::identity_op、
         // `% 1` 触发 deny-by-default 的 clippy::modulo_one，本仓库门禁是 `-D warnings`，
         // 所以把这两处恒等运算摘掉 —— 期望值仍是同一个数（(0+499)/2 + 1 = 250），断言方向没动。
-        let longest = if 999 - 601 > 499 { Interval { start: 601, end: 999 } } else { Interval { start: 0, end: 499 } };
+        let longest = if 999 - 601 > 499 {
+            Interval {
+                start: 601,
+                end: 999,
+            }
+        } else {
+            Interval { start: 0, end: 499 }
+        };
         assert_eq!(assign.start, (longest.start + longest.end) / 2 + 1);
         let mid = (longest.start + longest.end) / 2;
-        assert!(assign.start == mid || assign.start == mid + 1, "{assign:?} mid={mid}");
+        assert!(
+            assign.start == mid || assign.start == mid + 1,
+            "{assign:?} mid={mid}"
+        );
     }
     #[test]
     fn stops_splitting_below_min_segment() {
         let mut sc = Scheduler::new(1000, 400);
-        sc.on(Event::Connected(0));               // [0,999]
-        let acts = sc.on(Event::Connected(1));    // 半长 500 >= 400 可以劈
+        sc.on(Event::Connected(0)); // [0,999]
+        let acts = sc.on(Event::Connected(1)); // 半长 500 >= 400 可以劈
         assert!(acts.iter().any(|a| matches!(a, Action::Assign { .. })));
-        let acts2 = sc.on(Event::Connected(2));   // 再劈会得到 <400 的段 ⇒ 不劈
+        let acts2 = sc.on(Event::Connected(2)); // 再劈会得到 <400 的段 ⇒ 不劈
         assert!(acts2.iter().all(|a| matches!(a, Action::Idle)), "{acts2:?}");
     }
     #[test]
     fn window_done_returns_remainder_and_reassigns_without_new_connection() {
         let mut sc = s();
-        sc.on(Event::Connected(0));               // [0,999]
-        sc.on(Event::Progress { worker: 0, abs_end: 300 });
+        sc.on(Event::Connected(0)); // [0,999]
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 300,
+        });
         sc.on(Event::WindowDone { worker: 0 });
-        let acts = sc.on(Event::Connected(0));    // 同一 worker 复用，不再需要新连接
-        assert!(acts.iter().any(|a| matches!(a, Action::Assign { worker: 0, iv } if iv.start == 301)), "{acts:?}");
+        let acts = sc.on(Event::Connected(0)); // 同一 worker 复用，不再需要新连接
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::Assign { worker: 0, iv } if iv.start == 301)),
+            "{acts:?}"
+        );
     }
     #[test]
     fn no_ranges_forces_single_segment() {
@@ -531,13 +662,19 @@ mod tests {
         sc.on(Event::Connected(0));
         sc.on(Event::NoRanges);
         let acts = sc.on(Event::Connected(1));
-        assert!(acts.iter().all(|a| matches!(a, Action::Idle)), "退化后不得再派第二段: {acts:?}");
+        assert!(
+            acts.iter().all(|a| matches!(a, Action::Idle)),
+            "退化后不得再派第二段: {acts:?}"
+        );
     }
     #[test]
     fn failed_returns_interval_for_requeue() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Progress { worker: 0, abs_end: 200 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 200,
+        });
         sc.on(Event::Failed { worker: 0 });
         assert_eq!(sc.pending_bytes(), 799);
     }
@@ -545,7 +682,10 @@ mod tests {
     fn done_when_nothing_pending() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Progress { worker: 0, abs_end: 999 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 999,
+        });
         sc.on(Event::WindowDone { worker: 0 });
         assert!(sc.is_done());
     }
@@ -560,42 +700,109 @@ mod tests {
             sc.on(ev);
             check_invariants(sc, TOTAL, label);
         };
-        step(&mut sc, Event::Connected(0), "C0");                 // [0,999]
-        step(&mut sc, Event::Connected(1), "C1");                 // ⇒ [0,499] + [500,999]
-        step(&mut sc, Event::Connected(2), "C2");                 // [0,499] 最长 ⇒ [0,249] + [250,499]
-        step(&mut sc, Event::Progress { worker: 0, abs_end: 249 }, "P0");
-        step(&mut sc, Event::WindowDone { worker: 0 }, "WD0");    // [0,249] 整段确认
-        step(&mut sc, Event::Progress { worker: 2, abs_end: 300 }, "P2");
-        step(&mut sc, Event::Failed { worker: 2 }, "F2");         // 已写的 [250,300] 进 done，[301,499] 回队列
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 300 }], "相邻的已确认段必须合并");
-        assert_eq!(sc.pending_bytes(), 199 + 500, "回队列 199 + 在途 [500,999] 500");
-        step(&mut sc, Event::Connected(3), "C3");                 // 在途尾 [500,999] 比空闲 [301,499] 长 ⇒ 劈在途尾（空闲那段原样留着）
-        step(&mut sc, Event::Progress { worker: 3, abs_end: 999 }, "P3");
+        step(&mut sc, Event::Connected(0), "C0"); // [0,999]
+        step(&mut sc, Event::Connected(1), "C1"); // ⇒ [0,499] + [500,999]
+        step(&mut sc, Event::Connected(2), "C2"); // [0,499] 最长 ⇒ [0,249] + [250,499]
+        step(
+            &mut sc,
+            Event::Progress {
+                worker: 0,
+                abs_end: 249,
+            },
+            "P0",
+        );
+        step(&mut sc, Event::WindowDone { worker: 0 }, "WD0"); // [0,249] 整段确认
+        step(
+            &mut sc,
+            Event::Progress {
+                worker: 2,
+                abs_end: 300,
+            },
+            "P2",
+        );
+        step(&mut sc, Event::Failed { worker: 2 }, "F2"); // 已写的 [250,300] 进 done，[301,499] 回队列
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 300 }],
+            "相邻的已确认段必须合并"
+        );
+        assert_eq!(
+            sc.pending_bytes(),
+            199 + 500,
+            "回队列 199 + 在途 [500,999] 500"
+        );
+        step(&mut sc, Event::Connected(3), "C3"); // 在途尾 [500,999] 比空闲 [301,499] 长 ⇒ 劈在途尾（空闲那段原样留着）
+        step(
+            &mut sc,
+            Event::Progress {
+                worker: 3,
+                abs_end: 999,
+            },
+            "P3",
+        );
         step(&mut sc, Event::WindowDone { worker: 3 }, "WD3");
-        step(&mut sc, Event::Progress { worker: 1, abs_end: 749 }, "P1");
+        step(
+            &mut sc,
+            Event::Progress {
+                worker: 1,
+                abs_end: 749,
+            },
+            "P1",
+        );
         step(&mut sc, Event::WindowDone { worker: 1 }, "WD1");
-        step(&mut sc, Event::Connected(4), "C4");                 // 接手无人认领的 [301,499]
-        step(&mut sc, Event::Progress { worker: 4, abs_end: 499 }, "P4");
+        step(&mut sc, Event::Connected(4), "C4"); // 接手无人认领的 [301,499]
+        step(
+            &mut sc,
+            Event::Progress {
+                worker: 4,
+                abs_end: 499,
+            },
+            "P4",
+        );
         step(&mut sc, Event::WindowDone { worker: 4 }, "WD4");
         assert!(sc.is_done());
         assert_eq!(sc.pending_bytes(), 0);
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "全部落盘后 done 必须整段覆盖文件");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }],
+            "全部落盘后 done 必须整段覆盖文件"
+        );
     }
 
     #[test]
     fn no_ranges_never_splits_and_never_runs_two_segments() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Progress { worker: 0, abs_end: 400 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 400,
+        });
         sc.on(Event::NoRanges);
         for w in 1..5 {
-            assert_eq!(sc.on(Event::Connected(w)), vec![Action::Idle], "退化期间 w{w} 不得领到第二段");
+            assert_eq!(
+                sc.on(Event::Connected(w)),
+                vec![Action::Idle],
+                "退化期间 w{w} 不得领到第二段"
+            );
         }
-        sc.on(Event::WindowDone { worker: 0 });                   // 交回剩余 [401,999]
+        sc.on(Event::WindowDone { worker: 0 }); // 交回剩余 [401,999]
         let acts = sc.on(Event::Connected(1));
-        assert_eq!(acts, vec![Action::Assign { worker: 1, iv: Interval { start: 401, end: 999 } }],
-            "退化后一次只派一段、整段交出剩余区间：不劈、不重下已写的 0..400");
-        assert_eq!(sc.on(Event::Connected(2)), vec![Action::Idle], "已有一段在途时不得再派");
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 1,
+                iv: Interval {
+                    start: 401,
+                    end: 999
+                }
+            }],
+            "退化后一次只派一段、整段交出剩余区间：不劈、不重下已写的 0..400"
+        );
+        assert_eq!(
+            sc.on(Event::Connected(2)),
+            vec![Action::Idle],
+            "已有一段在途时不得再派"
+        );
         assert_eq!(sc.pending_bytes(), 599);
         check_invariants(&sc, 1000, "noranges");
     }
@@ -603,13 +810,26 @@ mod tests {
     #[test]
     fn queued_work_is_dispatched_when_longest_tail_is_too_short_to_split() {
         let mut sc = Scheduler::new(1000, 400);
-        sc.on(Event::Connected(0));                               // [0,999]
-        sc.on(Event::Connected(1));                               // ⇒ [0,499] + [500,999]
-        assert_eq!(sc.on(Event::Connected(2)), vec![Action::Idle], "250 < 400 ⇒ 不劈，且无空闲区间可派");
-        sc.on(Event::Failed { worker: 1 });                       // [500,999] 整体回队列
-        let acts = sc.on(Event::Connected(3));                    // 在途尾 [0,499] 劈不动 ⇒ 接手无人认领的段
-        assert_eq!(acts, vec![Action::Assign { worker: 3, iv: Interval { start: 500, end: 999 } }],
-            "最长段劈不动时必须让新 worker 接手无人认领的区间，而不是让它空等: {acts:?}");
+        sc.on(Event::Connected(0)); // [0,999]
+        sc.on(Event::Connected(1)); // ⇒ [0,499] + [500,999]
+        assert_eq!(
+            sc.on(Event::Connected(2)),
+            vec![Action::Idle],
+            "250 < 400 ⇒ 不劈，且无空闲区间可派"
+        );
+        sc.on(Event::Failed { worker: 1 }); // [500,999] 整体回队列
+        let acts = sc.on(Event::Connected(3)); // 在途尾 [0,499] 劈不动 ⇒ 接手无人认领的段
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 3,
+                iv: Interval {
+                    start: 500,
+                    end: 999
+                }
+            }],
+            "最长段劈不动时必须让新 worker 接手无人认领的区间，而不是让它空等: {acts:?}"
+        );
     }
 
     /// 简报的 `Consumes: consts::MIN_SEGMENT_BYTES` 落在调用方：调度器只认注入参数，
@@ -618,45 +838,92 @@ mod tests {
     fn split_threshold_is_the_injected_min_seg() {
         let mut loose = Scheduler::new(1000, 100);
         loose.on(Event::Connected(0));
-        assert!(loose.on(Event::Connected(1)).iter().any(|a| matches!(a, Action::Assign { .. })),
-            "地板 100 拦不住半长 500 的第一刀");
+        assert!(
+            loose
+                .on(Event::Connected(1))
+                .iter()
+                .any(|a| matches!(a, Action::Assign { .. })),
+            "地板 100 拦不住半长 500 的第一刀"
+        );
 
         let mut blocked = Scheduler::new(1000, 501);
         blocked.on(Event::Connected(0));
-        assert_eq!(blocked.on(Event::Connected(1)), vec![Action::Idle],
-            "总长一模一样，地板抬到 501（半长 500 触底）⇒ 一刀都不许劈");
+        assert_eq!(
+            blocked.on(Event::Connected(1)),
+            vec![Action::Idle],
+            "总长一模一样，地板抬到 501（半长 500 触底）⇒ 一刀都不许劈"
+        );
     }
 
     #[test]
     fn consts_default_splits_exactly_one_round() {
         use crate::consts::MIN_SEGMENT_BYTES as M;
         let mut sc = Scheduler::new(M * 2, M);
-        assert_eq!(sc.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: M * 2 - 1 } }]);
-        let acts = sc.on(Event::Connected(1));                    // 半长正好 = M ⇒ 不触底，允许一刀
-        assert!(acts.iter().any(|a| matches!(a, Action::Assign { worker: 1, iv }
-            if iv.start == M && iv.end == M * 2 - 1)), "{acts:?}");
-        assert!(acts.iter().any(|a| matches!(a, Action::Retighten { worker: 0, iv }
-            if iv.start == 0 && iv.end == M - 1)), "{acts:?}");
-        assert!(sc.on(Event::Connected(2)).iter().all(|a| matches!(a, Action::Idle)),
-            "第二刀会得到 M/2 的半段 ⇒ 必须触底停劈");
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 0,
+                    end: M * 2 - 1
+                }
+            }]
+        );
+        let acts = sc.on(Event::Connected(1)); // 半长正好 = M ⇒ 不触底，允许一刀
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::Assign { worker: 1, iv }
+            if iv.start == M && iv.end == M * 2 - 1)),
+            "{acts:?}"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::Retighten { worker: 0, iv }
+            if iv.start == 0 && iv.end == M - 1)),
+            "{acts:?}"
+        );
+        assert!(
+            sc.on(Event::Connected(2))
+                .iter()
+                .all(|a| matches!(a, Action::Idle)),
+            "第二刀会得到 M/2 的半段 ⇒ 必须触底停劈"
+        );
     }
 
     #[test]
     fn no_ranges_after_several_splits_still_never_splits() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Connected(1));                       // ⇒ w0 [0,499] + w1 [500,999]
+        sc.on(Event::Connected(1)); // ⇒ w0 [0,499] + w1 [500,999]
         sc.on(Event::NoRanges);
-        sc.on(Event::Progress { worker: 0, abs_end: 200 });
-        sc.on(Event::WindowDone { worker: 0 });           // 已写前缀进 done，[201,499] 回队列
-        let acts = sc.on(Event::Connected(2));            // w1 还在途 ⇒ 退化期一律 Idle
-        assert_eq!(acts, vec![Action::Idle], "还有段在途时退化期不得派新段: {acts:?}");
-        sc.on(Event::Progress { worker: 1, abs_end: 999 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 200,
+        });
+        sc.on(Event::WindowDone { worker: 0 }); // 已写前缀进 done，[201,499] 回队列
+        let acts = sc.on(Event::Connected(2)); // w1 还在途 ⇒ 退化期一律 Idle
+        assert_eq!(
+            acts,
+            vec![Action::Idle],
+            "还有段在途时退化期不得派新段: {acts:?}"
+        );
+        sc.on(Event::Progress {
+            worker: 1,
+            abs_end: 999,
+        });
         sc.on(Event::WindowDone { worker: 1 });
         let acts = sc.on(Event::Connected(2));
-        assert_eq!(acts, vec![Action::Assign { worker: 2, iv: Interval { start: 201, end: 499 } }],
-            "退化期派出的必须是整段无人认领区间，不含 Retighten");
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 2,
+                iv: Interval {
+                    start: 201,
+                    end: 499
+                }
+            }],
+            "退化期派出的必须是整段无人认领区间，不含 Retighten"
+        );
         assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })));
         assert_eq!(sc.pending_bytes(), 299);
         check_invariants(&sc, 1000, "noranges-after-splits");
@@ -669,27 +936,68 @@ mod tests {
     #[test]
     fn degraded_dispatch_is_start_ascending() {
         let mut sc = s();
-        sc.on(Event::Connected(0));                                   // [0,999]
-        sc.on(Event::Connected(1));                                   // ⇒ w0 [0,499] + w1 [500,999]
+        sc.on(Event::Connected(0)); // [0,999]
+        sc.on(Event::Connected(1)); // ⇒ w0 [0,499] + w1 [500,999]
         sc.on(Event::NoRanges);
-        sc.on(Event::Progress { worker: 0, abs_end: 200 });
-        sc.on(Event::WindowDone { worker: 0 });                       // done [0,200]，队列 [201,499]
-        sc.on(Event::Progress { worker: 1, abs_end: 699 });
-        sc.on(Event::WindowDone { worker: 1 });                       // done 再多 [500,699]，队列再多 [700,999]
-        assert_eq!(sc.pending_bytes(), 299 + 300, "两段无人认领：[201,499] 与 [700,999]");
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 200,
+        });
+        sc.on(Event::WindowDone { worker: 0 }); // done [0,200]，队列 [201,499]
+        sc.on(Event::Progress {
+            worker: 1,
+            abs_end: 699,
+        });
+        sc.on(Event::WindowDone { worker: 1 }); // done 再多 [500,699]，队列再多 [700,999]
+        assert_eq!(
+            sc.pending_bytes(),
+            299 + 300,
+            "两段无人认领：[201,499] 与 [700,999]"
+        );
         let acts = sc.on(Event::Connected(2));
-        assert_eq!(acts, vec![Action::Assign { worker: 2, iv: Interval { start: 201, end: 499 } }],
-            "退化模式必须按起点升序派，不得因为 [700,999] 更长就先派它: {acts:?}");
-        assert_eq!(sc.on(Event::Connected(3)), vec![Action::Idle], "退化期一次只允许一段在途");
-        sc.on(Event::Progress { worker: 2, abs_end: 499 });
-        sc.on(Event::WindowDone { worker: 2 });                       // done 并进 [0,499]
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 2,
+                iv: Interval {
+                    start: 201,
+                    end: 499
+                }
+            }],
+            "退化模式必须按起点升序派，不得因为 [700,999] 更长就先派它: {acts:?}"
+        );
+        assert_eq!(
+            sc.on(Event::Connected(3)),
+            vec![Action::Idle],
+            "退化期一次只允许一段在途"
+        );
+        sc.on(Event::Progress {
+            worker: 2,
+            abs_end: 499,
+        });
+        sc.on(Event::WindowDone { worker: 2 }); // done 并进 [0,499]
         let acts = sc.on(Event::Connected(3));
-        assert_eq!(acts, vec![Action::Assign { worker: 3, iv: Interval { start: 700, end: 999 } }],
-            "轮到 [700,999] 时前一段必须已经交回: {acts:?}");
-        sc.on(Event::Progress { worker: 3, abs_end: 999 });
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 3,
+                iv: Interval {
+                    start: 700,
+                    end: 999
+                }
+            }],
+            "轮到 [700,999] 时前一段必须已经交回: {acts:?}"
+        );
+        sc.on(Event::Progress {
+            worker: 3,
+            abs_end: 999,
+        });
         sc.on(Event::WindowDone { worker: 3 });
         assert!(sc.is_done());
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }]);
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }]
+        );
         check_invariants(&sc, 1000, "degraded-start-ascending");
     }
 
@@ -700,22 +1008,41 @@ mod tests {
     #[test]
     fn no_ranges_collapses_the_pending_table_into_one_segment() {
         let mut sc = s();
-        sc.on(Event::Connected(0));                                   // [0,999]
-        sc.on(Event::Connected(1));                                   // ⇒ w0 [0,499] / w1 [500,999]
-        sc.on(Event::Connected(2));                                   // ⇒ w0 [0,249] / w2 [250,499] / w1 [500,999]
-        sc.on(Event::Failed { worker: 0 });                           // 队列 [0,249]
-        sc.on(Event::Failed { worker: 2 });                           // 队列 [0,249] + [250,499]
-        sc.on(Event::WindowDone { worker: 1 });                       // 队列再多 [500,999]（今天表里三段并存）
+        sc.on(Event::Connected(0)); // [0,999]
+        sc.on(Event::Connected(1)); // ⇒ w0 [0,499] / w1 [500,999]
+        sc.on(Event::Connected(2)); // ⇒ w0 [0,249] / w2 [250,499] / w1 [500,999]
+        sc.on(Event::Failed { worker: 0 }); // 队列 [0,249]
+        sc.on(Event::Failed { worker: 2 }); // 队列 [0,249] + [250,499]
+        sc.on(Event::WindowDone { worker: 1 }); // 队列再多 [500,999]（今天表里三段并存）
         assert_eq!(sc.pending_bytes(), 1000, "一个字节都没写 ⇒ 全部仍是待下载");
-        sc.on(Event::NoRanges);                                       // ⇒ 段表塌成一段
+        sc.on(Event::NoRanges); // ⇒ 段表塌成一段
         let acts = sc.on(Event::Connected(3));
-        assert_eq!(acts, vec![Action::Assign { worker: 3, iv: Interval { start: 0, end: 999 } }],
-            "退化后的段表必须是**一段**、且从最低的未确认偏移起: {acts:?}");
-        assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })), "退化期永不劈分");
-        assert_eq!(sc.on(Event::Connected(4)), vec![Action::Idle], "退化期一次只允许一段在途");
-        sc.on(Event::Failed { worker: 3 });                           // 交回 [0,999]
-        assert_eq!(sc.on(Event::Connected(4)), vec![Action::Assign { worker: 4, iv: Interval { start: 0, end: 999 } }],
-            "退化期交回的尾巴并回同一段，段表不得重新变多");
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 3,
+                iv: Interval { start: 0, end: 999 }
+            }],
+            "退化后的段表必须是**一段**、且从最低的未确认偏移起: {acts:?}"
+        );
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::Retighten { .. })),
+            "退化期永不劈分"
+        );
+        assert_eq!(
+            sc.on(Event::Connected(4)),
+            vec![Action::Idle],
+            "退化期一次只允许一段在途"
+        );
+        sc.on(Event::Failed { worker: 3 }); // 交回 [0,999]
+        assert_eq!(
+            sc.on(Event::Connected(4)),
+            vec![Action::Assign {
+                worker: 4,
+                iv: Interval { start: 0, end: 999 }
+            }],
+            "退化期交回的尾巴并回同一段，段表不得重新变多"
+        );
         assert_eq!(sc.pending_bytes(), 1000);
         check_invariants(&sc, 1000, "noranges-collapse");
     }
@@ -730,14 +1057,36 @@ mod tests {
     #[test]
     fn segment_complete_marks_a_zero_progress_interval_done_and_never_requeues() {
         let mut sc = s();
-        assert_eq!(sc.on(Event::Connected(0)), vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 999 } }]);
-        sc.on(Event::SegmentComplete { worker: 0 });                // 一个字节都没写 ⇒ 416
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "整段恰好入 done 一次");
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval { start: 0, end: 999 }
+            }]
+        );
+        sc.on(Event::SegmentComplete { worker: 0 }); // 一个字节都没写 ⇒ 416
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }],
+            "整段恰好入 done 一次"
+        );
         assert_eq!(sc.pending_bytes(), 0, "该段不得回队列（活锁的根）");
         assert!(sc.is_done());
-        assert_eq!(sc.on(Event::Connected(1)), vec![Action::Idle], "没有第二段可派 ⇒ 不会再打第三次 416");
-        assert_eq!(sc.on(Event::SegmentComplete { worker: 0 }), Vec::<Action>::new(), "手上没活 ⇒ 幂等空动作");
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "重复上报不得把 done 记两次");
+        assert_eq!(
+            sc.on(Event::Connected(1)),
+            vec![Action::Idle],
+            "没有第二段可派 ⇒ 不会再打第三次 416"
+        );
+        assert_eq!(
+            sc.on(Event::SegmentComplete { worker: 0 }),
+            Vec::<Action>::new(),
+            "手上没活 ⇒ 幂等空动作"
+        );
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }],
+            "重复上报不得把 done 记两次"
+        );
         check_invariants(&sc, 1000, "segment-complete");
     }
 
@@ -745,18 +1094,38 @@ mod tests {
     #[test]
     fn segment_complete_seals_its_interval_exactly_once_and_is_not_redispatched() {
         let mut sc = s();
-        sc.on(Event::Connected(0));                                 // [0,999]
-        sc.on(Event::Connected(1));                                 // ⇒ w0 [0,499] / w1 [500,999]
-        sc.on(Event::Progress { worker: 1, abs_end: 600 });
-        sc.on(Event::SegmentComplete { worker: 1 });                // 写到 600 之后对端回 416
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 500, end: 999 }]);
+        sc.on(Event::Connected(0)); // [0,999]
+        sc.on(Event::Connected(1)); // ⇒ w0 [0,499] / w1 [500,999]
+        sc.on(Event::Progress {
+            worker: 1,
+            abs_end: 600,
+        });
+        sc.on(Event::SegmentComplete { worker: 1 }); // 写到 600 之后对端回 416
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval {
+                start: 500,
+                end: 999
+            }]
+        );
         assert_eq!(sc.pending_bytes(), 500, "只剩 w0 的 [0,499]");
-        sc.on(Event::Progress { worker: 0, abs_end: 499 });
-        sc.on(Event::WindowDone { worker: 0 });                     // 相邻 ⇒ 并进 [0,999]
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 499,
+        });
+        sc.on(Event::WindowDone { worker: 0 }); // 相邻 ⇒ 并进 [0,999]
         let acts = sc.on(Event::Connected(1));
-        assert_eq!(acts, vec![Action::Idle], "被封存的 [500,999] 不得再被派出: {acts:?}");
+        assert_eq!(
+            acts,
+            vec![Action::Idle],
+            "被封存的 [500,999] 不得再被派出: {acts:?}"
+        );
         assert!(sc.is_done());
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "done 只记一次并相邻合并");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }],
+            "done 只记一次并相邻合并"
+        );
         check_invariants(&sc, 1000, "segment-complete-partial");
     }
 
@@ -769,8 +1138,14 @@ mod tests {
         sc.on(Event::WindowDone { worker: 0 });
         assert_eq!(sc.pending_bytes(), 1000, "WindowDone 不封存任何字节");
         assert!(sc.snapshot_intervals().is_empty());
-        assert_eq!(sc.on(Event::Connected(1)), vec![Action::Assign { worker: 1, iv: Interval { start: 0, end: 999 } }],
-            "回队列的段照旧可再派 ⇒ 416 若折成 WindowDone 就是活锁");
+        assert_eq!(
+            sc.on(Event::Connected(1)),
+            vec![Action::Assign {
+                worker: 1,
+                iv: Interval { start: 0, end: 999 }
+            }],
+            "回队列的段照旧可再派 ⇒ 416 若折成 WindowDone 就是活锁"
+        );
     }
 
     #[test]
@@ -779,7 +1154,11 @@ mod tests {
         assert!(sc.is_done());
         assert_eq!(sc.pending_bytes(), 0);
         assert!(sc.snapshot_intervals().is_empty());
-        assert_eq!(sc.on(Event::Connected(0)), vec![Action::Idle], "零字节任务不得造出一个 1 字节的伪区间");
+        assert_eq!(
+            sc.on(Event::Connected(0)),
+            vec![Action::Idle],
+            "零字节任务不得造出一个 1 字节的伪区间"
+        );
         assert!(sc.is_done());
     }
 
@@ -787,21 +1166,41 @@ mod tests {
     fn second_connected_for_a_busy_worker_does_not_overwrite_its_progress() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Progress { worker: 0, abs_end: 500 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 500,
+        });
         assert_eq!(sc.pending_bytes(), 499);
-        let acts = sc.on(Event::Connected(0));                    // 同一 worker 又报"就绪"，手上还压着 [0,999]
-        assert_eq!(acts, vec![Action::Idle], "重复 Connected 覆盖在途段会丢掉已写偏移 ⇒ 必须拒派: {acts:?}");
-        assert_eq!(sc.pending_bytes(), 499, "重复 Connected 不得改动已确认的偏移");
+        let acts = sc.on(Event::Connected(0)); // 同一 worker 又报"就绪"，手上还压着 [0,999]
+        assert_eq!(
+            acts,
+            vec![Action::Idle],
+            "重复 Connected 覆盖在途段会丢掉已写偏移 ⇒ 必须拒派: {acts:?}"
+        );
+        assert_eq!(
+            sc.pending_bytes(),
+            499,
+            "重复 Connected 不得改动已确认的偏移"
+        );
     }
 
     #[test]
     fn failed_after_every_byte_was_written_still_marks_the_segment_done() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Progress { worker: 0, abs_end: 999 });
-        sc.on(Event::Failed { worker: 0 });                       // 写满之后连接才断（416 / EOF 竞态的形状）
-        assert!(sc.is_done(), "字节都已写满，Failed 不该让这段凭空消失：否则 is_done 与 done 会背离");
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }]);
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 999,
+        });
+        sc.on(Event::Failed { worker: 0 }); // 写满之后连接才断（416 / EOF 竞态的形状）
+        assert!(
+            sc.is_done(),
+            "字节都已写满，Failed 不该让这段凭空消失：否则 is_done 与 done 会背离"
+        );
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }]
+        );
         assert_eq!(sc.pending_bytes(), 0);
     }
 
@@ -809,11 +1208,24 @@ mod tests {
     fn progress_is_clamped_to_the_segment_and_never_regresses() {
         let mut sc = s();
         sc.on(Event::Connected(0));
-        sc.on(Event::Connected(1));                               // w0 [0,499], w1 [500,999]
-        sc.on(Event::Progress { worker: 1, abs_end: u64::MAX });  // 越界上报（对端多给了 / 记错）
-        assert_eq!(sc.pending_bytes(), 500, "越界上报必须夹到区间终点，否则在途尾算成负数");
-        sc.on(Event::Progress { worker: 0, abs_end: 300 });
-        sc.on(Event::Progress { worker: 0, abs_end: 100 });       // 迟到的旧上报
+        sc.on(Event::Connected(1)); // w0 [0,499], w1 [500,999]
+        sc.on(Event::Progress {
+            worker: 1,
+            abs_end: u64::MAX,
+        }); // 越界上报（对端多给了 / 记错）
+        assert_eq!(
+            sc.pending_bytes(),
+            500,
+            "越界上报必须夹到区间终点，否则在途尾算成负数"
+        );
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 300,
+        });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 100,
+        }); // 迟到的旧上报
         assert_eq!(sc.pending_bytes(), 199, "偏移只进不退");
         check_invariants(&sc, 1000, "clamp");
     }
@@ -847,7 +1259,10 @@ mod tests {
                             match rng.next(4) {
                                 0 => {
                                     let advance = rng.next(iv.len());
-                                    sc.on(Event::Progress { worker: w, abs_end: iv.start + advance })
+                                    sc.on(Event::Progress {
+                                        worker: w,
+                                        abs_end: iv.start + advance,
+                                    })
                                 }
                                 1 => {
                                     held.retain(|(hw, _)| *hw != w);
@@ -875,12 +1290,18 @@ mod tests {
             let mut guard = 0;
             while !sc.is_done() {
                 guard += 1;
-                assert!(guard < 500, "case {case}: total={total} min_seg={min_seg} 再怎么派也收不了工 ⇒ 有区间凭空消失");
+                assert!(
+                    guard < 500,
+                    "case {case}: total={total} min_seg={min_seg} 再怎么派也收不了工 ⇒ 有区间凭空消失"
+                );
                 for w in 0..workers {
                     match held.iter().position(|(hw, _)| *hw == w) {
                         Some(pos) => {
                             let iv = held[pos].1;
-                            sc.on(Event::Progress { worker: w, abs_end: iv.end });
+                            sc.on(Event::Progress {
+                                worker: w,
+                                abs_end: iv.end,
+                            });
                             sc.on(Event::WindowDone { worker: w });
                             held.remove(pos);
                         }
@@ -888,7 +1309,11 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(sc.pending_bytes(), 0, "case {case}: is_done() 为真但 pending 非零");
+            assert_eq!(
+                sc.pending_bytes(),
+                0,
+                "case {case}: is_done() 为真但 pending 非零"
+            );
             let covered: u64 = sc.snapshot_intervals().iter().map(Interval::len).sum();
             assert_eq!(covered, total, "case {case}: done 没有整段覆盖文件");
         }
@@ -899,13 +1324,25 @@ mod tests {
         for act in acts {
             match *act {
                 Action::Assign { worker, iv } => {
-                    assert!(!held.iter().any(|(hw, _)| *hw == worker), "给正忙的 w{worker} 又派了一段 ⇒ 覆盖它的偏移");
+                    assert!(
+                        !held.iter().any(|(hw, _)| *hw == worker),
+                        "给正忙的 w{worker} 又派了一段 ⇒ 覆盖它的偏移"
+                    );
                     held.push((worker, iv));
                 }
                 Action::Retighten { worker, iv } => {
-                    let (_, cur) = held.iter_mut().find(|(hw, _)| *hw == worker).expect("Retighten 打给了没活的 worker");
-                    assert_eq!(cur.start, iv.start, "收紧只能提前终点，不能挪起点: {cur:?} -> {iv:?}");
-                    assert!(iv.end >= cur.start && iv.end < cur.end, "收紧后的区间得是原区间的前缀: {cur:?} -> {iv:?}");
+                    let (_, cur) = held
+                        .iter_mut()
+                        .find(|(hw, _)| *hw == worker)
+                        .expect("Retighten 打给了没活的 worker");
+                    assert_eq!(
+                        cur.start, iv.start,
+                        "收紧只能提前终点，不能挪起点: {cur:?} -> {iv:?}"
+                    );
+                    assert!(
+                        iv.end >= cur.start && iv.end < cur.end,
+                        "收紧后的区间得是原区间的前缀: {cur:?} -> {iv:?}"
+                    );
                     *cur = iv;
                 }
                 Action::Idle => {}
@@ -914,7 +1351,10 @@ mod tests {
         let mut in_flight: Vec<Interval> = held.iter().map(|(_, iv)| *iv).collect();
         in_flight.sort_by_key(|iv| iv.start);
         for pair in in_flight.windows(2) {
-            assert!(pair[1].start > pair[0].end, "两段在途区间重叠 ⇒ 同一字节被派给两个 worker: {in_flight:?}");
+            assert!(
+                pair[1].start > pair[0].end,
+                "两段在途区间重叠 ⇒ 同一字节被派给两个 worker: {in_flight:?}"
+            );
         }
     }
 
@@ -935,7 +1375,7 @@ mod tests {
     fn cover(seeds: &[Interval], total: u64) -> Vec<Interval> {
         let held = |b: u64| seeds.iter().any(|iv| iv.start <= b && b <= iv.end);
         let mut out: Vec<Interval> = vec![];
-        let mut run: Option<(u64, u64)> = None;   // 当前这段连续命中的 (起点, 含端点)
+        let mut run: Option<(u64, u64)> = None; // 当前这段连续命中的 (起点, 含端点)
         for b in 0..total {
             if held(b) {
                 match run {
@@ -963,7 +1403,7 @@ mod tests {
     #[test]
     fn resume_prefix_seed_is_indistinguishable_from_the_run_that_earned_it() {
         let mut rng = Lcg(0x5EED_1234_ABCD_0001);
-        let mut compared = 0usize;   // 真正跑了动作比对的用例数
+        let mut compared = 0usize; // 真正跑了动作比对的用例数
         for case in 0..300usize {
             let total = 2 + rng.next(4095);
             let min_seg = 1 + rng.next(200);
@@ -977,18 +1417,23 @@ mod tests {
                 let acts = earned.on(Event::Connected(0));
                 let iv = match acts.as_slice() {
                     [Action::Assign { iv, .. }] => *iv,
-                    other => panic!("case {case}: 前缀参照物每轮该只领到一整条区间，实际 {other:?}"),
+                    other => {
+                        panic!("case {case}: 前缀参照物每轮该只领到一整条区间，实际 {other:?}")
+                    }
                 };
                 assert_eq!(iv.start, covered, "case {case}: 前缀之外不该有别的东西可派");
                 let stop = (k - 1).min(total - 1);
-                earned.on(Event::Progress { worker: 0, abs_end: stop });
+                earned.on(Event::Progress {
+                    worker: 0,
+                    abs_end: stop,
+                });
                 earned.on(Event::WindowDone { worker: 0 });
                 covered = stop + 1;
                 check_invariants(&earned, total, &format!("case {case} 参照物"));
             }
             let seed = earned.snapshot_intervals();
             if seed.iter().map(Interval::len).sum::<u64>() == total {
-                continue;   // 前缀正好盖满整份 ⇒ 没有可比对的剩余工作
+                continue; // 前缀正好盖满整份 ⇒ 没有可比对的剩余工作
             }
             compared += 1;
 
@@ -996,24 +1441,45 @@ mod tests {
             let mut noisy: Vec<Interval> = vec![];
             for iv in &seed {
                 noisy.push(*iv);
-                noisy.push(*iv);                                    // 重复行 ⇒ 同一段不许算两次
-                noisy.push(Interval { start: iv.end + 1, end: iv.end });   // 空区间 ⇒ 丢弃
+                noisy.push(*iv); // 重复行 ⇒ 同一段不许算两次
+                noisy.push(Interval {
+                    start: iv.end + 1,
+                    end: iv.end,
+                }); // 空区间 ⇒ 丢弃
                 if iv.len() >= 3 {
-                    noisy.push(Interval { start: iv.start + 1, end: iv.end - 1 });   // 子区间
+                    noisy.push(Interval {
+                        start: iv.start + 1,
+                        end: iv.end - 1,
+                    }); // 子区间
                 }
                 if iv.end + 1 == total {
-                    noisy.push(Interval { start: iv.start, end: total + 4_000 });    // 越界 ⇒ 夹回来
+                    noisy.push(Interval {
+                        start: iv.start,
+                        end: total + 4_000,
+                    }); // 越界 ⇒ 夹回来
                 }
             }
             for i in 1..noisy.len() {
                 let j = rng.next((i + 1) as u64) as usize;
                 noisy.swap(i, j);
             }
-            assert_eq!(cover(&noisy, total), seed, "case {case}: 夹具自己得先自洽（噪声不许改并集）");
+            assert_eq!(
+                cover(&noisy, total),
+                seed,
+                "case {case}: 夹具自己得先自洽（噪声不许改并集）"
+            );
 
             let mut seeded = Scheduler::resume(total, min_seg, &noisy);
-            assert_eq!(seeded.snapshot_intervals(), seed, "case {case}: 播种后的覆盖集");
-            assert_eq!(seeded.pending_bytes(), earned.pending_bytes(), "case {case}: 待下载字节数");
+            assert_eq!(
+                seeded.snapshot_intervals(),
+                seed,
+                "case {case}: 播种后的覆盖集"
+            );
+            assert_eq!(
+                seeded.pending_bytes(),
+                earned.pending_bytes(),
+                "case {case}: 待下载字节数"
+            );
 
             // ③ 同一串随机事件喂给两台，逐步比对动作与全部可观测量。
             let mut held: Vec<(usize, Interval)> = vec![];
@@ -1021,26 +1487,49 @@ mod tests {
                 let w = rng.next(workers as u64) as usize;
                 let ev = match (rng.next(4), held.iter().find(|(hw, _)| *hw == w).copied()) {
                     (0, _) | (_, None) => Event::Connected(w),
-                    (_, Some((_, iv))) if rng.next(3) == 0 => {
-                        Event::Progress { worker: w, abs_end: iv.start + rng.next(iv.len()) }
-                    }
+                    (_, Some((_, iv))) if rng.next(3) == 0 => Event::Progress {
+                        worker: w,
+                        abs_end: iv.start + rng.next(iv.len()),
+                    },
                     (_, Some((_, _))) => {
                         held.retain(|(hw, _)| *hw != w);
-                        if rng.next(2) == 0 { Event::WindowDone { worker: w } } else { Event::Failed { worker: w } }
+                        if rng.next(2) == 0 {
+                            Event::WindowDone { worker: w }
+                        } else {
+                            Event::Failed { worker: w }
+                        }
                     }
                 };
                 let a = earned.on(ev);
                 let b = seeded.on(ev);
-                assert_eq!(a, b, "case {case} step {step} 事件 {ev:?} 上动作分岔：earned={a:?} resume={b:?}");
+                assert_eq!(
+                    a, b,
+                    "case {case} step {step} 事件 {ev:?} 上动作分岔：earned={a:?} resume={b:?}"
+                );
                 track(&mut held, &a);
                 check_invariants(&earned, total, &format!("case {case} 参照物 step {step}"));
                 check_invariants(&seeded, total, &format!("case {case} 播种 step {step}"));
-                assert_eq!(earned.pending_bytes(), seeded.pending_bytes(), "case {case} step {step} pending 背离");
-                assert_eq!(earned.snapshot_intervals(), seeded.snapshot_intervals(), "case {case} step {step} 覆盖集背离");
-                assert_eq!(earned.is_done(), seeded.is_done(), "case {case} step {step} is_done 背离");
+                assert_eq!(
+                    earned.pending_bytes(),
+                    seeded.pending_bytes(),
+                    "case {case} step {step} pending 背离"
+                );
+                assert_eq!(
+                    earned.snapshot_intervals(),
+                    seeded.snapshot_intervals(),
+                    "case {case} step {step} 覆盖集背离"
+                );
+                assert_eq!(
+                    earned.is_done(),
+                    seeded.is_done(),
+                    "case {case} step {step} is_done 背离"
+                );
             }
         }
-        assert!(compared >= 200, "300 例里只有 {compared} 例可比对 ⇒ 夹具退化了，不是在测播种");
+        assert!(
+            compared >= 200,
+            "300 例里只有 {compared} 例可比对 ⇒ 夹具退化了，不是在测播种"
+        );
     }
 
     /// 多段空洞（断点文件的常态形状）的等价性只能按**要下的字节集合**比，不能按动作序列比 ——
@@ -1077,7 +1566,10 @@ mod tests {
                         held.retain(|(hw, _)| *hw != w);
                         match rng.next(3) {
                             0 => {
-                                earned.on(Event::Progress { worker: w, abs_end: iv.start + rng.next(iv.len()) });
+                                earned.on(Event::Progress {
+                                    worker: w,
+                                    abs_end: iv.start + rng.next(iv.len()),
+                                });
                                 earned.on(Event::WindowDone { worker: w })
                             }
                             1 => earned.on(Event::SegmentComplete { worker: w }),
@@ -1094,11 +1586,15 @@ mod tests {
             // **收口复审 B2 第 4 条（形状 a）**：上面循环里那句 `check_invariants` 断的一直是
             // **"还在途"**的状态，而真正要拿去播种的是**在途全部交回之后**的这一格 —— 它原先**没人审**。
             // 于是这一句先补上审计，再取种子。（这不是把 `cover` 那句搬个位置：见下面替换掉的注释。）
-            check_invariants(&earned, total, &format!("case {case} 参照物（在途全部交回之后）"));
+            check_invariants(
+                &earned,
+                total,
+                &format!("case {case} 参照物（在途全部交回之后）"),
+            );
             let seed = earned.snapshot_intervals();
             let covered = seed.iter().map(Interval::len).sum::<u64>();
             if covered == 0 || covered == total || seed.len() < 2 {
-                continue;   // 只要"至少两个互不相邻的空洞"这一格，那才是断点文件的常态
+                continue; // 只要"至少两个互不相邻的空洞"这一格，那才是断点文件的常态
             }
             compared += 1;
             // **原来这一句是** `assert_eq!(cover(&seed, total), seed, "播种的输入自己得先过独立参照")`，
@@ -1132,33 +1628,65 @@ mod tests {
 
             // ② 记账必须一字不差。
             assert_eq!(seeded.snapshot_intervals(), seed, "case {case}: 覆盖集不同");
-            assert_eq!(seeded.pending_bytes(), earned.pending_bytes(), "case {case}: pending 不同");
-            assert_eq!(seeded.pending_bytes(), total - covered, "case {case}: 播种后仍要满足「待下载 = 全长 - 已确认」");
-            assert!(!seeded.is_done() && !earned.is_done(), "case {case}: 还有洞时两边都不该收工");
+            assert_eq!(
+                seeded.pending_bytes(),
+                earned.pending_bytes(),
+                "case {case}: pending 不同"
+            );
+            assert_eq!(
+                seeded.pending_bytes(),
+                total - covered,
+                "case {case}: 播种后仍要满足「待下载 = 全长 - 已确认」"
+            );
+            assert!(
+                !seeded.is_done() && !earned.is_done(),
+                "case {case}: 还有洞时两边都不该收工"
+            );
 
             // ③ 剩下要下的字节集合：用单 worker 干完（场上永远只有一条在途区间 ⇒ 不劈分，
             //    每次领到的都是一整条队列区间），于是"派出去过的区间"直接就是那张字节集合。
             let earned_got = drain_with_one_worker(&mut earned);
             let seeded_got = drain_with_one_worker(&mut seeded);
             let bytes = |v: &[Interval]| v.iter().map(Interval::len).sum::<u64>();
-            assert_eq!(bytes(&seeded_got), total - covered, "case {case}: 播种方下的字节数不等于它欠的字节数");
-            assert_eq!(bytes(&earned_got), bytes(&seeded_got), "case {case}: 两台欠的字节数不同");
-            assert_eq!(cover(&earned_got, total), cover(&seeded_got, total), "case {case}: 两台要下的字节集合不同");
+            assert_eq!(
+                bytes(&seeded_got),
+                total - covered,
+                "case {case}: 播种方下的字节数不等于它欠的字节数"
+            );
+            assert_eq!(
+                bytes(&earned_got),
+                bytes(&seeded_got),
+                "case {case}: 两台欠的字节数不同"
+            );
+            assert_eq!(
+                cover(&earned_got, total),
+                cover(&seeded_got, total),
+                "case {case}: 两台要下的字节集合不同"
+            );
             for iv in &seeded_got {
                 assert!(
                     seed.iter().all(|d| iv.end < d.start || iv.start > d.end),
                     "case {case}: 播种后仍重下了已确认字节 {iv:?}（种子 {seed:?}）"
                 );
             }
-            assert!(seeded.is_done() && earned.is_done(), "case {case}: 干完活没收工");
+            assert!(
+                seeded.is_done() && earned.is_done(),
+                "case {case}: 干完活没收工"
+            );
             assert_eq!(
                 seeded.snapshot_intervals(),
-                vec![Interval { start: 0, end: total - 1 }],
+                vec![Interval {
+                    start: 0,
+                    end: total - 1
+                }],
                 "case {case}: 补完洞之后覆盖集必须是整份文件，一条不重不漏"
             );
             check_invariants(&seeded, total, &format!("case {case} 播种收尾"));
         }
-        assert!(compared >= 50, "300 例里只有 {compared} 例跑出多段空洞的种子 ⇒ 夹具退化了");
+        assert!(
+            compared >= 50,
+            "300 例里只有 {compared} 例跑出多段空洞的种子 ⇒ 夹具退化了"
+        );
     }
 
     /// 用**一个** worker 把剩下的活儿干完，返回派出去过的区间（按派出顺序）。
@@ -1173,7 +1701,10 @@ mod tests {
             for act in sc.on(Event::Connected(0)) {
                 match act {
                     Action::Assign { iv, .. } => {
-                        sc.on(Event::Progress { worker: 0, abs_end: iv.end });
+                        sc.on(Event::Progress {
+                            worker: 0,
+                            abs_end: iv.end,
+                        });
                         sc.on(Event::WindowDone { worker: 0 });
                         dispatched.push(iv);
                     }
@@ -1190,7 +1721,10 @@ mod tests {
     fn resume_seeding_edges_match_the_accounting_rules() {
         // 空文件：没有任何可确认的字节（与 `state::check_segments` 同一立场），也不许 panic。
         let mut empty = Scheduler::resume(0, 100, &[Interval { start: 0, end: 0 }]);
-        assert!(empty.snapshot_intervals().is_empty(), "空文件不接受任何种子");
+        assert!(
+            empty.snapshot_intervals().is_empty(),
+            "空文件不接受任何种子"
+        );
         assert_eq!(empty.pending_bytes(), 0);
         assert!(empty.is_done());
         assert_eq!(empty.on(Event::Connected(0)), vec![Action::Idle]);
@@ -1201,11 +1735,27 @@ mod tests {
         assert_eq!(plain.snapshot_intervals(), vec![]);
         assert_eq!(plain.pending_bytes(), total);
         assert!(!plain.is_done());
-        assert_eq!(plain.on(Event::Connected(0)), vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: total - 1 } }],
-            "空种子的第一枪必须与 `new` 给出同一个动作");
+        assert_eq!(
+            plain.on(Event::Connected(0)),
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 0,
+                    end: total - 1
+                }
+            }],
+            "空种子的第一枪必须与 `new` 给出同一个动作"
+        );
 
         // 种子盖满整份 ⇒ 直接收工，一段都不派。
-        let mut full = Scheduler::resume(total, 100, &[Interval { start: 0, end: total - 1 }]);
+        let mut full = Scheduler::resume(
+            total,
+            100,
+            &[Interval {
+                start: 0,
+                end: total - 1,
+            }],
+        );
         assert!(full.is_done(), "已确认字节覆盖整份文件 ⇒ 没有待下载工作");
         assert_eq!(full.pending_bytes(), 0);
         assert_eq!(full.on(Event::Connected(0)), vec![Action::Idle]);
@@ -1218,28 +1768,69 @@ mod tests {
     fn resume_normalizes_malformed_seeds_and_never_redispatches_seeded_bytes() {
         const TOTAL: u64 = 1000;
         let seeds = [
-            Interval { start: 600, end: 699 },
+            Interval {
+                start: 600,
+                end: 699,
+            },
             Interval { start: 0, end: 99 },
-            Interval { start: 100, end: 149 },    // 与上一行相邻 ⇒ 并成 [0,149]
-            Interval { start: 50, end: 700 },     // 横跨一切 ⇒ 全部并进 [0,700]
-            Interval { start: 900, end: 50_000 }, // 终点越过 EOF ⇒ 夹到 999
-            Interval { start: 800, end: 799 },    // 空区间 ⇒ 丢掉
+            Interval {
+                start: 100,
+                end: 149,
+            }, // 与上一行相邻 ⇒ 并成 [0,149]
+            Interval {
+                start: 50,
+                end: 700,
+            }, // 横跨一切 ⇒ 全部并进 [0,700]
+            Interval {
+                start: 900,
+                end: 50_000,
+            }, // 终点越过 EOF ⇒ 夹到 999
+            Interval {
+                start: 800,
+                end: 799,
+            }, // 空区间 ⇒ 丢掉
         ];
-        let want = vec![Interval { start: 0, end: 700 }, Interval { start: 900, end: 999 }];
+        let want = vec![
+            Interval { start: 0, end: 700 },
+            Interval {
+                start: 900,
+                end: 999,
+            },
+        ];
         let mut sc = Scheduler::resume(TOTAL, 100, &seeds);
-        assert_eq!(sc.snapshot_intervals(), want, "归一化结果要与 literal 期望和独立实现都相同");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            want,
+            "归一化结果要与 literal 期望和独立实现都相同"
+        );
         assert_eq!(sc.snapshot_intervals(), cover(&seeds, TOTAL));
         assert_eq!(sc.pending_bytes(), 199, "只剩 [701,899] 这一条缝");
         check_invariants(&sc, TOTAL, "seed-normalized");
 
         // 唯一可派的就是那条缝：起点、终点都必须绕开种子。
         let acts = sc.on(Event::Connected(0));
-        assert_eq!(acts, vec![Action::Assign { worker: 0, iv: Interval { start: 701, end: 899 } }],
-            "播种后派出去的区间只能是没归属的那条缝: {acts:?}");
-        sc.on(Event::Progress { worker: 0, abs_end: 899 });
+        assert_eq!(
+            acts,
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 701,
+                    end: 899
+                }
+            }],
+            "播种后派出去的区间只能是没归属的那条缝: {acts:?}"
+        );
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 899,
+        });
         sc.on(Event::WindowDone { worker: 0 });
         assert!(sc.is_done());
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "补完缝后整段覆盖，不重复计字节");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }],
+            "补完缝后整段覆盖，不重复计字节"
+        );
     }
 
     /// **T8 评审 A1（真缺陷）**：**整条越过 EOF 的种子必须整条丢掉，一个已确认字节都不许造出来**。
@@ -1264,12 +1855,23 @@ mod tests {
     #[test]
     fn a_seed_that_starts_past_eof_confirms_no_bytes_at_all() {
         const TOTAL: u64 = 1_000;
-        let past = [Interval { start: 1_500, end: 2_000 }];
+        let past = [Interval {
+            start: 1_500,
+            end: 2_000,
+        }];
 
         // ① 只有整条越界的种子 ⇒ 等价于"没有种子"：覆盖集空、全长还欠着、没收工。
         let empty_handed = Scheduler::resume(TOTAL, 100, &past);
-        assert_eq!(empty_handed.snapshot_intervals(), vec![], "起点在文件之外的种子不许留下任何已确认字节");
-        assert_eq!(empty_handed.pending_bytes(), 1_000, "1000 个字节一个都没归属");
+        assert_eq!(
+            empty_handed.snapshot_intervals(),
+            vec![],
+            "起点在文件之外的种子不许留下任何已确认字节"
+        );
+        assert_eq!(
+            empty_handed.pending_bytes(),
+            1_000,
+            "1000 个字节一个都没归属"
+        );
         assert!(
             !empty_handed.is_done(),
             "整条越界的种子不许让进度看起来前进一步：1000 个字节都还欠着 ⇒ 不收工。\
@@ -1278,31 +1880,61 @@ mod tests {
              ⇒ 本句在缺陷代码下照样绿；事故的正面在 \
              `a_ghost_byte_next_to_a_near_full_seed_is_the_shape_that_fakes_completion`）"
         );
-        assert_eq!(empty_handed.snapshot_intervals(), cover(&past, TOTAL), "字节集合这条轴上与独立参照一致");
+        assert_eq!(
+            empty_handed.snapshot_intervals(),
+            cover(&past, TOTAL),
+            "字节集合这条轴上与独立参照一致"
+        );
         check_invariants(&empty_handed, TOTAL, "seed-past-eof-only");
 
         // ② 混着给：夹回来的行（起点在文件内）算数，三条整条越界的一律丢掉。
         let mixed = [
-            Interval { start: 900, end: 50_000 }, // 起点在内、终点越界 ⇒ 夹到 999（唯一的合法行）
-            Interval { start: 1_500, end: 2_000 }, // 整条越界
-            Interval { start: 1_000, end: 1_000 }, // 单字节，正好落在 EOF 之外第一格
-            Interval { start: 4_000, end: 9_999 }, // 整条越界，且很长
+            Interval {
+                start: 900,
+                end: 50_000,
+            }, // 起点在内、终点越界 ⇒ 夹到 999（唯一的合法行）
+            Interval {
+                start: 1_500,
+                end: 2_000,
+            }, // 整条越界
+            Interval {
+                start: 1_000,
+                end: 1_000,
+            }, // 单字节，正好落在 EOF 之外第一格
+            Interval {
+                start: 4_000,
+                end: 9_999,
+            }, // 整条越界，且很长
         ];
         let mut sc = Scheduler::resume(TOTAL, 100, &mixed);
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 900, end: 999 }], "只有 [900,999] 这一条进了覆盖集");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval {
+                start: 900,
+                end: 999
+            }],
+            "只有 [900,999] 这一条进了覆盖集"
+        );
         assert_eq!(sc.pending_bytes(), 900, "还欠 [0,899] 这 900 个字节");
         assert!(!sc.is_done());
         check_invariants(&sc, TOTAL, "seed-past-eof-mixed");
         // 第一枪只能派没归属的那条缝，而且终点必须停在种子之前。
         assert_eq!(
             sc.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 899 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval { start: 0, end: 899 }
+            }],
             "派出去的区间只能是 [0,899]：不许从幽灵字节 999 之外凭空多出字节"
         );
 
         // ③ `total == 0` 那一支本来就什么都不接，与"整条越界"同一立场。
         let nothing = Scheduler::resume(0, 100, &[Interval { start: 0, end: 9 }]);
-        assert_eq!(nothing.snapshot_intervals(), vec![], "空文件没有可确认的字节");
+        assert_eq!(
+            nothing.snapshot_intervals(),
+            vec![],
+            "空文件没有可确认的字节"
+        );
         assert_eq!(nothing.pending_bytes(), 0);
         assert!(nothing.is_done());
     }
@@ -1317,29 +1949,47 @@ mod tests {
         let last = TOTAL - 1;
 
         // ① 单字节种子正好落在最后一个字节上 ⇒ 必须进覆盖集，一个字节都不许被当成越界丢掉。
-        let seed_exact = [Interval { start: last, end: last }];
+        let seed_exact = [Interval {
+            start: last,
+            end: last,
+        }];
         let mut only_last = Scheduler::resume(TOTAL, 100, &seed_exact);
         assert_eq!(
             only_last.snapshot_intervals(),
-            vec![Interval { start: last, end: last }],
+            vec![Interval {
+                start: last,
+                end: last
+            }],
             "`start == last` 不是越界：最后一个字节的种子必须原样留下（丢掉它 = 每轮续传重下它一个字节）"
         );
         assert_eq!(only_last.pending_bytes(), 999, "还欠 [0,998] 这 999 个字节");
         assert!(!only_last.is_done(), "[0,998] 还没归属 ⇒ 不许收工");
         assert_eq!(
             only_last.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: last - 1 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 0,
+                    end: last - 1
+                }
+            }],
             "派出去的只能是剩下那条缝，终点停在种子之前"
         );
         check_invariants(&only_last, TOTAL, "seed-last-byte-only");
 
         // ② 同一个字节换个写法：终点报得比 EOF 更远 ⇒ 夹完仍然算数（不许因为 `end` 越界
         //    就把合法的 `start` 一起丢掉 —— 那正是旧夹法与 `start >= last` 两种错法的分界）。
-        let seed_over_eof = [Interval { start: last, end: last + 50 }];
+        let seed_over_eof = [Interval {
+            start: last,
+            end: last + 50,
+        }];
         let clipped = Scheduler::resume(TOTAL, 100, &seed_over_eof);
         assert_eq!(
             clipped.snapshot_intervals(),
-            vec![Interval { start: last, end: last }],
+            vec![Interval {
+                start: last,
+                end: last
+            }],
             "夹终点不丢种子：第 {last} 个字节确认了，与它后面那些并不存在的字节是两件事"
         );
         check_invariants(&clipped, TOTAL, "seed-last-byte-clipped");
@@ -1386,11 +2036,18 @@ mod tests {
             TOTAL,
             100,
             &[
-                Interval { start: 0, end: 998 },       // 合法：前 999 个字节真的确认了
-                Interval { start: 1_500, end: 2_000 }, // 整条越界：必须整条丢掉
+                Interval { start: 0, end: 998 }, // 合法：前 999 个字节真的确认了
+                Interval {
+                    start: 1_500,
+                    end: 2_000,
+                }, // 整条越界：必须整条丢掉
             ],
         );
-        assert_eq!(sc.pending_bytes(), 1, "只剩最后一个字节还欠着 —— 旧夹法在这里算成 0");
+        assert_eq!(
+            sc.pending_bytes(),
+            1,
+            "只剩最后一个字节还欠着 —— 旧夹法在这里算成 0"
+        );
         assert!(
             !sc.is_done(),
             "那一个字节从没被派出 ⇒ 这一格才是「幽灵字节伪装成已完成」的正面形状：旧夹法在这里收工"
@@ -1402,14 +2059,27 @@ mod tests {
         );
         assert_eq!(
             sc.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 999, end: 999 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 999,
+                    end: 999
+                }
+            }],
             "剩下的活儿必须被派出去，不许因为覆盖集看起来满了就 `Idle`"
         );
         check_invariants(&sc, TOTAL, "seed-ghost-vs-near-full");
-        sc.on(Event::Progress { worker: 0, abs_end: 999 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 999,
+        });
         sc.on(Event::WindowDone { worker: 0 });
         assert!(sc.is_done(), "补上最后一个字节之后才真的收工");
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: 999 }], "相邻合并成整份文件");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval { start: 0, end: 999 }],
+            "相邻合并成整份文件"
+        );
         check_invariants(&sc, TOTAL, "seed-ghost-closed");
     }
 
@@ -1417,18 +2087,34 @@ mod tests {
     #[test]
     fn resume_with_a_middle_seed_leaves_both_gaps_and_dispatches_the_longest() {
         const TOTAL: u64 = 1000;
-        let mut sc = Scheduler::resume(TOTAL, 600, &[Interval { start: 200, end: 299 }]);
+        let mut sc = Scheduler::resume(
+            TOTAL,
+            600,
+            &[Interval {
+                start: 200,
+                end: 299,
+            }],
+        );
         assert_eq!(sc.pending_bytes(), 900, "[0,199] 与 [300,999] 两条缝都还在");
         assert_eq!(
             sc.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 300, end: 999 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 300,
+                    end: 999
+                }
+            }],
             "两条缝里派最长的那条；已确认的 [200,299] 一个字节都不许再派"
         );
         check_invariants(&sc, TOTAL, "seed-middle");
         // 第二段派剩下的 [0,199]（长度 200 < min_seg 600 ⇒ 不许劈在途尾）。
         assert_eq!(
             sc.on(Event::Connected(1)),
-            vec![Action::Assign { worker: 1, iv: Interval { start: 0, end: 199 } }],
+            vec![Action::Assign {
+                worker: 1,
+                iv: Interval { start: 0, end: 199 }
+            }],
             "剩下的起点缝必须原样派出，不被并回已确认字节"
         );
         check_invariants(&sc, TOTAL, "seed-middle-2");
@@ -1449,59 +2135,124 @@ mod tests {
     #[test]
     fn no_ranges_on_a_multi_gap_seed_dispatches_lowest_start_and_never_collapses_across_done() {
         const TOTAL: u64 = 1_000;
-        let seed = [Interval { start: 200, end: 299 }, Interval { start: 800, end: 899 }];
+        let seed = [
+            Interval {
+                start: 200,
+                end: 299,
+            },
+            Interval {
+                start: 800,
+                end: 899,
+            },
+        ];
         let mut sc = Scheduler::resume(TOTAL, 100, &seed);
         // 播种后的正常读法：三条缝 [0,199] / [300,799] / [900,999]，最长优先会挑中间那条。
-        assert_eq!(sc.snapshot_intervals(), seed.to_vec(), "两行不相邻 ⇒ 原样进");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            seed.to_vec(),
+            "两行不相邻 ⇒ 原样进"
+        );
         assert_eq!(sc.pending_bytes(), 800, "200 + 500 + 100 三条缝都还欠着");
         check_invariants(&sc, TOTAL, "seed-multi-gap-before-noranges");
 
         sc.on(Event::NoRanges);
-        assert_eq!(sc.pending_bytes(), 800, "`NoRanges` 只改派法，不许凭空造或吞掉待下载字节");
-        assert_eq!(sc.snapshot_intervals(), seed.to_vec(), "已确认字节不许被并进队列（那正是合并规则拦的事）");
+        assert_eq!(
+            sc.pending_bytes(),
+            800,
+            "`NoRanges` 只改派法，不许凭空造或吞掉待下载字节"
+        );
+        assert_eq!(
+            sc.snapshot_intervals(),
+            seed.to_vec(),
+            "已确认字节不许被并进队列（那正是合并规则拦的事）"
+        );
         assert!(!sc.is_done(), "三条缝一条都没补 ⇒ 不收工");
 
         // 判据 2：起点最低，不是最长。
         let acts = sc.on(Event::Connected(0));
         assert_eq!(
             acts,
-            vec![Action::Assign { worker: 0, iv: Interval { start: 0, end: 199 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval { start: 0, end: 199 }
+            }],
             "退化期派发的判据是起点最低：最长优先会给出 [300,799]，那会把 body 中段写到文件中段"
         );
         // 这一句**被上面那条等式全包**（等式已经钉死 `acts` 只有一条 `Assign` ⇒ 不可能有 `Retighten`）。
         // 留着是有意的（收口复审 B2 第 8 条裁定"不删"）：它是判据 3 里"永不劈分"那一半**唯一有名有姓**的针。
         // 上面那条等式日后若被放宽成 `acts.len()` 或 `any(matches!(Assign))` 这类形状，
         // "退化期会不会劈分"就没人看守了 ⇒ **冗余而无害，但不许撤**；要撤它必须先把上面那条等式钉牢。
-        assert!(!acts.iter().any(|a| matches!(a, Action::Retighten { .. })), "退化期永不劈分: {acts:?}");
-        assert_eq!(sc.on(Event::Connected(1)), vec![Action::Idle], "退化期一次只允许一段在途");
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::Retighten { .. })),
+            "退化期永不劈分: {acts:?}"
+        );
+        assert_eq!(
+            sc.on(Event::Connected(1)),
+            vec![Action::Idle],
+            "退化期一次只允许一段在途"
+        );
         check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-1");
 
         // 三条缝必须按文件顺序一条不漏地派完，而且都不碰已确认字节。
-        sc.on(Event::Progress { worker: 0, abs_end: 199 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 199,
+        });
         sc.on(Event::WindowDone { worker: 0 });
         assert_eq!(
             sc.snapshot_intervals(),
-            vec![Interval { start: 0, end: 299 }, Interval { start: 800, end: 899 }],
+            vec![
+                Interval { start: 0, end: 299 },
+                Interval {
+                    start: 800,
+                    end: 899
+                }
+            ],
             "补完 [0,199] 后与种子首行相邻合并"
         );
         assert_eq!(
             sc.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 300, end: 799 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 300,
+                    end: 799
+                }
+            }],
             "第二条缝：剩下的里起点最低的仍是 [300,799]"
         );
-        sc.on(Event::Progress { worker: 0, abs_end: 799 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 799,
+        });
         sc.on(Event::WindowDone { worker: 0 });
         assert_eq!(sc.pending_bytes(), 100, "只剩 [900,999]");
         check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-2");
         assert_eq!(
             sc.on(Event::Connected(0)),
-            vec![Action::Assign { worker: 0, iv: Interval { start: 900, end: 999 } }],
+            vec![Action::Assign {
+                worker: 0,
+                iv: Interval {
+                    start: 900,
+                    end: 999
+                }
+            }],
             "第三条缝：已确认的 [200,299] 与 [800,899] 一个字节都没重下"
         );
-        sc.on(Event::Progress { worker: 0, abs_end: 999 });
+        sc.on(Event::Progress {
+            worker: 0,
+            abs_end: 999,
+        });
         sc.on(Event::WindowDone { worker: 0 });
         assert!(sc.is_done(), "三条缝补完 ⇒ 收工");
-        assert_eq!(sc.snapshot_intervals(), vec![Interval { start: 0, end: TOTAL - 1 }], "相邻合并成整份文件");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            vec![Interval {
+                start: 0,
+                end: TOTAL - 1
+            }],
+            "相邻合并成整份文件"
+        );
         check_invariants(&sc, TOTAL, "seed-multi-gap-degraded-done");
     }
 
@@ -1509,9 +2260,22 @@ mod tests {
     /// 断点里的段经过 `resume` 之后，`snapshot_intervals()` 报回来的就是它自己（不动一个字段）。
     #[test]
     fn resume_accepts_the_state_segment_shape_verbatim() {
-        let segs = [Interval { start: 0, end: 236_031 }, Interval { start: 1_000_000, end: 1_048_575 }];
+        let segs = [
+            Interval {
+                start: 0,
+                end: 236_031,
+            },
+            Interval {
+                start: 1_000_000,
+                end: 1_048_575,
+            },
+        ];
         let sc = Scheduler::resume(4_194_304, crate::consts::MIN_SEGMENT_BYTES, &segs);
-        assert_eq!(sc.snapshot_intervals(), segs.to_vec(), "两行本来就不相邻 ⇒ 原样进、原样出");
+        assert_eq!(
+            sc.snapshot_intervals(),
+            segs.to_vec(),
+            "两行本来就不相邻 ⇒ 原样进、原样出"
+        );
         assert_eq!(
             sc.pending_bytes(),
             4_194_304 - segs.iter().map(Interval::len).sum::<u64>(),
@@ -1525,7 +2289,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self, bound: u64) -> u64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             (self.0 >> 33) % bound.max(1)
         }
     }

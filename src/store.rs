@@ -187,8 +187,12 @@ mod tests {
         assert_eq!(n, 4);
         assert_eq!(s.len()?, 1_000_004, "长度应随写入偏移自然延长");
         let mut b = vec![0u8; 8];
-        { use std::io::{Read, Seek, SeekFrom}; let f = &mut *s.file.lock().unwrap();
-          f.seek(SeekFrom::Start(500_000))?; f.read_exact(&mut b)?; }
+        {
+            use std::io::{Read, Seek, SeekFrom};
+            let f = &mut *s.file.lock().unwrap();
+            f.seek(SeekFrom::Start(500_000))?;
+            f.read_exact(&mut b)?;
+        }
         assert!(b.iter().all(|x| *x == 0), "未写区域读作零");
         s.flush()?;
         std::fs::remove_file(&p)?;
@@ -197,7 +201,10 @@ mod tests {
     #[test]
     fn open_existing_keeps_content() -> anyhow::Result<()> {
         let p = std::env::temp_dir().join("dlm-store-probe2.bin");
-        { let s = Store::open(&p, true)?; s.write_at(0, b"abc")?; }
+        {
+            let s = Store::open(&p, true)?;
+            s.write_at(0, b"abc")?;
+        }
         let s = Store::open(&p, false)?;
         assert_eq!(s.len()?, 3);
         std::fs::remove_file(&p)?;
@@ -231,7 +238,11 @@ mod tests {
         assert_eq!(s.len()?, 0, "truncate=true 必须把残留清干净");
         s.write_at(0, b"xyz")?;
         drop(s);
-        assert_eq!(std::fs::read(&p)?, b"xyz", "清干净之后新写的字节就是全部内容");
+        assert_eq!(
+            std::fs::read(&p)?,
+            b"xyz",
+            "清干净之后新写的字节就是全部内容"
+        );
         std::fs::remove_file(&p)?;
         Ok(())
     }
@@ -280,7 +291,11 @@ mod tests {
         assert_eq!(s.len()?, 6, "len() 必须是文件长度，不是句柄当前位置");
         s.write_at(6, b"gh")?;
         assert_eq!(s.len()?, 8, "写到更远处才延长");
-        assert_eq!(std::fs::read(&p)?, b"xbcdefgh", "重写只覆盖那一段，其余字节不动");
+        assert_eq!(
+            std::fs::read(&p)?,
+            b"xbcdefgh",
+            "重写只覆盖那一段，其余字节不动"
+        );
         std::fs::remove_file(&p)?;
         Ok(())
     }
@@ -313,7 +328,8 @@ mod tests {
         s.flush()?;
         s.flush()?; // 可重复调用，Task 8 收尾 + drop 前再刷一次不该报错
         assert_eq!(s.len()?, 1_004, "flush 不改变长度");
-        let got = std::fs::read(&p).with_context(|| format!("flush 之后重开读不回：{}", p.display()))?;
+        let got =
+            std::fs::read(&p).with_context(|| format!("flush 之后重开读不回：{}", p.display()))?;
         assert_eq!(got.len(), 1_004);
         assert_eq!(&got[0..4], b"head", "flush 前写的低偏移块");
         assert_eq!(&got[1_000..1_004], b"tail", "flush 前写的高偏移块");
@@ -345,7 +361,11 @@ mod tests {
             other.seek(SeekFrom::Start(50))?;
             other.write_all(b"def")?;
         }
-        assert_eq!(s.len()?, 53, "外部写入的字节也算落盘量 —— 缓存计数会在这里说谎");
+        assert_eq!(
+            s.len()?,
+            53,
+            "外部写入的字节也算落盘量 —— 缓存计数会在这里说谎"
+        );
         std::fs::remove_file(&p)?;
         Ok(())
     }
@@ -360,7 +380,11 @@ mod tests {
         let s = Store::open(&p, true)?;
         s.write_at(1_000, b"xyz")?;
         std::fs::rename(&p, &renamed).with_context(|| {
-            format!("改名失败，这条用例的前提不成立：{} -> {}", p.display(), renamed.display())
+            format!(
+                "改名失败，这条用例的前提不成立：{} -> {}",
+                p.display(),
+                renamed.display()
+            )
         })?;
         assert_eq!(s.len()?, 1_003, "路径已经不是当初那个了，长度仍来自句柄");
         s.write_at(2_000, b"abc")?;
@@ -368,7 +392,10 @@ mod tests {
         let got = std::fs::read(&renamed)?;
         assert_eq!(&got[1_000..1_003], b"xyz");
         assert_eq!(&got[2_000..2_003], b"abc");
-        assert!(got[1_003..2_000].iter().all(|&b| b == 0), "两段之间的空洞读作零");
+        assert!(
+            got[1_003..2_000].iter().all(|&b| b == 0),
+            "两段之间的空洞读作零"
+        );
         std::fs::remove_file(&renamed)?;
         Ok(())
     }

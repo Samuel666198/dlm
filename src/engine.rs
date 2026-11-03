@@ -160,8 +160,8 @@ use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
 use crate::consts::{
-    FAST_RETRY_MAX, FLAG_KEEP_STATE, PROBE_READ_BYTES, SLOW_RETRY_INTERVAL_SECS, STATE_SAVE_MAX_INTERVAL_SECS,
-    USER_AGENT,
+    FAST_RETRY_MAX, FLAG_KEEP_STATE, PROBE_READ_BYTES, SLOW_RETRY_INTERVAL_SECS,
+    STATE_SAVE_MAX_INTERVAL_SECS, USER_AGENT,
 };
 use crate::fetch::{self, FailKind, Outcome};
 use crate::probe;
@@ -603,7 +603,11 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     if task.hls() {
         return crate::hls::run(task, &cfg, started);
     }
-    ensure!(cfg.workers >= 1, "workers 至少要是 1（给了 {}）：没有 worker 就下不动任何东西", cfg.workers);
+    ensure!(
+        cfg.workers >= 1,
+        "workers 至少要是 1（给了 {}）：没有 worker 就下不动任何东西",
+        cfg.workers
+    );
     let client = Arc::new(build_client()?);
     let task = Arc::new(task.clone());
 
@@ -626,7 +630,11 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     //    把损坏读成"没有断点"会把已验证过的字节重新算成待下载，还会骗过 `--no-resume` 的判据。
     //    `force_fresh` 折成 `existing = None`（`resume` 的文档就把这一步交给调用方），
     //    且此时**不去读**那个文件 —— 读它只会把"这次不管断点"变成"这次因为断点坏了跑不起来"。
-    let loaded = if cfg.force_fresh { None } else { state::load(&state_path)? };
+    let loaded = if cfg.force_fresh {
+        None
+    } else {
+        state::load(&state_path)?
+    };
 
     // ② 试探。`total_len` / `accept_ranges` / 验证子只有这里拿得到 —— **E13②** 正是因此判定
     //    简报那个 `Config{resume: Decision}` 站不住：`Fresh` 里一个事实都没有。
@@ -638,7 +646,11 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     let plan = plan_from_decision(resume::decide(&task, loaded, &facts))?;
     // R17：只有续传、只有对端认 Range 时才发 If-Range。值取自断点验证器；强 ETag 优先，
     // Last-Modified 只在本次没开 `--ignore-mtime` 时用（`resume::if_range_value` 是唯一取值处）。
-    let if_range = if_range_for(plan.resume_validator.as_ref(), facts.accept_ranges, task.ignore_mtime());
+    let if_range = if_range_for(
+        plan.resume_validator.as_ref(),
+        facts.accept_ranges,
+        task.ignore_mtime(),
+    );
     let mut seed = plan.seed;
     let mut stats = plan.stats;
 
@@ -662,10 +674,15 @@ pub fn run(task: &Task, cfg: Config) -> Result<Report> {
     if plan.truncate && !probed.prelude.is_empty() {
         let take = probed.prelude.len().min(facts.total_len as usize);
         if take > 0 {
-            let wrote = store.write_at(0, &probed.prelude[..take]).context("把预读字节写到偏移 0 失败")?;
+            let wrote = store
+                .write_at(0, &probed.prelude[..take])
+                .context("把预读字节写到偏移 0 失败")?;
             if wrote > 0 {
                 stats.bytes_delivered = stats.bytes_delivered.saturating_add(wrote as u64);
-                seed.push(Interval { start: 0, end: wrote as u64 - 1 });
+                seed.push(Interval {
+                    start: 0,
+                    end: wrote as u64 - 1,
+                });
                 prelude_written = wrote as u64;
             }
         }
@@ -756,7 +773,12 @@ fn plan_from_decision(decision: Decision) -> Result<Plan> {
             resume_validator: None,
         }),
         Decision::Resume(snap) => {
-            let Snapshot { validator, segments, stats, .. } = snap;
+            let Snapshot {
+                validator,
+                segments,
+                stats,
+                ..
+            } = snap;
             Ok(Plan {
                 truncate: false,
                 seed: segments.iter().map(SegView::interval).collect(),
@@ -770,7 +792,11 @@ fn plan_from_decision(decision: Decision) -> Result<Plan> {
 
 /// R17 的取值入口：Fresh（没有断点验证器）、不认 Range 的对端、没有可用验证器 ⇒ 都不发。
 /// 单独成函数是为了让这三条否定条件各有一格单测，而不是埋在 `run` 的分支里。
-fn if_range_for(resume_validator: Option<&Validator>, accept_ranges: bool, ignore_mtime: bool) -> Option<String> {
+fn if_range_for(
+    resume_validator: Option<&Validator>,
+    accept_ranges: bool,
+    ignore_mtime: bool,
+) -> Option<String> {
     if !accept_ranges {
         return None;
     }
@@ -832,7 +858,12 @@ fn in_scope_bytes(shot: Interval, bytes: u64, owned: Interval) -> u64 {
 /// `WindowDone` 而不是"再来一枪"：窗口读满与 body 被掐断在调度器看来是同一件事
 /// （`Scheduler::on` 里 `Event::WindowDone | Event::Failed` 那一支两者都走 `release()`），
 /// 剩下的尾巴由它重新决定给谁。
-fn translate(outcome: &Outcome, shot: Interval, owned: Interval, worker: usize) -> (Vec<Event>, u64, u64) {
+fn translate(
+    outcome: &Outcome,
+    shot: Interval,
+    owned: Interval,
+    worker: usize,
+) -> (Vec<Event>, u64, u64) {
     let landed = shot_bytes(outcome, shot);
     let duplicated = landed - in_scope_bytes(shot, landed, owned);
     let mut events = Vec::with_capacity(2);
@@ -885,7 +916,10 @@ fn clamp_seed_to_disk(seed: &[Interval], on_disk: u64) -> Vec<Interval> {
     let last = on_disk - 1;
     seed.iter()
         .filter(|iv| iv.start <= last)
-        .map(|iv| Interval { start: iv.start, end: iv.end.min(last) })
+        .map(|iv| Interval {
+            start: iv.start,
+            end: iv.end.min(last),
+        })
         .collect()
 }
 
@@ -918,7 +952,9 @@ fn running_rate_bytes_per_sec(delivered: u64, elapsed: Duration) -> u64 {
 /// （debug 构建 panic）或报出一个 5e8 字节的假高速。`saturating_mul` 与那条同一个立场：
 /// 速率这一格绝不能在加法上回绕。
 fn instant_rate_bytes_per_sec(delta_bytes: u64, gap: Duration) -> u64 {
-    let micros = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX).max(1_000);
+    let micros = u64::try_from(gap.as_micros())
+        .unwrap_or(u64::MAX)
+        .max(1_000);
     delta_bytes.saturating_mul(1_000_000) / micros
 }
 
@@ -929,7 +965,10 @@ fn instant_rate_bytes_per_sec(delta_bytes: u64, gap: Duration) -> u64 {
 /// 慢重试那一档最见区别：全场都在 30 s 退避 ⇒ 这一格是 **0**，而 `slow_retry_rounds ≥ 1`；
 /// 把 Backoff 算进来就是让进度行说谎（"4 条连接在跑"，实际一条都没有）。
 fn busy_worker_count(workers: &[WorkerCtl]) -> usize {
-    workers.iter().filter(|ctl| ctl.state == WorkerState::Busy).count()
+    workers
+        .iter()
+        .filter(|ctl| ctl.state == WorkerState::Busy)
+        .count()
 }
 
 /// 快照里那一格"慢重试轮数"（判据⑥）：跨 worker 取**最大值**。
@@ -941,7 +980,11 @@ fn busy_worker_count(workers: &[WorkerCtl]) -> usize {
 /// "四条链各排下 1 次"印成 `x4`（读起来像同一条链重试了四轮，那是假象）；
 /// 逐 worker 报不在 v1 的交付面里。
 fn slow_retry_rounds(workers: &[WorkerCtl]) -> u32 {
-    workers.iter().map(|ctl| ctl.attempt.saturating_sub(FAST_RETRY_MAX)).max().unwrap_or(0)
+    workers
+        .iter()
+        .map(|ctl| ctl.attempt.saturating_sub(FAST_RETRY_MAX))
+        .max()
+        .unwrap_or(0)
 }
 
 /// `FailKind` → 一句能给人看的话。**不截断、不拼接**（E12⑦：载荷已经是单行 ≤200 字符）。
@@ -949,7 +992,10 @@ fn failure_note(kind: &FailKind) -> String {
     match kind {
         FailKind::Http(code) => format!("服务器对这一枪回了 {code}"),
         FailKind::Transport(note) => note.clone(),
-        FailKind::ValidatorChanged => "服务端说这份文件已经变了（带 If-Range 的请求回了 200，或 416/206 的范围对不上）".to_string(),
+        FailKind::ValidatorChanged => {
+            "服务端说这份文件已经变了（带 If-Range 的请求回了 200，或 416/206 的范围对不上）"
+                .to_string()
+        }
     }
 }
 
@@ -1001,7 +1047,8 @@ fn sha256_of_reader(reader: &mut impl Read) -> Result<String> {
 }
 
 pub(crate) fn sha256_of_path(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).with_context(|| format!("打开目标文件算 sha256 失败：{}", path.display()))?;
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("打开目标文件算 sha256 失败：{}", path.display()))?;
     sha256_of_reader(&mut file)
 }
 
@@ -1033,14 +1080,20 @@ fn ensure_parent_dir(target: &Path) -> Result<()> {
 /// 不开线程，中途没有任何引擎侧读得到的量 —— 这里连 `Engine` 都没有构造。
 /// 所以 `cfg.on_tick` 在本函数里**一次都不被读**，那条路的进度权威只有下面这份 [`Report`]。用例
 /// `the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some` 钉这一格。
-fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started: Instant) -> Result<Report> {
+fn run_whole_once(
+    task: &Arc<Task>,
+    cfg: &Config,
+    client: &Arc<Client>,
+    started: Instant,
+) -> Result<Report> {
     let target = task.target_path();
     ensure_parent_dir(&target)?;
     // 恒 truncate：这一支没有可读的断点，残留的半截文件不属于本轮任何账。
     let store = Store::open(&target, true)?;
     // R18：整份那一枪只有一条连接；`0` = 不限。
     let limiter = RateLimiter::new(cfg.max_speed);
-    let (outcome, facts) = fetch::run_whole_with_limiter(client, task, &store, RATE_UNKNOWN, Some(&limiter))?;
+    let (outcome, facts) =
+        fetch::run_whole_with_limiter(client, task, &store, RATE_UNKNOWN, Some(&limiter))?;
     // 收尾一次 flush。**E8① 的判据是"收尾调一次、绝不进 `run_window` 的每块循环"，不是"全二进制只有一个调用点"**
     // —— 本文件有两条互斥的出口路线（`data_file` 走这里，多 worker 走 `Engine::run` 收尾那一处），
     // 所以 flush 有两个调用点，每条路线上至多一次（T8 评审 E 第 2 条：原先这两句各写"全场只有这一处"，互为反例）。
@@ -1059,7 +1112,9 @@ fn run_whole_once(task: &Arc<Task>, cfg: &Config, client: &Arc<Client>, started:
             "POST 那一枪被窗口预算掐在 body 中间（已写 {bytes} 字节，服务器说全长 {bytes_total}）。\
              这一枪只许发一次：重发就是把表单交第二次（spec R7/E12⑧），所以如实报未完成"
         )),
-        Outcome::Stalled => Some("POST 那一枪在预算内一个字节都没到（连接没答或答得太慢）；这一枪不重发".to_string()),
+        Outcome::Stalled => Some(
+            "POST 那一枪在预算内一个字节都没到（连接没答或答得太慢）；这一枪不重发".to_string(),
+        ),
         Outcome::Failed(kind) => Some(format!(
             "POST 那一枪没成：{}；这一枪不重发（重发＝二次提交表单）",
             failure_note(kind)
@@ -1146,7 +1201,21 @@ impl Drop for Heartbeat {
 /// 重置），所以收紧永远递得给"此刻在途的那一枪"—— 这是 `Retighten` 唯一能兑现的通道：
 /// 那个线程正阻塞在 `resp.read()` 里，除了它自己每块看一眼的格子，外面没有任何东西能插话。
 fn worker_loop(spawn: WorkerSpawn) {
-    let WorkerSpawn { worker, jobs, reports, alive, cap, client, task, store, total_len, body, if_range, limiter, progress } = spawn;
+    let WorkerSpawn {
+        worker,
+        jobs,
+        reports,
+        alive,
+        cap,
+        client,
+        task,
+        store,
+        total_len,
+        body,
+        if_range,
+        limiter,
+        progress,
+    } = spawn;
     let _heartbeat = Heartbeat::new(alive);
     // `recv` Err = 主线程已经交回发送端（引擎退出）⇒ 收工。`Job::Stop` 是正常出口。
     while let Ok(job) = jobs.recv() {
@@ -1168,7 +1237,14 @@ fn worker_loop(spawn: WorkerSpawn) {
                     Some(&limiter),
                     Some(&progress),
                 );
-                if reports.send(WorkerReport { worker, iv, outcome }).is_err() {
+                if reports
+                    .send(WorkerReport {
+                        worker,
+                        iv,
+                        outcome,
+                    })
+                    .is_err()
+                {
                     break; // 主线程不在了，交回给谁都没意义
                 }
             }
@@ -1246,8 +1322,21 @@ impl Engine {
     /// 建通道、起 `cfg.workers` 条线程。起不来就把已经起的那几条收回去再报错（"根本跑不起来"）。
     fn new(launch: Launch) -> Result<Engine> {
         let Launch {
-            task, cfg, client, store, sched, total_len, accept_ranges, validator, state_path, stats, seed,
-            fresh_reason, if_range, limiter, started,
+            task,
+            cfg,
+            client,
+            store,
+            sched,
+            total_len,
+            accept_ranges,
+            validator,
+            state_path,
+            stats,
+            seed,
+            fresh_reason,
+            if_range,
+            limiter,
+            started,
         } = launch;
         let count = cfg.workers;
         // 交快照时要减掉的那个起点必须在 `stats` 被搬进结构体**之前**取（判据③）。
@@ -1256,7 +1345,11 @@ impl Engine {
         // **E16** R-B2：对端不认 `Range` ⇒ 每一枪取整条剩余 body（`ToEof`），**不许**按窗重请求。
         // 信号只有这一处（`ProbeFacts.accept_ranges`，**E11③** 的行为加权读法）；`run_window` 自己
         // 要到响应头到手才看得见退化，而预算（整请求期限，R7）必须在那之前定 —— 次序见 `fetch::BodyShape`。
-        let body = if accept_ranges { fetch::BodyShape::Windowed } else { fetch::BodyShape::ToEof };
+        let body = if accept_ranges {
+            fetch::BodyShape::Windowed
+        } else {
+            fetch::BodyShape::ToEof
+        };
         // R17 的值一次运行内不变；每个 worker 拿一份引用计数克隆，别把 String 复制 N 份。
         let if_range: Option<Arc<str>> = if_range.map(Arc::<str>::from);
 
@@ -1287,7 +1380,10 @@ impl Engine {
                 limiter: Arc::clone(&limiter),
                 progress: Arc::clone(&progress),
             };
-            match thread::Builder::new().name(format!("dlm-worker-{worker}")).spawn(move || worker_loop(spawn)) {
+            match thread::Builder::new()
+                .name(format!("dlm-worker-{worker}"))
+                .spawn(move || worker_loop(spawn))
+            {
                 Ok(handle) => {
                     jobs.push(tx);
                     handles.push(handle);
@@ -1303,14 +1399,19 @@ impl Engine {
                     for handle in handles.drain(..) {
                         let _ = handle.join();
                     }
-                    return Err(anyhow::Error::from(e).context(format!("开不出第 {worker} 个 worker 线程")));
+                    return Err(
+                        anyhow::Error::from(e).context(format!("开不出第 {worker} 个 worker 线程"))
+                    );
                 }
             }
         }
         // 主线程那份克隆必须交还：`Stop::WorkerGone{None}` 靠 `Disconnected` 才认得出"全没了"。
         drop(reports_tx);
 
-        let idle = WorkerCtl { state: WorkerState::Idle, attempt: 0 };
+        let idle = WorkerCtl {
+            state: WorkerState::Idle,
+            attempt: 0,
+        };
         let now = Instant::now();
         let mut engine = Engine {
             task,
@@ -1368,7 +1469,12 @@ impl Engine {
     }
 
     fn save_state(&mut self) -> Result<()> {
-        let segments: Vec<SegView> = self.sched.snapshot_intervals().into_iter().map(SegView::from).collect();
+        let segments: Vec<SegView> = self
+            .sched
+            .snapshot_intervals()
+            .into_iter()
+            .map(SegView::from)
+            .collect();
         let mut snap = Snapshot::from_task(&self.task, self.validator.clone(), segments)?;
         // `from_task` 会把 stats 归零（它只认任务与段表，不认运行中的账），这里把本轮的账填回去；
         // `saved_at` 也按派发那句重新盖一次 `utc_now()`，与 `stats` 同一时刻。
@@ -1487,8 +1593,13 @@ impl Engine {
         self.caps[worker].store(cap, Ordering::Release);
         self.progress[worker].store(fetch::NO_PROGRESS, Ordering::Release);
         self.synced_progress[worker] = fetch::NO_PROGRESS;
-        if self.jobs[worker].send(Job::Fetch { iv, rate_bps: rate }).is_err() {
-            return Some(Stop::WorkerGone { worker: Some(worker) });
+        if self.jobs[worker]
+            .send(Job::Fetch { iv, rate_bps: rate })
+            .is_err()
+        {
+            return Some(Stop::WorkerGone {
+                worker: Some(worker),
+            });
         }
         self.current[worker] = Some(iv);
         self.workers[worker].state = WorkerState::Busy;
@@ -1497,16 +1608,17 @@ impl Engine {
     }
 
     fn any_in_flight(&self) -> bool {
-        self.workers.iter().any(|ctl| matches!(ctl.state, WorkerState::Busy | WorkerState::Backoff { .. }))
+        self.workers
+            .iter()
+            .any(|ctl| matches!(ctl.state, WorkerState::Busy | WorkerState::Backoff { .. }))
     }
 
     /// A16：本次运行已经用掉的配额（预读基数 + 已交付 + 在途预占）。
     fn budget_spent(&self) -> u64 {
-        self.budget_share
-            .iter()
-            .fold(self.run_delivered.saturating_add(self.budget_base), |acc, share| {
-                acc.saturating_add(*share)
-            })
+        self.budget_share.iter().fold(
+            self.run_delivered.saturating_add(self.budget_base),
+            |acc, share| acc.saturating_add(*share),
+        )
     }
 
     fn budget_available(&self) -> u64 {
@@ -1529,7 +1641,8 @@ impl Engine {
             }
         }
         // 下限 1 ms：`recv_timeout(ZERO)` 在个别实现上等于"立刻回 Timeout"，那会变成忙等。
-        wake.saturating_duration_since(now).max(Duration::from_millis(1))
+        wake.saturating_duration_since(now)
+            .max(Duration::from_millis(1))
     }
 
     fn save_if_due(&mut self) -> Option<Stop> {
@@ -1612,7 +1725,9 @@ impl Engine {
     fn pump(&mut self) -> Stop {
         loop {
             if let Some(worker) = self.dead_busy_worker() {
-                return Stop::WorkerGone { worker: Some(worker) };
+                return Stop::WorkerGone {
+                    worker: Some(worker),
+                };
             }
             self.expire_backoffs();
             if let Some(stop) = self.ping_free_workers() {
@@ -1647,7 +1762,11 @@ impl Engine {
 
     /// 一条 worker 结论的全部后续：记账、喂事件、安排退避。交回 `Some(stop)` 表示主循环该停了。
     fn on_report(&mut self, rep: WorkerReport) -> Option<Stop> {
-        let WorkerReport { worker, iv, outcome } = rep;
+        let WorkerReport {
+            worker,
+            iv,
+            outcome,
+        } = rep;
         let outcome = match outcome {
             Ok(outcome) => outcome,
             // `run_window` 只在 `store.write_at` 失败时上抛：那一块真落了几字节**无从知道**，
@@ -1685,11 +1804,16 @@ impl Engine {
                 });
                 let attempt = self.workers[worker].attempt;
                 match next_retry_delay(attempt, self.cfg.max_retries) {
-                    None => Some(Stop::RetriesExhausted { worker, attempted: attempt }),
+                    None => Some(Stop::RetriesExhausted {
+                        worker,
+                        attempted: attempt,
+                    }),
                     Some(delay) => {
                         self.workers[worker].attempt = attempt.saturating_add(1);
                         self.stats.retries = self.stats.retries.saturating_add(1);
-                        self.workers[worker].state = WorkerState::Backoff { until: Instant::now() + delay };
+                        self.workers[worker].state = WorkerState::Backoff {
+                            until: Instant::now() + delay,
+                        };
                         self.current[worker] = None;
                         None
                     }
@@ -1749,14 +1873,18 @@ impl Engine {
         }
 
         let sched_done = self.sched.is_done();
-        let mut ok = matches!(&stop, Stop::Done) && completion_verdict(sched_done, on_disk, self.total_len);
+        let mut ok =
+            matches!(&stop, Stop::Done) && completion_verdict(sched_done, on_disk, self.total_len);
         let mut message: Option<String> = None;
 
         // **崩过的 worker 不许交回成功**：`join()` 报错的两种后果都在这里合流
         // （心跳那条路已经先把它变成 `WorkerGone`，这一条兜住"跑完了才发现崩过"的形状）。
         if !dead_workers.is_empty() {
             ok = false;
-            message = Some(format!("{} 个 worker 线程崩了（序号 {dead_workers:?}）：它手上那一枪没有结论", dead_workers.len()));
+            message = Some(format!(
+                "{} 个 worker 线程崩了（序号 {dead_workers:?}）：它手上那一枪没有结论",
+                dead_workers.len()
+            ));
         }
 
         if !ok && message.is_none() {
@@ -1764,10 +1892,16 @@ impl Engine {
                 Stop::RetriesExhausted { worker, attempted } => format!(
                     "worker {worker} 的重试到顶（已试 {attempted} 次，--max-retries={:?}）：{}",
                     self.cfg.max_retries,
-                    self.last_note.clone().unwrap_or_else(|| "最后一次失败没有留下原因串".to_string())
+                    self.last_note
+                        .clone()
+                        .unwrap_or_else(|| "最后一次失败没有留下原因串".to_string())
                 ),
-                Stop::WorkerGone { worker: Some(worker) } => format!("worker {worker} 的线程不在了：它那一枪不会有结论"),
-                Stop::WorkerGone { worker: None } => "所有 worker 线程都不在了：回报通道已断开".to_string(),
+                Stop::WorkerGone {
+                    worker: Some(worker),
+                } => format!("worker {worker} 的线程不在了：它那一枪不会有结论"),
+                Stop::WorkerGone { worker: None } => {
+                    "所有 worker 线程都不在了：回报通道已断开".to_string()
+                }
                 Stop::BudgetReached => format!(
                     "已达到本次运行字节预算（--max-bytes={}）：断点已保留，再次运行会继续",
                     self.cfg.max_bytes
@@ -1776,8 +1910,13 @@ impl Engine {
                     "没有活可派了，调度器却说还剩 {} 字节没归属（内部矛盾，不敢当成完成）",
                     self.sched.pending_bytes()
                 ),
-                Stop::Done => format!("归属已定但盘上只有 {on_disk}/{} 字节（E7：覆盖集不算已写字节数）", self.total_len),
-                Stop::StoreFailed(_) | Stop::StateFailed(_) => unreachable!("上面已经用 fatal 提前 bail"),
+                Stop::Done => format!(
+                    "归属已定但盘上只有 {on_disk}/{} 字节（E7：覆盖集不算已写字节数）",
+                    self.total_len
+                ),
+                Stop::StoreFailed(_) | Stop::StateFailed(_) => {
+                    unreachable!("上面已经用 fatal 提前 bail")
+                }
             });
         }
 
@@ -1803,7 +1942,10 @@ impl Engine {
             && let Err(e) = fs::remove_file(&self.state_path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            message = Some(format!("下载已完成，但断点文件删不掉（{}）：{e}", self.state_path.display()));
+            message = Some(format!(
+                "下载已完成，但断点文件删不掉（{}）：{e}",
+                self.state_path.display()
+            ));
         }
 
         let confirmed = coverage_bytes(&self.sched.snapshot_intervals());
@@ -1853,19 +1995,19 @@ mod tests {
             (2, None, Some(4)),
             (3, None, Some(8)),
             (4, None, Some(16)),
-            (5, None, Some(30)),   // §6.2：第 6 次起转 30 s，而不是判整任务失败
+            (5, None, Some(30)), // §6.2：第 6 次起转 30 s，而不是判整任务失败
             (6, None, Some(30)),
             (9, None, Some(30)),
-            (u32::MAX, None, Some(30)),   // 无限慢重试不许因为计数溢出而崩或停
+            (u32::MAX, None, Some(30)), // 无限慢重试不许因为计数溢出而崩或停
             // —— 给了 --max-retries：封顶的是整条链（快速 + 慢速一起数）——
-            (0, Some(0), None),    // 封顶 0 ⇒ 一次都不重试
+            (0, Some(0), None), // 封顶 0 ⇒ 一次都不重试
             (0, Some(1), Some(1)),
-            (1, Some(1), None),    // 已经重试满 1 次 ⇒ 第 2 次不给
+            (1, Some(1), None), // 已经重试满 1 次 ⇒ 第 2 次不给
             (4, Some(5), Some(16)),
-            (5, Some(5), None),    // 快速用满 ⇒ 慢速一档也不给留
+            (5, Some(5), None), // 快速用满 ⇒ 慢速一档也不给留
             (5, Some(6), Some(30)),
             (6, Some(7), Some(30)),
-            (7, Some(7), None),    // 慢速重试同样计入上限
+            (7, Some(7), None), // 慢速重试同样计入上限
             (8, Some(7), None),
         ];
         for (attempt, cap, want) in table {
@@ -1881,15 +2023,27 @@ mod tests {
     #[test]
     fn the_cap_admits_exactly_that_many_retries_and_no_more() {
         for cap in 0u32..12 {
-            let allowed: Vec<Option<Duration>> =
-                (0..cap + 3).map(|a| next_retry_delay(a, Some(cap))).collect();
+            let allowed: Vec<Option<Duration>> = (0..cap + 3)
+                .map(|a| next_retry_delay(a, Some(cap)))
+                .collect();
             let given = allowed.iter().filter(|d| d.is_some()).count();
-            assert_eq!(given, cap as usize, "封顶 {cap} 次却放行了 {given} 档: {allowed:?}");
-            assert!(allowed[cap as usize].is_none(), "第 {} 档该收手（封顶 {cap}）", cap + 1);
+            assert_eq!(
+                given, cap as usize,
+                "封顶 {cap} 次却放行了 {given} 档: {allowed:?}"
+            );
+            assert!(
+                allowed[cap as usize].is_none(),
+                "第 {} 档该收手（封顶 {cap}）",
+                cap + 1
+            );
         }
         // 没封顶：再往后也永远有下一档（§6.2 的"无限"）。
         for attempt in [5u32, 500, 100_000, u32::MAX] {
-            assert_eq!(next_retry_delay(attempt, None), Some(Duration::from_secs(30)), "attempt={attempt}");
+            assert_eq!(
+                next_retry_delay(attempt, None),
+                Some(Duration::from_secs(30)),
+                "attempt={attempt}"
+            );
         }
     }
 
@@ -1901,7 +2055,10 @@ mod tests {
         for cap in [None, Some(1), Some(3), Some(FAST_RETRY_MAX), Some(64)] {
             for attempt in 0u32..64 {
                 if let Some(d) = next_retry_delay(attempt, cap) {
-                    assert!(d.as_secs() >= 1, "退避不许是零秒（那等于立刻重打同一枪）: {d:?}");
+                    assert!(
+                        d.as_secs() >= 1,
+                        "退避不许是零秒（那等于立刻重打同一枪）: {d:?}"
+                    );
                     assert!(
                         d.as_secs() <= WINDOW_MAX_TIMEOUT_SECS,
                         "退避不该长过最宽的一次窗口预算，否则主循环的等待没有上界: {d:?}"
@@ -1920,9 +2077,27 @@ mod tests {
     fn completion_verdict_needs_both_books_and_never_the_covering_set() {
         let table: &[(&str, bool, u64, u64, bool)] = &[
             ("两本账都对得上", true, 8, 8, true),
-            ("调度器没说完，盘上够了也不成（还有区间在途）", false, 8, 8, false),
-            ("调度器说完了，盘上少一个字节（416 封存过没落盘的段）", true, 7, 8, false),
-            ("盘上比全长多（上一轮写歪的尾巴）也不能算完", true, 9, 8, false),
+            (
+                "调度器没说完，盘上够了也不成（还有区间在途）",
+                false,
+                8,
+                8,
+                false,
+            ),
+            (
+                "调度器说完了，盘上少一个字节（416 封存过没落盘的段）",
+                true,
+                7,
+                8,
+                false,
+            ),
+            (
+                "盘上比全长多（上一轮写歪的尾巴）也不能算完",
+                true,
+                9,
+                8,
+                false,
+            ),
             ("空文件：两个 0 就是完成", true, 0, 0, true),
             ("什么都没干", false, 0, 8, false),
         ];
@@ -1937,7 +2112,10 @@ mod tests {
         // 覆盖集那个量**不参与**判定，所以它相等而落盘量不等时必须还是假。
         let sealed = [Interval { start: 0, end: 7 }];
         assert_eq!(coverage_bytes(&sealed), 8, "覆盖集自己说的是 8 字节");
-        assert!(!completion_verdict(true, 7, 8), "覆盖集 == 全长而盘上只有 7 ⇒ 不许过闸（E7）");
+        assert!(
+            !completion_verdict(true, 7, 8),
+            "覆盖集 == 全长而盘上只有 7 ⇒ 不许过闸（E7）"
+        );
     }
 
     /// `Advanced{bytes}` → `Progress{abs_end}` 的换算必须是**含端点**的，而且不许越过区间。
@@ -1952,25 +2130,42 @@ mod tests {
     /// - `bytes = 0` ⇒ `None`（没什么可报的）。
     #[test]
     fn the_advanced_mapping_is_inclusive_and_bounded_to_the_interval() {
-        let iv = Interval { start: 100, end: 199 }; // 100 个字节
+        let iv = Interval {
+            start: 100,
+            end: 199,
+        }; // 100 个字节
         let table: &[(u64, Option<u64>)] = &[
-            (0, None),                    // 一个字节都没落地
-            (1, Some(100)),               // 只有第 100 个字节
-            (50, Some(149)),              // 写到 149（含）
-            (100, Some(199)),             // 整个区间：正好等于 iv.end，绝不是 end+1
+            (0, None),        // 一个字节都没落地
+            (1, Some(100)),   // 只有第 100 个字节
+            (50, Some(149)),  // 写到 149（含）
+            (100, Some(199)), // 整个区间：正好等于 iv.end，绝不是 end+1
         ];
         for (bytes, want) in table {
             assert_eq!(progress_abs_end(iv.start, *bytes), *want, "bytes={bytes}");
         }
-        assert_eq!(progress_abs_end(iv.start, 100), Some(iv.end), "填满区间时报的必须是含端点的终点");
-        assert_ne!(progress_abs_end(iv.start, 100), Some(iv.end + 1), "end+1 会把下一段的第一字节吞掉");
+        assert_eq!(
+            progress_abs_end(iv.start, 100),
+            Some(iv.end),
+            "填满区间时报的必须是含端点的终点"
+        );
+        assert_ne!(
+            progress_abs_end(iv.start, 100),
+            Some(iv.end + 1),
+            "end+1 会把下一段的第一字节吞掉"
+        );
 
         // `Complete` 不带字节，但它承诺的就是全长 ⇒ 同一个含端点终点（`fetch::run_window` 的 `>` 判据）。
         let (events, landed, _) = translate(&Outcome::Complete, iv, iv, 3);
         assert_eq!(landed, 100, "Complete 落的字节就是区间全长");
         assert_eq!(
             events,
-            vec![Event::Progress { worker: 3, abs_end: 199 }, Event::SegmentComplete { worker: 3 }],
+            vec![
+                Event::Progress {
+                    worker: 3,
+                    abs_end: 199
+                },
+                Event::SegmentComplete { worker: 3 }
+            ],
             "Complete 折成 SegmentComplete（**不是** WindowDone，E7）"
         );
     }
@@ -1980,12 +2175,44 @@ mod tests {
     fn one_fetch_outcome_maps_to_exactly_the_documented_events() {
         let iv = Interval { start: 0, end: 999 };
         let cases: Vec<(Outcome, Vec<Event>, u64)> = vec![
-            (Outcome::Advanced { bytes: 400 }, vec![Event::Progress { worker: 1, abs_end: 399 }, Event::WindowDone { worker: 1 }], 400),
-            (Outcome::Complete, vec![Event::Progress { worker: 1, abs_end: 999 }, Event::SegmentComplete { worker: 1 }], 1000),
+            (
+                Outcome::Advanced { bytes: 400 },
+                vec![
+                    Event::Progress {
+                        worker: 1,
+                        abs_end: 399,
+                    },
+                    Event::WindowDone { worker: 1 },
+                ],
+                400,
+            ),
+            (
+                Outcome::Complete,
+                vec![
+                    Event::Progress {
+                        worker: 1,
+                        abs_end: 999,
+                    },
+                    Event::SegmentComplete { worker: 1 },
+                ],
+                1000,
+            ),
             (Outcome::Stalled, vec![Event::Failed { worker: 1 }], 0),
-            (Outcome::Failed(FailKind::Http(503)), vec![Event::Failed { worker: 1 }], 0),
-            (Outcome::Failed(FailKind::Transport("对端拆了线".into())), vec![Event::Failed { worker: 1 }], 0),
-            (Outcome::Failed(FailKind::ValidatorChanged), vec![Event::Failed { worker: 1 }], 0),
+            (
+                Outcome::Failed(FailKind::Http(503)),
+                vec![Event::Failed { worker: 1 }],
+                0,
+            ),
+            (
+                Outcome::Failed(FailKind::Transport("对端拆了线".into())),
+                vec![Event::Failed { worker: 1 }],
+                0,
+            ),
+            (
+                Outcome::Failed(FailKind::ValidatorChanged),
+                vec![Event::Failed { worker: 1 }],
+                0,
+            ),
         ];
         for (outcome, want_events, want_landed) in cases {
             let (events, landed, duplicated) = translate(&outcome, iv, iv, 1);
@@ -1997,7 +2224,10 @@ mod tests {
         // 空区间那一支（`run_window` 看见 `iv.is_empty()` 直接 `Complete`，一枪都不发）：
         // 没有可报的偏移，只交回封存事件本身。
         let empty = Interval { start: 5, end: 4 };
-        assert_eq!(translate(&Outcome::Complete, empty, empty, 0).0, vec![Event::SegmentComplete { worker: 0 }]);
+        assert_eq!(
+            translate(&Outcome::Complete, empty, empty, 0).0,
+            vec![Event::SegmentComplete { worker: 0 }]
+        );
     }
 
     /// **重复字节**只有一种来源：字节落在了调度器认给这个 worker 的区间之外。
@@ -2017,21 +2247,64 @@ mod tests {
         type Row = (&'static str, Interval, u64, Interval, u64, u64, Option<u64>);
         let table: &[Row] = &[
             ("没收紧过：全是真进度", shot, 400, shot, 400, 0, Some(399)),
-            ("收紧后读完窗口：越界那截算重复", shot, 1000, tightened, 1000, 600, Some(999)),
-            ("收紧后正好收到新终点", shot, 400, tightened, 400, 0, Some(399)),
-            ("收紧后还少于一新终点", shot, 250, tightened, 250, 0, Some(249)),
+            (
+                "收紧后读完窗口：越界那截算重复",
+                shot,
+                1000,
+                tightened,
+                1000,
+                600,
+                Some(999),
+            ),
+            (
+                "收紧后正好收到新终点",
+                shot,
+                400,
+                tightened,
+                400,
+                0,
+                Some(399),
+            ),
+            (
+                "收紧后还少于一新终点",
+                shot,
+                250,
+                tightened,
+                250,
+                0,
+                Some(249),
+            ),
             ("一个字节都没落地", shot, 0, tightened, 0, 0, None),
-            ("起点就在新区间之后（整枪都白读）", shot, 100, Interval { start: 500, end: 999 }, 100, 100, Some(99)),
+            (
+                "起点就在新区间之后（整枪都白读）",
+                shot,
+                100,
+                Interval {
+                    start: 500,
+                    end: 999,
+                },
+                100,
+                100,
+                Some(99),
+            ),
         ];
         for (case, s, bytes, owned, want_landed, want_duplicated, want_abs_end) in table {
-            let (events, landed, duplicated) = translate(&Outcome::Advanced { bytes: *bytes }, *s, *owned, 0);
+            let (events, landed, duplicated) =
+                translate(&Outcome::Advanced { bytes: *bytes }, *s, *owned, 0);
             assert_eq!(landed, *want_landed, "{case}");
             assert_eq!(duplicated, *want_duplicated, "{case}");
             // 事件里报的是**真实**的含端点偏移，越界那一段由调度器自己夹住（`note_progress`）。
             // 零进度那一支没有偏移可报，只剩收尾那一条。
             match want_abs_end {
                 None => assert_eq!(events, vec![Event::WindowDone { worker: 0 }], "{case}"),
-                Some(abs_end) => assert_eq!(events[0], Event::Progress { worker: 0, abs_end: *abs_end }, "{case}"),
+                Some(abs_end) => assert_eq!(
+                    events[0],
+                    Event::Progress {
+                        worker: 0,
+                        abs_end: *abs_end
+                    },
+                    "{case}"
+                ),
             }
         }
     }
@@ -2057,29 +2330,53 @@ mod tests {
     #[test]
     fn the_duplicate_book_counts_only_what_fell_outside_the_owned_range() {
         let window = crate::consts::WINDOW_BYTES;
-        let shot = Interval { start: 0, end: window - 1 };
-        let (_, landed, duplicated) = translate(&Outcome::Advanced { bytes: window }, shot, shot, 0);
+        let shot = Interval {
+            start: 0,
+            end: window - 1,
+        };
+        let (_, landed, duplicated) =
+            translate(&Outcome::Advanced { bytes: window }, shot, shot, 0);
         assert_eq!(landed, window, "整窗都是落盘量");
-        assert_eq!(duplicated, 0, "①读满自己那个窗口不是重复：帽/归属没动，一个字节都不会被重下");
+        assert_eq!(
+            duplicated, 0,
+            "①读满自己那个窗口不是重复：帽/归属没动，一个字节都不会被重下"
+        );
 
-        let owned = Interval { start: 0, end: 100_000 };
+        let owned = Interval {
+            start: 0,
+            end: 100_000,
+        };
         let crossed = 100_001 + 65_536;
-        let (_, landed, duplicated) = translate(&Outcome::Advanced { bytes: crossed }, shot, owned, 0);
+        let (_, landed, duplicated) =
+            translate(&Outcome::Advanced { bytes: crossed }, shot, owned, 0);
         assert_eq!(landed, crossed);
-        assert_eq!(duplicated, 65_536, "②越帽的那一块整块落 ⇒ 这本账的全部就是那一块（64 KiB）");
+        assert_eq!(
+            duplicated, 65_536,
+            "②越帽的那一块整块落 ⇒ 这本账的全部就是那一块（64 KiB）"
+        );
 
-        let all_mine = Interval { start: 500, end: 999 };
+        let all_mine = Interval {
+            start: 500,
+            end: 999,
+        };
         let (_, _, duplicated) = translate(
             &Outcome::Advanced { bytes: 100 },
             Interval { start: 0, end: 99 },
             all_mine,
             0,
         );
-        assert_eq!(duplicated, 100, "③整枪都落在归属之外 ⇒ 全是账（不许只算越过右终点的那截）");
+        assert_eq!(
+            duplicated, 100,
+            "③整枪都落在归属之外 ⇒ 全是账（不许只算越过右终点的那截）"
+        );
 
         // 同一格在 `Complete` 那一支也要成立：`Complete` 交回的是区间全长，归属没缩就是零。
         let (_, landed, duplicated) = translate(&Outcome::Complete, shot, shot, 0);
-        assert_eq!((landed, duplicated), (window, 0), "Complete 不该凭空造出重复账");
+        assert_eq!(
+            (landed, duplicated),
+            (window, 0),
+            "Complete 不该凭空造出重复账"
+        );
 
         // ④ 这本账不许为负：`landed` 比归属短的时候是 0，不是 `usize` 下溢（debug 直接 panic）。
         let short = translate(&Outcome::Advanced { bytes: 10 }, shot, owned, 0);
@@ -2094,7 +2391,10 @@ mod tests {
     /// 那条集成用例的镜像面）。
     #[test]
     fn a_retighten_moves_the_target_end_but_never_fires_a_shot() {
-        let iv = Interval { start: 100, end: 299 };
+        let iv = Interval {
+            start: 100,
+            end: 299,
+        };
         assert!(matches!(
             action_for_worker(Action::Assign { worker: 3, iv }),
             Shot::Fire { worker: 3, iv: got } if got == iv
@@ -2112,7 +2412,10 @@ mod tests {
         assert_eq!(first.len(), 1, "第一枪只有 Assign");
         assert!(matches!(first[0], Action::Assign { .. }));
         assert_eq!(
-            second.iter().map(|a| matches!(a, Action::Retighten { .. })).collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|a| matches!(a, Action::Retighten { .. }))
+                .collect::<Vec<_>>(),
             vec![true, false],
             "第二枪该是先 Retighten 再 Assign，且只有后者是一枪：{second:?}"
         );
@@ -2141,26 +2444,48 @@ mod tests {
 
         // Fresh（没有断点）：truncate、没有种子、没有原因、账从零。
         let plan = plan_from_decision(Decision::Fresh { reason: None }).expect("Fresh 是合法结论");
-        assert!(plan.truncate, "Fresh 必须覆盖残留的半截文件（spec §4 的 --no-resume 同一支）");
+        assert!(
+            plan.truncate,
+            "Fresh 必须覆盖残留的半截文件（spec §4 的 --no-resume 同一支）"
+        );
         assert!(plan.seed.is_empty(), "Fresh 没有可播种的段表");
-        assert!(plan.fresh_reason.is_none(), "本来就没有断点 ⇒ 没有需要解释的事");
+        assert!(
+            plan.fresh_reason.is_none(),
+            "本来就没有断点 ⇒ 没有需要解释的事"
+        );
         assert_eq!(plan.stats, Stats::default());
         assert!(plan.resume_validator.is_none(), "Fresh 不该带续传验证器");
 
         // Fresh（冲突重来）：原因串必须活着走到 Report（`src/resume.rs` 对 Task 9 的承诺）。
-        let plan = plan_from_decision(Decision::Fresh { reason: Some("ETag 变了".into()) }).expect("Fresh 是合法结论");
+        let plan = plan_from_decision(Decision::Fresh {
+            reason: Some("ETag 变了".into()),
+        })
+        .expect("Fresh 是合法结论");
         assert_eq!(plan.fresh_reason.as_deref(), Some("ETag 变了"));
 
         // Resume：不动文件、段表进种子、账从上次的 stats 接着数。
         let snap = Snapshot::stub_for_test(
             validator,
-            vec![SegView { start: 0, end: 39 }, SegView { start: 60, end: 99 }],
+            vec![
+                SegView { start: 0, end: 39 },
+                SegView { start: 60, end: 99 },
+            ],
         );
         let mut snap = snap;
-        snap.stats = Stats { bytes_delivered: 70, bytes_duplicated: 6, retries: 2 };
+        snap.stats = Stats {
+            bytes_delivered: 70,
+            bytes_duplicated: 6,
+            retries: 2,
+        };
         let plan = plan_from_decision(Decision::Resume(snap)).expect("Resume 是合法结论");
         assert!(!plan.truncate, "续传绝不许截断文件：那会把已确认的字节抹掉");
-        assert_eq!(plan.seed, vec![Interval { start: 0, end: 39 }, Interval { start: 60, end: 99 }]);
+        assert_eq!(
+            plan.seed,
+            vec![
+                Interval { start: 0, end: 39 },
+                Interval { start: 60, end: 99 }
+            ]
+        );
         assert_eq!(plan.stats.retries, 2, "重试计数是跨轮的账，不能从 0 重数");
         assert_eq!(plan.stats.bytes_delivered, 70);
         assert!(plan.fresh_reason.is_none());
@@ -2180,12 +2505,18 @@ mod tests {
             final_url: "http://x/y".into(),
             ignore_mtime: false,
         };
-        assert!(if_range_for(None, true, false).is_none(), "Fresh 没有断点验证器，不许发");
+        assert!(
+            if_range_for(None, true, false).is_none(),
+            "Fresh 没有断点验证器，不许发"
+        );
         assert!(
             if_range_for(Some(&validator), false, false).is_none(),
             "不认 Range 的对端回 200 是正常退化，不是验证器变了"
         );
-        assert_eq!(if_range_for(Some(&validator), true, false).as_deref(), Some("\"e\""));
+        assert_eq!(
+            if_range_for(Some(&validator), true, false).as_deref(),
+            Some("\"e\"")
+        );
         assert_eq!(
             if_range_for(Some(&validator), true, true).as_deref(),
             Some("\"e\""),
@@ -2197,7 +2528,10 @@ mod tests {
     /// "引擎用的那一格"：断点里那两条区间进不去的位置才是真危险）。
     #[test]
     fn the_seed_only_leaves_the_gaps_for_the_scheduler_to_dispatch() {
-        let seed = [Interval { start: 0, end: 39 }, Interval { start: 60, end: 99 }];
+        let seed = [
+            Interval { start: 0, end: 39 },
+            Interval { start: 60, end: 99 },
+        ];
         let mut sched = Scheduler::resume(100, 16, &seed);
         assert_eq!(sched.pending_bytes(), 20, "只有 40..=59 还没归属");
         let actions = sched.on(Event::Connected(0));
@@ -2212,44 +2546,79 @@ mod tests {
     /// 而永远续不上（失败那一支按裁定留着断点文件）。
     #[test]
     fn the_seed_is_clamped_to_what_is_actually_on_disk() {
-        let seed = [Interval { start: 0, end: 39 }, Interval { start: 60, end: 99 }];
+        let seed = [
+            Interval { start: 0, end: 39 },
+            Interval { start: 60, end: 99 },
+        ];
         let table: &[(&str, u64, &[Interval])] = &[
             ("文件被删空：整张表都不作数", 0, &[]),
             ("只写到第一个洞之前", 20, &[Interval { start: 0, end: 19 }]),
             ("正好到第一行末尾", 40, &[Interval { start: 0, end: 39 }]),
-            ("落在洞里：第二行一个字节都没有", 50, &[Interval { start: 0, end: 39 }]),
+            (
+                "落在洞里：第二行一个字节都没有",
+                50,
+                &[Interval { start: 0, end: 39 }],
+            ),
             ("越过第二行的终点：原样", 140, &seed),
-            ("盘上正好缺最后一行", 80, &[Interval { start: 0, end: 39 }, Interval { start: 60, end: 79 }]),
+            (
+                "盘上正好缺最后一行",
+                80,
+                &[
+                    Interval { start: 0, end: 39 },
+                    Interval { start: 60, end: 79 },
+                ],
+            ),
         ];
         for (case, on_disk, want) in table {
-            assert_eq!(clamp_seed_to_disk(&seed, *on_disk), *want, "{case}：on_disk={on_disk}");
+            assert_eq!(
+                clamp_seed_to_disk(&seed, *on_disk),
+                *want,
+                "{case}：on_disk={on_disk}"
+            );
         }
         // 夹完仍然是 `check_segments` 收得下的形状：只会更远，不会新增相邻。
         let clamped = clamp_seed_to_disk(&seed, 80);
-        assert!(clamped.windows(2).all(|w| w[1].start > w[0].end + 1), "夹完还升序且不相邻：{clamped:?}");
+        assert!(
+            clamped.windows(2).all(|w| w[1].start > w[0].end + 1),
+            "夹完还升序且不相邻：{clamped:?}"
+        );
         // 夹掉的字节回到待下载，而不是被记成"已经落盘"：调度器必须能把它们重新派出去。
         let sched = Scheduler::resume(100, 16, &clamped);
-        assert_eq!(sched.pending_bytes(), 40, "已确认 0..=39 与 60..=79 共 60 字节，剩下 40 个还得下");
+        assert_eq!(
+            sched.pending_bytes(),
+            40,
+            "已确认 0..=39 与 60..=79 共 60 字节，剩下 40 个还得下"
+        );
     }
 
     /// 平均速率：除零要挡住（第一轮没有任何测量），单位是**字节/秒**（`window_budget` 按字节除）。
     #[test]
     fn running_rate_guards_the_division_and_is_bytes_per_second() {
         let table: &[(u64, Duration, u64)] = &[
-            (0, Duration::ZERO, 0),                                        // 同一瞬间：不许 panic
-            (0, Duration::from_secs(3), 0),                                // 还没字节
-            (1_000_000, Duration::from_secs(1), 1_000_000),                 // 1 MB/s
-            (1_000_000, Duration::from_millis(500), 2_000_000),             // 半秒交完
-            (1, Duration::from_micros(1), 1_000_000),                       // 一个字节一微秒
-            (8 * 1024 * 1024, Duration::from_millis(1), 8_388_608_000),   // 8 MiB / 1 ms = 8 GiB/s
+            (0, Duration::ZERO, 0),                             // 同一瞬间：不许 panic
+            (0, Duration::from_secs(3), 0),                     // 还没字节
+            (1_000_000, Duration::from_secs(1), 1_000_000),     // 1 MB/s
+            (1_000_000, Duration::from_millis(500), 2_000_000), // 半秒交完
+            (1, Duration::from_micros(1), 1_000_000),           // 一个字节一微秒
+            (8 * 1024 * 1024, Duration::from_millis(1), 8_388_608_000), // 8 MiB / 1 ms = 8 GiB/s
         ];
         for (delivered, elapsed, want) in table {
-            assert_eq!(running_rate_bytes_per_sec(*delivered, *elapsed), *want, "delivered={delivered} elapsed={elapsed:?}");
+            assert_eq!(
+                running_rate_bytes_per_sec(*delivered, *elapsed),
+                *want,
+                "delivered={delivered} elapsed={elapsed:?}"
+            );
         }
         // 速率 0 是"未知"，`window_budget` 据此给最宽预算 —— 这里钉的是两端接得上。
-        assert_eq!(fetch::window_budget(0), Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS));
+        assert_eq!(
+            fetch::window_budget(0),
+            Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS)
+        );
         // u64 上界那一格不许绕回成小数（saturating）。
-        assert!(running_rate_bytes_per_sec(u64::MAX, Duration::from_micros(1)) >= running_rate_bytes_per_sec(1, Duration::from_micros(1)));
+        assert!(
+            running_rate_bytes_per_sec(u64::MAX, Duration::from_micros(1))
+                >= running_rate_bytes_per_sec(1, Duration::from_micros(1))
+        );
     }
 
     /// `--sha256` 那道闸的比对：大小写与首尾空白不算不符，空期望**永不放行**。
@@ -2265,7 +2634,11 @@ mod tests {
             ("两边都空", "", "", false),
         ];
         for (case, got, want, pass) in table {
-            assert_eq!(hash_matches(got, want), *pass, "{case}：got={got:?} want={want:?}");
+            assert_eq!(
+                hash_matches(got, want),
+                *pass,
+                "{case}：got={got:?} want={want:?}"
+            );
         }
     }
 
@@ -2273,11 +2646,16 @@ mod tests {
     #[test]
     fn the_hasher_reads_a_stream_in_chunks_and_prints_lower_case_hex() {
         // 公开向量：SHA-256("abc")。
-        assert_eq!(sha256_of_reader(&mut "abc".as_bytes()).expect("读内存不该失败"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256_of_reader(&mut "abc".as_bytes()).expect("读内存不该失败"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         // 超过一个 64 KiB 块：分块循环的两条支路都要走到（`take` 满块 + 尾巴）。
         let big = vec![0u8; 64 * 1024 * 3 + 7];
-        assert_eq!(sha256_of_reader(&mut big.as_slice()).expect("读内存不该失败"), hex_lower(&Sha256::digest(&big)));
+        assert_eq!(
+            sha256_of_reader(&mut big.as_slice()).expect("读内存不该失败"),
+            hex_lower(&Sha256::digest(&big))
+        );
         assert_eq!(hex_lower(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
         assert_eq!(hex_lower(&[]), "");
     }
@@ -2286,15 +2664,29 @@ mod tests {
     #[test]
     fn failure_note_keeps_the_transporters_words_and_adds_no_truncation() {
         assert_eq!(failure_note(&FailKind::Http(416)), "服务器对这一枪回了 416");
-        assert_eq!(failure_note(&FailKind::ValidatorChanged),
-            "服务端说这份文件已经变了（带 If-Range 的请求回了 200，或 416/206 的范围对不上）");
+        assert_eq!(
+            failure_note(&FailKind::ValidatorChanged),
+            "服务端说这份文件已经变了（带 If-Range 的请求回了 200，或 416/206 的范围对不上）"
+        );
         // Transport 的载荷**原样**透传：生产侧已经把它压成单行、截到 200 字符、摘掉 URL
         // （`fetch::transport_note` 是唯一的实现）。这里再截一次就会互相吃掉信息（E12⑦），
         // 所以连"看着顺眼一点"的修饰都不许做：载荷里有换行也照原样交回去。
         let long = "y".repeat(200);
-        assert_eq!(failure_note(&FailKind::Transport(long.clone())), long, "200 字符的载荷一格都不许多截");
-        assert_eq!(failure_note(&FailKind::Transport("带换行\n".into())), "带换行\n", "只透传，不改写");
-        assert_eq!(failure_note(&FailKind::Transport(String::new())), "", "空载荷不是 panic 也不是占位文案");
+        assert_eq!(
+            failure_note(&FailKind::Transport(long.clone())),
+            long,
+            "200 字符的载荷一格都不许多截"
+        );
+        assert_eq!(
+            failure_note(&FailKind::Transport("带换行\n".into())),
+            "带换行\n",
+            "只透传，不改写"
+        );
+        assert_eq!(
+            failure_note(&FailKind::Transport(String::new())),
+            "",
+            "空载荷不是 panic 也不是占位文案"
+        );
     }
 
     /// `Report::replay` 与 `dispatched()`/`tightened()` 的对应关系（阶段 5 那两道链接的地基）。
@@ -2329,8 +2721,14 @@ mod tests {
             }
         }
         let first = Interval { start: 0, end: 199 };
-        trace.push(TraceStep::Fed(Event::Progress { worker: 0, abs_end: first.end }));
-        sched.on(Event::Progress { worker: 0, abs_end: first.end });
+        trace.push(TraceStep::Fed(Event::Progress {
+            worker: 0,
+            abs_end: first.end,
+        }));
+        sched.on(Event::Progress {
+            worker: 0,
+            abs_end: first.end,
+        });
         trace.push(TraceStep::Fed(Event::WindowDone { worker: 0 }));
         sched.on(Event::WindowDone { worker: 0 });
 
@@ -2349,23 +2747,58 @@ mod tests {
         };
         let replayed = report.replay(total, min_seg);
         let (assigns, retightens) = sched_snapshot_pairs(&replayed);
-        assert_eq!(assigns, report.dispatched(), "回放给出的 Assign 必须与引擎真打出去的一枪逐条相等");
-        assert_eq!(retightens, report.tightened(), "回放的 Retighten 必须与记下的收紧逐条相等");
-        assert!(!report.tightened().is_empty(), "两个 worker 的形状里至少该有一次收紧");
+        assert_eq!(
+            assigns,
+            report.dispatched(),
+            "回放给出的 Assign 必须与引擎真打出去的一枪逐条相等"
+        );
+        assert_eq!(
+            retightens,
+            report.tightened(),
+            "回放的 Retighten 必须与记下的收紧逐条相等"
+        );
+        assert!(
+            !report.tightened().is_empty(),
+            "两个 worker 的形状里至少该有一次收紧"
+        );
         // 条数写成**字面量**（T8 评审 B 的测试诚实性条目）：这一段形状是手工搭的，两次 `Connected`
         // 各派出什么、劈在哪一格全都可知 ⇒ "至少有一条"那种读法会放过少派/多派一枪的变异。
-        assert_eq!(report.dispatched().len(), 2, "两枪：第一次 Connected 整段派出，第二次 Connected 领到劈出来的右半");
-        assert_eq!(report.tightened().len(), 1, "一次收紧：劈分时 incumbent 的在途区间被收到中点之前");
-        assert_eq!(report.fed().len(), 4, "四条事件：两次 Connected、一次 Progress、一次 WindowDone");
+        assert_eq!(
+            report.dispatched().len(),
+            2,
+            "两枪：第一次 Connected 整段派出，第二次 Connected 领到劈出来的右半"
+        );
+        assert_eq!(
+            report.tightened().len(),
+            1,
+            "一次收紧：劈分时 incumbent 的在途区间被收到中点之前"
+        );
+        assert_eq!(
+            report.fed().len(),
+            4,
+            "四条事件：两次 Connected、一次 Progress、一次 WindowDone"
+        );
         // 这一格原先断的是 `report.confirmed` —— 上面几行自己刚写进去的字面量 0，等于没断
         // （T8 评审 B）。改成断**被测代码 `Report::replay` 产出的完整动作序列**：带 worker 序号，
         // 比 `assigns`/`retightens` 两列区间投影更严（区间对而序号错也红）。
         assert_eq!(
             replayed,
             vec![
-                Action::Assign { worker: 0, iv: Interval { start: 0, end: 399 } },
-                Action::Retighten { worker: 0, iv: Interval { start: 0, end: 199 } },
-                Action::Assign { worker: 1, iv: Interval { start: 200, end: 399 } },
+                Action::Assign {
+                    worker: 0,
+                    iv: Interval { start: 0, end: 399 }
+                },
+                Action::Retighten {
+                    worker: 0,
+                    iv: Interval { start: 0, end: 199 }
+                },
+                Action::Assign {
+                    worker: 1,
+                    iv: Interval {
+                        start: 200,
+                        end: 399
+                    }
+                },
             ],
             "回放必须给出与这段真跑完全相同的动作序列（含 worker 序号与中点劈分的位置）"
         );
@@ -2375,14 +2808,20 @@ mod tests {
     fn sched_snapshot_pairs(actions: &[Action]) -> (Vec<Interval>, Vec<Interval>) {
         // 返回类型写成元组而不是结构体：它只在这条用例里活着。
         (
-            actions.iter().filter_map(|a| match a {
-                Action::Assign { iv, .. } => Some(*iv),
-                _ => None,
-            }).collect(),
-            actions.iter().filter_map(|a| match a {
-                Action::Retighten { iv, .. } => Some(*iv),
-                _ => None,
-            }).collect(),
+            actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Assign { iv, .. } => Some(*iv),
+                    _ => None,
+                })
+                .collect(),
+            actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Retighten { iv, .. } => Some(*iv),
+                    _ => None,
+                })
+                .collect(),
         )
     }
 
@@ -2414,7 +2853,10 @@ mod tests {
 
     impl TickSink {
         fn new() -> TickSink {
-            TickSink { hits: Arc::new(AtomicUsize::new(0)), log: Arc::new(Mutex::new(vec![])) }
+            TickSink {
+                hits: Arc::new(AtomicUsize::new(0)),
+                log: Arc::new(Mutex::new(vec![])),
+            }
         }
 
         fn count(&self) -> usize {
@@ -2438,7 +2880,9 @@ mod tests {
             let log = Arc::clone(&self.log);
             Arc::new(move |snap: &RunSnapshot| {
                 hits.fetch_add(1, Ordering::SeqCst);
-                log.lock().expect("快照流水没有竞争者").push((Instant::now(), *snap));
+                log.lock()
+                    .expect("快照流水没有竞争者")
+                    .push((Instant::now(), *snap));
             })
         }
     }
@@ -2506,7 +2950,10 @@ mod tests {
             jobs: vec![job_tx],
             reports: reports_rx,
             handles: vec![],
-            workers: vec![WorkerCtl { state: WorkerState::Idle, attempt: 0 }],
+            workers: vec![WorkerCtl {
+                state: WorkerState::Idle,
+                attempt: 0,
+            }],
             alive: vec![Arc::new(AtomicBool::new(true))],
             caps: vec![Arc::new(fetch::EndCap::new(fetch::NO_END_CAP))],
             progress: vec![Arc::new(AtomicU64::new(fetch::NO_PROGRESS))],
@@ -2527,7 +2974,13 @@ mod tests {
             tick_delivered: 0,
             dup_base: 0,
         };
-        TickFixture { engine, reports: reports_tx, _jobs: vec![job_rx], target, state_path }
+        TickFixture {
+            engine,
+            reports: reports_tx,
+            _jobs: vec![job_rx],
+            target,
+            state_path,
+        }
     }
 
     /// 一条"这一枪落了这么多字节 / 这一枪坏了"的结论。
@@ -2535,7 +2988,11 @@ mod tests {
     /// `iv` 给什么都行：`run_delivered` 只看这条结论交回的字节，调度器认不认这一段只影响覆盖集
     /// （而覆盖集这一格由 (e) 直接钉，不必绕主循环）。
     fn report(worker: usize, iv: Interval, outcome: Outcome) -> WorkerReport {
-        WorkerReport { worker, iv, outcome: Ok(outcome) }
+        WorkerReport {
+            worker,
+            iv,
+            outcome: Ok(outcome),
+        }
     }
 
     /// 节拍上界：`运行秒数上取整 + 2`（**E21** 的验收下限 (b) 原文，`+2` 是留给"收尾那一拍"与
@@ -2554,24 +3011,83 @@ mod tests {
     /// - 三笔账的字面量（`run_delivered` / `bytes_duplicated` / 结论）挡的是"挂观察者与不挂走了两条路"。
     #[test]
     fn the_default_config_carries_no_observer_and_none_changes_no_book() {
-        assert!(Config::default().on_tick.is_none(), "E21⑨ 的默认必须是 `None`：默认路径一个新字段都不挂");
-        let by_update = Config { workers: 3, ..Config::default() };
-        assert!(by_update.on_tick.is_none(), "结构体更新语法也不该凭空长出观察者");
-        assert!(by_update.clone().on_tick.is_none(), "`Config` 派生 `Clone` ⇒ 字段是 `Arc`，克隆不许把它变成 `Some`");
+        assert!(
+            Config::default().on_tick.is_none(),
+            "E21⑨ 的默认必须是 `None`：默认路径一个新字段都不挂"
+        );
+        let by_update = Config {
+            workers: 3,
+            ..Config::default()
+        };
+        assert!(
+            by_update.on_tick.is_none(),
+            "结构体更新语法也不该凭空长出观察者"
+        );
+        assert!(
+            by_update.clone().on_tick.is_none(),
+            "`Config` 派生 `Clone` ⇒ 字段是 `Arc`，克隆不许把它变成 `Some`"
+        );
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let cfg = Config { workers: 1, max_retries: Some(0), ..Config::default() };
+        let cfg = Config {
+            workers: 1,
+            max_retries: Some(0),
+            ..Config::default()
+        };
         let mut fx = hand_engine("none", cfg, 1_000_000);
         // 三条结论照投：两条进度 + 一条收工的失败（`max_retries = Some(0)` ⇒ 失败即封顶，见 `Stop`）。
-        fx.reports.send(report(0, Interval { start: 0, end: 999 }, Outcome::Advanced { bytes: 1_000 })).expect("投结论");
-        fx.reports.send(report(0, Interval { start: 1_000, end: 1_999 }, Outcome::Advanced { bytes: 2_000 })).expect("投结论");
-        fx.reports.send(report(0, Interval { start: 2_000, end: 2_999 }, Outcome::Failed(FailKind::Http(503)))).expect("投结论");
+        fx.reports
+            .send(report(
+                0,
+                Interval { start: 0, end: 999 },
+                Outcome::Advanced { bytes: 1_000 },
+            ))
+            .expect("投结论");
+        fx.reports
+            .send(report(
+                0,
+                Interval {
+                    start: 1_000,
+                    end: 1_999,
+                },
+                Outcome::Advanced { bytes: 2_000 },
+            ))
+            .expect("投结论");
+        fx.reports
+            .send(report(
+                0,
+                Interval {
+                    start: 2_000,
+                    end: 2_999,
+                },
+                Outcome::Failed(FailKind::Http(503)),
+            ))
+            .expect("投结论");
         let stop = fx.engine.drive();
 
-        assert!(matches!(stop, Stop::RetriesExhausted { worker: 0, attempted: 0 }), "主循环要照常走到收工结论：{stop:?}");
-        assert_eq!(fx.engine.run_delivered, 3_000, "没有观察者也要照常记账（3_000 = 上面两条结论的字面量）");
-        assert_eq!(fx.engine.stats.bytes_duplicated, 0, "没有观察者也不该凭空多出重复账");
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "引擎不许绕开 `Config` 自己找观察者");
+        assert!(
+            matches!(
+                stop,
+                Stop::RetriesExhausted {
+                    worker: 0,
+                    attempted: 0
+                }
+            ),
+            "主循环要照常走到收工结论：{stop:?}"
+        );
+        assert_eq!(
+            fx.engine.run_delivered, 3_000,
+            "没有观察者也要照常记账（3_000 = 上面两条结论的字面量）"
+        );
+        assert_eq!(
+            fx.engine.stats.bytes_duplicated, 0,
+            "没有观察者也不该凭空多出重复账"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "引擎不许绕开 `Config` 自己找观察者"
+        );
         assert!(!fx.state_path.exists(), "观察者缺席时不许多出任何落盘产物");
         fx.cleanup();
     }
@@ -2586,7 +3102,12 @@ mod tests {
     #[test]
     fn a_sink_gets_one_tick_per_beat_and_never_one_per_block() {
         let sink = TickSink::new();
-        let cfg = Config { workers: 1, max_retries: Some(0), on_tick: Some(sink.handle()), ..Config::default() };
+        let cfg = Config {
+            workers: 1,
+            max_retries: Some(0),
+            on_tick: Some(sink.handle()),
+            ..Config::default()
+        };
         let mut fx = hand_engine("beat", cfg, 100_000_000);
 
         let pacer = {
@@ -2594,13 +3115,26 @@ mod tests {
             thread::spawn(move || {
                 for k in 0..6u64 {
                     thread::sleep(Duration::from_millis(250));
-                    let iv = Interval { start: k * 1_000, end: k * 1_000 + 999 };
-                    if reports.send(report(0, iv, Outcome::Advanced { bytes: 1_000 })).is_err() {
+                    let iv = Interval {
+                        start: k * 1_000,
+                        end: k * 1_000 + 999,
+                    };
+                    if reports
+                        .send(report(0, iv, Outcome::Advanced { bytes: 1_000 }))
+                        .is_err()
+                    {
                         return;
                     }
                 }
                 thread::sleep(Duration::from_millis(200));
-                let _ = reports.send(report(0, Interval { start: 6_000, end: 6_999 }, Outcome::Failed(FailKind::Http(503))));
+                let _ = reports.send(report(
+                    0,
+                    Interval {
+                        start: 6_000,
+                        end: 6_999,
+                    },
+                    Outcome::Failed(FailKind::Http(503)),
+                ));
             })
         };
 
@@ -2608,13 +3142,25 @@ mod tests {
         let stop = fx.engine.drive();
         let elapsed = started.elapsed();
         pacer.join().expect("节拍线程要收得回来");
-        assert!(matches!(stop, Stop::RetriesExhausted { .. }), "夹具该由那条失败结论收工：{stop:?}");
-        assert_eq!(fx.engine.run_delivered, 6_000, "六条结论**都真落了盘**（不然次数上限就是在比一个空夹具）");
+        assert!(
+            matches!(stop, Stop::RetriesExhausted { .. }),
+            "夹具该由那条失败结论收工：{stop:?}"
+        );
+        assert_eq!(
+            fx.engine.run_delivered, 6_000,
+            "六条结论**都真落了盘**（不然次数上限就是在比一个空夹具）"
+        );
 
         let n = sink.count();
         let cap = beat_bound(elapsed);
-        assert!(n >= 2, "运行 {elapsed:?} 至少该有两发（越过 `LOOP_POLL` 的一拍 + 收尾那一拍），实测 {n}");
-        assert!(n <= cap, "每拍至多一次 + 收尾一发 ⇒ 上界 {cap}（运行 {elapsed:?}），实测 {n}：多出来就是打进每块那条循环里了");
+        assert!(
+            n >= 2,
+            "运行 {elapsed:?} 至少该有两发（越过 `LOOP_POLL` 的一拍 + 收尾那一拍），实测 {n}"
+        );
+        assert!(
+            n <= cap,
+            "每拍至多一次 + 收尾一发 ⇒ 上界 {cap}（运行 {elapsed:?}），实测 {n}：多出来就是打进每块那条循环里了"
+        );
         fx.cleanup();
     }
 
@@ -2631,7 +3177,12 @@ mod tests {
     #[test]
     fn the_rate_cell_is_the_difference_between_two_beats_not_the_whole_run_average() {
         let sink = TickSink::new();
-        let cfg = Config { workers: 1, max_retries: Some(0), on_tick: Some(sink.handle()), ..Config::default() };
+        let cfg = Config {
+            workers: 1,
+            max_retries: Some(0),
+            on_tick: Some(sink.handle()),
+            ..Config::default()
+        };
         let mut fx = hand_engine("rate", cfg, 100_000_000);
         let anchor = fx.engine.started;
 
@@ -2639,22 +3190,49 @@ mod tests {
             let reports = fx.reports.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(50));
-                if reports.send(report(0, Interval { start: 0, end: 999 }, Outcome::Advanced { bytes: 1_000 })).is_err() {
+                if reports
+                    .send(report(
+                        0,
+                        Interval { start: 0, end: 999 },
+                        Outcome::Advanced { bytes: 1_000 },
+                    ))
+                    .is_err()
+                {
                     return;
                 }
                 // 1.45 s：稳稳落在第一拍**之后**（第一拍在 ~1.0 s），又快于第二拍（~2.0–2.4 s）。
                 thread::sleep(Duration::from_millis(1_400));
-                if reports.send(report(0, Interval { start: 1_000, end: 900_999 }, Outcome::Advanced { bytes: 900_000 })).is_err() {
+                if reports
+                    .send(report(
+                        0,
+                        Interval {
+                            start: 1_000,
+                            end: 900_999,
+                        },
+                        Outcome::Advanced { bytes: 900_000 },
+                    ))
+                    .is_err()
+                {
                     return;
                 }
                 thread::sleep(Duration::from_millis(1_550));
-                let _ = reports.send(report(0, Interval { start: 901_000, end: 901_999 }, Outcome::Failed(FailKind::Http(503))));
+                let _ = reports.send(report(
+                    0,
+                    Interval {
+                        start: 901_000,
+                        end: 901_999,
+                    },
+                    Outcome::Failed(FailKind::Http(503)),
+                ));
             })
         };
 
         let stop = fx.engine.drive();
         pacer.join().expect("节拍线程要收得回来");
-        assert!(matches!(stop, Stop::RetriesExhausted { .. }), "夹具该由那条失败结论收工：{stop:?}");
+        assert!(
+            matches!(stop, Stop::RetriesExhausted { .. }),
+            "夹具该由那条失败结论收工：{stop:?}"
+        );
 
         let log = sink.taken();
         let pair = log
@@ -2666,9 +3244,15 @@ mod tests {
         let (tb, snap_b) = pair[1];
 
         let delta = snap_b.run_delivered - snap_a.run_delivered;
-        assert_eq!(delta, 900_000, "落在两拍之间的那一发必须是上面写死的 900_000，实测 {delta}");
+        assert_eq!(
+            delta, 900_000,
+            "落在两拍之间的那一发必须是上面写死的 900_000，实测 {delta}"
+        );
         let gap_us = u64::try_from(tb.duration_since(ta).as_micros()).expect("快照流水按时间升序");
-        assert!(gap_us >= 50_000, "两拍之间至少隔开 50 ms，否则 1 ms 下限会让这一格变成除法噪声：{gap_us} µs");
+        assert!(
+            gap_us >= 50_000,
+            "两拍之间至少隔开 50 ms，否则 1 ms 下限会让这一格变成除法噪声：{gap_us} µs"
+        );
         let by_difference = delta.saturating_mul(1_000_000) / gap_us;
         let run_us = u64::try_from(tb.duration_since(anchor).as_micros()).expect("收尾在开工之后");
         let by_whole_run_average = snap_b.run_delivered.saturating_mul(1_000_000) / run_us;
@@ -2688,7 +3272,10 @@ mod tests {
             "E21④ 点名的那个坑：把全程平均 {by_whole_run_average} 交出去当显示速率（实测 {}）。慢启动段会把它算低",
             snap_b.instant_bytes_per_sec
         );
-        assert_eq!(snap_a.run_delivered, 1_000, "第一拍只该看到那一发 1_000 字节的结论");
+        assert_eq!(
+            snap_a.run_delivered, 1_000,
+            "第一拍只该看到那一发 1_000 字节的结论"
+        );
         fx.cleanup();
     }
 
@@ -2702,18 +3289,45 @@ mod tests {
     /// 连接被拒），POST 那一枪自己得出"没成"的结论。网络失败不是夹具的替身，是那条路的正常出口
     /// （`run_whole_once` 不重发，spec R7 / E12⑧）；这一格断的只有"tick 次数"，不是那条结论的内容。
     #[test]
-    fn the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some() -> anyhow::Result<()> {
+    fn the_data_file_route_emits_no_ticks_while_the_segment_route_emits_some() -> anyhow::Result<()>
+    {
         let sink = TickSink::new();
-        let cfg = Config { workers: 1, max_retries: Some(0), on_tick: Some(sink.handle()), ..Config::default() };
+        let cfg = Config {
+            workers: 1,
+            max_retries: Some(0),
+            on_tick: Some(sink.handle()),
+            ..Config::default()
+        };
 
         // ① 可分段那一支：先把接线跑通。
         let mut fx = hand_engine("pair", cfg, 100_000_000);
-        fx.reports.send(report(0, Interval { start: 0, end: 999 }, Outcome::Advanced { bytes: 1_000 })).expect("投结论");
-        fx.reports.send(report(0, Interval { start: 1_000, end: 1_999 }, Outcome::Failed(FailKind::Http(503)))).expect("投结论");
+        fx.reports
+            .send(report(
+                0,
+                Interval { start: 0, end: 999 },
+                Outcome::Advanced { bytes: 1_000 },
+            ))
+            .expect("投结论");
+        fx.reports
+            .send(report(
+                0,
+                Interval {
+                    start: 1_000,
+                    end: 1_999,
+                },
+                Outcome::Failed(FailKind::Http(503)),
+            ))
+            .expect("投结论");
         let stop = fx.engine.drive();
-        assert!(matches!(stop, Stop::RetriesExhausted { .. }), "夹具该收工：{stop:?}");
+        assert!(
+            matches!(stop, Stop::RetriesExhausted { .. }),
+            "夹具该收工：{stop:?}"
+        );
         let segment_ticks = sink.count();
-        assert!(segment_ticks >= 1, "对照那一发要真收到过 tick，否则下面的 0 只是在比一个没接上的观察者：{stop:?}");
+        assert!(
+            segment_ticks >= 1,
+            "对照那一发要真收到过 tick，否则下面的 0 只是在比一个没接上的观察者：{stop:?}"
+        );
         fx.cleanup();
 
         // ② `--data-file` 那一支：同一个观察者，清零之后必须还是 0。
@@ -2737,10 +3351,28 @@ mod tests {
             name: Some("dlm-9a-datafile.bin".to_string()),
             flags: 0,
         };
-        let report_of_whole_route = run(&task, Config { workers: 1, on_tick: Some(sink.handle()), ..Config::default() })?;
-        assert!(!report_of_whole_route.ok, "指向已关闭端口的 POST 不该被报成成功");
-        assert_eq!(report_of_whole_route.trace.len(), 0, "那一支没有调度器，一条事件都不该被喂出去");
-        assert_eq!(sink.count(), 0, "E21⑧：`--data-file` 那一支 0 次 tick（对照上面可分段那一支收到过 {segment_ticks} 发）");
+        let report_of_whole_route = run(
+            &task,
+            Config {
+                workers: 1,
+                on_tick: Some(sink.handle()),
+                ..Config::default()
+            },
+        )?;
+        assert!(
+            !report_of_whole_route.ok,
+            "指向已关闭端口的 POST 不该被报成成功"
+        );
+        assert_eq!(
+            report_of_whole_route.trace.len(),
+            0,
+            "那一支没有调度器，一条事件都不该被喂出去"
+        );
+        assert_eq!(
+            sink.count(),
+            0,
+            "E21⑧：`--data-file` 那一支 0 次 tick（对照上面可分段那一支收到过 {segment_ticks} 发）"
+        );
 
         let _ = fs::remove_file(&body);
         let _ = fs::remove_file(&target);
@@ -2756,12 +3388,20 @@ mod tests {
     #[test]
     fn every_snapshot_cell_comes_from_the_documented_source() {
         let sink = TickSink::new();
-        let cfg = Config { workers: 1, on_tick: Some(sink.handle()), ..Config::default() };
+        let cfg = Config {
+            workers: 1,
+            on_tick: Some(sink.handle()),
+            ..Config::default()
+        };
         let mut fx = hand_engine("cells", cfg, 1_000);
 
         // 覆盖集：`0..=399` 已确认 ⇒ 按判据① `covered = total_len − pending_bytes()` = 1000 − 600。
         fx.engine.sched = Scheduler::resume(1_000, 16, &[Interval { start: 0, end: 399 }]);
-        assert_eq!(fx.engine.sched.pending_bytes(), 600, "先自证那本账：调度器说还差 600 字节");
+        assert_eq!(
+            fx.engine.sched.pending_bytes(),
+            600,
+            "先自证那本账：调度器说还差 600 字节"
+        );
         // 跨轮账（判据③）：断点带回来的 dup 是 40，本轮加到 150 ⇒ 快照只能交出差值 110。
         fx.engine.dup_base = 40;
         fx.engine.stats.bytes_duplicated = 150;
@@ -2772,25 +3412,60 @@ mod tests {
         fx.engine.tick_at = Instant::now() + Duration::from_secs(5);
         fx.engine.cfg.workers = 3;
         fx.engine.workers = vec![
-            WorkerCtl { state: WorkerState::Busy, attempt: 7 },
-            WorkerCtl { state: WorkerState::Backoff { until: Instant::now() + Duration::from_secs(30) }, attempt: 3 },
-            WorkerCtl { state: WorkerState::Idle, attempt: 0 },
+            WorkerCtl {
+                state: WorkerState::Busy,
+                attempt: 7,
+            },
+            WorkerCtl {
+                state: WorkerState::Backoff {
+                    until: Instant::now() + Duration::from_secs(30),
+                },
+                attempt: 3,
+            },
+            WorkerCtl {
+                state: WorkerState::Idle,
+                attempt: 0,
+            },
         ];
 
         fx.engine.emit_tick();
         let log = sink.taken();
         assert_eq!(log.len(), 1, "直接交快照：一发");
         let snap = log[0].1;
-        assert_eq!(snap.total_len, 1_000, "判据②：`total_len` 不是 Option，也不许拿 0 当未知哨兵");
-        assert_eq!(snap.covered_bytes, 400, "判据①：covered = total_len − pending_bytes()，**不是** store.len()");
-        assert_eq!(snap.run_delivered, 1_000_000, "判据③：用的就是引擎已有的那一格 `run_delivered`");
-        assert_eq!(snap.run_bytes_duplicated, 110, "判据③：本次 dup 增量 = 150 − 40，跨轮那份起点要减掉");
-        assert_eq!(snap.instant_bytes_per_sec, 1_000_000_000, "判据④：Δ=1e6 字节 ÷ 1 ms 下限 = 1e9 字节/秒");
+        assert_eq!(
+            snap.total_len, 1_000,
+            "判据②：`total_len` 不是 Option，也不许拿 0 当未知哨兵"
+        );
+        assert_eq!(
+            snap.covered_bytes, 400,
+            "判据①：covered = total_len − pending_bytes()，**不是** store.len()"
+        );
+        assert_eq!(
+            snap.run_delivered, 1_000_000,
+            "判据③：用的就是引擎已有的那一格 `run_delivered`"
+        );
+        assert_eq!(
+            snap.run_bytes_duplicated, 110,
+            "判据③：本次 dup 增量 = 150 − 40，跨轮那份起点要减掉"
+        );
+        assert_eq!(
+            snap.instant_bytes_per_sec, 1_000_000_000,
+            "判据④：Δ=1e6 字节 ÷ 1 ms 下限 = 1e9 字节/秒"
+        );
         assert_eq!(snap.active_workers, 1, "判据⑤：只数 Busy");
         assert_eq!(snap.workers_total, 3, "`workers_total` = `cfg.workers`");
-        assert_eq!(snap.slow_retry_rounds, 2, "判据⑥：跨 worker **最大值** = 7 − FAST_RETRY_MAX(5)，不是各链相加");
-        assert!(fx.engine.any_in_flight(), "同一副状态下 `any_in_flight()` 是真的（Busy + Backoff 都算）");
-        assert_ne!(snap.active_workers, 2, "两处判据不许互换：`active_workers` 不能把退避中那一条也算成在途");
+        assert_eq!(
+            snap.slow_retry_rounds, 2,
+            "判据⑥：跨 worker **最大值** = 7 − FAST_RETRY_MAX(5)，不是各链相加"
+        );
+        assert!(
+            fx.engine.any_in_flight(),
+            "同一副状态下 `any_in_flight()` 是真的（Busy + Backoff 都算）"
+        );
+        assert_ne!(
+            snap.active_workers, 2,
+            "两处判据不许互换：`active_workers` 不能把退避中那一条也算成在途"
+        );
         fx.cleanup();
     }
 
@@ -2801,44 +3476,78 @@ mod tests {
     #[test]
     fn the_instant_rate_formula_is_the_microsecond_quotient_with_a_one_ms_floor() {
         let table: &[(u64, Duration, u64)] = &[
-            (0, Duration::ZERO, 0),                                        // 没字节 + 同一瞬间：不许 panic
-            (1_000, Duration::from_secs(1), 1_000),                         // 1 秒 1000 字节
-            (65_536, Duration::from_millis(500), 131_072),                  // 半秒一满块
-            (1_000_000, Duration::from_millis(1), 1_000_000_000),           // 下限那一格：1 ms
-            (500, Duration::from_micros(1), 500_000),                       // 1 µs 也要夹到 1 ms（不夹就是 5e8 的假高速）
-            (900_000, Duration::from_millis(1_200), 750_000),               // (c) 那一格的同形状对照
+            (0, Duration::ZERO, 0),                        // 没字节 + 同一瞬间：不许 panic
+            (1_000, Duration::from_secs(1), 1_000),        // 1 秒 1000 字节
+            (65_536, Duration::from_millis(500), 131_072), // 半秒一满块
+            (1_000_000, Duration::from_millis(1), 1_000_000_000), // 下限那一格：1 ms
+            (500, Duration::from_micros(1), 500_000), // 1 µs 也要夹到 1 ms（不夹就是 5e8 的假高速）
+            (900_000, Duration::from_millis(1_200), 750_000), // (c) 那一格的同形状对照
         ];
         for (delta, gap, want) in table {
-            assert_eq!(instant_rate_bytes_per_sec(*delta, *gap), *want, "Δ={delta} gap={gap:?}");
+            assert_eq!(
+                instant_rate_bytes_per_sec(*delta, *gap),
+                *want,
+                "Δ={delta} gap={gap:?}"
+            );
         }
         // 两条式子必须**是**两条式子：同一时刻、同一笔账，给出的数不一样。
-        assert_eq!(running_rate_bytes_per_sec(901_000, Duration::from_millis(2_500)), 360_400);
+        assert_eq!(
+            running_rate_bytes_per_sec(901_000, Duration::from_millis(2_500)),
+            360_400
+        );
         assert_ne!(
             instant_rate_bytes_per_sec(900_000, Duration::from_millis(1_200)),
             running_rate_bytes_per_sec(901_000, Duration::from_millis(2_500)),
             "E21④：显示速率与 `window_budget` 的分子是两个数，不许共用"
         );
         // 上界那一格不许在加法上回绕。
-        assert!(instant_rate_bytes_per_sec(u64::MAX, Duration::from_micros(1)) >= instant_rate_bytes_per_sec(1, Duration::from_micros(1)));
+        assert!(
+            instant_rate_bytes_per_sec(u64::MAX, Duration::from_micros(1))
+                >= instant_rate_bytes_per_sec(1, Duration::from_micros(1))
+        );
     }
 
     /// (g)：`active_workers` 与 `slow_retry_rounds` 的规则各自钉死（判据⑤⑥）。
     #[test]
     fn the_busy_count_and_the_slow_retry_rounds_follow_their_own_rules() {
         let later = Instant::now() + Duration::from_secs(30);
-        let busy = |attempt| WorkerCtl { state: WorkerState::Busy, attempt };
-        let idle = |attempt| WorkerCtl { state: WorkerState::Idle, attempt };
-        let back = |attempt| WorkerCtl { state: WorkerState::Backoff { until: later }, attempt };
+        let busy = |attempt| WorkerCtl {
+            state: WorkerState::Busy,
+            attempt,
+        };
+        let idle = |attempt| WorkerCtl {
+            state: WorkerState::Idle,
+            attempt,
+        };
+        let back = |attempt| WorkerCtl {
+            state: WorkerState::Backoff { until: later },
+            attempt,
+        };
         // 一行 = (名字, 这条那几条 worker 状态, 期望 Busy 条数, 期望慢重试轮数)
         let rows: &[(&str, &[WorkerCtl], usize, u32)] = &[
             ("全场空闲", &[idle(0), idle(0)], 0, 0),
             ("Busy 才算在途", &[busy(0), idle(0)], 1, 0),
-            ("退避中不算在途，但它的 attempt 照样进慢重试那一格", &[back(9)], 0, 4),
+            (
+                "退避中不算在途，但它的 attempt 照样进慢重试那一格",
+                &[back(9)],
+                0,
+                4,
+            ),
             ("两条 Busy 加一条退避", &[busy(0), busy(0), back(9)], 2, 4),
             ("取最大值而不是相加", &[idle(7), idle(2)], 0, 2),
-            ("刚好用满快速那一档 ⇒ 0（第 6 次才排下头一发 30 s）", &[busy(5)], 1, 0),
+            (
+                "刚好用满快速那一档 ⇒ 0（第 6 次才排下头一发 30 s）",
+                &[busy(5)],
+                1,
+                0,
+            ),
             ("一个 worker 都没起来 ⇒ 两格都是 0", &[], 0, 0),
-            ("u32 上界不许绕回", &[back(u32::MAX)], 0, u32::MAX - FAST_RETRY_MAX),
+            (
+                "u32 上界不许绕回",
+                &[back(u32::MAX)],
+                0,
+                u32::MAX - FAST_RETRY_MAX,
+            ),
         ];
         for (case, workers, want_active, want_rounds) in rows {
             assert_eq!(busy_worker_count(workers), *want_active, "{case}");
@@ -2850,14 +3559,28 @@ mod tests {
     /// 在途预占在结论回来时归零，花到顶后置 `budget_exhausted`。
     #[test]
     fn the_byte_budget_slices_shots_and_stops_after_the_cap() {
-        let cfg = Config { workers: 1, max_bytes: 1_000, ..Config::default() };
+        let cfg = Config {
+            workers: 1,
+            max_bytes: 1_000,
+            ..Config::default()
+        };
         let mut fx = hand_engine("budget", cfg, 10_000);
         fx.engine.budget_base = 250;
 
-        let first = Interval { start: 0, end: 9_999 };
+        let first = Interval {
+            start: 0,
+            end: 9_999,
+        };
         assert!(fx.engine.dispatch(0, first).is_none());
-        assert_eq!(fx.engine.budget_share[0], 750, "可用额度 1000-250，单 worker 全给它");
-        assert_eq!(fx.engine.caps[0].load(Ordering::Acquire), 749, "帽是 start+share-1");
+        assert_eq!(
+            fx.engine.budget_share[0], 750,
+            "可用额度 1000-250，单 worker 全给它"
+        );
+        assert_eq!(
+            fx.engine.caps[0].load(Ordering::Acquire),
+            749,
+            "帽是 start+share-1"
+        );
 
         assert!(
             fx.engine
@@ -2868,7 +3591,10 @@ mod tests {
         assert!(!fx.engine.budget_exhausted, "还差 50 字节，不许提前收工");
         assert_eq!(fx.engine.budget_available(), 50);
 
-        let second = Interval { start: 750, end: 9_999 };
+        let second = Interval {
+            start: 750,
+            end: 9_999,
+        };
         assert!(fx.engine.dispatch(0, second).is_none());
         assert_eq!(fx.engine.budget_share[0], 50);
         assert_eq!(fx.engine.caps[0].load(Ordering::Acquire), 799);
@@ -2898,7 +3624,11 @@ mod tests {
                 .unwrap();
             head
         });
-        let resp = build_client().unwrap().get(format!("http://{addr}/ua")).send().unwrap();
+        let resp = build_client()
+            .unwrap()
+            .get(format!("http://{addr}/ua"))
+            .send()
+            .unwrap();
         assert_eq!(resp.status(), 200);
         let head = server.join().unwrap();
         let want = format!("user-agent: {}", USER_AGENT.to_ascii_lowercase());

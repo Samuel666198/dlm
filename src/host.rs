@@ -83,7 +83,12 @@ impl HostConfig {
         let gui_endpoint = file.gui_endpoint.or_else(|| {
             std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("dlm/gui/endpoint.json"))
         });
-        Self { dlm_exe, download_dir, log_dir, gui_endpoint }
+        Self {
+            dlm_exe,
+            download_dir,
+            log_dir,
+            gui_endpoint,
+        }
     }
 }
 
@@ -159,7 +164,12 @@ impl Host {
     }
 
     fn download(&mut self, value: &Value) -> Vec<u8> {
-        let text = |key: &str| value.get(key).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        };
         let Some(url) = text("url") else {
             return error("download needs a url");
         };
@@ -252,7 +262,11 @@ impl Host {
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log_err))
-            .stdin(if cookie.is_some() { Stdio::piped() } else { Stdio::null() });
+            .stdin(if cookie.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
         let mut child = match command.spawn() {
@@ -337,7 +351,10 @@ impl Host {
                 if let Ok(mut map) = jobs.lock() {
                     map.remove(&job);
                 }
-                let was_canceled = canceled.lock().map(|mut set| set.remove(&job)).unwrap_or(false);
+                let was_canceled = canceled
+                    .lock()
+                    .map(|mut set| set.remove(&job))
+                    .unwrap_or(false);
                 let frame = json!({
                     "op": "done",
                     "job": job,
@@ -371,7 +388,11 @@ impl Host {
         let Some(job) = value.get("job").and_then(Value::as_str) else {
             return error("cancel needs a job");
         };
-        let found = self.jobs.lock().ok().and_then(|jobs| jobs.get(job).copied());
+        let found = self
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|jobs| jobs.get(job).copied());
         let Some((pid, tab)) = found else {
             return serde_json::to_vec(&json!({
                 "op": "cancel",
@@ -392,7 +413,10 @@ impl Host {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .creation_flags(CREATE_NO_WINDOW);
-            let ok = command.status().map(|status| status.success()).unwrap_or(false);
+            let ok = command
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
             if !ok && let Ok(mut set) = self.canceled.lock() {
                 set.remove(job);
             }
@@ -419,8 +443,12 @@ impl Host {
     }
 
     fn try_queue(&self, url: &str, name: Option<&str>, referer: Option<&str>) -> QueueOutcome {
-        let Some(path) = &self.config.gui_endpoint else { return QueueOutcome::Unavailable };
-        let Ok(text) = fs::read_to_string(path) else { return QueueOutcome::Unavailable };
+        let Some(path) = &self.config.gui_endpoint else {
+            return QueueOutcome::Unavailable;
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return QueueOutcome::Unavailable;
+        };
         let Ok(endpoint) = serde_json::from_str::<GuiEndpoint>(&text) else {
             return QueueOutcome::Unavailable;
         };
@@ -447,7 +475,10 @@ impl Host {
             "start_at": null,
         });
         let response = client
-            .post(format!("http://127.0.0.1:{}/api/add?t={}", endpoint.port, endpoint.token))
+            .post(format!(
+                "http://127.0.0.1:{}/api/add?t={}",
+                endpoint.port, endpoint.token
+            ))
             .header("content-type", "application/json")
             .body(body.to_string())
             .send();
@@ -461,7 +492,9 @@ impl Host {
                 match serde_json::from_str::<Value>(&text) {
                     Ok(value) if value.get("ok").and_then(Value::as_bool) == Some(true) => {
                         let Some(id) = value.get("id").and_then(Value::as_str) else {
-                            return QueueOutcome::Rejected("队列接受了任务但没有返回 id".to_string());
+                            return QueueOutcome::Rejected(
+                                "队列接受了任务但没有返回 id".to_string(),
+                            );
                         };
                         QueueOutcome::Queued(id.to_string())
                     }
@@ -554,7 +587,9 @@ fn parse_progress(line: &str) -> Option<(f64, u64, u64, f64)> {
 
 fn derive_name(url: &str) -> String {
     let fallback = || "download.bin".to_string();
-    let Ok(parsed) = reqwest::Url::parse(url) else { return fallback() };
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return fallback();
+    };
     let Some(segment) = parsed.path_segments().and_then(|mut s| s.next_back()) else {
         return fallback();
     };
@@ -589,7 +624,8 @@ mod tests {
         let path = dir.join("endpoint.json");
         fs::write(
             &path,
-            serde_json::json!({"port": port, "token": "tok", "pid": 1, "started_at": 1}).to_string(),
+            serde_json::json!({"port": port, "token": "tok", "pid": 1, "started_at": 1})
+                .to_string(),
         )
         .unwrap();
         path
@@ -624,7 +660,9 @@ mod tests {
     #[test]
     fn download_rejects_non_http_urls() {
         let mut host = Host::new(config(&std::env::temp_dir()));
-        let reply: Value = serde_json::from_slice(&host.handle(br#"{"op":"download","url":"file:///x"}"#)).unwrap();
+        let reply: Value =
+            serde_json::from_slice(&host.handle(br#"{"op":"download","url":"file:///x"}"#))
+                .unwrap();
         assert_eq!(reply["op"], "error");
     }
 
@@ -640,7 +678,10 @@ mod tests {
         assert_eq!(reply["op"], "accepted", "{reply}");
         assert_eq!(reply["mode"], "direct", "没有端点文件 ⇒ 回退直连：{reply}");
         let log = reply["log"].as_str().expect("log path");
-        assert!(std::path::Path::new(log).exists(), "job log should exist: {log}");
+        assert!(
+            std::path::Path::new(log).exists(),
+            "job log should exist: {log}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -657,7 +698,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reply["op"], "accepted", "{reply}");
-        let frame = rx.recv_timeout(Duration::from_secs(15)).expect("done frame");
+        let frame = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("done frame");
         let done: Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(done["op"], "done", "{done}");
         assert_eq!(done["job"], reply["job"]);
@@ -669,7 +712,8 @@ mod tests {
     #[test]
     fn progress_lines_are_parsed_and_other_lines_are_not() {
         let (percent, done, total, speed) =
-            parse_progress("45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4  dup 5.5%").expect("progress line");
+            parse_progress("45.2%  21.7 MiB/48.0 MiB  3.1 MiB/s  x4  dup 5.5%")
+                .expect("progress line");
         assert!((percent - 45.2).abs() < 1e-9);
         assert_eq!(total, 48 * 1_048_576);
         assert!((done as i64 - (21.7 * 1_048_576.0) as i64).abs() <= 1);
@@ -681,7 +725,8 @@ mod tests {
     #[test]
     fn cancel_unknown_job_is_refused() {
         let mut host = Host::new(config(&std::env::temp_dir()));
-        let reply: Value = serde_json::from_slice(&host.handle(br#"{"op":"cancel","job":"nope"}"#)).unwrap();
+        let reply: Value =
+            serde_json::from_slice(&host.handle(br#"{"op":"cancel","job":"nope"}"#)).unwrap();
         assert_eq!(reply["op"], "cancel");
         assert_eq!(reply["ok"], false);
     }
@@ -691,8 +736,16 @@ mod tests {
         assert_eq!(derive_name("https://x/a.bin"), "a.bin");
         assert_eq!(derive_name("https://x/"), "download.bin");
         assert_eq!(derive_name("https://x/dir/"), "download.bin");
-        assert_eq!(derive_name("https://x/a%20b.zip"), "a%20b.zip", "不做百分号解码");
-        assert_eq!(derive_name("https://x/a:b"), "download.bin", "冒号会被队列名闸拒");
+        assert_eq!(
+            derive_name("https://x/a%20b.zip"),
+            "a%20b.zip",
+            "不做百分号解码"
+        );
+        assert_eq!(
+            derive_name("https://x/a:b"),
+            "download.bin",
+            "冒号会被队列名闸拒"
+        );
         assert_eq!(derive_name("https://x/a?x=1"), "a");
     }
 
@@ -729,9 +782,9 @@ mod tests {
             gui_endpoint: Some(endpoint_file(&dir, port)),
             ..config(&dir)
         });
-        let reply: Value = serde_json::from_slice(
-            &host.handle(br#"{"op":"download","url":"https://example.invalid/a.bin","cookie":"sid=1"}"#),
-        )
+        let reply: Value = serde_json::from_slice(&host.handle(
+            br#"{"op":"download","url":"https://example.invalid/a.bin","cookie":"sid=1"}"#,
+        ))
         .unwrap();
         assert_eq!(reply["mode"], "direct", "带 Cookie 必须直连：{reply}");
         listener.set_nonblocking(true).unwrap();
@@ -797,7 +850,10 @@ mod tests {
         .unwrap();
         handle.join().unwrap();
         assert_eq!(reply["op"], "error", "{reply}");
-        assert_eq!(reply["message"], "nope", "队列明确拒绝时不许回退直连：{reply}");
+        assert_eq!(
+            reply["message"], "nope",
+            "队列明确拒绝时不许回退直连：{reply}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,6 @@
+use crate::consts::FLAG_IGNORE_MTIME;
 use std::fmt;
 use std::path::PathBuf;
-use crate::consts::FLAG_IGNORE_MTIME;
 
 /// 任务模型。`Clone`/`PartialEq`/`Eq` 走派生（Task 9 的用例直接 `assert_eq!` 两个 `Task`）；
 /// **只有 `Debug` 是手写的** —— 见下面那个 `impl` 的说明。
@@ -379,24 +379,32 @@ impl Task {
         // 只按 `char::is_whitespace` 剥首尾 ⇒ 少认了首尾的 C0 与串中间的 tab/LF/CR（少认＝绕过，见其文档）。
         let url = url_for_gate(&self.url);
         anyhow::ensure!(!url.is_empty(), "缺少 URL");
-        let plain_http = url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("http://"));
-        anyhow::ensure!(!(plain_http && self.password.is_some()),
-            "明文 HTTP 不发送口令：请改用 https:// 或去掉 --password");
+        let plain_http = url
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"));
+        anyhow::ensure!(
+            !(plain_http && self.password.is_some()),
+            "明文 HTTP 不发送口令：请改用 https:// 或去掉 --password"
+        );
         // 勘误 E9：凭据写在 URL 的 userinfo 里会**原样落盘**两处（`task.url` 与 `validator.final_url`），
         // 而 `state` 删不掉 URL（续传要用）。所以这条只在**这一个**闸口里判，`state` 只指路、不重复实现。
         // 入参交进来的是**已归一的** `url`（`authority_has_userinfo` 本体不归一，见它的文档）。
-        anyhow::ensure!(!authority_has_userinfo(&url),
+        anyhow::ensure!(
+            !authority_has_userinfo(&url),
             "URL 的 host 前不能带凭据（userinfo，形如 https://用户:口令@主机/…）：\
-             请把它去掉并改用 --user / --password 传入");
+             请把它去掉并改用 --user / --password 传入"
+        );
         // 第四条（T99-G1c）：前三条管的是"规范形状上的坏味道"，这一条管"形状本身"。
         // 非规范 ⇒ 拒，不降级、不转交 reqwest 报错。排在前面的 E9 那条**位置是刻意的**：
         // 规范串上的 userinfo（`https://alice:口令@host/x`）必须继续收到那句能行动的措辞
         // （"改用 --user / --password 传入"），不能被这句泛泛的"参数写错了"顶掉。
-        anyhow::ensure!(canonical_shape_of(&url).is_some(),
+        anyhow::ensure!(
+            canonical_shape_of(&url).is_some(),
             "参数写错了：URL 要的是 `http://` 或 `https://` 的规范写法（scheme 之后紧跟恰好 `://`，\
              主机名非空且 host 前不带凭据），不接受 `http:/host`、`http:/\\host`、`http:////host` 这类分隔符变体，\
              也不接受 http/https 之外的 scheme 与不写 scheme 的串；`https://`（没有主机名）与 \
-             `https://:8443/a.bin`（只有端口、没有主机名）这一族，请在 `://` 之后补上主机名");
+             `https://:8443/a.bin`（只有端口、没有主机名）这一族，请在 `://` 之后补上主机名"
+        );
         // 第五条（T99-G5 第 1 条立、T99-G5c 把覆盖面补完、T99-G5c-R1 定下宽度那张表、T99-H1 并联背板）：
         // 前四条管 URL，这一条管**最终生效的那个名字**。排在最后**是刻意的**——它读的是 `effective_name()`
         // 而不是归一后的 URL 串，把它插在中间会让"四条判据读同一份串"那句话变成需要读者自己分辨的例外。
@@ -423,10 +431,12 @@ impl Task {
         } || !self.lands_inside_out_dir();
         if refused {
             anyhow::bail!(match &self.name {
-                Some(_) => "参数写错了：--out-name 要的是落在 --out-dir 里的名字，\
+                Some(_) =>
+                    "参数写错了：--out-name 要的是落在 --out-dir 里的名字，\
                             不能是绝对路径、盘符形状（`C:x`、`C:\\…`）或 `\\` 打头、也不能含 \"..\" 段\
                             （要子目录请直接写相对路径，如 sub/x.bin）",
-                None => "参数写错了：这条 URL 的末段推不出一个落在 --out-dir 里的名字\
+                None =>
+                    "参数写错了：这条 URL 的末段推不出一个落在 --out-dir 里的名字\
                         （末段是 \".\" 或 \"..\" 时落点走到目录之外或目录本身；\
                         末段是绝对路径、盘符形状如 `C:x`、`u:p@x` 或 `\\` 打头时，\
                         与 --out-dir 拼接会把整个落点换掉）；请用 --out-name 显式给一个相对文件名",
@@ -434,8 +444,12 @@ impl Task {
         }
         Ok(())
     }
-    pub fn segmentable(&self) -> bool { self.data_file.is_none() }
-    pub fn ignore_mtime(&self) -> bool { self.flags & FLAG_IGNORE_MTIME != 0 }
+    pub fn segmentable(&self) -> bool {
+        self.data_file.is_none()
+    }
+    pub fn ignore_mtime(&self) -> bool {
+        self.flags & FLAG_IGNORE_MTIME != 0
+    }
     /// **真正会落盘的那个名字**：用户给的 `--out-name`，不给时从 URL 末段推导。
     ///
     /// 提成一个函数只为一个理由（T99-G5c 第 1 条）：`target_path()` 与 `validate()` 必须读**同一份**串，
@@ -452,7 +466,11 @@ impl Task {
             return name.clone();
         }
         let tail = self.url.split(['?', '#']).next().unwrap_or(&self.url);
-        tail.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download").to_string()
+        tail.rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("download")
+            .to_string()
     }
     pub fn target_path(&self) -> PathBuf {
         self.dir.join(self.effective_name())
@@ -491,14 +509,26 @@ impl Task {
 mod tests {
     use super::*;
     fn t(url: &str) -> Task {
-        Task { url: url.into(), referer: None, cookies: None, data_file: None,
-               user: None, password: None, dir: ".".into(), name: None, flags: 0 }
+        Task {
+            url: url.into(),
+            referer: None,
+            cookies: None,
+            data_file: None,
+            user: None,
+            password: None,
+            dir: ".".into(),
+            name: None,
+            flags: 0,
+        }
     }
     #[test]
     fn rejects_password_over_plain_http() {
         let mut x = t("http://example.com/a.bin");
         x.password = Some("hunter2".into());
-        assert!(x.validate().is_err(), "明文 HTTP 带口令必须拒绝，不许降级发送");
+        assert!(
+            x.validate().is_err(),
+            "明文 HTTP 带口令必须拒绝，不许降级发送"
+        );
     }
     #[test]
     fn allows_password_over_https() {
@@ -545,8 +575,14 @@ mod tests {
                 panic!("{url} 的 authority 里有 @，必须被 validate() 拒绝");
             };
             let msg = err.to_string();
-            assert!(msg.contains("--user") && msg.contains("--password"), "错误要指使用这两个参数：{msg}");
-            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("--user") && msg.contains("--password"),
+                "错误要指使用这两个参数：{msg}"
+            );
+            assert!(
+                !msg.contains("s3cret"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
     }
 
@@ -554,20 +590,29 @@ mod tests {
     fn an_at_that_is_not_in_the_authority_is_not_credentials() {
         // 判据只看 authority：`@` 出现在 path/query/片段里是合法的，一律放行。
         for url in [
-            "https://x/a@b.bin",           // path 里
+            "https://x/a@b.bin", // path 里
             "https://x/dir/alice@example/a.bin",
-            "https://x/a.bin?to=me@host",  // query 里
-            "https://x/a.bin#frag@1",      // fragment 里
-            "https://x:8080/a.bin",        // 端口不是 userinfo
-            "https://[fe80::1]/a.bin",     // IPv6 字面量
+            "https://x/a.bin?to=me@host", // query 里
+            "https://x/a.bin#frag@1",     // fragment 里
+            "https://x:8080/a.bin",       // 端口不是 userinfo
+            "https://[fe80::1]/a.bin",    // IPv6 字面量
         ] {
-            assert!(t(url).validate().is_ok(), "{url} 的 authority 里没有 @，必须放行");
+            assert!(
+                t(url).validate().is_ok(),
+                "{url} 的 authority 里没有 @，必须放行"
+            );
         }
         // 无 scheme 的串（`x/a.bin`、`/n`、`//h/x`）⇒ **本 CLI 不接受**，由形状闸（`validate()` 第四条）
         // 当场拒（T99-G1c 反转默认；以前那一支是"含 @ 就拒、不含就放行到 reqwest 的
         // relative URL without a base"，已被"只放行规范写法"废除）。
-        assert!(t("alice:s3cret@x/a.bin").validate().is_err(), "无 scheme 但 authority 含 @ ⇒ 拒");
-        assert!(t("http://h/a@b").validate().is_ok(), "规范写法、`@` 落在 path 里 ⇒ 不是凭据（正向对照臂）");
+        assert!(
+            t("alice:s3cret@x/a.bin").validate().is_err(),
+            "无 scheme 但 authority 含 @ ⇒ 拒"
+        );
+        assert!(
+            t("http://h/a@b").validate().is_ok(),
+            "规范写法、`@` 落在 path 里 ⇒ 不是凭据（正向对照臂）"
+        );
     }
 
     #[test]
@@ -576,11 +621,17 @@ mod tests {
         // 所以磁盘边界自动受保护 —— 这条用例证明"不需要在 state 里再写一遍"。
         let mut x = t("https://alice:s3cret@x/a.bin");
         x.password = Some("s3cret".into());
-        assert!(x.validate().is_err(), "带 userinfo 的任务在 validate() 就被拒 ⇒ 到不了落盘点");
+        assert!(
+            x.validate().is_err(),
+            "带 userinfo 的任务在 validate() 就被拒 ⇒ 到不了落盘点"
+        );
         // 改写成两个参数（我们期望用户走的形状）后，同一条 URL 的干净版本照常通过。
         x.url = "https://x/a.bin".into();
         x.user = Some("alice".into());
-        assert!(x.validate().is_ok(), "口令走 --user/--password 是本工具支持的形状");
+        assert!(
+            x.validate().is_ok(),
+            "口令走 --user/--password 是本工具支持的形状"
+        );
     }
 
     // ---- T99-G1 / G1b：URL 的"首尾空白 + 首尾 C0 + 串中间 tab/LF/CR"都不得绕过凭据闸 ----
@@ -609,8 +660,14 @@ mod tests {
                 panic!("{url:?} 是带空白的明文 HTTP，配口令必须被闸拒掉");
             };
             let msg = err.to_string();
-            assert!(msg.contains("明文 HTTP 不发送口令"), "错误文案要指改 https 或去掉 --password：{msg}");
-            assert!(!msg.contains("hunter2"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("明文 HTTP 不发送口令"),
+                "错误文案要指改 https 或去掉 --password：{msg}"
+            );
+            assert!(
+                !msg.contains("hunter2"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
     }
 
@@ -629,8 +686,14 @@ mod tests {
                 panic!("{url:?} 的 authority 里有 @，首尾空白不许让它变成合法写法");
             };
             let msg = err.to_string();
-            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
-            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("userinfo"),
+                "错误要说出 userinfo 这个形状：{msg}"
+            );
+            assert!(
+                !msg.contains("s3cret"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
     }
 
@@ -642,7 +705,10 @@ mod tests {
             let Err(err) = t(url).validate() else {
                 panic!("{url:?} 里除了空白什么都没有，必须报缺少 URL");
             };
-            assert!(err.to_string().contains("缺少 URL"), "{url:?} 要走缺少 URL 那一支：{err}");
+            assert!(
+                err.to_string().contains("缺少 URL"),
+                "{url:?} 要走缺少 URL 那一支：{err}"
+            );
         }
     }
 
@@ -650,13 +716,22 @@ mod tests {
     fn accepts_https_url_with_leading_whitespace() {
         // 正向对照臂：证明上面那把归一没把合法写法一起杀掉 —— 带首尾空白的 `https://`（不带口令）
         // 仍然过闸。闸管的是"读哪份串"，不是"替用户把 URL 改干净"（`task.url` 照原样落盘）。
-        for url in ["   https://example.com/a.bin", "\thttps://example.com/a.bin\t"] {
-            assert!(t(url).validate().is_ok(), "{url:?} 是加密的、authority 无 @，必须放行");
+        for url in [
+            "   https://example.com/a.bin",
+            "\thttps://example.com/a.bin\t",
+        ] {
+            assert!(
+                t(url).validate().is_ok(),
+                "{url:?} 是加密的、authority 无 @，必须放行"
+            );
         }
         // 同一份串上的口令支也照放行（与 `allows_password_over_https` 同一立场，只是多了首尾空白）。
         let mut x = t("  https://example.com/a.bin");
         x.password = Some("hunter2".into());
-        assert!(x.validate().is_ok(), "https 带口令是本工具支持的形状，首尾空白不改变这一点");
+        assert!(
+            x.validate().is_ok(),
+            "https 带口令是本工具支持的形状，首尾空白不改变这一点"
+        );
     }
 
     #[test]
@@ -664,13 +739,28 @@ mod tests {
         // 发头那一侧的判据必须与闸读同一份串：否则 `  https://h/` 过了闸却算出 `false`，
         // 该带的凭据静默不带（换来 401 而不是错误）。
         assert!(url_is_https("  https://h/"), "带首空白的 https 仍是 https");
-        assert!(url_is_https("HTTPS://h/x "), "大写 scheme 加尾空白也仍是 https");
-        assert!(!url_is_https("\thttp://h/"), "带首空白的明文 http 不是 https");
-        assert!(!url_is_https("  not-a-url  "), "保守那一支仍成立：认不出 scheme ⇒ 假");
+        assert!(
+            url_is_https("HTTPS://h/x "),
+            "大写 scheme 加尾空白也仍是 https"
+        );
+        assert!(
+            !url_is_https("\thttp://h/"),
+            "带首空白的明文 http 不是 https"
+        );
+        assert!(
+            !url_is_https("  not-a-url  "),
+            "保守那一支仍成立：认不出 scheme ⇒ 假"
+        );
         assert!(!url_is_https("   "), "全空白 ⇒ 假（不是 panic，也不是真）");
         // T99-G1b 追加的两条：这一族的判据必须与闸读同一份**归一后**的串，而不只是"去掉空白"。
-        assert!(url_is_https("\u{1}https://h/"), "前导 C0 不是新 scheme：解析器剥掉它，那还是 https");
-        assert!(!url_is_https("ht\ntp://h/"), "串中间的 LF 被删掉后是 `http` ⇒ 不是 https（保守那一支照旧）");
+        assert!(
+            url_is_https("\u{1}https://h/"),
+            "前导 C0 不是新 scheme：解析器剥掉它，那还是 https"
+        );
+        assert!(
+            !url_is_https("ht\ntp://h/"),
+            "串中间的 LF 被删掉后是 `http` ⇒ 不是 https（保守那一支照旧）"
+        );
     }
 
     #[test]
@@ -679,7 +769,10 @@ mod tests {
         // 那格的串仍然退（那格本身没动），干净 `https://` 串仍然过。
         let mut plain = t("http://example.com/a.bin");
         plain.password = Some("hunter2".into());
-        assert!(plain.validate().is_err(), "干净明文 HTTP 带口令必须拒绝，不许降级发送");
+        assert!(
+            plain.validate().is_err(),
+            "干净明文 HTTP 带口令必须拒绝，不许降级发送"
+        );
         let mut secure = t("https://example.com/a.bin");
         secure.password = Some("hunter2".into());
         assert!(secure.validate().is_ok(), "干净 https 带口令必须放行");
@@ -711,8 +804,14 @@ mod tests {
                 panic!("{url:?} 的 scheme 前只有 C0/空格，配口令必须被闸拒掉");
             };
             let msg = err.to_string();
-            assert!(msg.contains("明文 HTTP 不发送口令"), "错误文案要指改 https 或去掉 --password：{msg}");
-            assert!(!msg.contains("hunter2"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("明文 HTTP 不发送口令"),
+                "错误文案要指改 https 或去掉 --password：{msg}"
+            );
+            assert!(
+                !msg.contains("hunter2"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
     }
 
@@ -730,8 +829,14 @@ mod tests {
                 panic!("{url:?} 的 authority 里有 @，前导 C0 不许让它变成合法写法");
             };
             let msg = err.to_string();
-            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
-            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("userinfo"),
+                "错误要说出 userinfo 这个形状：{msg}"
+            );
+            assert!(
+                !msg.contains("s3cret"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
     }
 
@@ -749,8 +854,14 @@ mod tests {
                 panic!("{url:?} 删掉中间的 Tab 就是带 userinfo 的 URL，必须被闸拒掉");
             };
             let msg = err.to_string();
-            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
-            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("userinfo"),
+                "错误要说出 userinfo 这个形状：{msg}"
+            );
+            assert!(
+                !msg.contains("s3cret"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
     }
 
@@ -768,8 +879,14 @@ mod tests {
                 panic!("{url:?} 删掉中间的换行就是带 userinfo 的 URL，必须被闸拒掉");
             };
             let msg = err.to_string();
-            assert!(msg.contains("userinfo"), "错误要说出 userinfo 这个形状：{msg}");
-            assert!(!msg.contains("s3cret"), "错误消息本身不该把口令抄一遍：{msg}");
+            assert!(
+                msg.contains("userinfo"),
+                "错误要说出 userinfo 这个形状：{msg}"
+            );
+            assert!(
+                !msg.contains("s3cret"),
+                "错误消息本身不该把口令抄一遍：{msg}"
+            );
         }
         // 同一刀也喂 `plain_http` 那一支：中间 LF 的明文 http 配口令必须走"明文 HTTP 不发送口令"。
         let mut x = t("ht\ntp://example.com/a.bin");
@@ -777,7 +894,10 @@ mod tests {
         let Err(err) = x.validate() else {
             panic!("`ht\\ntp://…` 归一后是明文 HTTP，配口令必须被闸拒掉");
         };
-        assert!(err.to_string().contains("明文 HTTP 不发送口令"), "要走那一支：{err}");
+        assert!(
+            err.to_string().contains("明文 HTTP 不发送口令"),
+            "要走那一支：{err}"
+        );
     }
 
     #[test]
@@ -790,13 +910,22 @@ mod tests {
             "\u{1f} https://example.com/a.bin\t", // 尾部混一个 Tab（同一步会删掉它）
             "\u{1}https://example.com/a@b.bin",   // `@` 在 path 里仍然只是 path
         ] {
-            assert!(t(url).validate().is_ok(), "{url:?} 归一后是加密的、authority 无 @，必须放行");
-            assert!(url_is_https(url), "{url:?} 的 scheme 就是 https，判据要给真");
+            assert!(
+                t(url).validate().is_ok(),
+                "{url:?} 归一后是加密的、authority 无 @，必须放行"
+            );
+            assert!(
+                url_is_https(url),
+                "{url:?} 的 scheme 就是 https，判据要给真"
+            );
         }
         // 口令支照放行（与 `accepts_https_url_with_leading_whitespace` 同一立场，只是多了 C0）。
         let mut x = t("\u{1}https://example.com/a.bin");
         x.password = Some("hunter2".into());
-        assert!(x.validate().is_ok(), "https 带口令是本工具支持的形状，前导 C0 不改变这一点");
+        assert!(
+            x.validate().is_ok(),
+            "https 带口令是本工具支持的形状，前导 C0 不改变这一点"
+        );
     }
 
     #[test]
@@ -805,9 +934,19 @@ mod tests {
         // 绝不回写 `task.url`。续传要拿原串重新发请求，改写过的话下一条任务的字节就对不上来源。
         const RAW: &str = "\u{1}http\t://host/a.bin";
         let x = t(RAW);
-        assert!(x.validate().is_ok(), "{RAW:?} 归一后是明文 http、authority 无 @ 且不带口令 ⇒ 必须放行");
-        assert_eq!(x.url, RAW, "闸只读归一后的那份，不许把归一结果写回 `task.url`");
-        assert_eq!(url_for_gate(RAW), "http://host/a.bin", "归一本身的两步（对照读：不回写、只给判据）");
+        assert!(
+            x.validate().is_ok(),
+            "{RAW:?} 归一后是明文 http、authority 无 @ 且不带口令 ⇒ 必须放行"
+        );
+        assert_eq!(
+            x.url, RAW,
+            "闸只读归一后的那份，不许把归一结果写回 `task.url`"
+        );
+        assert_eq!(
+            url_for_gate(RAW),
+            "http://host/a.bin",
+            "归一本身的两步（对照读：不回写、只给判据）"
+        );
 
         // `Snapshot::from_task` 那条落盘路径同样不受影响：它只是调 `validate()`（规则仍只住一处，
         // 见 E23 附记），存下来的还是原串。夹具在本格里手搭 —— `state.rs` 一行没动。
@@ -824,17 +963,27 @@ mod tests {
             vec![crate::state::SegView { start: 0, end: 9 }],
         )
         .expect("过闸的任务必须能构造快照");
-        assert_eq!(snap.task.url, RAW, "断点文件里存的必须是原串，不是归一后的那份");
-        assert_eq!(snap.validator.final_url, RAW, "`validator.final_url` 同样不回写");
+        assert_eq!(
+            snap.task.url, RAW,
+            "断点文件里存的必须是原串，不是归一后的那份"
+        );
+        assert_eq!(
+            snap.validator.final_url, RAW,
+            "`validator.final_url` 同样不回写"
+        );
         assert!(!snap.needs_secret, "这条任务本来就没带口令");
 
         // 反面：同一形状配上口令 ⇒ 落盘口也拒（`from_task` 调的就是这同一个闸，G1b 修的那份串自动生效）。
         let mut with_secret = x.clone();
         with_secret.password = Some("hunter2".into());
-        let Err(err) = crate::state::Snapshot::from_task(&with_secret, validator, Vec::new()) else {
+        let Err(err) = crate::state::Snapshot::from_task(&with_secret, validator, Vec::new())
+        else {
             panic!("前导 C0 + 中间 Tab 的明文 http 配口令，在落盘口也必须被拒");
         };
-        assert!(err.to_string().contains("明文 HTTP 不发送口令"), "落盘口要走闸文案：{err}");
+        assert!(
+            err.to_string().contains("明文 HTTP 不发送口令"),
+            "落盘口要走闸文案：{err}"
+        );
         Ok(())
     }
 
@@ -880,13 +1029,41 @@ mod tests {
         const LAND: &str = "这条 URL 的末段";
         let rows: &[(&str, bool, Want)] = &[
             // ① 分隔符变体、凭据写在 URL 里那一族：实测账见计划文末勘误 **E32**
-            ("http:/u:PASS@127.0.0.1:8899/x1.bin", false, Refused(SHAPE, None)),
-            ("http:/\\u:PASS@127.0.0.1:8899/x2.bin", false, Refused(SHAPE, None)),
-            ("http:////u:PASS@127.0.0.1:8899/x3.bin", false, Refused(SHAPE, None)),
-            ("http:\\u:PASS@127.0.0.1:8899/x4.bin", false, Refused(URLINFO, None)),
-            ("http:\\\\u:PASS@127.0.0.1:8899/x5.bin", false, Refused(URLINFO, None)),
-            ("http:u:PASS@127.0.0.1:8899/x6.bin", false, Refused(URLINFO, None)),
-            ("http:///u:PASS@127.0.0.1:8899/x7.bin", false, Refused(SHAPE, None)),
+            (
+                "http:/u:PASS@127.0.0.1:8899/x1.bin",
+                false,
+                Refused(SHAPE, None),
+            ),
+            (
+                "http:/\\u:PASS@127.0.0.1:8899/x2.bin",
+                false,
+                Refused(SHAPE, None),
+            ),
+            (
+                "http:////u:PASS@127.0.0.1:8899/x3.bin",
+                false,
+                Refused(SHAPE, None),
+            ),
+            (
+                "http:\\u:PASS@127.0.0.1:8899/x4.bin",
+                false,
+                Refused(URLINFO, None),
+            ),
+            (
+                "http:\\\\u:PASS@127.0.0.1:8899/x5.bin",
+                false,
+                Refused(URLINFO, None),
+            ),
+            (
+                "http:u:PASS@127.0.0.1:8899/x6.bin",
+                false,
+                Refused(URLINFO, None),
+            ),
+            (
+                "http:///u:PASS@127.0.0.1:8899/x7.bin",
+                false,
+                Refused(SHAPE, None),
+            ),
             ("https:/h/a.bin", false, Refused(SHAPE, None)),
             ("https:/\\h/a.bin", false, Refused(SHAPE, None)),
             ("https:////h/a.bin", false, Refused(SHAPE, None)),
@@ -900,8 +1077,16 @@ mod tests {
             (" \thttp://u:PASS@h/x", false, Refused(URLINFO, None)),
             ("ht\ntp://u:PASS@h/x", false, Refused(URLINFO, None)),
             ("h\tttp://u:PASS@h/x", false, Refused(URLINFO, None)),
-            ("https\r\n://alice:s3cret@h/x", false, Refused(URLINFO, None)),
-            ("http://alice:s3cret@h/a\r.bin", false, Refused(URLINFO, None)),
+            (
+                "https\r\n://alice:s3cret@h/x",
+                false,
+                Refused(URLINFO, None),
+            ),
+            (
+                "http://alice:s3cret@h/a\r.bin",
+                false,
+                Refused(URLINFO, None),
+            ),
             ("\u{1}http://h/x", true, Refused(PLAIN_TEXT, Some(false))),
             (" \thttp://h/x", true, Refused(PLAIN_TEXT, Some(false))),
             // ③ 规范形状上的 E9 两支（措辞与方向**一个字都没改**，只是现在只在规范串上跑）
@@ -911,7 +1096,11 @@ mod tests {
             ("https://alice:s3cret@h/x", false, Refused(URLINFO, None)),
             ("HTTPS://ALICE:S3CRET@h/x", false, Refused(URLINFO, None)),
             ("https://alice@h/x", false, Refused(URLINFO, None)),
-            ("https://alice:s3cret@h/x/a?q=1#f", false, Refused(URLINFO, None)),
+            (
+                "https://alice:s3cret@h/x/a?q=1#f",
+                false,
+                Refused(URLINFO, None),
+            ),
             // ④ 空与全空白（走"缺少 URL"那一支，不是形状那一支）
             ("", false, Refused(MISSING, None)),
             ("   ", false, Refused(MISSING, None)),
@@ -954,7 +1143,11 @@ mod tests {
             // 裁决 Some(false)），但 `authority_has_userinfo` 的终止符集合不带 `\`、把整截当 host 段
             // 扫出 `@` ⇒ 它撞在 userinfo 那一支上（措辞点名 userinfo）。这一格钉住 STATUS 里"两支是
             // 刻意**并集**"那条裁定：形状支与 userinfo 支各自的终止符集合不同，并联的方向是"多拒"。
-            ("http://127.0.0.1:18777\\u:p@x", false, Refused(URLINFO, Some(false))),
+            (
+                "http://127.0.0.1:18777\\u:p@x",
+                false,
+                Refused(URLINFO, Some(false)),
+            ),
             ("https://[fe80::1]:8443/a@b.bin", false, Want::Secure),
             ("http://h/a@b.bin", false, Want::Plain),
             ("http://h/a.bin?to=me@host", false, Want::Plain),
@@ -982,22 +1175,46 @@ mod tests {
                     if let Err(err) = x.validate() {
                         panic!("规范写法 {raw:?}（口令={with_password}）必须放行，实际被拒：{err}");
                     }
-                    assert_eq!(shape, Some(secure), "{raw:?} 是规范写法 ⇒ 裁决必须是 Some({secure})");
-                    assert_eq!(https, secure, "{raw:?}：`url_is_https` 必须与闸同向（分家的后果是该带的凭据静默不带）");
-                    assert_eq!(x.url, *raw, "闸只读归一后的那份，绝不把归一结果写回 `task.url`");
+                    assert_eq!(
+                        shape,
+                        Some(secure),
+                        "{raw:?} 是规范写法 ⇒ 裁决必须是 Some({secure})"
+                    );
+                    assert_eq!(
+                        https, secure,
+                        "{raw:?}：`url_is_https` 必须与闸同向（分家的后果是该带的凭据静默不带）"
+                    );
+                    assert_eq!(
+                        x.url, *raw,
+                        "闸只读归一后的那份，绝不把归一结果写回 `task.url`"
+                    );
                 }
                 Refused(needle, want_shape) => {
                     let Err(err) = x.validate() else {
-                        panic!("{raw:?}（口令={with_password}）必须被闸拒掉 —— 放行就意味着凭据可以上明文线、\
-                                也可以随 `task.url` 落进断点文件");
+                        panic!(
+                            "{raw:?}（口令={with_password}）必须被闸拒掉 —— 放行就意味着凭据可以上明文线、\
+                                也可以随 `task.url` 落进断点文件"
+                        );
                     };
                     let msg = err.to_string();
-                    assert!(msg.contains(needle), "{raw:?} 要走「{needle}」那一支，实际消息：{msg}");
+                    assert!(
+                        msg.contains(needle),
+                        "{raw:?} 要走「{needle}」那一支，实际消息：{msg}"
+                    );
                     for leak in [SECRET, "PASS", "s3cret", "alice"] {
-                        assert!(!msg.contains(leak), "错误消息不该把凭据抄一遍（{leak:?}）：{msg}");
+                        assert!(
+                            !msg.contains(leak),
+                            "错误消息不该把凭据抄一遍（{leak:?}）：{msg}"
+                        );
                     }
-                    assert_eq!(shape, want_shape, "{raw:?} 的形状裁决与期望不符（闸与裁决必须同源）");
-                    assert!(!https, "{raw:?} 已被拒 ⇒ 绝不能再被算成 https（保守那一支＝不发凭据）");
+                    assert_eq!(
+                        shape, want_shape,
+                        "{raw:?} 的形状裁决与期望不符（闸与裁决必须同源）"
+                    );
+                    assert!(
+                        !https,
+                        "{raw:?} 已被拒 ⇒ 绝不能再被算成 https（保守那一支＝不发凭据）"
+                    );
                 }
             }
         }
@@ -1014,8 +1231,14 @@ mod tests {
         x.name = Some("a.bin".into());
         x.flags = 1;
         let d = format!("{x:?}");
-        assert!(!d.contains("hunter2"), "Debug 里不能有口令本尊（Task 8 的错误路径会打 Debug）：{d}");
-        assert!(d.contains("password: Some(\"[redacted]\")"), "口令要显式渲染成掩码，而不是消失：{d}");
+        assert!(
+            !d.contains("hunter2"),
+            "Debug 里不能有口令本尊（Task 8 的错误路径会打 Debug）：{d}"
+        );
+        assert!(
+            d.contains("password: Some(\"[redacted]\")"),
+            "口令要显式渲染成掩码，而不是消失：{d}"
+        );
         // 其余字段照旧可见 —— 掩码只针对 password，别把调试价值一起抹掉。
         for want in [
             "url: \"https://x/a.bin\"",
@@ -1029,7 +1252,10 @@ mod tests {
         // 没口令时渲染成 None（与今天派生的形状一致），且不得留下空掩码。
         x.password = None;
         let clean = format!("{x:?}");
-        assert!(clean.contains("password: None"), "没口令时该是 password: None：{clean}");
+        assert!(
+            clean.contains("password: None"),
+            "没口令时该是 password: None：{clean}"
+        );
         assert!(!clean.contains("[redacted]"), "没口令就不该有掩码：{clean}");
     }
 
@@ -1064,7 +1290,10 @@ mod tests {
     /// URL 必须干净：不然 `is_err()` 会由前面四条里的某一条交出来，这一发的牙就白装。
     /// 消息 needle 里额外点名 `--out-name` 也正是为这一句服务的（负向格必须死在**这一条**上）。
     fn named(url: &str, name: &str) -> Task {
-        Task { name: Some(name.into()), ..t(url) }
+        Task {
+            name: Some(name.into()),
+            ..t(url)
+        }
     }
 
     /// 负向四格（简报点名的四格）＋ 简报在判据里另写明的三种 `..` 形状（`x/..`、单独的 `..`、
@@ -1078,20 +1307,34 @@ mod tests {
             ("../x", "父目录里的一个名字：落在 --out-dir 之外"),
             ("x/..", "`..` 不在串首也照样是往上走一层"),
             ("a/../../b", "中间夹着的 `..` 段，切段之后仍然看得见"),
-            (r"..\x", "反斜杠版：Windows 上这是真的父目录，不是名字里的两个点"),
+            (
+                r"..\x",
+                "反斜杠版：Windows 上这是真的父目录，不是名字里的两个点",
+            ),
             ("/abs/x", "串首 `/`：PathBuf::join 会整份丢掉 --out-dir"),
             (r"C:\x", "盘符 ＋ 反斜杠：Windows 上的绝对路径"),
-            (r"C:x", "只有盘符前缀（没有分隔符）：Windows 上＝该盘当前目录，仍在 --out-dir 之外"),
+            (
+                r"C:x",
+                "只有盘符前缀（没有分隔符）：Windows 上＝该盘当前目录，仍在 --out-dir 之外",
+            ),
         ];
         for (name, why) in table {
             let Err(err) = named("https://example.com/a.bin", name).validate() else {
                 panic!("--out-name {name:?}（{why}）必须被闸拒掉，实际放行了");
             };
             let msg = err.to_string();
-            assert!(msg.contains(SHAPE), "{name:?} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2），实际：{msg}");
-            assert!(msg.contains("--out-name"), "{name:?} 的消息得点名是哪一格写错了，否则用户没法改：{msg}");
-            assert!(!msg.contains("漏洞") && !msg.contains("exploit"),
-                "这是\"参数写错了\"那一族的措辞，不许升级成安全告警的口吻：{msg}");
+            assert!(
+                msg.contains(SHAPE),
+                "{name:?} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2），实际：{msg}"
+            );
+            assert!(
+                msg.contains("--out-name"),
+                "{name:?} 的消息得点名是哪一格写错了，否则用户没法改：{msg}"
+            );
+            assert!(
+                !msg.contains("漏洞") && !msg.contains("exploit"),
+                "这是\"参数写错了\"那一族的措辞，不许升级成安全告警的口吻：{msg}"
+            );
         }
     }
 
@@ -1101,13 +1344,22 @@ mod tests {
     fn allows_relative_out_names_inside_the_out_dir() {
         for name in ["x.bin", "sub/x.bin", "a%20b.zip"] {
             let x = named("https://example.com/a.bin", name);
-            assert!(x.validate().is_ok(), "{name:?} 是落在 --out-dir 里的相对名字，不许拒： {:?}",
-                x.validate().err());
+            assert!(
+                x.validate().is_ok(),
+                "{name:?} 是落在 --out-dir 里的相对名字，不许拒： {:?}",
+                x.validate().err()
+            );
         }
         // 相对子路径不只是"过闸"，它还得真的落成子目录里（这一句钉的是闸与 target_path 没有分家）。
         let x = named("https://example.com/a.bin", "sub/x.bin");
-        assert!(x.target_path().to_string_lossy().replace('\\', "/").ends_with("sub/x.bin"),
-            "落点应当是 --out-dir 底下的 sub/x.bin：{}", x.target_path().display());
+        assert!(
+            x.target_path()
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("sub/x.bin"),
+            "落点应当是 --out-dir 底下的 sub/x.bin：{}",
+            x.target_path().display()
+        );
     }
 
     /// 派生名（`--out-name` 不给，从 URL 末段推）的现状四格 ＋ 一格"带洞的 URL 也推不出洞"。
@@ -1125,9 +1377,20 @@ mod tests {
         ];
         for (url, want_tail) in table {
             let x = t(url);
-            assert!(x.validate().is_ok(), "{url} 干净且没给 --out-name，必须放行：{:?}", x.validate().err());
-            let got = x.target_path().file_name().map(|s| s.to_string_lossy().into_owned());
-            assert_eq!(got.as_deref(), Some(*want_tail), "{url} 推导出来的落点末段与现状不符");
+            assert!(
+                x.validate().is_ok(),
+                "{url} 干净且没给 --out-name，必须放行：{:?}",
+                x.validate().err()
+            );
+            let got = x
+                .target_path()
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned());
+            assert_eq!(
+                got.as_deref(),
+                Some(*want_tail),
+                "{url} 推导出来的落点末段与现状不符"
+            );
         }
     }
 
@@ -1143,26 +1406,54 @@ mod tests {
         const SHAPE: &str = "参数写错了";
         const DERIVED: &str = "这条 URL 的末段";
         let table: &[(&str, &str)] = &[
-            ("https://h/..", "末段单独一个 `..`：落点是 --out-dir 的上一级"),
-            ("https://h/.", "末段是 `.`：落点是目录本身，不是目录里的一个文件"),
-            ("https://h/a/..", "`..` 前面还有别的段：切段之后末段仍然是它"),
-            ("https://h/../..", "两个 `..` 连着写：末段还是 `..`，不因为多走一层就换个判法"),
-            ("https://h/..?q=1", "先砍 query 再取名 ⇒ 末段仍是 `..`，query 不是挡箭牌"),
+            (
+                "https://h/..",
+                "末段单独一个 `..`：落点是 --out-dir 的上一级",
+            ),
+            (
+                "https://h/.",
+                "末段是 `.`：落点是目录本身，不是目录里的一个文件",
+            ),
+            (
+                "https://h/a/..",
+                "`..` 前面还有别的段：切段之后末段仍然是它",
+            ),
+            (
+                "https://h/../..",
+                "两个 `..` 连着写：末段还是 `..`，不因为多走一层就换个判法",
+            ),
+            (
+                "https://h/..?q=1",
+                "先砍 query 再取名 ⇒ 末段仍是 `..`，query 不是挡箭牌",
+            ),
             ("https://h/..#frag", "同上，fragment 也不是"),
-            (r"https://h/..\x", r"反斜杠版：Windows 上 `..\x` 是真的父目录形状，切段带 `\` 才看得见"),
+            (
+                r"https://h/..\x",
+                r"反斜杠版：Windows 上 `..\x` 是真的父目录形状，切段带 `\` 才看得见",
+            ),
         ];
         for (url, why) in table {
             let x = t(url);
-            assert!(x.name.is_none(), "夹具：这一族必须走推导名那一路，否则测的是显式判据");
+            assert!(
+                x.name.is_none(),
+                "夹具：这一族必须走推导名那一路，否则测的是显式判据"
+            );
             let Err(err) = x.validate() else {
                 panic!("{url} 的末段（{why}）必须被闸拒掉，实际放行了");
             };
             let msg = err.to_string();
-            assert!(msg.contains(SHAPE), "{url} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2），实际：{msg}");
-            assert!(msg.contains(DERIVED),
-                "{url} 没给 --out-name，消息得说出矛头是这条 URL 的末段，否则用户会去改自己没填过的那格：{msg}");
-            assert!(!msg.contains("漏洞") && !msg.contains("exploit"),
-                "这是\"参数写错了\"那一族的措辞（用户自伤，不是远端可利用），不许升级成安全告警的口吻：{msg}");
+            assert!(
+                msg.contains(SHAPE),
+                "{url} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2），实际：{msg}"
+            );
+            assert!(
+                msg.contains(DERIVED),
+                "{url} 没给 --out-name，消息得说出矛头是这条 URL 的末段，否则用户会去改自己没填过的那格：{msg}"
+            );
+            assert!(
+                !msg.contains("漏洞") && !msg.contains("exploit"),
+                "这是\"参数写错了\"那一族的措辞（用户自伤，不是远端可利用），不许升级成安全告警的口吻：{msg}"
+            );
         }
     }
 
@@ -1189,11 +1480,20 @@ mod tests {
         ];
         for (url, want) in table {
             let x = t(url);
-            assert!(x.validate().is_ok(),
-                "{url} 的末段不走出目录，闸不许拒（拒了就是修过头）：{:?}", x.validate().err());
-            let got = x.target_path().file_name().map(|s| s.to_string_lossy().into_owned());
-            assert_eq!(got.as_deref(), Some(*want),
-                "{url} 既然放行，闸判的那份名字就必须是 target_path() 真拿去 join 的那份（两本账）");
+            assert!(
+                x.validate().is_ok(),
+                "{url} 的末段不走出目录，闸不许拒（拒了就是修过头）：{:?}",
+                x.validate().err()
+            );
+            let got = x
+                .target_path()
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned());
+            assert_eq!(
+                got.as_deref(),
+                Some(*want),
+                "{url} 既然放行，闸判的那份名字就必须是 target_path() 真拿去 join 的那份（两本账）"
+            );
         }
     }
 
@@ -1219,60 +1519,102 @@ mod tests {
         let table: &[(&str, bool, bool)] = &[
             ("u:p@x", false, false), // H1 翻格：join 把左半边整份丢掉，落点 `u:p@x` 在目录外（旧表记"推导放"）
             ("a:b", false, false),   // 同一族的另一半（`@` 从来不是放行理由，这一行仍两边同判）
-            ("C:x", false, false),   // 盘相对：旧"推导支不查盘符"的立论被 `…/C:\evil\p.bin` 实测推翻
-            ("..", false, false),    // 越目录那一半**两边都查** ⇒ 不许"统一成都不查"（m2 的牙）
-            (".", false, false),     // 同上，落点是目录本身那一格
-            ("x.bin", true, true),   // 两支都没有理由管的普通名字（正向对照）
+            ("C:x", false, false), // 盘相对：旧"推导支不查盘符"的立论被 `…/C:\evil\p.bin` 实测推翻
+            ("..", false, false),  // 越目录那一半**两边都查** ⇒ 不许"统一成都不查"（m2 的牙）
+            (".", false, false),   // 同上，落点是目录本身那一格
+            ("x.bin", true, true), // 两支都没有理由管的普通名字（正向对照）
         ];
         for (name, derived_ok, explicit_ok) in table {
-            assert_eq!(derived_ok, explicit_ok, "夹具：可达末段上的表必须两支同判，异判只许走差集格那一发");
+            assert_eq!(
+                derived_ok, explicit_ok,
+                "夹具：可达末段上的表必须两支同判，异判只许走差集格那一发"
+            );
             let url = format!("http://[::1]:8080/{name}");
             let derived = t(&url);
             assert!(derived.name.is_none(), "夹具：第一路必须是推导名");
-            assert_eq!(derived.validate().is_ok(), *derived_ok,
+            assert_eq!(
+                derived.validate().is_ok(),
+                *derived_ok,
                 "{name:?} 走推导那一路应当{}（背板并联后：末段把落点带出目录就拒）",
-                if *derived_ok { "放行" } else { "被拒" });
+                if *derived_ok { "放行" } else { "被拒" }
+            );
             if !*derived_ok {
                 let msg = derived.validate().err().unwrap().to_string();
-                assert!(msg.contains("这条 URL 的末段"),
-                    "{name:?} 推导支的措辞必须点名末段，否则用户会去改自己没填过的 --out-name：{msg}");
+                assert!(
+                    msg.contains("这条 URL 的末段"),
+                    "{name:?} 推导支的措辞必须点名末段，否则用户会去改自己没填过的 --out-name：{msg}"
+                );
             }
 
             let explicit = named("https://example.com/a.bin", name);
             assert!(explicit.name.is_some(), "夹具：第二路必须是显式 --out-name");
-            assert_eq!(explicit.validate().is_ok(), *explicit_ok,
+            assert_eq!(
+                explicit.validate().is_ok(),
+                *explicit_ok,
                 "{name:?} 走显式那一路应当{}（全判据＋背板，裁决与本行推导侧相同）",
-                if *explicit_ok { "放行" } else { "被拒" });
+                if *explicit_ok { "放行" } else { "被拒" }
+            );
             if !*explicit_ok {
                 let msg = explicit.validate().err().unwrap().to_string();
-                assert!(msg.contains("--out-name"),
-                    "{name:?} 显式支的措辞必须点名 --out-name，否则用户分不清来源：{msg}");
+                assert!(
+                    msg.contains("--out-name"),
+                    "{name:?} 显式支的措辞必须点名 --out-name，否则用户分不清来源：{msg}"
+                );
             }
         }
 
         // 差集那一格（先实测后写侧）：--out-dir 本身是盘相对 `C:x`、名字也叫 `C:x`。
         // 推导支：join("C:x") 见右侧带盘符前缀 ⇒ 整份丢掉左半边、自己还是 `C:x` ⇒ 前缀命中 ⇒ 放行；
         // 显式支：同一份串在第一刀"字母＋冒号"上就被全判据拒。
-        let weird = Task { dir: "C:x".into(), ..t("https://h/C:x") };
+        let weird = Task {
+            dir: "C:x".into(),
+            ..t("https://h/C:x")
+        };
         assert!(weird.name.is_none(), "夹具：差集格的推导路");
-        assert!(weird.lands_inside_out_dir(), "实测前提：盘相对目录配同名盘符末段，join 语义认为落在里面");
-        assert!(weird.validate().is_ok(), "推导支在这一格放行（切段判据无 . 段、背板前缀命中）");
-        let weird_explicit = Task { dir: "C:x".into(), ..named("https://example.com/a.bin", "C:x") };
-        assert!(weird_explicit.validate().is_err(), "显式支在同一格按全判据第 2 刀拒——两支唯一实测分歧格");
+        assert!(
+            weird.lands_inside_out_dir(),
+            "实测前提：盘相对目录配同名盘符末段，join 语义认为落在里面"
+        );
+        assert!(
+            weird.validate().is_ok(),
+            "推导支在这一格放行（切段判据无 . 段、背板前缀命中）"
+        );
+        let weird_explicit = Task {
+            dir: "C:x".into(),
+            ..named("https://example.com/a.bin", "C:x")
+        };
+        assert!(
+            weird_explicit.validate().is_err(),
+            "显式支在同一格按全判据第 2 刀拒——两支唯一实测分歧格"
+        );
 
         // 全判据不是死代码的另一半：含 `/` 的串只有显式支收得到，而它拼回去可能**仍在目录内**
         // （背板放、全判据拒）。判据函数层面直接钉宽度差，末段域层面钉"那种串不可达"。
         let slashed = "C:/o/inside.bin";
-        assert!(out_name_leaves_out_dir(slashed), "全判据按盘符打头拒（显式支收得到这种串）");
-        assert!(!escapes_out_dir(slashed), "切段判据不拒它：两支的宽度差在判据层面仍然真实存在");
-        assert!(t("http://h/a/b").effective_name().find('/').is_none(),
-            "而推导支只会收到不含 / 的末段——上面那根差集格之外，可达域两支同判");
+        assert!(
+            out_name_leaves_out_dir(slashed),
+            "全判据按盘符打头拒（显式支收得到这种串）"
+        );
+        assert!(
+            !escapes_out_dir(slashed),
+            "切段判据不拒它：两支的宽度差在判据层面仍然真实存在"
+        );
+        assert!(
+            t("http://h/a/b").effective_name().find('/').is_none(),
+            "而推导支只会收到不含 / 的末段——上面那根差集格之外，可达域两支同判"
+        );
 
         // 形状裁决与落点裁决各管各的（旧理由 2 的翻案侧）：形状支仍说这条 URL 规范。
-        assert_eq!(canonical_http_authority("http://[::1]:8080/u:p@x"), Some(false),
-            "形状表那句\"规范写法\"一个字都没动");
+        assert_eq!(
+            canonical_http_authority("http://[::1]:8080/u:p@x"),
+            Some(false),
+            "形状表那句\"规范写法\"一个字都没动"
+        );
         let x = t("http://[::1]:8080/u:p@x");
-        assert!(x.validate().is_err(), "落点闸从 H1 起真把它拦住（旧表那一格捆在 validate() 上，读成了矛盾）");
+        assert!(
+            x.validate().is_err(),
+            "落点闸从 H1 起真把它拦住（旧表那一格捆在 validate() 上，读成了矛盾）"
+        );
     }
 
     /// **T99-H1 负臂本体：`join` 背板夹住的那五族**（控制员事实表上的五个串，本发在 `64e37b8` 的
@@ -1287,38 +1629,66 @@ mod tests {
         for tail in five {
             let url = format!("https://h/{tail}");
             let x = t(&url);
-            assert_eq!(x.effective_name(), tail,
-                "夹具：{tail:?} 必须能按字面当末段推导出来，否则这一格测的是兜底名不是背板");
-            assert!(!escapes_out_dir(tail), "{tail:?} 不含 `.`／`..` 段：切段判据对它恒盲，能拦的只有背板");
-            assert!(!x.lands_inside_out_dir(), "{tail:?} 按 join 真语义落在 --out-dir 之外");
+            assert_eq!(
+                x.effective_name(),
+                tail,
+                "夹具：{tail:?} 必须能按字面当末段推导出来，否则这一格测的是兜底名不是背板"
+            );
+            assert!(
+                !escapes_out_dir(tail),
+                "{tail:?} 不含 `.`／`..` 段：切段判据对它恒盲，能拦的只有背板"
+            );
+            assert!(
+                !x.lands_inside_out_dir(),
+                "{tail:?} 按 join 真语义落在 --out-dir 之外"
+            );
             let Err(err) = x.validate() else {
                 panic!("{tail:?} 推导支必须被背板拒掉（旧闸实测退 0 并把落点带出目录）");
             };
             let msg = err.to_string();
-            assert!(msg.contains("参数写错了") && msg.contains("这条 URL 的末段"),
-                "{tail:?} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2）并点名末段：{msg}");
-            assert!(!msg.contains("漏洞") && !msg.contains("exploit"),
-                "用户自伤那一族，不许升级成安全告警口吻：{msg}");
+            assert!(
+                msg.contains("参数写错了") && msg.contains("这条 URL 的末段"),
+                "{tail:?} 要走\"参数写错了\"那一族（E23⑤ ⇒ 退 2）并点名末段：{msg}"
+            );
+            assert!(
+                !msg.contains("漏洞") && !msg.contains("exploit"),
+                "用户自伤那一族，不许升级成安全告警口吻：{msg}"
+            );
 
             let e = named("https://example.com/a.bin", tail);
             let Err(err) = e.validate() else {
                 panic!("{tail:?} 显式支必须拒（全判据存量＋并联背板，两支都在）");
             };
-            assert!(err.to_string().contains("--out-name"),
-                "{tail:?} 显式支措辞点名 --out-name：{}", err);
+            assert!(
+                err.to_string().contains("--out-name"),
+                "{tail:?} 显式支措辞点名 --out-name：{}",
+                err
+            );
         }
 
         // 背板盲的那一族（校准实测 `Path::new("E:/o/..").starts_with("E:/o")` = **真**）：
         // 这一格是"并联不是替换"的正面证据——背板说"在里面"，闸整体仍须拒（切段判据管）。
         let dotdot = t("https://h/..");
-        assert!(dotdot.lands_inside_out_dir(),
-            "实测前提：背板对 `..` 恒盲（前缀关系断不掉）⇒ 它替代不了 escapes_out_dir（m2 的立论）");
-        assert!(dotdot.validate().is_err(), "而闸整体照样拒它——切段判据那一支还在");
+        assert!(
+            dotdot.lands_inside_out_dir(),
+            "实测前提：背板对 `..` 恒盲（前缀关系断不掉）⇒ 它替代不了 escapes_out_dir（m2 的立论）"
+        );
+        assert!(
+            dotdot.validate().is_err(),
+            "而闸整体照样拒它——切段判据那一支还在"
+        );
 
         // 正向对照（防砸宽的牙）：正常末段与显式相对子路径必须照旧放行。
-        assert!(t("https://h/x.bin").validate().is_ok(), "普通末段不许被背板误杀");
-        assert!(named("https://example.com/a.bin", "sub/x.bin").validate().is_ok(),
-            "相对子路径照旧允许——join 回去仍是 --out-dir 底下");
+        assert!(
+            t("https://h/x.bin").validate().is_ok(),
+            "普通末段不许被背板误杀"
+        );
+        assert!(
+            named("https://example.com/a.bin", "sub/x.bin")
+                .validate()
+                .is_ok(),
+            "相对子路径照旧允许——join 回去仍是 --out-dir 底下"
+        );
     }
 
     /// **T99-G5d 第 1 件：一根结构针 —— "闸查的名字"与"`target_path()` 真拿去落盘的名字"必须是
@@ -1354,22 +1724,37 @@ mod tests {
     /// `effective_name` **改名**且两侧同时改指新名，这一发也会红——那是"钉形状"的代价，刻意的：
     /// 一本账要有名字可查，换了名字就照新名字同步这根针，不许悄悄换账本。
     #[test]
-    fn the_gate_and_the_landing_share_one_name_source_and_the_tail_algorithm_lives_only_in_effective_name() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("task.rs");
-        let all = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）", path.display()));
+    fn the_gate_and_the_landing_share_one_name_source_and_the_tail_algorithm_lives_only_in_effective_name()
+     {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("task.rs");
+        let all = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "读 {} 的源码文本失败：{err}（本发是源码扫描针，读不到就是没有判据）",
+                path.display()
+            )
+        });
         let src = match all.find("#[cfg(test)]") {
             Some(at) => &all[..at],
-            None => panic!("src/task.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"),
+            None => panic!(
+                "src/task.rs 里找不到 `#[cfg(test)]`——扫描区靠它切掉测试文本，不许退回整文件（针会扫到自己）"
+            ),
         };
 
         // 签名行在**产品区**的非注释行里必须恰好出现一次：出现第二个同名函数＝第二本账。
         let sig_count = |sig: &str| -> usize {
-            src.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(sig)).count()
+            src.lines()
+                .filter(|l| !l.trim_start().starts_with("//") && l.contains(sig))
+                .count()
         };
         for sig in ["fn validate(", "fn target_path(", "fn effective_name("] {
-            assert_eq!(sig_count(sig), 1,
-                "`{sig}` 在 src/task.rs 产品区应当恰好出现一次（两处同名＝两本账），实得 {} 次", sig_count(sig));
+            assert_eq!(
+                sig_count(sig),
+                1,
+                "`{sig}` 在 src/task.rs 产品区应当恰好出现一次（两处同名＝两本账），实得 {} 次",
+                sig_count(sig)
+            );
         }
 
         // 函数体切片：从签名行起按大括号深度截到函数结束，只收非 `//` 开头的行。
@@ -1379,32 +1764,53 @@ mod tests {
             let mut body = String::new();
             let mut depth: i32 = 0;
             let mut inside = false;
+            let mut started = false;
             for line in src.lines() {
                 let t = line.trim_start();
-                if t.starts_with("//") { continue; }
+                if t.starts_with("//") {
+                    continue;
+                }
                 if !inside {
-                    if !t.contains(sig) { continue; }
+                    if !t.contains(sig) {
+                        continue;
+                    }
                     inside = true;
                 }
                 depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                if depth > 0 {
+                    started = true;
+                }
                 body.push_str(line);
                 body.push('\n');
-                if depth == 0 { break; }
+                // 签名可能被 rustfmt 拆成多行：第一个 `{` 出现前 depth 恒 0，不能就此收工。
+                if started && depth == 0 {
+                    break;
+                }
             }
-            assert!(inside, "产品区里找不到含 `{sig}` 的非注释行——判据应当存在的函数没了");
-            assert_eq!(depth, 0, "`{sig}` 的函数体在大括号深度上没闭合——针的夹具跟不上实现形状");
+            assert!(
+                inside,
+                "产品区里找不到含 `{sig}` 的非注释行——判据应当存在的函数没了"
+            );
+            assert_eq!(
+                depth, 0,
+                "`{sig}` 的函数体在大括号深度上没闭合——针的夹具跟不上实现形状"
+            );
             body
         }
 
         let validate = body_of(src, "fn validate(");
-        assert!(validate.contains("self.effective_name()"),
+        assert!(
+            validate.contains("self.effective_name()"),
             "断言 1 红：`fn validate(` 的体内不再读 `self.effective_name()`——闸退回查另一本账\
-             （例如只查 `self.name`），放下的名字与落盘的名字不再是同一份");
+             （例如只查 `self.name`），放下的名字与落盘的名字不再是同一份"
+        );
 
         let target = body_of(src, "fn target_path(");
-        assert!(target.contains("self.effective_name()"),
+        assert!(
+            target.contains("self.effective_name()"),
             "断言 2a 红：`fn target_path(` 的体内不再读 `self.effective_name()`——这正是 m4 的形状：\
-             落盘自己再算一遍末段，两份等价算法各住一处；行为差分对它实测零红（G5c-R2），只有这根针抓得到");
+             落盘自己再算一遍末段，两份等价算法各住一处；行为差分对它实测零红（G5c-R2），只有这根针抓得到"
+        );
 
         // 断言 2b（**T99-H3 第 4 节把它从"禁一个 token"扩成"禁一族切串调用"**）：
         // 旧写法只禁 `rsplit('/')` 那一个 token ⇒ 同一份等价末段重算换个拼法就溜过去了：
@@ -1414,11 +1820,17 @@ mod tests {
         // `effective_name` 那种"名字里含 find"的假命中，而切串找位置一定是 `.find(…)` 的调用形状。
         const TAIL_SPLITTING_TOKENS: &[&str] = &["split", "rfind", "find("];
         for token in TAIL_SPLITTING_TOKENS {
-            assert!(!target.contains(token),
+            assert!(
+                !target.contains(token),
                 "断言 2b 红：`fn target_path(` 的体内出现了切串调用 `{token}`——落盘在自己算末段\
                  （m4 禁的那件事，本发只是换了拼法）；末段算法只许住在 `effective_name()` 一处。\
                  命中现场：{}",
-                target.lines().find(|l| l.contains(token)).unwrap_or_default().trim());
+                target
+                    .lines()
+                    .find(|l| l.contains(token))
+                    .unwrap_or_default()
+                    .trim()
+            );
         }
 
         // 断言 2c（**T99-H3 第 4 节的第二种写法，与 2b 并联**）：整条函数体除签名与收尾大括号外
@@ -1440,9 +1852,11 @@ mod tests {
         );
 
         let effective = body_of(src, "fn effective_name(");
-        assert!(effective.contains("rsplit('/')"),
+        assert!(
+            effective.contains("rsplit('/')"),
             "断言 3 红：`rsplit('/')` 不在 `fn effective_name(` 的体内了——末段算法被搬走或删掉（m5）。这一条\
-             证明断言 2 的禁字不是装饰：把算法搬进 target_path 再删掉这里的，断言 1/2 各自照逻辑仍是绿的");
+             证明断言 2 的禁字不是装饰：把算法搬进 target_path 再删掉这里的，断言 1/2 各自照逻辑仍是绿的"
+        );
 
         // 断言 3b（**2b 的正向对照**，E28⑧-1 那条纪律要求的"负向判据必配正向对照"）：
         // 同一套禁字 token 拿去扫 `effective_name` 的体内**必须**命中至少一个 —— 末段算法本来就住那儿。
@@ -1453,9 +1867,11 @@ mod tests {
             .filter(|token| effective.contains(*token))
             .copied()
             .collect();
-        assert!(!hits.is_empty(),
+        assert!(
+            !hits.is_empty(),
             "断言 3b 红：切串 token 清单（{TAIL_SPLITTING_TOKENS:?}）在 `fn effective_name(` 的体内**一个都打不中**\
-             ——那说明断言 2b 扫的是一把自己拼错的尺子，禁字判据已经退化成恒真");
+             ——那说明断言 2b 扫的是一把自己拼错的尺子，禁字判据已经退化成恒真"
+        );
     }
 
     /// **T99-G5d 第 2 件：一发行为差分——对表里每一行，两个**独立观察量**恒等：
@@ -1493,29 +1909,41 @@ mod tests {
     fn what_the_gate_admits_and_what_the_landing_tail_shows_always_agree() {
         // 一格 = (URL, `--out-name`；`None` = 走推导名)。全是今天真存在的形状，A/B 见各行注。
         let table: &[(&str, Option<&str>)] = &[
-            ("https://h/..", None),                                    // 推导＝`..` ⇒ 两侧都假
-            ("https://h/.", None),                                     // 落点是目录本身 ⇒ 两侧都假
-            ("https://h/..?x=1", None),                                // 砍 query 后末段仍是 `..` ⇒ 两侧都假；这一格是 m4′ 的牙
-            ("https://h/a.bin#..", None),                              // 末段 `a.bin` ⇒ 两侧都真
-            ("https://h/v1.2.bin", None),                              // 两侧都真（长得像 `..` 的合法名）
-            ("https://h/u:p@x", None),                                 // H1 翻格：A 假（背板拒）；B 同宽后也假（落点 `u:p@x` 不在 `.` 底下）
-            ("https://h/C:x\\y", None),                                // 背板五族之一进恒等表：两侧都假
-            ("https://example.com/a.bin", Some("sub/x.bin")),          // 显式子路径 ⇒ 两侧都真
-            ("https://example.com/a.bin", Some("..")),                 // 显式名末段就是 `..` ⇒ 两侧都假
-            ("https://example.com/a.bin", Some("C:x\\y")),             // 显式支吃到同一只背板 ⇒ 两侧都假
+            ("https://h/..", None),                           // 推导＝`..` ⇒ 两侧都假
+            ("https://h/.", None),                            // 落点是目录本身 ⇒ 两侧都假
+            ("https://h/..?x=1", None), // 砍 query 后末段仍是 `..` ⇒ 两侧都假；这一格是 m4′ 的牙
+            ("https://h/a.bin#..", None), // 末段 `a.bin` ⇒ 两侧都真
+            ("https://h/v1.2.bin", None), // 两侧都真（长得像 `..` 的合法名）
+            ("https://h/u:p@x", None), // H1 翻格：A 假（背板拒）；B 同宽后也假（落点 `u:p@x` 不在 `.` 底下）
+            ("https://h/C:x\\y", None), // 背板五族之一进恒等表：两侧都假
+            ("https://example.com/a.bin", Some("sub/x.bin")), // 显式子路径 ⇒ 两侧都真
+            ("https://example.com/a.bin", Some("..")), // 显式名末段就是 `..` ⇒ 两侧都假
+            ("https://example.com/a.bin", Some("C:x\\y")), // 显式支吃到同一只背板 ⇒ 两侧都假
         ];
         for (url, name) in table {
-            let x = match name { Some(n) => named(url, n), None => t(url) };
+            let x = match name {
+                Some(n) => named(url, n),
+                None => t(url),
+            };
             let a = x.validate().is_ok();
             let target = x.target_path().to_string_lossy().into_owned();
-            let seg = target.split(['/', '\\']).next_back().unwrap_or("").to_string();
+            let seg = target
+                .split(['/', '\\'])
+                .next_back()
+                .unwrap_or("")
+                .to_string();
             // B 的两格：末段是普通名字，**且**落点仍 prefixes 在 --out-dir 底下（H1 加宽，字符串级独立读法）。
-            let b = seg != "." && seg != ".."
-                && x.target_path().to_string_lossy().replace('\\', "/")
+            let b = seg != "."
+                && seg != ".."
+                && x.target_path()
+                    .to_string_lossy()
+                    .replace('\\', "/")
                     .starts_with(&x.dir.to_string_lossy().replace('\\', "/")[..]);
-            assert_eq!(a, b,
+            assert_eq!(
+                a, b,
                 "url={url} --out-name={name:?}：闸放不放 A={a}，落盘串是 {target:?}（末段 {seg:?}、前缀在目录里吗 B={b}）——\
-                 两侧不同意＝闸与落盘在读两本账（或两支宽度在这一格塌了，见文档注释的适用域声明）");
+                 两侧不同意＝闸与落盘在读两本账（或两支宽度在这一格塌了，见文档注释的适用域声明）"
+            );
         }
 
         // 盲区段：名字内部带 `..` 段而末段普通 ⇒ B 量具天生看不见，实测登记为 (A 假, B 真)。
@@ -1523,16 +1951,34 @@ mod tests {
         // （业主是差集表那发 `both_name_branches_agree_on_reachable_tails_and_pin_the_one_measured_cell`），
         // 只是哨兵。⚠ H1 复量：背板对 `.\../x` 的前缀关系断不掉（`starts_with(".")` 实测真），
         // 两格组合**没翻**——"盲区没了"不成立，哨兵照旧。
-        for (url, name) in [("https://example.com/a.bin", Some("../x")), ("https://h/..\\x", None)] {
-            let x = match name { Some(n) => named(url, n), None => t(url) };
+        for (url, name) in [
+            ("https://example.com/a.bin", Some("../x")),
+            ("https://h/..\\x", None),
+        ] {
+            let x = match name {
+                Some(n) => named(url, n),
+                None => t(url),
+            };
             let a = x.validate().is_ok();
-            let seg = x.target_path().to_string_lossy().split(['/', '\\']).next_back().unwrap_or("").to_string();
-            let inside = x.target_path().to_string_lossy().replace('\\', "/")
+            let seg = x
+                .target_path()
+                .to_string_lossy()
+                .split(['/', '\\'])
+                .next_back()
+                .unwrap_or("")
+                .to_string();
+            let inside = x
+                .target_path()
+                .to_string_lossy()
+                .replace('\\', "/")
                 .starts_with(&x.dir.to_string_lossy().replace('\\', "/")[..]);
             let b = seg != "." && seg != ".." && inside;
-            assert_eq!((a, b), (false, true),
+            assert_eq!(
+                (a, b),
+                (false, true),
                 "url={url} --out-name={name:?} 是登记过的盲区格（末段普通、名字内部含 `..` 段）：实测组合翻了＝\
-                 判据宽度被动过，去对照那张差集表");
+                 判据宽度被动过，去对照那张差集表"
+            );
         }
     }
 }

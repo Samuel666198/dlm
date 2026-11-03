@@ -22,7 +22,10 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
                 if got == 0 {
                     return Ok(None);
                 }
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "native message length truncated"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "native message length truncated",
+                ));
             }
             Ok(n) => got += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -43,8 +46,12 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
 
 /// 写一帧并 flush；stdout 上不许出现帧以外的东西。
 pub fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "native message length overflows u32"))?;
+    let len = u32::try_from(payload.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native message length overflows u32",
+        )
+    })?;
     if len > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -60,7 +67,10 @@ pub fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> io::Result<()> {
 pub fn respond(payload: &[u8]) -> Vec<u8> {
     let value: Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
-        Err(_) => return serde_json::to_vec(&json!({"op": "error", "message": "invalid json"})).expect("json! serializable"),
+        Err(_) => {
+            return serde_json::to_vec(&json!({"op": "error", "message": "invalid json"}))
+                .expect("json! serializable");
+        }
     };
     let op = value.get("op").and_then(Value::as_str).unwrap_or("");
     let reply = match op {
@@ -107,20 +117,29 @@ mod tests {
         assert!(read_frame(&mut empty).unwrap().is_none());
 
         let mut half = Cursor::new(vec![1u8, 0u8]);
-        assert_eq!(read_frame(&mut half).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            read_frame(&mut half).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
     fn oversized_length_is_refused_before_allocating_the_body() {
         let mut cur = Cursor::new((MAX_MESSAGE_BYTES + 1).to_ne_bytes().to_vec());
-        assert_eq!(read_frame(&mut cur).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_frame(&mut cur).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
     fn oversized_write_is_refused() {
         let payload = vec![0u8; MAX_MESSAGE_BYTES as usize + 1];
         let mut out = Vec::new();
-        assert_eq!(write_frame(&mut out, &payload).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            write_frame(&mut out, &payload).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
@@ -155,7 +174,8 @@ mod tests {
         serve(Cursor::new(input), &mut output).unwrap();
         let mut cur = Cursor::new(output);
         let first: Value = serde_json::from_slice(&read_frame(&mut cur).unwrap().unwrap()).unwrap();
-        let second: Value = serde_json::from_slice(&read_frame(&mut cur).unwrap().unwrap()).unwrap();
+        let second: Value =
+            serde_json::from_slice(&read_frame(&mut cur).unwrap().unwrap()).unwrap();
         assert_eq!(first["op"], "pong");
         assert_eq!(second["op"], "error");
         assert!(read_frame(&mut cur).unwrap().is_none());

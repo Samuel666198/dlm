@@ -244,9 +244,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
+use reqwest::StatusCode;
 use reqwest::blocking::{Body, Client, Request};
 use reqwest::header::{CONTENT_RANGE, IF_RANGE, RANGE};
-use reqwest::StatusCode;
 
 use crate::consts::{WINDOW_BYTES, WINDOW_MAX_TIMEOUT_SECS, WINDOW_MIN_TIMEOUT_SECS};
 use crate::probe;
@@ -516,7 +516,10 @@ struct ShotPlan {
 fn plan_shot(iv: Interval, total_len: u64, rate_bps: u64, shape: BodyShape) -> ShotPlan {
     let stop = match shape {
         // 裁定 5 / E12⑥：区间终点与"至多 `WINDOW_BYTES` 个字节"里更近的那个。
-        BodyShape::Windowed => iv.end.saturating_add(1).min(iv.start.saturating_add(WINDOW_BYTES)),
+        BodyShape::Windowed => iv
+            .end
+            .saturating_add(1)
+            .min(iv.start.saturating_add(WINDOW_BYTES)),
         // **E16**：整条区间，不做窗口夹。退化那一支每多切一刀就多付一遍"从文件头到那里"的前缀。
         BodyShape::ToEof => iv.end.saturating_add(1),
     };
@@ -526,7 +529,11 @@ fn plan_shot(iv: Interval, total_len: u64, rate_bps: u64, shape: BodyShape) -> S
         BodyShape::Windowed => stop.saturating_sub(iv.start),
         BodyShape::ToEof => stop,
     };
-    ShotPlan { range: range_header(iv, total_len, shape), budget: budget_for(planned_bytes, rate_bps), stop }
+    ShotPlan {
+        range: range_header(iv, total_len, shape),
+        budget: budget_for(planned_bytes, rate_bps),
+        stop,
+    }
 }
 
 /// 这一枪发哪一条 `Range`（spec §2 表里"发 `Range: start-`"、§3 对 IDM 开放终点的观测）。
@@ -672,7 +679,12 @@ fn open_request_body(path: &Path) -> Result<Body> {
 ///
 /// `budget` 照窗口那一支同一个式子（`window_budget(rate_bps)`），语义也同一个：**整请求期限**
 /// （本轮实测，见模块文档）—— 一份大或慢的整份下载会被它掐在 body 中间，后果见 `run_whole` 的文档。
-fn build_body_request(agent: &Client, task: &Task, body: Body, budget: Duration) -> Result<Request> {
+fn build_body_request(
+    agent: &Client,
+    task: &Task,
+    body: Body,
+    budget: Duration,
+) -> Result<Request> {
     let req = agent.post(&task.url).body(body).timeout(budget);
     probe::with_contract_headers(req, task)?
         .build()
@@ -765,7 +777,9 @@ pub fn run_window(
     cap: &EndCap,
     shape: BodyShape,
 ) -> Result<Outcome> {
-    run_window_with_if_range(agent, task, iv, store, rate_bps, total_len, cap, shape, None)
+    run_window_with_if_range(
+        agent, task, iv, store, rate_bps, total_len, cap, shape, None,
+    )
 }
 
 /// 与 [`run_window`] 相同，但可以带一条 `If-Range`（R17）。
@@ -784,7 +798,9 @@ pub fn run_window_with_if_range(
     shape: BodyShape,
     if_range: Option<&str>,
 ) -> Result<Outcome> {
-    run_window_with_limits(agent, task, iv, store, rate_bps, total_len, cap, shape, if_range, None, None)
+    run_window_with_limits(
+        agent, task, iv, store, rate_bps, total_len, cap, shape, if_range, None, None,
+    )
 }
 
 /// 与 [`run_window`] 相同，但可以带 `If-Range`（R17）、一只共享限速器（R18）和一块
@@ -842,7 +858,9 @@ pub fn run_window_with_limits(
             // 重定向**中途**失败时，带凭据的落地 URL 只出现在 reqwest 的错误里 ⇒ 同一个闸、同一句话
             // （`probe::landed_url_is_refused` 的三支合取 ＋ `probe::LANDED_CREDENTIALS`，Task 5 评审 C3 /
             // T99-G1f；与 `probe::run` 的错误支完全同形，口令字面值取自手上的 `task`）。
-            if e.url().is_some_and(|u| probe::landed_url_is_refused(u.as_str(), task.password.as_deref())) {
+            if e.url()
+                .is_some_and(|u| probe::landed_url_is_refused(u.as_str(), task.password.as_deref()))
+            {
                 bail!("{}", probe::LANDED_CREDENTIALS);
             }
             // 这一支还没开始读 body ⇒ 必然零进度（`is_timeout` 在这里直接可用：`execute` 交回的是
@@ -958,7 +976,9 @@ pub fn run_window_with_limits(
         // 今天 `wrote <= take <= CHUNK_BYTES` 远不到 `u64` 的上界，可一旦哪里算错了，debug 构建会
         // panic（release 构建会**绕回 0**，然后从文件开头重写下整段）。这一条不改变任何可达行为。
         cursor = cursor.saturating_add(wrote as u64);
-        if let Some(progress) = progress && wrote > 0 {
+        if let Some(progress) = progress
+            && wrote > 0
+        {
             // 含端点的"已写到哪"；engine 在下次 Connected 前读它，split_tail 就不会切到光标后面。
             progress.store(cursor - 1, Ordering::Release);
         }
@@ -1078,10 +1098,11 @@ pub fn run_whole_with_limiter(
 
     // 本入口**只**服务带请求体的形状。判据复用 `Task::segmentable()`（与 spec §2.2 第一条、
     // 与 `run_window` 那道闸同一个函数）：反过来放行就等于让一条可分段的任务绕过窗口化那条路。
-    let body_path = task.data_file.as_deref().with_context(
-        || "fetch::run_whole 只服务带 --data-file 的形状（POST、不分段、事实取自这一枪）；\
-           其余形状请调 fetch::run_window".to_string(),
-    )?;
+    let body_path = task.data_file.as_deref().with_context(|| {
+        "fetch::run_whole 只服务带 --data-file 的形状（POST、不分段、事实取自这一枪）；\
+           其余形状请调 fetch::run_window"
+            .to_string()
+    })?;
     let body = open_request_body(body_path)?;
 
     let req = build_body_request(agent, task, body, window_budget(rate_bps))?;
@@ -1091,7 +1112,9 @@ pub fn run_whole_with_limiter(
             // 重定向**中途**失败：带凭据的落地 URL 只出现在 reqwest 的错误里 ⇒ 同一个闸、同一句话
             // （`probe::landed_url_is_refused` 的三支合取 ＋ `probe::LANDED_CREDENTIALS`，Task 5 评审 C3 /
             // T99-G1f）。这一支还没看到响应 ⇒ 没有事实可交。
-            if e.url().is_some_and(|u| probe::landed_url_is_refused(u.as_str(), task.password.as_deref())) {
+            if e.url()
+                .is_some_and(|u| probe::landed_url_is_refused(u.as_str(), task.password.as_deref()))
+            {
                 bail!("{}", probe::LANDED_CREDENTIALS);
             }
             return Ok((
@@ -1124,7 +1147,13 @@ pub fn run_whole_with_limiter(
     let headers = resp.headers().clone();
     // F2 的落点：**与 `probe` 同一个函数**把这五个字段读出来（`asked_for_range = false` —— 这一支
     // 一条 Range 都没发，所以 `accept_ranges` 只能看头说，这与 `prelude_max == 0` 时 probe 的读法一致）。
-    let facts = probe::facts_from_response(status, false, &headers, &final_url, task.password.as_deref())?;
+    let facts = probe::facts_from_response(
+        status,
+        false,
+        &headers,
+        &final_url,
+        task.password.as_deref(),
+    )?;
 
     let mut cursor = 0u64;
     let mut buf = vec![0u8; CHUNK_BYTES];
@@ -1220,21 +1249,46 @@ mod tests {
         // `an_open_ended_request_is_for_the_window_that_reaches_eof_not_the_interval` 断"问窗口那一格"，
         // 这里把夹具换成真正的那一尾（起点 = 全长 - 一个窗口），**判据方向一字未动**：末段仍是开放终点。
         assert_eq!(
-            range_header(Interval { start: 48 * 1024 * 1024 - WINDOW_BYTES, end: 48 * 1024 * 1024 - 1 }, 48 * 1024 * 1024, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: 48 * 1024 * 1024 - WINDOW_BYTES,
+                    end: 48 * 1024 * 1024 - 1
+                },
+                48 * 1024 * 1024,
+                BodyShape::Windowed
+            ),
             format!("bytes={}-", 48 * 1024 * 1024 - WINDOW_BYTES)
         );
         // 整份文件（起点 0、终点是最后一个字节）也算末段 ⇒ 同样是开放终点，不是 `bytes=0-<全长-1>`。
-        assert_eq!(range_header(Interval { start: 0, end: 9 }, 10, BodyShape::Windowed), "bytes=0-");
+        assert_eq!(
+            range_header(Interval { start: 0, end: 9 }, 10, BodyShape::Windowed),
+            "bytes=0-"
+        );
         // 终点在文件中间 ⇒ 必须带显式终点（少带就是对端多送一整个窗口）。
-        assert_eq!(range_header(Interval { start: 0, end: 8 }, 10, BodyShape::Windowed), "bytes=0-8");
-        assert_eq!(range_header(Interval { start: 4, end: 8 }, 10, BodyShape::Windowed), "bytes=4-8");
+        assert_eq!(
+            range_header(Interval { start: 0, end: 8 }, 10, BodyShape::Windowed),
+            "bytes=0-8"
+        );
+        assert_eq!(
+            range_header(Interval { start: 4, end: 8 }, 10, BodyShape::Windowed),
+            "bytes=4-8"
+        );
         // 单字节区间不是末段（终点不是最后一个字节）。
-        assert_eq!(range_header(Interval { start: 4, end: 4 }, 10, BodyShape::Windowed), "bytes=4-4");
+        assert_eq!(
+            range_header(Interval { start: 4, end: 4 }, 10, BodyShape::Windowed),
+            "bytes=4-4"
+        );
         // 越过全长（`scheduler` 由 `total_len` 派区间，本不该出现；出现时按"到文件末尾为止"读）。
-        assert_eq!(range_header(Interval { start: 4, end: 20 }, 10, BodyShape::Windowed), "bytes=4-");
+        assert_eq!(
+            range_header(Interval { start: 4, end: 20 }, 10, BodyShape::Windowed),
+            "bytes=4-"
+        );
         // 全长 0：`total_len - 1` 会下溢（debug 直接 panic），`saturating_add` 那一支把它读成开放终点。
         // 这条形状到不了网络（区间必是空的，`run_window` 先交 `Complete`），但判据不许靠下溢活着。
-        assert_eq!(range_header(Interval { start: 0, end: 0 }, 0, BodyShape::Windowed), "bytes=0-");
+        assert_eq!(
+            range_header(Interval { start: 0, end: 0 }, 0, BodyShape::Windowed),
+            "bytes=0-"
+        );
     }
 
     /// **E14②（戊）**：判据里的"终点"是**窗口**，不是区间。这条用例是本轮唯一被改掉判据值的既有形状
@@ -1247,17 +1301,38 @@ mod tests {
         // 窗口正好落在 EOF：起点 = 全长 - WINDOW ⇒ `window_end == total_len - 1` ⇒ 开放终点。
         let total = 48 * 1024 * 1024;
         assert_eq!(
-            range_header(Interval { start: total - WINDOW_BYTES, end: total - 1 }, total, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: total - WINDOW_BYTES,
+                    end: total - 1
+                },
+                total,
+                BodyShape::Windowed
+            ),
             format!("bytes={}-", total - WINDOW_BYTES)
         );
         // 窗口越过 EOF（剩下的比一个窗口少）⇒ 仍然开放终点，不许写成 `bytes=start-<全长-1>`。
         assert_eq!(
-            range_header(Interval { start: total - 4096, end: total - 1 }, total, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: total - 4096,
+                    end: total - 1
+                },
+                total,
+                BodyShape::Windowed
+            ),
             format!("bytes={}-", total - 4096)
         );
         // 区间伸到 EOF、但**窗口填不满它** ⇒ 问的是窗口那一格，不是 EOF（这就是 E14② 改的那一格）。
         assert_eq!(
-            range_header(Interval { start: 1_048_576, end: total - 1 }, total, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: 1_048_576,
+                    end: total - 1
+                },
+                total,
+                BodyShape::Windowed
+            ),
             format!("bytes={}-{}", 1_048_576, 1_048_576 + WINDOW_BYTES - 1)
         );
         // 阶段4 那条惹祸的派单形状：8 MiB 文件的第一段 `[236032, 8388607]`。
@@ -1267,17 +1342,38 @@ mod tests {
         // 口径与它为什么不是账单见 `state::Stats::bytes_duplicated`；原先这里写的是"每一字节都由
         // 别人重下"，那是这张断言表**没钉**的强度）。这一格的判据是"不再问 EOF 那一截"，与字节数无关。
         assert_eq!(
-            range_header(Interval { start: 236_032, end: 8_388_607 }, 8_388_608, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: 236_032,
+                    end: 8_388_607
+                },
+                8_388_608,
+                BodyShape::Windowed
+            ),
             format!("bytes=236032-{}", 236_032 + WINDOW_BYTES - 1)
         );
         // 区间比窗口窄 ⇒ 窗口终点就是区间终点 ⇒ 与 E14 之前一模一样（戊只动"比窗口宽"那一支）。
         assert_eq!(
-            range_header(Interval { start: 236_032, end: 236_032 + 65_536 - 1 }, 8_388_608, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: 236_032,
+                    end: 236_032 + 65_536 - 1
+                },
+                8_388_608,
+                BodyShape::Windowed
+            ),
             format!("bytes=236032-{}", 236_032 + 65_536 - 1)
         );
         // 起点与全长都贴着 `u64` 上界：加法不许回绕（回绕了就会把"问一个字节"发成开放终点）。
         assert_eq!(
-            range_header(Interval { start: u64::MAX - 1, end: u64::MAX }, u64::MAX, BodyShape::Windowed),
+            range_header(
+                Interval {
+                    start: u64::MAX - 1,
+                    end: u64::MAX
+                },
+                u64::MAX,
+                BodyShape::Windowed
+            ),
             "bytes=18446744073709551614-"
         );
     }
@@ -1330,7 +1426,10 @@ mod tests {
                 // 旧分子（`stop − iv.start`）算出 8 / 1 × 2 = **16 s** ⇒ 两个分子落在**不同秒数**上，
                 // 这一格因此能分辨 F12 修没修（原先那一行的两个分子都算出 24 s，对这一格没有断言力）。
                 name: "degraded-tail-toeof",
-                iv: Interval { start: 40_000_000, end: 47_999_999 },
+                iv: Interval {
+                    start: 40_000_000,
+                    end: 47_999_999,
+                },
                 total: 48_000_000,
                 rate: 1_000_000,
                 shape: BodyShape::ToEof,
@@ -1341,7 +1440,10 @@ mod tests {
             Row {
                 // 与上一格**同一个区间、同一个速率读数**，只换形状 —— 这对比例是这一组格子的判据。
                 name: "degraded-tail-windowed",
-                iv: Interval { start: 40_000_000, end: 47_999_999 },
+                iv: Interval {
+                    start: 40_000_000,
+                    end: 47_999_999,
+                },
                 total: 48_000_000,
                 rate: 1_000_000,
                 shape: BodyShape::Windowed,
@@ -1353,7 +1455,10 @@ mod tests {
             },
             Row {
                 name: "mid-file-short-toeof",
-                iv: Interval { start: 1_000_000, end: 1_000_999 },
+                iv: Interval {
+                    start: 1_000_000,
+                    end: 1_000_999,
+                },
                 total: 48 * 1024 * 1024,
                 rate: 1_000_000,
                 shape: BodyShape::ToEof,
@@ -1363,7 +1468,10 @@ mod tests {
             },
             Row {
                 name: "mid-file-short-windowed",
-                iv: Interval { start: 1_000_000, end: 1_000_999 },
+                iv: Interval {
+                    start: 1_000_000,
+                    end: 1_000_999,
+                },
                 total: 48 * 1024 * 1024,
                 rate: 1_000_000,
                 shape: BodyShape::Windowed,
@@ -1373,7 +1481,10 @@ mod tests {
             },
             Row {
                 name: "rate-unknown-toeof",
-                iv: Interval { start: 0, end: 48 * 1024 * 1024 - 1 },
+                iv: Interval {
+                    start: 0,
+                    end: 48 * 1024 * 1024 - 1,
+                },
                 total: 48 * 1024 * 1024,
                 rate: 0,
                 shape: BodyShape::ToEof,
@@ -1383,7 +1494,10 @@ mod tests {
             },
             Row {
                 name: "rate-unknown-windowed",
-                iv: Interval { start: 0, end: 48 * 1024 * 1024 - 1 },
+                iv: Interval {
+                    start: 0,
+                    end: 48 * 1024 * 1024 - 1,
+                },
                 total: 48 * 1024 * 1024,
                 rate: 0,
                 shape: BodyShape::Windowed,
@@ -1394,17 +1508,43 @@ mod tests {
         ];
         for row in rows {
             let plan = plan_shot(row.iv, row.total, row.rate, row.shape);
-            assert_eq!(plan.range, row.range.to_string(), "[{}] 发出去的 Range", row.name);
-            assert_eq!(plan.budget, Duration::from_secs(row.budget_secs), "[{}] 整请求期限", row.name);
+            assert_eq!(
+                plan.range,
+                row.range.to_string(),
+                "[{}] 发出去的 Range",
+                row.name
+            );
+            assert_eq!(
+                plan.budget,
+                Duration::from_secs(row.budget_secs),
+                "[{}] 整请求期限",
+                row.name
+            );
             assert_eq!(plan.stop, row.stop, "[{}] 读上界（exclusive）", row.name);
         }
 
         // `window_budget` 仍然等于"`WINDOW_BYTES` 那一格的 `budget_for`"：**四条**断言（下界夹住 /
         // 式子本身 / 上界夹住 / 速率未知），每条的期望值都必须是**算出来的字面秒数**。
-        assert_eq!(window_budget(10_000_000), Duration::from_secs(15), "4 MiB / 10 MB/s × 2 = 0.8 s ⇒ 夹到下界");
-        assert_eq!(window_budget(300_000), Duration::from_secs(26), "4_194_304 / 300_000 = 13.98 ⇒ 整数除法向下取整到 13，× 2 = 26 s（**不是整除**）");
-        assert_eq!(window_budget(1), Duration::from_secs(120), "速率 1 字节/秒 ⇒ 式子给出 8,388,608 s ⇒ 夹到上界");
-        assert_eq!(window_budget(0), Duration::from_secs(120), "速率未知 ⇒ 最宽，且**不许**除零 panic");
+        assert_eq!(
+            window_budget(10_000_000),
+            Duration::from_secs(15),
+            "4 MiB / 10 MB/s × 2 = 0.8 s ⇒ 夹到下界"
+        );
+        assert_eq!(
+            window_budget(300_000),
+            Duration::from_secs(26),
+            "4_194_304 / 300_000 = 13.98 ⇒ 整数除法向下取整到 13，× 2 = 26 s（**不是整除**）"
+        );
+        assert_eq!(
+            window_budget(1),
+            Duration::from_secs(120),
+            "速率 1 字节/秒 ⇒ 式子给出 8,388,608 s ⇒ 夹到上界"
+        );
+        assert_eq!(
+            window_budget(0),
+            Duration::from_secs(120),
+            "速率未知 ⇒ 最宽，且**不许**除零 panic"
+        );
     }
 
     // ---- 终点帽（E14① 乙）：只有往下才说话 ----
@@ -1417,13 +1557,25 @@ mod tests {
         lower_end_cap(&cap, 1_000_000);
         assert_eq!(cap.load(Ordering::Acquire), 1_000_000, "降下去的帽就是帽");
         lower_end_cap(&cap, 4_000_000);
-        assert_eq!(cap.load(Ordering::Acquire), 1_000_000, "更大的值当没看见：帽只降不升");
+        assert_eq!(
+            cap.load(Ordering::Acquire),
+            1_000_000,
+            "更大的值当没看见：帽只降不升"
+        );
         lower_end_cap(&cap, 900_000);
-        assert_eq!(cap.load(Ordering::Acquire), 900_000, "再降还是算话：收紧是单调的，不是一次的");
+        assert_eq!(
+            cap.load(Ordering::Acquire),
+            900_000,
+            "再降还是算话：收紧是单调的，不是一次的"
+        );
         // 降到 `u64::MAX`（"没有帽"那个值）当然也不算话 —— 引擎重置格子走 `store`，不走这条路，
         // 这条断言钉的是"如果谁误把 NO_END_CAP 当成一次收紧，它不会把已经收紧的枪放宽"。
         lower_end_cap(&cap, NO_END_CAP);
-        assert_eq!(cap.load(Ordering::Acquire), 900_000, "重置必须用 store：用这条路就是自相矛盾");
+        assert_eq!(
+            cap.load(Ordering::Acquire),
+            900_000,
+            "重置必须用 store：用这条路就是自相矛盾"
+        );
         // 起点那一格：0 是合法的含端点终点（文件第一个字节），必须降得下去。
         let first = AtomicU64::new(NO_END_CAP);
         lower_end_cap(&first, 0);
@@ -1444,14 +1596,29 @@ mod tests {
         assert!(!cap_allows(9 * chunk, 10 * chunk, 0));
         // ③ 帽在两块之间：跨过它的那一块照样**整块**落（不切半块 ⇒ 少一个"半块算谁的"的账）。
         let cap_mid = 3 * chunk + chunk / 2;
-        assert!(cap_allows(cap_mid, 3 * chunk + chunk / 2, 0), "块首查：正好到帽这一格还要读下一块");
-        assert!(!cap_allows(cap_mid, 4 * chunk + chunk / 2, 0), "过了帽半块就已经该收手");
+        assert!(
+            cap_allows(cap_mid, 3 * chunk + chunk / 2, 0),
+            "块首查：正好到帽这一格还要读下一块"
+        );
+        assert!(
+            !cap_allows(cap_mid, 4 * chunk + chunk / 2, 0),
+            "过了帽半块就已经该收手"
+        );
         // ④ 没有帽（初值那个 `u64::MAX`）：任何偏移都放行 ⇒ 读满窗口照旧。
-        assert!(cap_allows(NO_END_CAP, u64::MAX - 1, 0), "NO_END_CAP 必须是真·不拦");
+        assert!(
+            cap_allows(NO_END_CAP, u64::MAX - 1, 0),
+            "NO_END_CAP 必须是真·不拦"
+        );
         // ⑤ 陈旧帽（低于这一枪的起点）：起点那一格仍然放行 ⇒ 至少写一块再收手，
         //    绝不交回 `Advanced { bytes: 0 }`（M9 那条纪律：零字节的 Advanced 谁也数不到）。
-        assert!(cap_allows(100, 4_096, 4_096), "帽低于起点 ⇒ 拦不出零字节：起点这一格必须放行");
-        assert!(!cap_allows(100, 4_097, 4_096), "写过起点一格之后就轮到帽说话");
+        assert!(
+            cap_allows(100, 4_096, 4_096),
+            "帽低于起点 ⇒ 拦不出零字节：起点这一格必须放行"
+        );
+        assert!(
+            !cap_allows(100, 4_097, 4_096),
+            "写过起点一格之后就轮到帽说话"
+        );
     }
 
     // ---- 窗口预算（plan 第 796 行的式子 + 简报没写的除零） ----
@@ -1460,29 +1627,50 @@ mod tests {
     fn the_window_budget_clamps_at_both_ends_of_the_formula() {
         // 中间那支：`WINDOW_BYTES / rate * 2`。速率 4 MiB/s ⇒ 一个窗口正好 1 s ⇒ 预算 2 s，
         // 但下界是 15 s ⇒ 取 15。把速率换成 1 MiB/s ⇒ 8 s，仍被下界夹住。
-        assert_eq!(window_budget(WINDOW_BYTES), Duration::from_secs(WINDOW_MIN_TIMEOUT_SECS));
-        assert_eq!(window_budget(1_048_576), Duration::from_secs(WINDOW_MIN_TIMEOUT_SECS));
+        assert_eq!(
+            window_budget(WINDOW_BYTES),
+            Duration::from_secs(WINDOW_MIN_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            window_budget(1_048_576),
+            Duration::from_secs(WINDOW_MIN_TIMEOUT_SECS)
+        );
         // 慢速：128 KiB/s ⇒ 4 MiB / 128 KiB * 2 = 64 s ⇒ 在界内，照式子给。
         assert_eq!(window_budget(131_072), Duration::from_secs(64));
         // 更慢：32 KiB/s ⇒ 256 s ⇒ 被上界 120 s 夹住（不许一个窗口挂四分钟）。
-        assert_eq!(window_budget(32_768), Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS));
-        assert_eq!(window_budget(1), Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS));
+        assert_eq!(
+            window_budget(32_768),
+            Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            window_budget(1),
+            Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS)
+        );
     }
 
     #[test]
     fn an_unknown_rate_becomes_the_longest_budget_instead_of_a_division_panic() {
         // `rate_bps` 是测出来的：第一轮还没有任何测量结果，调用方给 0 是最自然的写法。
         // 照 plan 那个式子字面写就是一次除零 panic（不是报错，是直接砸进程）。
-        assert_eq!(window_budget(0), Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS));
+        assert_eq!(
+            window_budget(0),
+            Duration::from_secs(WINDOW_MAX_TIMEOUT_SECS)
+        );
     }
 
     // ---- 206 的位置声明 ----
 
     #[test]
     fn content_range_start_reads_only_the_offset_and_refuses_every_shape_that_has_none() {
-        assert_eq!(content_range_start("bytes 262144-393215/8388608"), Some(262144));
+        assert_eq!(
+            content_range_start("bytes 262144-393215/8388608"),
+            Some(262144)
+        );
         assert_eq!(content_range_start("bytes 0-1023/1024"), Some(0));
-        assert_eq!(content_range_start("bytes 50331647-50331647/50331648"), Some(50331647));
+        assert_eq!(
+            content_range_start("bytes 50331647-50331647/50331648"),
+            Some(50331647)
+        );
         // 416 的写法（没有"本次区间"那一段）读不出起点。
         assert_eq!(content_range_start("bytes */4194304"), None);
         // **总长**未知不影响到得了起点：`bytes 0-1023/*` 说的是"这一段从 0 起"，位置照样可核对
@@ -1507,7 +1695,10 @@ mod tests {
         assert!(!is_read_timeout(&std::io::Error::other("boom")));
         // std 自己的超时形状认，reqwest 包了一层的形状由集成用例钉
         // （`reqwest::Error` 没有公开构造器，单元层造不出那个 payload ⇒ 那一支只有真对端能证）。
-        assert!(is_read_timeout(&std::io::Error::new(std::io::ErrorKind::TimedOut, "waited too long")));
+        assert!(is_read_timeout(&std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "waited too long"
+        )));
     }
 
     // ---- 请求的形状（不发 close、头与 probe 同源、预算真上了线） ----
@@ -1532,12 +1723,26 @@ mod tests {
         assert_eq!(req.headers().get(RANGE).unwrap(), "bytes=100-200");
         assert_eq!(req.headers().get(ACCEPT_ENCODING).unwrap(), "identity");
         assert_eq!(req.headers().get(ACCEPT).unwrap(), "*/*");
-        assert_eq!(req.headers().get("referer").unwrap(), "https://site.example/from");
+        assert_eq!(
+            req.headers().get("referer").unwrap(),
+            "https://site.example/from"
+        );
         assert_eq!(req.headers().get("cookie").unwrap(), "sid=1");
         // https ⇒ Basic 由 `with_contract_headers` 自己发出去（同一次构造里判据是同一份）。
-        let auth = req.headers().get("authorization").expect("https 上口令要上线").to_str().unwrap();
-        assert!(auth.starts_with("Basic "), "口令只以 Basic 形态出去：{auth}");
-        assert!(!auth.contains("hunter2"), "base64 之后的串里不该有明文口令：{auth}");
+        let auth = req
+            .headers()
+            .get("authorization")
+            .expect("https 上口令要上线")
+            .to_str()
+            .unwrap();
+        assert!(
+            auth.starts_with("Basic "),
+            "口令只以 Basic 形态出去：{auth}"
+        );
+        assert!(
+            !auth.contains("hunter2"),
+            "base64 之后的串里不该有明文口令：{auth}"
+        );
         // 预算真的挂在请求上（不是拼了个 Duration 扔掉）。
         assert_eq!(req.timeout().copied(), Some(budget));
         // 不发 `Connection: close`（spec §10 R5 / 计划 E2；行为侧的证明归集成用例
@@ -1552,7 +1757,10 @@ mod tests {
         let mut t = task("http://example.com/a.bin");
         t.user = Some("alice".into());
         let req = build_request(&agent, &t, "bytes=0-", Duration::from_secs(15), None).unwrap();
-        assert!(req.headers().get("authorization").is_none(), "明文 socket 上半副凭据也不许出去");
+        assert!(
+            req.headers().get("authorization").is_none(),
+            "明文 socket 上半副凭据也不许出去"
+        );
         assert_eq!(req.headers().get(RANGE).unwrap(), "bytes=0-");
     }
 
@@ -1561,7 +1769,10 @@ mod tests {
         let agent = Client::builder().build().unwrap();
         let t = task("https://example.com/a.bin");
         let none = build_request(&agent, &t, "bytes=0-99", Duration::from_secs(15), None).unwrap();
-        assert!(none.headers().get(IF_RANGE).is_none(), "Fresh/无验证器时不许凭空带 If-Range");
+        assert!(
+            none.headers().get(IF_RANGE).is_none(),
+            "Fresh/无验证器时不许凭空带 If-Range"
+        );
 
         let some = build_request(
             &agent,
@@ -1573,8 +1784,17 @@ mod tests {
         .unwrap();
         assert_eq!(some.headers().get(IF_RANGE).unwrap(), "\"abc\"");
 
-        let bad = build_request(&agent, &t, "bytes=0-99", Duration::from_secs(15), Some("bad\nvalue"));
-        assert!(bad.is_err(), "头里装不下的值要报错，不许 panic、不许静默丢掉");
+        let bad = build_request(
+            &agent,
+            &t,
+            "bytes=0-99",
+            Duration::from_secs(15),
+            Some("bad\nvalue"),
+        );
+        assert!(
+            bad.is_err(),
+            "头里装不下的值要报错，不许 panic、不许静默丢掉"
+        );
     }
 
     // ---- 对外形状（plan 第 765–767 行的 Produces） ----
@@ -1583,11 +1803,20 @@ mod tests {
     fn outcome_and_fail_kind_are_the_shape_task_8_consumes() {
         // 解构钉住变体名与字段：改名或加字段都会让 Task 8 的匹配当场编译失败，而不是运行时少一支。
         let advanced = Outcome::Advanced { bytes: 7 };
-        let Outcome::Advanced { bytes } = advanced else { panic!("Advanced 还在吗：{advanced:?}") };
+        let Outcome::Advanced { bytes } = advanced else {
+            panic!("Advanced 还在吗：{advanced:?}")
+        };
         assert_eq!(bytes, 7);
-        for out in [Outcome::Complete, Outcome::Stalled, Outcome::Failed(FailKind::Http(403))] {
+        for out in [
+            Outcome::Complete,
+            Outcome::Stalled,
+            Outcome::Failed(FailKind::Http(403)),
+        ] {
             match out {
-                Outcome::Advanced { .. } | Outcome::Complete | Outcome::Stalled | Outcome::Failed(_) => {}
+                Outcome::Advanced { .. }
+                | Outcome::Complete
+                | Outcome::Stalled
+                | Outcome::Failed(_) => {}
             }
         }
         // `bytes` 与 `total_len` 是 `u64`（Task 8 直接把它加进偏移）；`Http` 装的是 `u16` 状态码；
@@ -1598,7 +1827,10 @@ mod tests {
             FailKind::ValidatorChanged,
         ];
         assert_eq!(kinds[0], FailKind::Http(416));
-        assert_ne!(kinds[1], kinds[2], "Transport 与 ValidatorChanged 不许折成同一个账");
+        assert_ne!(
+            kinds[1], kinds[2],
+            "Transport 与 ValidatorChanged 不许折成同一个账"
+        );
         // `Transport` 的**载荷**也是一笔账：同一支 Transport，原因不同就是两个不同的结论
         // （Task 8 要把那句话原样交给用户）。把它折成"只看涨不看话"的写法在这里当场红。
         assert_ne!(
@@ -1611,7 +1843,10 @@ mod tests {
         // 现在是"克隆一份交出去、手里留一份能打印"，两份必须相等。
         let a = Outcome::Failed(FailKind::Transport("响应体读到一半对端拆了线".to_string()));
         let b = a.clone();
-        assert_eq!(a, b, "克隆一份结论之后原件还在、且两份相等（Task 8 才能一边打日志一边把它发出去）");
+        assert_eq!(
+            a, b,
+            "克隆一份结论之后原件还在、且两份相等（Task 8 才能一边打日志一边把它发出去）"
+        );
     }
 
     // ---- 本轮 D：`FailKind::Transport` 那句原因的构造规则（勘误 E12⑦） ----
@@ -1628,10 +1863,16 @@ mod tests {
 
     impl FakeErr {
         fn new(msg: &str) -> Self {
-            FakeErr { msg: msg.to_string(), cause: None }
+            FakeErr {
+                msg: msg.to_string(),
+                cause: None,
+            }
         }
         fn caused_by(msg: &str, cause: FakeErr) -> Self {
-            FakeErr { msg: msg.to_string(), cause: Some(Box::new(cause)) }
+            FakeErr {
+                msg: msg.to_string(),
+                cause: Some(Box::new(cause)),
+            }
         }
     }
 
@@ -1643,7 +1884,9 @@ mod tests {
 
     impl std::error::Error for FakeErr {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.cause.as_ref().map(|c| &**c as &(dyn std::error::Error + 'static))
+            self.cause
+                .as_ref()
+                .map(|c| &**c as &(dyn std::error::Error + 'static))
         }
     }
 
@@ -1652,8 +1895,14 @@ mod tests {
         // Windows 上 `io::Error` 的消息常带 `\r\n`（OS 文本原样带着），而 Task 8 把它打在进度行里
         // ⇒ 多行会把那一行拆成三截。折叠规则只有一条：所有空白段 ⇒ 一个空格。
         let note = transport_note(&FakeErr::new("第一行\n第二行\r\n第三行"));
-        assert_eq!(note, "第一行 第二行 第三行", "换行与回车都被折成空格，文字一个不丢：{note}");
-        assert!(!note.contains('\n') && !note.contains('\r'), "原因必须是一行：{note:?}");
+        assert_eq!(
+            note, "第一行 第二行 第三行",
+            "换行与回车都被折成空格，文字一个不丢：{note}"
+        );
+        assert!(
+            !note.contains('\n') && !note.contains('\r'),
+            "原因必须是一行：{note:?}"
+        );
         // 前后多余空白也一并收掉（不然 `{note}` 打进进度行会留一个看起来像空格的空档）。
         assert_eq!(transport_note(&FakeErr::new("  头  \n  尾 ")), "头 尾");
     }
@@ -1664,10 +1913,17 @@ mod tests {
         // panic（这就是契约写"char 边界"的原因：截断这件事不许有 panic 的余地）。
         let long = "断".repeat(300);
         let note = transport_note(&FakeErr::new(&long));
-        assert_eq!(note.chars().count(), TRANSPORT_NOTE_MAX_CHARS, "上界是**字符**数，不是字节数");
+        assert_eq!(
+            note.chars().count(),
+            TRANSPORT_NOTE_MAX_CHARS,
+            "上界是**字符**数，不是字节数"
+        );
         let mut head: String = long.chars().take(TRANSPORT_NOTE_MAX_CHARS - 1).collect();
         head.push('…');
-        assert_eq!(note, head, "截断只动尾巴，前面照原样，并且看得出来是被截的：{note}");
+        assert_eq!(
+            note, head,
+            "截断只动尾巴，前面照原样，并且看得出来是被截的：{note}"
+        );
 
         // 让"第 200 个字符"正好落在多字节字符上那种形状：199 个 ASCII + 一串中文。
         let mixed = format!("{}{}", "a".repeat(TRANSPORT_NOTE_MAX_CHARS - 1), "中文中文");
@@ -1675,7 +1931,10 @@ mod tests {
         assert_eq!(note.chars().count(), TRANSPORT_NOTE_MAX_CHARS);
         assert!(note.ends_with('…'), "按字符切才谈得上边界：{note}");
         // 没超长的一字不动（不许有"顺手裁剪合法文本"的读法）。
-        assert_eq!(transport_note(&FakeErr::new("刚好没那么长")), "刚好没那么长");
+        assert_eq!(
+            transport_note(&FakeErr::new("刚好没那么长")),
+            "刚好没那么长"
+        );
     }
 
     #[test]
@@ -1686,7 +1945,10 @@ mod tests {
             "request or response body error",
             FakeErr::caused_by(
                 "request or response body error",
-                FakeErr::caused_by("request or response body error", FakeErr::new("other side closed")),
+                FakeErr::caused_by(
+                    "request or response body error",
+                    FakeErr::new("other side closed"),
+                ),
             ),
         );
         assert_eq!(
@@ -1698,10 +1960,17 @@ mod tests {
         let err = FakeErr::caused_by("外层", FakeErr::caused_by("", FakeErr::new("真正的原因")));
         assert_eq!(transport_note(&err), "外层: 真正的原因");
         // 没有链的时候就只有自己这一句（不许补"未知错误"那种编出来的话）。
-        assert_eq!(transport_note(&FakeErr::new("孤零零的一句")), "孤零零的一句");
+        assert_eq!(
+            transport_note(&FakeErr::new("孤零零的一句")),
+            "孤零零的一句"
+        );
         // 找到**一条**就收手：第三条不再进来（"first useful line" 是契约的措辞）。
         let err = FakeErr::caused_by("甲", FakeErr::caused_by("乙", FakeErr::new("丙")));
-        assert_eq!(transport_note(&err), "甲: 乙", "链上只取首条新信息：{err:?}");
+        assert_eq!(
+            transport_note(&err),
+            "甲: 乙",
+            "链上只取首条新信息：{err:?}"
+        );
     }
 
     #[test]
@@ -1712,14 +1981,23 @@ mod tests {
         let note = transport_note(&FakeErr::new(
             "error sending request for url (https://example.com/a.bin?sid=1)",
         ));
-        assert_eq!(note, "error sending request", "尾巴那截 URL 整个摘掉：{note}");
-        assert!(!note.contains("http") && !note.contains("sid=1"), "URL 的成分还留着：{note}");
+        assert_eq!(
+            note, "error sending request",
+            "尾巴那截 URL 整个摘掉：{note}"
+        );
+        assert!(
+            !note.contains("http") && !note.contains("sid=1"),
+            "URL 的成分还留着：{note}"
+        );
         // 链上那层的 URL 尾巴同样摘掉（hyper 的 cause 里也可能带）。
         let err = FakeErr::caused_by(
             "error decoding response body for url (http://127.0.0.1:9/x)",
             FakeErr::new("connection closed for url (http://127.0.0.1:9/x)"),
         );
-        assert_eq!(transport_note(&err), "error decoding response body: connection closed");
+        assert_eq!(
+            transport_note(&err),
+            "error decoding response body: connection closed"
+        );
     }
 
     #[test]
@@ -1731,7 +2009,10 @@ mod tests {
             WINDOW_EOF_WITHOUT_BYTES,
             "自造那句原因该原样进来、原样出去（它本来已经是一行且远短于上界）"
         );
-        assert_eq!(transport_note(&std::io::Error::other(WHOLE_EMPTY_DOCUMENT)), WHOLE_EMPTY_DOCUMENT);
+        assert_eq!(
+            transport_note(&std::io::Error::other(WHOLE_EMPTY_DOCUMENT)),
+            WHOLE_EMPTY_DOCUMENT
+        );
         // 这两句里一个 ASCII 字母/数字都不带 ⇒ 集成用例 `a_transport_note_holds_no_byte_of_the_body_…`
         // 能拿"那一枪的响应体全是 'r'"当探针：账里混进任何一个 body 字节都会当场红。
         for cause in [WINDOW_EOF_WITHOUT_BYTES, WHOLE_EMPTY_DOCUMENT] {
@@ -1791,8 +2072,16 @@ mod tests {
         let body = open_request_body(&file).unwrap();
         let req = build_body_request(&agent, &t, body, budget).unwrap();
 
-        assert_eq!(req.method(), &reqwest::Method::POST, "带体的那一枪必须是 POST：发 GET 就是把另一条请求的字节当成果子");
-        assert!(req.headers().get(RANGE).is_none(), "POST 上一条 Range 都不许出现（spec §2.2）：{:?}", req.headers());
+        assert_eq!(
+            req.method(),
+            &reqwest::Method::POST,
+            "带体的那一枪必须是 POST：发 GET 就是把另一条请求的字节当成果子"
+        );
+        assert!(
+            req.headers().get(RANGE).is_none(),
+            "POST 上一条 Range 都不许出现（spec §2.2）：{:?}",
+            req.headers()
+        );
         // `Content-Length` **不在** `build()` 出来的头表上：它是 reqwest 在 `into_async` 那一步从
         // `metadata().len()` 补写的（见 `open_request_body` 的文档），所以这一层断不了它。
         // 线上那一条归集成用例
@@ -1801,19 +2090,41 @@ mod tests {
         // `read_request_with_body`：见到 `Transfer-Encoding` 就当场红）。
         // **不发 Content-Type**：任务形状里没有供给它的字段，猜一个会悄悄改掉服务器怎么处理这份请求。
         // 这是登记给 Task 9（CLI）的开放问题，见 `run_whole` 的文档。
-        assert!(req.headers().get(reqwest::header::CONTENT_TYPE).is_none(), "不许凭空发明 Content-Type：{:?}", req.headers());
+        assert!(
+            req.headers().get(reqwest::header::CONTENT_TYPE).is_none(),
+            "不许凭空发明 Content-Type：{:?}",
+            req.headers()
+        );
         // 体的确实在请求上（`Body::from(File)` 之后 `as_bytes()` 读不出内容，只有"有没有体"看得出来；
         // 逐字节对不对归集成用例的对端取证）。
         assert!(req.body().is_some(), "POST 必须带着体");
         // 契约头与 `probe` 同源，口令那半在 https 上放行。
         assert_eq!(req.headers().get(ACCEPT_ENCODING).unwrap(), "identity");
         assert_eq!(req.headers().get(ACCEPT).unwrap(), "*/*");
-        assert_eq!(req.headers().get("referer").unwrap(), "https://site.example/form");
+        assert_eq!(
+            req.headers().get("referer").unwrap(),
+            "https://site.example/form"
+        );
         assert_eq!(req.headers().get("cookie").unwrap(), "sid=1");
-        let auth = req.headers().get("authorization").expect("https 上口令要上线").to_str().unwrap();
-        assert!(auth.starts_with("Basic ") && !auth.contains("hunter2"), "只以 Basic 形态出去：{auth}");
-        assert_eq!(req.timeout().copied(), Some(budget), "窗口预算照同一个式子挂在整份那一枪上");
-        assert!(req.headers().get(reqwest::header::CONNECTION).is_none(), "不发 Connection: close（R5/E2）");
+        let auth = req
+            .headers()
+            .get("authorization")
+            .expect("https 上口令要上线")
+            .to_str()
+            .unwrap();
+        assert!(
+            auth.starts_with("Basic ") && !auth.contains("hunter2"),
+            "只以 Basic 形态出去：{auth}"
+        );
+        assert_eq!(
+            req.timeout().copied(),
+            Some(budget),
+            "窗口预算照同一个式子挂在整份那一枪上"
+        );
+        assert!(
+            req.headers().get(reqwest::header::CONNECTION).is_none(),
+            "不发 Connection: close（R5/E2）"
+        );
         std::fs::remove_file(&file).expect("清体文件");
     }
 
@@ -1828,7 +2139,11 @@ mod tests {
         t.user = Some("alice".into());
         let body = open_request_body(&file).unwrap();
         let req = build_body_request(&agent, &t, body, Duration::from_secs(15)).unwrap();
-        assert!(req.headers().get("authorization").is_none(), "明文 socket 上半副凭据也不许出去：{:?}", req.headers());
+        assert!(
+            req.headers().get("authorization").is_none(),
+            "明文 socket 上半副凭据也不许出去：{:?}",
+            req.headers()
+        );
         assert_eq!(req.method(), &reqwest::Method::POST, "闸只挡口令，不改方法");
         std::fs::remove_file(&file).expect("清体文件");
     }
@@ -1846,9 +2161,18 @@ mod tests {
             panic!("读不出来的体文件必须报错，不许悄悄发一条空体的 POST");
         };
         let msg = err.to_string();
-        assert!(msg.contains("--data-file"), "错误要点名那个参数，用户才知道改什么：{msg}");
-        assert!(msg.contains("definitely-not-there.bin"), "路径要点名（那是用户能给对的东西）：{msg}");
-        assert!(!msg.contains("cvv") && !msg.contains("session=abc") && !msg.contains("hunter2"), "错误里抄了体：{msg}");
+        assert!(
+            msg.contains("--data-file"),
+            "错误要点名那个参数，用户才知道改什么：{msg}"
+        );
+        assert!(
+            msg.contains("definitely-not-there.bin"),
+            "路径要点名（那是用户能给对的东西）：{msg}"
+        );
+        assert!(
+            !msg.contains("cvv") && !msg.contains("session=abc") && !msg.contains("hunter2"),
+            "错误里抄了体：{msg}"
+        );
     }
 
     // ---- 修复轮 F1：两条入口互斥（各拒对方那种形状） ----
@@ -1858,14 +2182,19 @@ mod tests {
         let agent = Client::builder().build().unwrap();
         let mut t = task("https://example.com/submit");
         t.data_file = Some("does-not-matter.bin".into());
-        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("t7-scratch");
+        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t7-scratch");
         std::fs::create_dir_all(&store_dir).expect("建 t7-scratch 目录");
         let path = store_dir.join("f1-window-guard.bin");
         let store = Store::open(&path, true).expect("开测试目标文件");
         let Err(err) = run_window(
             &agent,
             &t,
-            Interval { start: 0, end: 4095 },
+            Interval {
+                start: 0,
+                end: 4095,
+            },
             &store,
             10_000_000,
             48 * 1024 * 1024,
@@ -1875,7 +2204,10 @@ mod tests {
             panic!("带 --data-file 的任务不该被窗口那条路接受（发 GET 就是拿另一条请求的字节）");
         };
         let msg = err.to_string();
-        assert!(msg.contains("--data-file") && msg.contains("run_whole"), "错误要指路：{msg}");
+        assert!(
+            msg.contains("--data-file") && msg.contains("run_whole"),
+            "错误要指路：{msg}"
+        );
         assert!(!msg.contains('\n'), "错误消息是一行话：{msg}");
         assert_eq!(store.len().expect("读长度"), 0, "被拒的任务不许动过盘");
         drop(store);
@@ -1888,7 +2220,9 @@ mod tests {
         // 带体 ⇒ `run_whole`。谁都不许同时接两种形状 —— 否则"用哪条路"就变成一个调用方的自由。
         let agent = Client::builder().build().unwrap();
         let t = task("https://example.com/a.bin");
-        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("t7-scratch");
+        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t7-scratch");
         std::fs::create_dir_all(&store_dir).expect("建 t7-scratch 目录");
         let path = store_dir.join("f1-whole-guard.bin");
         let store = Store::open(&path, true).expect("开测试目标文件");
@@ -1896,7 +2230,10 @@ mod tests {
             panic!("没有体的任务不该走 `run_whole`：那条路不分窗口，会把可分段的任务整份吸完");
         };
         let msg = err.to_string();
-        assert!(msg.contains("--data-file") && msg.contains("run_window"), "错误要指路：{msg}");
+        assert!(
+            msg.contains("--data-file") && msg.contains("run_window"),
+            "错误要指路：{msg}"
+        );
         assert_eq!(store.len().expect("读长度"), 0, "被拒的任务不许动过盘");
         drop(store);
         let _ = std::fs::remove_file(&path);
@@ -1908,7 +2245,9 @@ mod tests {
         // 顺序在这里有实质意义：那种任务连体文件都不该被打开（口令表单的体不该被读进我们的进程）。
         let agent = Client::builder().build().unwrap();
         let file = scratch_body("f1-order.bin", BODY_SENTINEL.as_bytes());
-        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("t7-scratch");
+        let store_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t7-scratch");
         std::fs::create_dir_all(&store_dir).expect("建 t7-scratch 目录");
         // 体文件与目标文件**必须不同名**（同名时 `Store::open(.., true)` 会把体一起截掉，
         // 于是"被拒的任务没读过体"这一半就成了恒真断言）。
@@ -1923,8 +2262,14 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("口令"), "错误要说清是口令规则：{msg}");
-        assert!(!msg.contains("hunter2") && !msg.contains("cvv"), "两条都不许抄：{msg}");
-        assert!(!msg.contains("--data-file"), "看起来是先开了体文件才被口令闸挡住：{msg}");
+        assert!(
+            !msg.contains("hunter2") && !msg.contains("cvv"),
+            "两条都不许抄：{msg}"
+        );
+        assert!(
+            !msg.contains("--data-file"),
+            "看起来是先开了体文件才被口令闸挡住：{msg}"
+        );
 
         // E9 那一支：URL 里带 userinfo 的任务在两条入口上都到不了网络（`probe::run` 同一个判据）。
         let mut credentialed = task("https://alice:s3cret@example.com/a.bin");
@@ -1932,8 +2277,14 @@ mod tests {
         let Err(err) = run_whole(&agent, &credentialed, &store, 10_000_000) else {
             panic!("URL 里带 userinfo（E9）的任务必须被 `run_whole` 的 validate() 拒掉");
         };
-        assert!(err.to_string().contains("--user"), "错误要指使用 --user/--password：{err}");
-        assert!(!err.to_string().contains("s3cret"), "错误里不许抄凭据：{err}");
+        assert!(
+            err.to_string().contains("--user"),
+            "错误要指使用 --user/--password：{err}"
+        );
+        assert!(
+            !err.to_string().contains("s3cret"),
+            "错误里不许抄凭据：{err}"
+        );
 
         assert_eq!(store.len().expect("读长度"), 0, "被拒的任务不许动过盘");
         drop(store);

@@ -98,7 +98,9 @@ fn dispatch() -> Result<u8> {
                 eprintln!("警告：将在 {delay_secs} 秒后关机；取消请运行 shutdown /a");
             }
             // R19：动作失败只警告，不改下载结果/退出码（"动作失败不许掩盖下载结果"）。
-            if let Err(err) = dlm::actions::execute(&dlm::actions::plan(action, &task.target_path())) {
+            if let Err(err) =
+                dlm::actions::execute(&dlm::actions::plan(action, &task.target_path()))
+            {
                 eprintln!("警告：完成后动作失败：{err:#}");
             }
         } else {
@@ -228,7 +230,11 @@ mod tests {
         //    那一行改成读 `rep.message.is_none()`）`--lib` 200 全绿、三发二进制用例也全绿，
         //    只有这一发行①会红。这就是它存在的理由。
         assert_eq!(
-            finish(&report(true, Some("下载已完成，但断点文件删不掉")), &task(), true),
+            finish(
+                &report(true, Some("下载已完成，但断点文件删不掉")),
+                &task(),
+                true
+            ),
             0,
             "成功档 + 一句说明 ⇒ 还是 0（`message.is_some()` 不是失败信号）"
         );

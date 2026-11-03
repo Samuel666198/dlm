@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::consts::PROBE_READ_BYTES;
@@ -202,7 +202,12 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let token = config.token.clone().unwrap_or_else(random_token);
     let listener = TcpListener::bind(("127.0.0.1", config.port)).context("绑定 127.0.0.1 失败")?;
     let port = listener.local_addr().context("拿不到监听端口")?.port();
-    let endpoint = Endpoint { port, token: token.clone(), pid: std::process::id(), started_at: queue::now_secs() };
+    let endpoint = Endpoint {
+        port,
+        token: token.clone(),
+        pid: std::process::id(),
+        started_at: queue::now_secs(),
+    };
     if let Err(err) = write_endpoint(&config.endpoint, &endpoint) {
         eprintln!("警告：写端点文件失败：{err:#}（浏览器投递会回退直连）");
     }
@@ -241,7 +246,10 @@ fn apply_quota_config(config: &GuiConfig, store: &mut QueueStore) -> Result<bool
     if config.quota_window_secs == Some(0) {
         bail!("参数写错了：--quota-window 至少 1 秒");
     }
-    let effective_limit = config.quota_limit.or(store.quota().map(|q| q.limit)).unwrap_or(0);
+    let effective_limit = config
+        .quota_limit
+        .or(store.quota().map(|q| q.limit))
+        .unwrap_or(0);
     if config.quota_window_secs.is_some() && effective_limit == 0 {
         bail!("参数写错了：--quota-window 需要先启用 --quota，或队列里已经存有配额");
     }
@@ -358,7 +366,10 @@ fn check_update(url: &str) -> UpdateView {
         available: version_is_newer(&current, &latest),
         latest: Some(latest),
         url: value.get("url").and_then(Value::as_str).map(str::to_string),
-        notes: value.get("notes").and_then(Value::as_str).map(str::to_string),
+        notes: value
+            .get("notes")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         checked_at: Some(queue::now_secs()),
         error: None,
     }
@@ -374,7 +385,10 @@ fn open_app_window(url: &str) {
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         ];
         if let Some(browser) = candidates.iter().find(|p| Path::new(p).exists())
-            && Command::new(browser).arg(format!("--app={url}")).spawn().is_ok()
+            && Command::new(browser)
+                .arg(format!("--app={url}"))
+                .spawn()
+                .is_ok()
         {
             return;
         }
@@ -396,7 +410,8 @@ fn open_app_window(url: &str) {
 
 fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("建端点目录失败：{}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("建端点目录失败：{}", parent.display()))?;
     }
     let name = path
         .file_name()
@@ -410,7 +425,11 @@ fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<()> {
 }
 
 fn snapshot_of(store: &QueueStore, out_dir: &Path) -> Vec<TaskView> {
-    store.tasks().iter().map(|t| TaskView::from_task(t, out_dir)).collect()
+    store
+        .tasks()
+        .iter()
+        .map(|t| TaskView::from_task(t, out_dir))
+        .collect()
 }
 
 fn runner(
@@ -426,7 +445,16 @@ fn runner(
     loop {
         let mut changed = false;
         match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(ticket) => changed |= apply(ticket, &mut store, &mut children, &mut reserved, &mut last_delivered, &config),
+            Ok(ticket) => {
+                changed |= apply(
+                    ticket,
+                    &mut store,
+                    &mut children,
+                    &mut reserved,
+                    &mut last_delivered,
+                    &config,
+                )
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 for (_, mut child) in children.drain() {
@@ -435,7 +463,13 @@ fn runner(
                 return;
             }
         }
-        changed |= tick(&mut store, &mut children, &mut reserved, &mut last_delivered, &config);
+        changed |= tick(
+            &mut store,
+            &mut children,
+            &mut reserved,
+            &mut last_delivered,
+            &config,
+        );
         if changed {
             let _ = store.save();
         }
@@ -457,9 +491,24 @@ fn apply(
     config: &GuiConfig,
 ) -> bool {
     match ticket {
-        Ticket::Add { url, name, referer, start_at, on_complete, reply } => {
+        Ticket::Add {
+            url,
+            name,
+            referer,
+            start_at,
+            on_complete,
+            reply,
+        } => {
             let category = config.category_dirs.then(|| queue::category_for(&name));
-            match store.add(&url, &name, referer, start_at, on_complete, category, &config.log_dir) {
+            match store.add(
+                &url,
+                &name,
+                referer,
+                start_at,
+                on_complete,
+                category,
+                &config.log_dir,
+            ) {
                 Ok(task) => {
                     let _ = reply.send(Ok(task.id));
                     true
@@ -472,7 +521,9 @@ fn apply(
             }
         }
         Ticket::Pause(id) => {
-            let Some(task) = store.find_mut(&id) else { return false };
+            let Some(task) = store.find_mut(&id) else {
+                return false;
+            };
             if task.status == TaskStatus::Running
                 && let Some(mut child) = children.remove(&id)
             {
@@ -489,7 +540,9 @@ fn apply(
             false
         }
         Ticket::Resume(id) => {
-            let Some(task) = store.find_mut(&id) else { return false };
+            let Some(task) = store.find_mut(&id) else {
+                return false;
+            };
             if matches!(task.status, TaskStatus::Paused | TaskStatus::Failed) {
                 task.status = TaskStatus::Queued;
                 task.pid = None;
@@ -522,7 +575,11 @@ fn quota_slice(available: u64, free_slots: usize) -> Option<u64> {
     }
     let free = free_slots.max(1) as u64;
     let per_slot = available / free;
-    Some(if per_slot >= MIN_QUOTA_SLICE { per_slot } else { available })
+    Some(if per_slot >= MIN_QUOTA_SLICE {
+        per_slot
+    } else {
+        available
+    })
 }
 
 /// 构造 `dlm` 子进程参数。抽成纯函数是为了让"配额切片 / 完成后动作到底传没传"能单测。
@@ -609,7 +666,10 @@ fn tick(
     // 上一轮因预算退出、而本窗剩余仍不足一轮预读的任务：明确进入配额等待，别每 500 ms 空转。
     if let Some(quota) = store.quota() {
         let reserved_total = reserved.values().copied().fold(0u64, u64::saturating_add);
-        let available = quota.limit.saturating_sub(quota.used).saturating_sub(reserved_total);
+        let available = quota
+            .limit
+            .saturating_sub(quota.used)
+            .saturating_sub(reserved_total);
         if available < MIN_QUOTA_SLICE
             && let Some(reset) = store.quota_next_reset()
         {
@@ -648,15 +708,24 @@ fn tick(
                 changed |= store.quota_start(now);
             }
             let reserved_total = reserved.values().copied().fold(0u64, u64::saturating_add);
-            let available = quota.limit.saturating_sub(quota.used).saturating_sub(reserved_total);
+            let available = quota
+                .limit
+                .saturating_sub(quota.used)
+                .saturating_sub(reserved_total);
             let free_slots = (config.concurrency - children.len()).max(1);
-            let Some(slice) = quota_slice(available, free_slots) else { break };
+            let Some(slice) = quota_slice(available, free_slots) else {
+                break;
+            };
             Some(slice)
         } else {
             None
         };
 
-        let log = match fs::OpenOptions::new().create(true).append(true).open(&task.log) {
+        let log = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&task.log)
+        {
             Ok(file) => file,
             Err(err) => {
                 eprintln!("dlm-gui: create job log failed: {err}");
@@ -742,7 +811,12 @@ fn handle_http(
     let request = match read_request(stream) {
         Ok(req) => req,
         Err(err) => {
-            let _ = respond(stream, 400, "text/plain; charset=utf-8", err.to_string().as_bytes());
+            let _ = respond(
+                stream,
+                400,
+                "text/plain; charset=utf-8",
+                err.to_string().as_bytes(),
+            );
             return Ok(());
         }
     };
@@ -750,7 +824,12 @@ fn handle_http(
         return respond(stream, 403, "text/plain; charset=utf-8", b"forbidden");
     }
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => respond(stream, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()),
+        ("GET", "/") => respond(
+            stream,
+            200,
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes(),
+        ),
         ("GET", "/api/tasks") => {
             let tasks = snapshot.lock().map(|g| g.clone()).unwrap_or_default();
             let body = serde_json::to_vec(&tasks).unwrap_or_else(|_| b"[]".to_vec());
@@ -759,7 +838,9 @@ fn handle_http(
         ("GET", "/api/quota") => {
             let quota = quota_snapshot.lock().ok().and_then(|g| g.clone());
             let body = match quota {
-                Some(q) => serde_json::to_vec(&q).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec()),
+                Some(q) => {
+                    serde_json::to_vec(&q).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec())
+                }
                 None => br#"{"enabled":false}"#.to_vec(),
             };
             respond(stream, 200, "application/json", &body)
@@ -769,17 +850,38 @@ fn handle_http(
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_else(|_| UpdateView::disabled());
-            let body = serde_json::to_vec(&update).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec());
+            let body =
+                serde_json::to_vec(&update).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec());
             respond(stream, 200, "application/json", &body)
         }
         ("POST", "/api/add") => {
             let value: Value = match serde_json::from_slice(&request.body) {
                 Ok(v) => v,
-                Err(_) => return respond(stream, 400, "application/json", br#"{"ok":false,"error":"bad json"}"#),
+                Err(_) => {
+                    return respond(
+                        stream,
+                        400,
+                        "application/json",
+                        br#"{"ok":false,"error":"bad json"}"#,
+                    );
+                }
             };
-            let url = value.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
-            let name = value.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
-            let referer = value.get("referer").and_then(Value::as_str).map(str::to_string);
+            let url = value
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let referer = value
+                .get("referer")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let start_at = value.get("start_at").and_then(Value::as_u64);
             let on_complete = value
                 .get("on_complete")
@@ -789,17 +891,25 @@ fn handle_http(
                 .map(str::to_string);
             let lower = url.to_ascii_lowercase();
             if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-                return respond(stream, 200, "application/json", br#"{"ok":false,"error":"only http/https"}"#);
+                return respond(
+                    stream,
+                    200,
+                    "application/json",
+                    br#"{"ok":false,"error":"only http/https"}"#,
+                );
             }
             if let Err(err) = queue::validate_name(&name) {
-                let body = serde_json::to_vec(&json!({"ok": false, "error": err.to_string()})).unwrap();
+                let body =
+                    serde_json::to_vec(&json!({"ok": false, "error": err.to_string()})).unwrap();
                 return respond(stream, 200, "application/json", &body);
             }
             let on_complete = match on_complete {
                 Some(raw) => match queue::validate_on_complete(&raw) {
                     Ok(action) => action,
                     Err(err) => {
-                        let body = serde_json::to_vec(&json!({"ok": false, "error": err.to_string()})).unwrap();
+                        let body =
+                            serde_json::to_vec(&json!({"ok": false, "error": err.to_string()}))
+                                .unwrap();
                         return respond(stream, 200, "application/json", &body);
                     }
                 },
@@ -807,10 +917,22 @@ fn handle_http(
             };
             let (reply, reply_rx) = mpsc::channel();
             if tx
-                .send(Ticket::Add { url, name, referer, start_at, on_complete, reply })
+                .send(Ticket::Add {
+                    url,
+                    name,
+                    referer,
+                    start_at,
+                    on_complete,
+                    reply,
+                })
                 .is_err()
             {
-                return respond(stream, 200, "application/json", br#"{"ok":false,"error":"queue unavailable"}"#);
+                return respond(
+                    stream,
+                    200,
+                    "application/json",
+                    br#"{"ok":false,"error":"queue unavailable"}"#,
+                );
             }
             let body = match reply_rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(Ok(id)) => serde_json::to_vec(&json!({"ok": true, "id": id})).unwrap(),
@@ -822,10 +944,22 @@ fn handle_http(
         ("POST", "/api/pause") | ("POST", "/api/resume") | ("POST", "/api/remove") => {
             let value: Value = match serde_json::from_slice(&request.body) {
                 Ok(v) => v,
-                Err(_) => return respond(stream, 400, "application/json", br#"{"ok":false,"error":"bad json"}"#),
+                Err(_) => {
+                    return respond(
+                        stream,
+                        400,
+                        "application/json",
+                        br#"{"ok":false,"error":"bad json"}"#,
+                    );
+                }
             };
             let Some(id) = value.get("id").and_then(Value::as_str) else {
-                return respond(stream, 400, "application/json", br#"{"ok":false,"error":"missing id"}"#);
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    br#"{"ok":false,"error":"missing id"}"#,
+                );
             };
             let ticket = match request.path.as_str() {
                 "/api/pause" => Ticket::Pause(id.to_string()),
@@ -836,7 +970,12 @@ fn handle_http(
             respond(stream, 200, "application/json", br#"{"ok":true}"#)
         }
         ("GET", "/api/log") => {
-            let Some(id) = request.query.iter().find(|(k, _)| k == "id").map(|(_, v)| v.as_str()) else {
+            let Some(id) = request
+                .query
+                .iter()
+                .find(|(k, _)| k == "id")
+                .map(|(_, v)| v.as_str())
+            else {
                 return respond(stream, 400, "text/plain; charset=utf-8", b"missing id");
             };
             let log = snapshot
@@ -881,11 +1020,17 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Request> {
             break pos + 4;
         }
         if buf.len() > 64 * 1024 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "request headers too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request headers too large",
+            ));
         }
         let n = stream.read(&mut chunk)?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "request ended before headers"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "request ended before headers",
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
     };
@@ -896,7 +1041,10 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Request> {
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
     if method.is_empty() || target.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad request line"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad request line",
+        ));
     }
     let (path, query) = split_target(&target);
     let mut content_length = 0usize;
@@ -919,7 +1067,12 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Request> {
         body.extend_from_slice(&chunk[..n]);
     }
     body.truncate(content_length);
-    Ok(Request { method, path, query, body })
+    Ok(Request {
+        method,
+        path,
+        query,
+        body,
+    })
 }
 
 fn split_target(target: &str) -> (String, Vec<(String, String)>) {
@@ -975,7 +1128,10 @@ mod tests {
 
     #[test]
     fn find_bytes_finds_the_header_boundary() {
-        assert_eq!(find_bytes(b"GET / HTTP/1.1\r\n\r\nbody", b"\r\n\r\n"), Some(14));
+        assert_eq!(
+            find_bytes(b"GET / HTTP/1.1\r\n\r\nbody", b"\r\n\r\n"),
+            Some(14)
+        );
         assert_eq!(find_bytes(b"none", b"\r\n\r\n"), None);
     }
 
@@ -990,7 +1146,11 @@ mod tests {
 
     #[test]
     fn quota_slice_prefers_one_slot_when_only_one_slice_fits() {
-        assert_eq!(quota_slice(MIN_QUOTA_SLICE - 1, 1), None, "不够一轮预读就不派");
+        assert_eq!(
+            quota_slice(MIN_QUOTA_SLICE - 1, 1),
+            None,
+            "不够一轮预读就不派"
+        );
         assert_eq!(quota_slice(MIN_QUOTA_SLICE, 1), Some(MIN_QUOTA_SLICE));
         assert_eq!(quota_slice(MIN_QUOTA_SLICE * 2, 2), Some(MIN_QUOTA_SLICE));
         assert_eq!(
@@ -1019,24 +1179,43 @@ mod tests {
             total_len: None,
             delivered: None,
         };
-        let plain: Vec<String> =
-            child_args(&task, Path::new("D:/dl"), None).into_iter().map(|s| s.to_string_lossy().to_string()).collect();
-        assert!(plain.windows(2).any(|w| w[0] == "--referer" && w[1] == "https://example.com/"));
+        let plain: Vec<String> = child_args(&task, Path::new("D:/dl"), None)
+            .into_iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            plain
+                .windows(2)
+                .any(|w| w[0] == "--referer" && w[1] == "https://example.com/")
+        );
         assert!(!plain.iter().any(|s| s == "--on-complete"));
         assert!(!plain.iter().any(|s| s == "--max-bytes"));
 
         task.on_complete = Some("open".into());
-        let with_action: Vec<String> =
-            child_args(&task, Path::new("D:/dl"), Some(4096)).into_iter().map(|s| s.to_string_lossy().to_string()).collect();
-        assert!(with_action.windows(2).any(|w| w[0] == "--on-complete" && w[1] == "open"));
-        assert!(with_action.windows(2).any(|w| w[0] == "--max-bytes" && w[1] == "4096"));
+        let with_action: Vec<String> = child_args(&task, Path::new("D:/dl"), Some(4096))
+            .into_iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            with_action
+                .windows(2)
+                .any(|w| w[0] == "--on-complete" && w[1] == "open")
+        );
+        assert!(
+            with_action
+                .windows(2)
+                .any(|w| w[0] == "--max-bytes" && w[1] == "4096")
+        );
     }
 
     #[test]
     fn version_comparison_is_numeric_by_dotted_segment() {
         assert!(!version_is_newer("0.1.0", "0.1.0"));
         assert!(version_is_newer("0.1.0", "0.1.1"));
-        assert!(version_is_newer("0.1.0", "0.10.0"), "10 > 1，不是字符串比较");
+        assert!(
+            version_is_newer("0.1.0", "0.10.0"),
+            "10 > 1，不是字符串比较"
+        );
         assert!(version_is_newer("0.9.9", "0.10.0"));
         assert!(version_is_newer("0.9.0", "v1.0"));
         assert!(!version_is_newer("1.0.0", "0.99.99"), "远端更旧不算新版本");
@@ -1076,7 +1255,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dlm-endpoint-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("endpoint.json");
-        let endpoint = Endpoint { port: 51234, token: "tok".into(), pid: 7, started_at: 9 };
+        let endpoint = Endpoint {
+            port: 51234,
+            token: "tok".into(),
+            pid: 7,
+            started_at: 9,
+        };
         write_endpoint(&path, &endpoint).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();

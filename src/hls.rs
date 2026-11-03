@@ -69,7 +69,13 @@ struct MediaPlaylist {
 
 /// `--hls` 且没给 `--out-name` 时的默认落点名：`playlist.m3u8` → `playlist.ts`。
 fn default_name(url: &str) -> String {
-    let tail = url.split(['?', '#']).next().unwrap_or(url).rsplit('/').next().unwrap_or("");
+    let tail = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
     let lower = tail.to_ascii_lowercase();
     if let Some(stem) = lower.strip_suffix(".m3u8")
         && !stem.is_empty()
@@ -159,7 +165,10 @@ fn parse_playlist(text: &str) -> Result<Playlist> {
             continue;
         }
         if let Some(bandwidth) = pending_bandwidth.take() {
-            variants.push(Variant { bandwidth, uri: line.to_string() });
+            variants.push(Variant {
+                bandwidth,
+                uri: line.to_string(),
+            });
             continue;
         }
         if expect_segment {
@@ -167,7 +176,10 @@ fn parse_playlist(text: &str) -> Result<Playlist> {
             if let Some(range) = range {
                 last_range_end = range.offset.saturating_add(range.length);
             }
-            media.segments.push(MediaSegment { uri: line.to_string(), range });
+            media.segments.push(MediaSegment {
+                uri: line.to_string(),
+                range,
+            });
             expect_segment = false;
         }
     }
@@ -178,7 +190,12 @@ fn parse_playlist(text: &str) -> Result<Playlist> {
     Ok(Playlist::Media(media))
 }
 
-fn fetch_text(client: &Client, task: &Task, url: &Url, limiter: &RateLimiter) -> Result<(String, Url)> {
+fn fetch_text(
+    client: &Client,
+    task: &Task,
+    url: &Url,
+    limiter: &RateLimiter,
+) -> Result<(String, Url)> {
     let req = probe::with_contract_headers(client.get(url.as_str()), task)?
         .timeout(std::time::Duration::from_secs(HLS_TIMEOUT_SECS));
     ensure!(
@@ -186,7 +203,11 @@ fn fetch_text(client: &Client, task: &Task, url: &Url, limiter: &RateLimiter) ->
         "HLS 清单 URL 未通过凭据闸（不回显值）"
     );
     let resp = req.send().context("请求 HLS 清单失败")?;
-    ensure!(resp.status().is_success(), "HLS 清单返回 HTTP {}", resp.status().as_u16());
+    ensure!(
+        resp.status().is_success(),
+        "HLS 清单返回 HTTP {}",
+        resp.status().as_u16()
+    );
     let final_url = resp.url().clone();
     let text = resp.text().context("读 HLS 清单失败")?;
     limiter.consume(text.len() as u64);
@@ -211,7 +232,11 @@ fn fetch_segment_once(
     if let Some(range) = range {
         req = req.header(
             reqwest::header::RANGE,
-            format!("bytes={}-{}", range.offset, range.offset.saturating_add(range.length).saturating_sub(1)),
+            format!(
+                "bytes={}-{}",
+                range.offset,
+                range.offset.saturating_add(range.length).saturating_sub(1)
+            ),
         );
     }
     ensure!(
@@ -226,7 +251,11 @@ fn fetch_segment_once(
             resp.status().as_u16()
         );
     } else {
-        ensure!(resp.status().is_success(), "HLS 分片返回 HTTP {}", resp.status().as_u16());
+        ensure!(
+            resp.status().is_success(),
+            "HLS 分片返回 HTTP {}",
+            resp.status().as_u16()
+        );
     }
     let mut data = Vec::new();
     let mut buf = vec![0u8; READ_CHUNK];
@@ -295,7 +324,13 @@ fn ensure_parent_dir(target: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("建目标目录失败：{}", dir.display()))
 }
 
-fn run_inner(client: &Client, task: &Task, url: &Url, file: &mut File, limiter: &RateLimiter) -> Result<u64> {
+fn run_inner(
+    client: &Client,
+    task: &Task,
+    url: &Url,
+    file: &mut File,
+    limiter: &RateLimiter,
+) -> Result<u64> {
     let (text, base) = fetch_text(client, task, url, limiter)?;
     // 凭据只按**原始任务 URL** 的 origin 判；playlist 可能被重定向到 CDN，
     // 拿最终 base 当同源会把原始 Cookie 送到 CDN。
@@ -308,7 +343,9 @@ fn run_inner(client: &Client, task: &Task, url: &Url, file: &mut File, limiter: 
                 .into_iter()
                 .max_by_key(|v| v.bandwidth)
                 .context("master 播放列表没有可用变体")?;
-            let media_url = base.join(&chosen.uri).context("master 播放列表里的 URI 解析失败")?;
+            let media_url = base
+                .join(&chosen.uri)
+                .context("master 播放列表里的 URI 解析失败")?;
             let (text, media_base) = fetch_text(client, task, &media_url, limiter)?;
             let Playlist::Media(media) = parse_playlist(&text)? else {
                 bail!("master 指向的仍是一个 master 播放列表（B3a 只支持一层）");
@@ -321,7 +358,9 @@ fn run_inner(client: &Client, task: &Task, url: &Url, file: &mut File, limiter: 
     if let Some(init) = &media.init {
         let init_url = base.join(&init.uri).context("初始化分片 URI 解析失败")?;
         let filtered = filter_cross_origin(task, &origin, &init_url);
-        total = total.saturating_add(append_body(client, &filtered, &init_url, init.range, file, limiter)?);
+        total = total.saturating_add(append_body(
+            client, &filtered, &init_url, init.range, file, limiter,
+        )?);
     }
     for segment in &media.segments {
         let segment_url = base.join(&segment.uri).context("分片 URI 解析失败")?;
@@ -361,13 +400,19 @@ pub fn run(task: &Task, cfg: &Config, started: Instant) -> Result<Report> {
     out_task.validate()?;
     let target = out_task.target_path();
     ensure_parent_dir(&target)?;
-    let mut file = File::create(&target).with_context(|| format!("建 HLS 输出文件失败：{}", target.display()))?;
+    let mut file = File::create(&target)
+        .with_context(|| format!("建 HLS 输出文件失败：{}", target.display()))?;
     let client = build_hls_client()?;
     let limiter = RateLimiter::new(cfg.max_speed);
     let url = Url::parse(&task.url).context("HLS URL 解析失败")?;
     let result = run_inner(&client, task, &url, &mut file, &limiter);
     if let Err(err) = file.flush() {
-        return Ok(report(started, 0, false, Some(format!("HLS 输出 flush 失败：{err}"))));
+        return Ok(report(
+            started,
+            0,
+            false,
+            Some(format!("HLS 输出 flush 失败：{err}")),
+        ));
     }
     let delivered = fs::metadata(&target).map_or(0, |m| m.len());
     match result {
@@ -384,7 +429,9 @@ pub fn run(task: &Task, cfg: &Config, started: Instant) -> Result<Report> {
                             )),
                         ));
                     }
-                    Err(err) => return Ok(report(started, delivered, false, Some(format!("{err:#}")))),
+                    Err(err) => {
+                        return Ok(report(started, delivered, false, Some(format!("{err:#}"))));
+                    }
                     Ok(_) => {}
                 }
             }
@@ -403,18 +450,25 @@ mod tests {
         let text = "#EXTM3U\n\
             #EXT-X-STREAM-INF:BANDWIDTH=100,CODECS=\"avc1\"\nlow/index.m3u8\n\
             #EXT-X-STREAM-INF:BANDWIDTH=900,RESOLUTION=1920x1080\nhigh/index.m3u8\n";
-        let Playlist::Master(variants) = parse_playlist(text).unwrap() else { panic!("master") };
+        let Playlist::Master(variants) = parse_playlist(text).unwrap() else {
+            panic!("master")
+        };
         assert_eq!(variants.len(), 2);
         assert_eq!(variants[0].bandwidth, 100);
         assert_eq!(variants[1].uri, "high/index.m3u8");
         let base = Url::parse("https://x/a/master.m3u8").unwrap();
-        assert_eq!(base.join(&variants[1].uri).unwrap().as_str(), "https://x/a/high/index.m3u8");
+        assert_eq!(
+            base.join(&variants[1].uri).unwrap().as_str(),
+            "https://x/a/high/index.m3u8"
+        );
     }
 
     #[test]
     fn media_playlists_keep_segments_in_order_and_accept_method_none() {
         let text = "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:1,\na.ts\n#EXTINF:2,\nsub/b.ts\n";
-        let Playlist::Media(media) = parse_playlist(text).unwrap() else { panic!("media") };
+        let Playlist::Media(media) = parse_playlist(text).unwrap() else {
+            panic!("media")
+        };
         let uris: Vec<&str> = media.segments.iter().map(|s| s.uri.as_str()).collect();
         assert_eq!(uris, vec!["a.ts", "sub/b.ts"]);
         assert!(media.segments.iter().all(|s| s.range.is_none()));
@@ -423,9 +477,10 @@ mod tests {
 
     #[test]
     fn encrypted_playlists_are_refused() {
-        let err = parse_playlist("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:1,\na.ts\n")
-            .unwrap_err()
-            .to_string();
+        let err =
+            parse_playlist("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:1,\na.ts\n")
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("加密 HLS"), "{err}");
     }
 
@@ -435,14 +490,31 @@ mod tests {
             #EXT-X-MAP:URI=\"main.mp4\",BYTERANGE=\"719@0\"\n\
             #EXTINF:6,\n#EXT-X-BYTERANGE:274201@719\nmain.mp4\n\
             #EXTINF:6,\n#EXT-X-BYTERANGE:280451\nmain.mp4\n";
-        let Playlist::Media(media) = parse_playlist(text).unwrap() else { panic!("media") };
+        let Playlist::Media(media) = parse_playlist(text).unwrap() else {
+            panic!("media")
+        };
         let init = media.init.expect("map");
         assert_eq!(init.uri, "main.mp4");
-        assert_eq!(init.range, Some(ByteRange { offset: 0, length: 719 }));
-        assert_eq!(media.segments[0].range, Some(ByteRange { offset: 719, length: 274201 }));
+        assert_eq!(
+            init.range,
+            Some(ByteRange {
+                offset: 0,
+                length: 719
+            })
+        );
+        assert_eq!(
+            media.segments[0].range,
+            Some(ByteRange {
+                offset: 719,
+                length: 274201
+            })
+        );
         assert_eq!(
             media.segments[1].range,
-            Some(ByteRange { offset: 274_920, length: 280_451 }),
+            Some(ByteRange {
+                offset: 274_920,
+                length: 280_451
+            }),
             "省略 @offset 时从上一片末尾续"
         );
     }
@@ -488,7 +560,10 @@ mod tests {
             &client,
             &task,
             &url,
-            Some(ByteRange { offset: 719, length: 300 }),
+            Some(ByteRange {
+                offset: 719,
+                length: 300,
+            }),
             &RateLimiter::new(0),
         )
         .unwrap();
@@ -510,9 +585,17 @@ mod tests {
             flags: crate::consts::FLAG_HLS,
         };
         let base = Url::parse("https://origin.example/master.m3u8").unwrap();
-        let same = filter_cross_origin(&task, &base, &Url::parse("https://origin.example/a.ts").unwrap());
+        let same = filter_cross_origin(
+            &task,
+            &base,
+            &Url::parse("https://origin.example/a.ts").unwrap(),
+        );
         assert_eq!(same.cookies.as_deref(), Some("sid=1"));
-        let cross = filter_cross_origin(&task, &base, &Url::parse("https://cdn.example/a.ts").unwrap());
+        let cross = filter_cross_origin(
+            &task,
+            &base,
+            &Url::parse("https://cdn.example/a.ts").unwrap(),
+        );
         assert!(cross.cookies.is_none());
         assert!(cross.referer.is_none());
         assert!(cross.user.is_none());

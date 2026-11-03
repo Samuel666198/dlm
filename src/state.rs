@@ -172,21 +172,31 @@ pub struct SegView {
 impl SegView {
     /// 这一行覆盖多少字节；`end < start` 视为空区间返回 0（与 `Interval::len` 同规则）。
     pub fn len(&self) -> u64 {
-        if self.is_empty() { 0 } else { self.end - self.start + 1 }
+        if self.is_empty() {
+            0
+        } else {
+            self.end - self.start + 1
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.end < self.start
     }
     /// 回到 `scheduler::Interval` 形状（Task 8 若要把断点喂回调度器）。
     pub fn interval(&self) -> Interval {
-        Interval { start: self.start, end: self.end }
+        Interval {
+            start: self.start,
+            end: self.end,
+        }
     }
 }
 
 impl From<Interval> for SegView {
     /// E7 的那条数据通路：`snapshot_intervals()` 的每个区间原样变成一行。
     fn from(iv: Interval) -> SegView {
-        SegView { start: iv.start, end: iv.end }
+        SegView {
+            start: iv.start,
+            end: iv.end,
+        }
     }
 }
 
@@ -317,7 +327,11 @@ impl Snapshot {
     ///    错误原样上抛（`Task::validate` 的文案已经说明是口令/userinfo），不加 `context` —— anyhow 的
     ///    `to_string()` 只显示最外层，包一层会把"口令"三个字从消息里挤掉。
     /// 2. `check_segments` —— 供数必须是 E7 那个极小覆盖集，写坏的文件比不写更糟（下一轮照着它跳段）。
-    pub fn from_task(task: &Task, validator: Validator, segments: Vec<SegView>) -> anyhow::Result<Snapshot> {
+    pub fn from_task(
+        task: &Task,
+        validator: Validator,
+        segments: Vec<SegView>,
+    ) -> anyhow::Result<Snapshot> {
         task.validate()?;
         check_segments(&segments, validator.total_len)?;
         Ok(Snapshot {
@@ -417,10 +431,19 @@ pub fn save(path: &Path, snap: &Snapshot) -> anyhow::Result<()> {
     let text = serde_json::to_string_pretty(snap)
         .with_context(|| format!("序列化断点文件失败：{}", path.display()))?;
     let tmp = temp_path(path);
-    std::fs::write(&tmp, text)
-        .with_context(|| format!("写断点文件临时文件失败（父目录不存在或不可写？）：{}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("断点文件原子替换失败：{} -> {}", tmp.display(), path.display()))?;
+    std::fs::write(&tmp, text).with_context(|| {
+        format!(
+            "写断点文件临时文件失败（父目录不存在或不可写？）：{}",
+            tmp.display()
+        )
+    })?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "断点文件原子替换失败：{} -> {}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -434,7 +457,11 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Snapshot>> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow::Error::new(e).context(format!("读断点文件失败：{}", path.display()))),
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("读断点文件失败：{}", path.display()))
+            );
+        }
     };
     let snap: Snapshot = serde_json::from_str(&raw).with_context(|| {
         format!(
@@ -478,7 +505,12 @@ pub fn confirmed_bytes(snap: &Snapshot) -> u64 {
 fn check_segments(segments: &[SegView], total_len: u64) -> anyhow::Result<()> {
     let mut prev_end: Option<u64> = None;
     for (i, s) in segments.iter().enumerate() {
-        anyhow::ensure!(!s.is_empty(), "段表第 {i} 行起点晚于终点：[{}, {}]", s.start, s.end);
+        anyhow::ensure!(
+            !s.is_empty(),
+            "段表第 {i} 行起点晚于终点：[{}, {}]",
+            s.start,
+            s.end
+        );
         if let Some(p) = prev_end {
             anyhow::ensure!(
                 s.start > p + 1,
@@ -521,7 +553,12 @@ fn format_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let tod = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", tod / 3_600, (tod % 3_600) / 60, tod % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        tod / 3_600,
+        (tod % 3_600) / 60,
+        tod % 60
+    )
 }
 
 /// Howard Hinnant 的 `days_from_civil` 逆运算（`[1600, 9999]` 内精确，本用例覆盖 1900–9999）。
@@ -580,7 +617,10 @@ mod tests {
             data_file: None,
             user: user.map(str::to_string),
             password: password.map(str::to_string),
-            dir: target.parent().expect("用例的目标路径必须有父目录").to_path_buf(),
+            dir: target
+                .parent()
+                .expect("用例的目标路径必须有父目录")
+                .to_path_buf(),
             name: Some(
                 target
                     .file_name()
@@ -660,7 +700,10 @@ mod tests {
     fn assert_no_stray_state_files(dir: &Path, allowed: &[&Path]) {
         for entry in std::fs::read_dir(dir).expect("列 scratch 目录") {
             let p = entry.expect("读目录项").path();
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if !(name.ends_with(".dlm.json") || name.ends_with(".dlm.json.tmp")) {
                 continue; // 目标文件本身不归本条管
             }
@@ -724,7 +767,11 @@ mod tests {
         save(&p, &snap)?;
 
         let loaded = load(&p)?;
-        assert_eq!(loaded.as_ref(), Some(&snap), "save→load 必须一模一样（含 needs_secret / v / saved_at）");
+        assert_eq!(
+            loaded.as_ref(),
+            Some(&snap),
+            "save→load 必须一模一样（含 needs_secret / v / saved_at）"
+        );
         assert!(!tmp_of(&p).exists(), "rename 之后不该留下 .tmp");
         // brief 逐字的那条：它查的是 `p.with_extension("tmp")` ⇒ `a.bin.dlm.tmp`，与本模块真正用的
         // `<p>.tmp`（= `a.bin.dlm.json.tmp`）不是同一个文件，所以它单独存在时恒为真（假断言，见 `tmp_of`
@@ -737,7 +784,11 @@ mod tests {
         again.stats.bytes_delivered = 1_000;
         again.stats.retries = 3;
         save(&p, &again)?;
-        assert_eq!(load(&p)?.as_ref(), Some(&again), "第二次 save 必须整份替换，不残留上一版");
+        assert_eq!(
+            load(&p)?.as_ref(),
+            Some(&again),
+            "第二次 save 必须整份替换，不残留上一版"
+        );
         assert!(!tmp_of(&p).exists());
         std::fs::remove_file(&p)?;
         assert_eq!(load(&p)?, None, "删掉状态文件之后 load 给 Ok(None)");
@@ -759,12 +810,18 @@ mod tests {
             let target = dir.join(name);
             let got = path_for(&target);
             assert_eq!(
-                got.file_name().map(|n| n.to_string_lossy().into_owned()).as_deref(),
+                got.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .as_deref(),
                 Some(expected),
                 "目标 {}",
                 target.display()
             );
-            assert_eq!(got.parent(), Some(target.parent().unwrap()), "断点文件与目标同目录（spec §4）");
+            assert_eq!(
+                got.parent(),
+                Some(target.parent().unwrap()),
+                "断点文件与目标同目录（spec §4）"
+            );
         }
         Ok(())
     }
@@ -782,7 +839,15 @@ mod tests {
         all_strings(&value, &mut strings);
         let mut keys = vec![];
         collect_keys(&value, &mut keys);
-        let forbidden = ["password", "passwd", "pass", "pwd", "credential", "token", "encpassword"];
+        let forbidden = [
+            "password",
+            "passwd",
+            "pass",
+            "pwd",
+            "credential",
+            "token",
+            "encpassword",
+        ];
         for key in &keys {
             let low = key.to_ascii_lowercase();
             assert!(
@@ -791,7 +856,10 @@ mod tests {
             );
         }
         assert!(keys.contains(&"needs_secret".to_string()));
-        assert!(strings.iter().all(|s| !s.contains(SECRET)), "序列化结果里任何一处都不得出现口令");
+        assert!(
+            strings.iter().all(|s| !s.contains(SECRET)),
+            "序列化结果里任何一处都不得出现口令"
+        );
         Ok(())
     }
 
@@ -804,7 +872,10 @@ mod tests {
         let t = task_at(&target, Some("someone"), Some(SECRET));
         let snap = Snapshot::from_task(&t, validator(10), rows(&[(0, 9)]))?;
         assert!(snap.needs_secret);
-        assert!(!format!("{snap:?}").contains(SECRET), "Debug 里也不能有口令");
+        assert!(
+            !format!("{snap:?}").contains(SECRET),
+            "Debug 里也不能有口令"
+        );
         assert!(!format!("{:?}", snap.task).contains(SECRET));
         Ok(())
     }
@@ -820,7 +891,10 @@ mod tests {
         let err = Snapshot::from_task(&t, validator(10), rows(&[(0, 9)]))
             .expect_err("authority 里带凭据的任务不能被写进断点文件");
         let msg = err.to_string();
-        assert!(msg.contains("--user") && msg.contains("--password"), "错误要指使用哪两个参数：{msg}");
+        assert!(
+            msg.contains("--user") && msg.contains("--password"),
+            "错误要指使用哪两个参数：{msg}"
+        );
         assert!(!msg.contains(SECRET), "错误消息自己不该把口令抄一遍：{msg}");
         assert!(!path_for(&target).exists(), "拒了就不该顺手写盘");
         // 把凭据改写成两个参数（我们期望用户走的形状）后，同一个任务写得动、读得回，且盘上没有口令。
@@ -849,9 +923,15 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&raw)?;
         let mut strings = vec![];
         all_strings(&value, &mut strings);
-        assert!(strings.iter().all(|s| !s.contains(secret)), "解码后的某个字符串含口令：{strings:?}");
+        assert!(
+            strings.iter().all(|s| !s.contains(secret)),
+            "解码后的某个字符串含口令：{strings:?}"
+        );
         assert!(!raw.contains(secret), "原文里不该有口令本尊");
-        assert!(!raw.contains("词"), "原文里连口令里那段不受转义影响的片段都不该有");
+        assert!(
+            !raw.contains("词"),
+            "原文里连口令里那段不受转义影响的片段都不该有"
+        );
         assert!(snap.needs_secret, "口令照样得被记成\"需要口令\"");
         t.password = None;
         assert!(
@@ -875,8 +955,14 @@ mod tests {
         let p = path_for(&target);
         save(&p, &snap)?;
         let raw = std::fs::read_to_string(&p)?;
-        assert!(raw.contains("\"user\": \"alice\""), "用户名按 spec 形状落盘：{raw}");
-        assert!(raw.contains("\"cookies\": \"sid=42\""), "cookie 同样照 spec 形状落盘（已知风险，见注释）");
+        assert!(
+            raw.contains("\"user\": \"alice\""),
+            "用户名按 spec 形状落盘：{raw}"
+        );
+        assert!(
+            raw.contains("\"cookies\": \"sid=42\""),
+            "cookie 同样照 spec 形状落盘（已知风险，见注释）"
+        );
         assert!(!raw.contains(SECRET), "同一份文件里唯独没有口令");
         assert_eq!(load(&p)?.unwrap().task.user.as_deref(), Some("alice"));
         std::fs::remove_file(&p)?;
@@ -892,13 +978,21 @@ mod tests {
         //  支持 FileRenameInfoEx 时行为与 Unix 相同 —— NTFS 支持）。这条走的就是**状态文件已存在**那一支。
         let target = target_of("t4_overwrite", "a.bin");
         let p = path_for(&target);
-        let first = Snapshot::from_task(&task_at(&target, None, None), validator(10), rows(&[(0, 9)]))?;
+        let first = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(10),
+            rows(&[(0, 9)]),
+        )?;
         save(&p, &first)?;
         let second = Snapshot::from_task(&task_at(&target, None, None), validator(20), rows(&[]))?;
-        save(&p, &second).expect("第二次 save 撞上已存在的状态文件必须成功替换，不能报\"目标已存在\"");
+        save(&p, &second)
+            .expect("第二次 save 撞上已存在的状态文件必须成功替换，不能报\"目标已存在\"");
         assert_eq!(load(&p)?.as_ref(), Some(&second), "读回来必须已是新版");
         let raw = std::fs::read_to_string(&p)?;
-        assert!(!raw.contains("\"total_len\": 10"), "旧版内容不得残留：{raw}");
+        assert!(
+            !raw.contains("\"total_len\": 10"),
+            "旧版内容不得残留：{raw}"
+        );
         assert!(!tmp_of(&p).exists(), "替换之后 .tmp 不该还在");
         assert_no_stray_state_files(target.parent().unwrap(), &[&p]);
         std::fs::remove_file(&p)?;
@@ -915,12 +1009,22 @@ mod tests {
         // 那种对端用 std 造不出来（它不给"去掉 FILE_SHARE_DELETE"的选项），所以这里**不写断言**。
         let target = target_of("t4_open_dst", "a.bin");
         let p = path_for(&target);
-        let first = Snapshot::from_task(&task_at(&target, None, None), validator(10), rows(&[(0, 9)]))?;
+        let first = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(10),
+            rows(&[(0, 9)]),
+        )?;
         save(&p, &first)?;
-        let held = std::fs::File::open(&p).with_context(|| format!("读者句柄开不了：{}", p.display()))?;
-        let second = Snapshot::from_task(&task_at(&target, None, None), validator(30), rows(&[(0, 29)]))?;
-        save(&p, &second)
-            .unwrap_or_else(|e| panic!("目标被本进程开着时 rename 竟然失败（那 tmp+rename 就站不住了）：{e}"));
+        let held =
+            std::fs::File::open(&p).with_context(|| format!("读者句柄开不了：{}", p.display()))?;
+        let second = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(30),
+            rows(&[(0, 29)]),
+        )?;
+        save(&p, &second).unwrap_or_else(|e| {
+            panic!("目标被本进程开着时 rename 竟然失败（那 tmp+rename 就站不住了）：{e}")
+        });
         assert_eq!(load(&p)?.as_ref(), Some(&second), "换掉的必须是新版");
         drop(held);
         assert!(!tmp_of(&p).exists(), ".tmp 不得残留");
@@ -935,7 +1039,11 @@ mod tests {
         let target = target_of("t4_stale_tmp", "a.bin");
         let p = path_for(&target);
         std::fs::write(tmp_of(&p), b"{ \"v\": 1, \"task\": {\"url\"")?; // 故意留一份截断的残留
-        let snap = Snapshot::from_task(&task_at(&target, None, None), validator(10), rows(&[(0, 9)]))?;
+        let snap = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(10),
+            rows(&[(0, 9)]),
+        )?;
         save(&p, &snap)?;
         assert_eq!(
             load(&p)?.as_ref(),
@@ -995,9 +1103,19 @@ mod tests {
         let reads = reader.join().expect("读者线程不该 panic");
         eprintln!("读者线程在 {reads} 次连续 load 中始终读到完整记录（写者做了 400 次 save）");
         let anomalies: Vec<String> = rx.try_iter().collect();
-        assert!(anomalies.is_empty(), "并发读者发现了非原子写：{anomalies:?}");
-        assert!(reads > 0, "读者一次都没读到过 ⇒ 这条用例没跑起来（并发失效也要能发现）");
-        assert_eq!(load(&p)?.as_ref(), Some(&snap), "最后一次的写必须就是最终态");
+        assert!(
+            anomalies.is_empty(),
+            "并发读者发现了非原子写：{anomalies:?}"
+        );
+        assert!(
+            reads > 0,
+            "读者一次都没读到过 ⇒ 这条用例没跑起来（并发失效也要能发现）"
+        );
+        assert_eq!(
+            load(&p)?.as_ref(),
+            Some(&snap),
+            "最后一次的写必须就是最终态"
+        );
         assert!(!tmp_of(&p).exists());
         std::fs::remove_file(&p)?;
         Ok(())
@@ -1009,10 +1127,16 @@ mod tests {
         let parent = dir.join("missing-sub");
         let p = parent.join("a.bin.dlm.json");
         let snap = Snapshot::from_task(&task_at(&p, None, None), validator(1), vec![])?;
-        let err = save(&p, &snap)
-            .expect_err("父目录不存在时 save 必须返回 Err，不能 panic、也不能自愈");
-        assert!(err.to_string().contains("a.bin.dlm.json"), "错误里要带上路径：{err}");
-        assert!(!parent.exists(), "本模块不建父目录（那是 cli/engine 的活，与 store.rs 一致）");
+        let err =
+            save(&p, &snap).expect_err("父目录不存在时 save 必须返回 Err，不能 panic、也不能自愈");
+        assert!(
+            err.to_string().contains("a.bin.dlm.json"),
+            "错误里要带上路径：{err}"
+        );
+        assert!(
+            !parent.exists(),
+            "本模块不建父目录（那是 cli/engine 的活，与 store.rs 一致）"
+        );
         Ok(())
     }
 
@@ -1034,15 +1158,21 @@ mod tests {
     fn load_rejects_truncated_or_empty_json_instead_of_no_state() -> anyhow::Result<()> {
         let target = target_of("t4_truncated", "a.bin");
         let p = path_for(&target);
-        let snap = Snapshot::from_task(&task_at(&target, None, None), validator(10), rows(&[(0, 9)]))?;
+        let snap = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(10),
+            rows(&[(0, 9)]),
+        )?;
         save(&p, &snap)?;
         let mut raw = std::fs::read_to_string(&p)?;
         let cut = raw.len() / 2;
         raw.truncate(cut);
         std::fs::write(&p, &raw)?;
-        let err = load(&p)
-            .expect_err("截断的断点文件必须是 Err，不许当成\"没有断点\"");
-        assert!(err.to_string().contains("t4_truncated"), "错误里要带路径：{err}");
+        let err = load(&p).expect_err("截断的断点文件必须是 Err，不许当成\"没有断点\"");
+        assert!(
+            err.to_string().contains("t4_truncated"),
+            "错误里要带路径：{err}"
+        );
 
         std::fs::write(&p, "")?;
         assert!(load(&p).is_err(), "0 字节的断点文件同样必须 Err");
@@ -1056,12 +1186,18 @@ mod tests {
     fn load_rejects_an_unknown_version() -> anyhow::Result<()> {
         let target = target_of("t4_version", "a.bin");
         let p = path_for(&target);
-        let mut snap = Snapshot::from_task(&task_at(&target, None, None), validator(10), rows(&[(0, 9)]))?;
+        let mut snap = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(10),
+            rows(&[(0, 9)]),
+        )?;
         snap.v = STATE_VERSION + 1;
         std::fs::write(&p, serde_json::to_string_pretty(&snap)?)?;
-        let err = load(&p)
-            .expect_err("未来版本的断点文件必须 Err，不能按旧格式猜着读");
-        assert!(err.to_string().contains("版本"), "错误要说明是版本不符：{err}");
+        let err = load(&p).expect_err("未来版本的断点文件必须 Err，不能按旧格式猜着读");
+        assert!(
+            err.to_string().contains("版本"),
+            "错误要说明是版本不符：{err}"
+        );
         snap.v = 0;
         std::fs::write(&p, serde_json::to_string_pretty(&snap)?)?;
         assert!(load(&p).is_err(), "v=0（含别家工具的伪文件）同样拒读");
@@ -1078,7 +1214,11 @@ mod tests {
         // `deny_unknown_fields` 的三个方向，每个都对应一种真实的坏文件：
         let target = target_of("t4_extra_key", "a.bin");
         let p = path_for(&target);
-        let snap = Snapshot::from_task(&task_at(&target, None, None), validator(10), rows(&[(0, 9)]))?;
+        let snap = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(10),
+            rows(&[(0, 9)]),
+        )?;
         save(&p, &snap)?;
         let good = std::fs::read_to_string(&p)?;
 
@@ -1088,17 +1228,39 @@ mod tests {
 
         // ② 顶层多一个我们不写的键 ⇒ Err。少了 `deny_unknown_fields` 这就是"无声丢掉半份信息"：
         //    文件里明明有东西，我们读的时候当它不存在。
-        std::fs::write(&p, good.replace("\"needs_secret\": false", "\"needs_secret\": false, \"bytes_pending\": 42"))?;
-        assert!(load(&p).is_err(), "顶层未知键必须拒读（deny_unknown_fields）");
+        std::fs::write(
+            &p,
+            good.replace(
+                "\"needs_secret\": false",
+                "\"needs_secret\": false, \"bytes_pending\": 42",
+            ),
+        )?;
+        assert!(
+            load(&p).is_err(),
+            "顶层未知键必须拒读（deny_unknown_fields）"
+        );
 
         // ③ 别的工具（或某个忘了 skip 的自己人）写出一份带 `password` 的同后缀文件 ⇒ 必须**拒读**，
         //    而不是"忽略那个键、其余照用"。口令已经明文躺在别人写的那个文件里了，我们参与不进去。
-        std::fs::write(&p, good.replace("\"user\": null", &format!("\"user\": null, \"password\": \"{SECRET}\"")))?;
+        std::fs::write(
+            &p,
+            good.replace(
+                "\"user\": null",
+                &format!("\"user\": null, \"password\": \"{SECRET}\""),
+            ),
+        )?;
         let err = load(&p).expect_err("task 视图里多出 password 键必须拒读，不能当作可忽略的噪音");
-        assert!(err.to_string().contains("t4_extra_key"), "错误里要带路径，用户才知道该删哪个文件：{err}");
+        assert!(
+            err.to_string().contains("t4_extra_key"),
+            "错误里要带路径，用户才知道该删哪个文件：{err}"
+        );
 
         std::fs::write(&p, &good)?;
-        assert_eq!(load(&p)?.as_ref(), Some(&snap), "原样那份照样读得回来（上面三条不是恒假断言）");
+        assert_eq!(
+            load(&p)?.as_ref(),
+            Some(&snap),
+            "原样那份照样读得回来（上面三条不是恒假断言）"
+        );
         std::fs::remove_file(&p)?;
         Ok(())
     }
@@ -1116,7 +1278,10 @@ mod tests {
             (rows(&[(0, 9), (10, 19)]), "相邻未合并"),
             (rows(&[(0, 19), (10, 29)]), "重叠"),
             (rows(&[(0, 19), (5, 6)]), "被包含"),
-            (rows(&[(0, 10)]), "终点越界（total_len=10 ⇒ 合法终点最大是 9）"),
+            (
+                rows(&[(0, 10)]),
+                "终点越界（total_len=10 ⇒ 合法终点最大是 9）",
+            ),
             (rows(&[(3, 1)]), "起点晚于终点"),
         ];
         for (segments, why) in bad {
@@ -1136,8 +1301,15 @@ mod tests {
         // 必须复查段表。少了这一道，"save 只信调用方"的实现同样能过上面那六条 from_task 断言。
         let mut mutated = ok.clone();
         mutated.segments = rows(&[(0, 3), (4, 5)]); // 相邻未合并
-        assert!(save(&p, &mutated).is_err(), "save 必须自己复查段表，不能只信 from_task");
-        assert_eq!(load(&p)?.as_ref(), Some(&ok), "被拒的那次 save 不得动到盘上的旧记录");
+        assert!(
+            save(&p, &mutated).is_err(),
+            "save 必须自己复查段表，不能只信 from_task"
+        );
+        assert_eq!(
+            load(&p)?.as_ref(),
+            Some(&ok),
+            "被拒的那次 save 不得动到盘上的旧记录"
+        );
 
         // 读取侧：手写一份相邻两行的 JSON（其余字段都对）⇒ 仍然 Err。
         let tampered = format!(
@@ -1151,7 +1323,12 @@ mod tests {
   "needs_secret": false,
   "saved_at": "2026-10-16T00:00:00Z"
 }}"#,
-            target.parent().unwrap().display().to_string().replace('\\', "\\\\")
+            target
+                .parent()
+                .unwrap()
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
         );
         std::fs::write(&p, &tampered)?;
         assert!(load(&p).is_err(), "被改坏的段表在读取侧同样要挡住");
@@ -1188,16 +1365,37 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            vec!["needs_secret", "saved_at", "segments", "stats", "task", "v", "validator"],
+            vec![
+                "needs_secret",
+                "saved_at",
+                "segments",
+                "stats",
+                "task",
+                "v",
+                "validator"
+            ],
             "顶层键必须与 spec §4 一致"
         );
         assert_eq!(v["v"].as_u64(), Some(1));
         assert_eq!(v["needs_secret"].as_bool(), Some(true));
-        let mut task_keys: Vec<&String> = top["task"].as_object().expect("task 是对象").keys().collect();
+        let mut task_keys: Vec<&String> = top["task"]
+            .as_object()
+            .expect("task 是对象")
+            .keys()
+            .collect();
         task_keys.sort();
         assert_eq!(
             task_keys,
-            vec!["cookies", "data_file", "dir", "flags", "name", "referer", "url", "user"],
+            vec![
+                "cookies",
+                "data_file",
+                "dir",
+                "flags",
+                "name",
+                "referer",
+                "url",
+                "user"
+            ],
             "task 视图 = Task 的九个字段去掉 password"
         );
         let mut val_keys: Vec<&String> = top["validator"]
@@ -1206,16 +1404,40 @@ mod tests {
             .keys()
             .collect();
         val_keys.sort();
-        assert_eq!(val_keys, vec!["etag", "final_url", "ignore_mtime", "last_modified", "total_len"]);
-        let mut stat_keys: Vec<&String> = top["stats"].as_object().expect("stats 是对象").keys().collect();
+        assert_eq!(
+            val_keys,
+            vec![
+                "etag",
+                "final_url",
+                "ignore_mtime",
+                "last_modified",
+                "total_len"
+            ]
+        );
+        let mut stat_keys: Vec<&String> = top["stats"]
+            .as_object()
+            .expect("stats 是对象")
+            .keys()
+            .collect();
         stat_keys.sort();
-        assert_eq!(stat_keys, vec!["bytes_delivered", "bytes_duplicated", "retries"]);
+        assert_eq!(
+            stat_keys,
+            vec!["bytes_delivered", "bytes_duplicated", "retries"]
+        );
         let seg0 = top["segments"][0].as_object().expect("段行是对象");
         let mut seg_keys: Vec<&String> = seg0.keys().collect();
         seg_keys.sort();
-        assert_eq!(seg_keys, vec!["end", "start"], "E7 的覆盖集一行只有起止两个偏移（闭区间，含端点）");
+        assert_eq!(
+            seg_keys,
+            vec!["end", "start"],
+            "E7 的覆盖集一行只有起止两个偏移（闭区间，含端点）"
+        );
         assert_eq!(seg0["start"].as_u64(), Some(0));
-        assert_eq!(seg0["end"].as_u64(), Some(9), "闭区间：total_len=10 的整份确认记到 9，不是 10");
+        assert_eq!(
+            seg0["end"].as_u64(),
+            Some(9),
+            "闭区间：total_len=10 的整份确认记到 9，不是 10"
+        );
         std::fs::remove_file(&p)?;
         Ok(())
     }
@@ -1225,7 +1447,11 @@ mod tests {
         // Task 8 靠这三个计数（plan 第 843 行写作 `stats.duplicated`，按勘误 **E9** 读作
         // `bytes_duplicated` —— 落盘名以本文件为准）。
         let target = target_of("t4_stats", "a.bin");
-        let mut snap = Snapshot::from_task(&task_at(&target, None, None), validator(1_000), rows(&[(0, 499)]))?;
+        let mut snap = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(1_000),
+            rows(&[(0, 499)]),
+        )?;
         assert_eq!(snap.stats, Stats::default(), "新建快照的计数从 0 起");
         snap.stats.bytes_delivered = 900;
         snap.stats.bytes_duplicated = 400; // 这一格存什么读回什么；口径（含 E17 撤账后的少报）见字段文档
@@ -1243,10 +1469,18 @@ mod tests {
     #[test]
     fn segments_are_the_inclusive_cover_set() -> anyhow::Result<()> {
         let target = target_of("t4_cover", "a.bin");
-        let snap = Snapshot::from_task(&task_at(&target, None, None), validator(1_000), rows(&[(0, 249), (500, 999)]))?;
+        let snap = Snapshot::from_task(
+            &task_at(&target, None, None),
+            validator(1_000),
+            rows(&[(0, 249), (500, 999)]),
+        )?;
         assert_eq!(snap.segments[0].len(), 250, "闭区间 [0,249] 是 250 字节");
         assert_eq!(snap.segments[1].len(), 500);
-        assert_eq!(snap.segments[0].interval(), Interval { start: 0, end: 249 }, "行能回到 scheduler 的区间形状");
+        assert_eq!(
+            snap.segments[0].interval(),
+            Interval { start: 0, end: 249 },
+            "行能回到 scheduler 的区间形状"
+        );
         assert_eq!(confirmed_bytes(&snap), 750);
         let p = path_for(&target);
         save(&p, &snap)?;
@@ -1285,7 +1519,11 @@ mod tests {
         // (段表内容, 违约原因, `check_segments` 消息里应当出现的词)
         type BadCase = (Vec<(u64, u64)>, &'static str, &'static str);
         let bad: [BadCase; 6] = [
-            (vec![(0, 9), (10, 19)], "相邻未合并（Task 5 表里最容易写错的那一支）", "相邻"),
+            (
+                vec![(0, 9), (10, 19)],
+                "相邻未合并（Task 5 表里最容易写错的那一支）",
+                "相邻",
+            ),
             (vec![(10, 19), (0, 9)], "乱序", "相邻"),
             (vec![(0, 19), (10, 29)], "重叠", "相邻"),
             (vec![(0, 19), (5, 6)], "被包含", "相邻"),
@@ -1302,8 +1540,16 @@ mod tests {
             );
         }
         // 反面对照（同一条用例里，证明上面六条不是恒真）：Task 5 要的合法形状照样构造得出来。
-        assert_eq!(stub_panic_message(100, &[(0, 9), (20, 49)]), None, "合法多行夹具不该 panic");
-        assert_eq!(stub_panic_message(100, &[(0, 99)]), None, "整份一条不该 panic");
+        assert_eq!(
+            stub_panic_message(100, &[(0, 9), (20, 49)]),
+            None,
+            "合法多行夹具不该 panic"
+        );
+        assert_eq!(
+            stub_panic_message(100, &[(0, 99)]),
+            None,
+            "整份一条不该 panic"
+        );
         assert_eq!(stub_panic_message(100, &[]), None, "空段表不该 panic");
     }
 
@@ -1314,9 +1560,20 @@ mod tests {
         let p = path_for(&target);
         let snap = Snapshot::stub_for_test(validator(100), rows(&[(0, 9), (20, 49)]));
         save(&p, &snap).expect("夹具过了段表闸就必须写得出去");
-        assert_eq!(load(&p)?.as_ref(), Some(&snap), "夹具形状要能原样 round-trip");
-        assert_eq!(confirmed_bytes(&snap), 40, "夹具的覆盖集算法与真实快照同一条");
-        assert_eq!(snap.task.url, snap.validator.final_url, "夹具的 task/validator 自洽（url 取自 final_url）");
+        assert_eq!(
+            load(&p)?.as_ref(),
+            Some(&snap),
+            "夹具形状要能原样 round-trip"
+        );
+        assert_eq!(
+            confirmed_bytes(&snap),
+            40,
+            "夹具的覆盖集算法与真实快照同一条"
+        );
+        assert_eq!(
+            snap.task.url, snap.validator.final_url,
+            "夹具的 task/validator 自洽（url 取自 final_url）"
+        );
         std::fs::remove_file(&p)?;
         Ok(())
     }
@@ -1359,14 +1616,23 @@ mod tests {
         assert_eq!(b[13], b':');
         assert_eq!(b[16], b':');
         assert_eq!(b[19], b'Z');
-        assert!(b[..4].iter().all(u8::is_ascii_digit) && s.starts_with("20"), "年份看着不对：{s}");
+        assert!(
+            b[..4].iter().all(u8::is_ascii_digit) && s.starts_with("20"),
+            "年份看着不对：{s}"
+        );
         let digit_positions: &[usize] = &[5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-        assert!(digit_positions.iter().all(|&i| b[i].is_ascii_digit()), "月/日/时/分/秒的位置上该是数字：{s}");
+        assert!(
+            digit_positions.iter().all(|&i| b[i].is_ascii_digit()),
+            "月/日/时/分/秒的位置上该是数字：{s}"
+        );
         // `utc_now()` 就是 `from_task` 用的那口钟，格式一致 ⇒ 这个字符串的字典序 == 时间序
         // （Task 8 每次落盘前用它刷 `saved_at`，见 `Snapshot::saved_at` 的文档）。
         let later = utc_now();
         assert_eq!(later.len(), 20, "同一个格式：{later}");
-        assert!(later.as_str() >= s.as_str(), "同一口钟不该倒退：{s} -> {later}");
+        assert!(
+            later.as_str() >= s.as_str(),
+            "同一口钟不该倒退：{s} -> {later}"
+        );
         Ok(())
     }
 
@@ -1380,7 +1646,10 @@ mod tests {
         let err = Snapshot::from_task(&t, validator(10), vec![])
             .expect_err("明文 HTTP + 口令的任务不得能被写进断点文件");
         assert!(!path_for(&target).exists(), "拒了就不该顺手写盘");
-        assert!(err.to_string().contains("口令"), "错误要说明是口令规则：{err}");
+        assert!(
+            err.to_string().contains("口令"),
+            "错误要说明是口令规则：{err}"
+        );
         Ok(())
     }
 }

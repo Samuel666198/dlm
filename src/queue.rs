@@ -69,7 +69,8 @@ pub struct QuotaState {
 
 impl QuotaState {
     pub fn resets_at(&self) -> u64 {
-        self.window_started_at.saturating_add(self.window_secs.max(1))
+        self.window_started_at
+            .saturating_add(self.window_secs.max(1))
     }
 }
 
@@ -92,7 +93,10 @@ pub struct QueueStore {
 }
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn now_millis() -> u64 {
@@ -108,9 +112,16 @@ impl QueueStore {
             Ok(text) => serde_json::from_str::<QueueFile>(&text)
                 .with_context(|| format!("解析队列文件失败：{}", path.display()))?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => QueueFile::default(),
-            Err(err) => return Err(err).with_context(|| format!("读队列文件失败：{}", path.display())),
+            Err(err) => {
+                return Err(err).with_context(|| format!("读队列文件失败：{}", path.display()));
+            }
         };
-        Ok(Self { path, next_id: file.next_id.max(1), tasks: file.tasks, quota: file.quota })
+        Ok(Self {
+            path,
+            next_id: file.next_id.max(1),
+            tasks: file.tasks,
+            quota: file.quota,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -151,7 +162,12 @@ impl QueueStore {
         if !changed {
             return false;
         }
-        self.quota = Some(QuotaState { limit, window_secs, window_started_at: 0, used: 0 });
+        self.quota = Some(QuotaState {
+            limit,
+            window_secs,
+            window_started_at: 0,
+            used: 0,
+        });
         for task in &mut self.tasks {
             task.hold_until = None;
         }
@@ -160,7 +176,9 @@ impl QueueStore {
 
     /// 推进固定窗口：跨过整窗就清零并释放到点的等待。没有起算（`window_started_at == 0`）时不动。
     pub fn quota_tick(&mut self, now: u64) -> bool {
-        let Some(mut quota) = self.quota else { return false };
+        let Some(mut quota) = self.quota else {
+            return false;
+        };
         if quota.window_started_at == 0 {
             return false;
         }
@@ -171,8 +189,9 @@ impl QueueStore {
         }
         let elapsed = now - quota.window_started_at;
         let windows = (elapsed / window).max(1);
-        quota.window_started_at =
-            quota.window_started_at.saturating_add(windows.saturating_mul(window));
+        quota.window_started_at = quota
+            .window_started_at
+            .saturating_add(windows.saturating_mul(window));
         quota.used = 0;
         self.quota = Some(quota);
         for task in &mut self.tasks {
@@ -184,7 +203,9 @@ impl QueueStore {
     }
 
     pub fn quota_charge(&mut self, bytes: u64) -> bool {
-        let Some(quota) = self.quota.as_mut() else { return false };
+        let Some(quota) = self.quota.as_mut() else {
+            return false;
+        };
         if bytes == 0 {
             return false;
         }
@@ -193,7 +214,9 @@ impl QueueStore {
     }
 
     pub fn quota_hold(&mut self, id: &str, until: u64) -> bool {
-        let Some(task) = self.find_mut(id) else { return false };
+        let Some(task) = self.find_mut(id) else {
+            return false;
+        };
         if task.hold_until == Some(until) {
             return false;
         }
@@ -203,7 +226,9 @@ impl QueueStore {
 
     /// 下一次整窗重置的时刻；还没起算 ⇒ `None`。
     pub fn quota_next_reset(&self) -> Option<u64> {
-        self.quota.filter(|q| q.window_started_at > 0).map(|q| q.resets_at())
+        self.quota
+            .filter(|q| q.window_started_at > 0)
+            .map(|q| q.resets_at())
     }
 
     /// 一个任务的覆盖量：断点可读就用段表；成功收尾会删断点，退回读目标文件长度。
@@ -214,7 +239,9 @@ impl QueueStore {
 
     /// 第一次派发带配额的任务时起算本窗（没有任务时窗口不流逝）。
     pub fn quota_start(&mut self, now: u64) -> bool {
-        let Some(quota) = self.quota.as_mut() else { return false };
+        let Some(quota) = self.quota.as_mut() else {
+            return false;
+        };
         if quota.window_started_at != 0 {
             return false;
         }
@@ -239,7 +266,8 @@ impl QueueStore {
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("建队列目录失败：{}", parent.display()))?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("建队列目录失败：{}", parent.display()))?;
         }
         let file = QueueFile {
             next_id: self.next_id,
@@ -251,7 +279,8 @@ impl QueueStore {
         fs::write(&tmp, text).with_context(|| format!("写队列临时文件失败：{}", tmp.display()))?;
         // `rename` 在本机（Windows）会替换已存在的目标；先删目标会把"原子替换"拆成
         // "删掉旧文件 + 再改名"两步，崩在中间就丢队列。
-        fs::rename(&tmp, &self.path).with_context(|| format!("提交队列文件失败：{}", self.path.display()))?;
+        fs::rename(&tmp, &self.path)
+            .with_context(|| format!("提交队列文件失败：{}", self.path.display()))?;
         Ok(())
     }
 
@@ -274,7 +303,9 @@ impl QueueStore {
         let stored_name = match category.filter(|c| !c.is_empty()) {
             Some(category) => {
                 ensure!(
-                    category.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                    category
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_'),
                     "分类目录名不合法"
                 );
                 format!("{category}/{name}")
@@ -325,7 +356,9 @@ pub fn validate_on_complete(raw: &str) -> Result<Option<String>> {
 
 /// 按文件名扩展名归类（C3）。只影响 UI 标签/筛选，不改变落盘目录。
 pub fn category_for(name: &str) -> &'static str {
-    let Some((_, ext)) = name.rsplit_once('.') else { return "other" };
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return "other";
+    };
     match ext.to_ascii_lowercase().as_str() {
         "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "ts"
         | "m2ts" | "3gp" => "video",
@@ -333,7 +366,9 @@ pub fn category_for(name: &str) -> &'static str {
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "iso" | "cab" => "archive",
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "epub"
         | "mobi" | "csv" => "document",
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "tif" | "tiff" | "heic" => "image",
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "tif" | "tiff" | "heic" => {
+            "image"
+        }
         "exe" | "msi" | "apk" | "dmg" | "pkg" | "deb" | "rpm" | "appimage" => "program",
         _ => "other",
     }
@@ -346,7 +381,10 @@ pub fn validate_name(name: &str) -> Result<()> {
     if name == "." || name == ".." {
         bail!("文件名不能是 . 或 ..");
     }
-    if name.chars().any(|c| c == '/' || c == '\\' || c == ':' || c.is_control()) {
+    if name
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c == ':' || c.is_control())
+    {
         bail!("文件名不能含 / \\ : 或控制字符");
     }
     Ok(())
@@ -363,7 +401,11 @@ pub fn state_path(out_dir: &Path, name: &str) -> PathBuf {
 /// 覆盖量：断点可读就用段表；成功收尾会删断点，退回读目标文件长度。
 pub fn delivered(out_dir: &Path, name: &str) -> Option<u64> {
     let (_, covered) = progress(out_dir, name);
-    covered.or_else(|| fs::metadata(target_path(out_dir, name)).ok().map(|m| m.len()))
+    covered.or_else(|| {
+        fs::metadata(target_path(out_dir, name))
+            .ok()
+            .map(|m| m.len())
+    })
 }
 
 /// 从断点读 `(total_len, delivered)`；没有/坏文件交 `(None, None)`。
@@ -374,24 +416,31 @@ pub fn progress(out_dir: &Path, name: &str) -> (Option<u64>, Option<u64>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         return (None, None);
     };
-    let total = v.get("validator").and_then(|x| x.get("total_len")).and_then(|x| x.as_u64());
-    let delivered = v
-        .get("segments")
-        .and_then(|x| x.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let start = row.get("start")?.as_u64()?;
-                    let end = row.get("end")?.as_u64()?;
-                    if end >= start { Some(end - start + 1) } else { None }
-                })
-                .sum::<u64>()
-        });
+    let total = v
+        .get("validator")
+        .and_then(|x| x.get("total_len"))
+        .and_then(|x| x.as_u64());
+    let delivered = v.get("segments").and_then(|x| x.as_array()).map(|rows| {
+        rows.iter()
+            .filter_map(|row| {
+                let start = row.get("start")?.as_u64()?;
+                let end = row.get("end")?.as_u64()?;
+                if end >= start {
+                    Some(end - start + 1)
+                } else {
+                    None
+                }
+            })
+            .sum::<u64>()
+    });
     (total, delivered)
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
-    let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "queue.json".into());
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "queue.json".into());
     path.with_file_name(format!("{name}.tmp"))
 }
 
@@ -412,7 +461,15 @@ mod tests {
     fn add_save_load_roundtrip() {
         let (dir, mut store) = temp_queue("roundtrip");
         let task = store
-            .add("https://example.com/a.bin", "a.bin", Some("https://example.com/".into()), None, None, None, &dir)
+            .add(
+                "https://example.com/a.bin",
+                "a.bin",
+                Some("https://example.com/".into()),
+                None,
+                None,
+                None,
+                &dir,
+            )
             .unwrap();
         store.save().unwrap();
         let loaded = QueueStore::load(store.path().to_path_buf()).unwrap();
@@ -426,7 +483,17 @@ mod tests {
     #[test]
     fn running_becomes_paused_on_recovery() {
         let (dir, mut store) = temp_queue("recover");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
+        let task = store
+            .add(
+                "https://example.com/a.bin",
+                "a.bin",
+                None,
+                None,
+                None,
+                None,
+                &dir,
+            )
+            .unwrap();
         store.find_mut(&task.id).unwrap().status = TaskStatus::Running;
         store.find_mut(&task.id).unwrap().pid = Some(1234);
         assert!(store.recover_running());
@@ -438,10 +505,34 @@ mod tests {
     #[test]
     fn rejects_bad_urls_and_names() {
         let (dir, mut store) = temp_queue("bad");
-        assert!(store.add("file:///x", "a.bin", None, None, None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "../a", None, None, None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "a/b", None, None, None, None, &dir).is_err());
-        assert!(store.add("https://example.com/a", "a:b", None, None, None, None, &dir).is_err());
+        assert!(
+            store
+                .add("file:///x", "a.bin", None, None, None, None, &dir)
+                .is_err()
+        );
+        assert!(
+            store
+                .add(
+                    "https://example.com/a",
+                    "../a",
+                    None,
+                    None,
+                    None,
+                    None,
+                    &dir
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .add("https://example.com/a", "a/b", None, None, None, None, &dir)
+                .is_err()
+        );
+        assert!(
+            store
+                .add("https://example.com/a", "a:b", None, None, None, None, &dir)
+                .is_err()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -479,7 +570,17 @@ mod tests {
     #[test]
     fn remove_returns_the_task() {
         let (dir, mut store) = temp_queue("remove");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
+        let task = store
+            .add(
+                "https://example.com/a.bin",
+                "a.bin",
+                None,
+                None,
+                None,
+                None,
+                &dir,
+            )
+            .unwrap();
         assert_eq!(store.remove(&task.id).unwrap().id, task.id);
         assert!(store.find(&task.id).is_none());
         let _ = fs::remove_dir_all(dir);
@@ -507,7 +608,17 @@ mod tests {
     #[test]
     fn quota_window_resets_and_releases_holds() {
         let (dir, mut store) = temp_queue("quota");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
+        let task = store
+            .add(
+                "https://example.com/a.bin",
+                "a.bin",
+                None,
+                None,
+                None,
+                None,
+                &dir,
+            )
+            .unwrap();
         assert!(store.set_quota(1_000, 10));
         assert!(store.quota_start(100));
         assert!(store.quota_charge(600));
@@ -517,14 +628,28 @@ mod tests {
         assert!(store.quota_tick(110), "到点要推进窗口");
         let q = store.quota().unwrap();
         assert_eq!((q.window_started_at, q.used), (110, 0));
-        assert_eq!(store.find(&task.id).unwrap().hold_until, None, "到点释放等待");
+        assert_eq!(
+            store.find(&task.id).unwrap().hold_until,
+            None,
+            "到点释放等待"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn quota_charge_and_disable_roundtrip() {
         let (dir, mut store) = temp_queue("quota-off");
-        let task = store.add("https://example.com/a.bin", "a.bin", None, None, None, None, &dir).unwrap();
+        let task = store
+            .add(
+                "https://example.com/a.bin",
+                "a.bin",
+                None,
+                None,
+                None,
+                None,
+                &dir,
+            )
+            .unwrap();
         assert!(!store.quota_charge(5), "没启用时不计账");
         assert!(store.set_quota(1_000, 10));
         assert!(store.quota_start(100));
@@ -533,7 +658,11 @@ mod tests {
         assert!(store.quota_hold(&task.id, 110));
         assert!(store.set_quota(0, 10), "关闭是变化");
         assert!(store.quota().is_none());
-        assert_eq!(store.find(&task.id).unwrap().hold_until, None, "关闭要清等待");
+        assert_eq!(
+            store.find(&task.id).unwrap().hold_until,
+            None,
+            "关闭要清等待"
+        );
         assert!(!store.set_quota(0, 10), "重复关闭不再算变化");
         let _ = fs::remove_dir_all(dir);
     }
@@ -547,15 +676,23 @@ mod tests {
         store.save().unwrap();
         let loaded = QueueStore::load(dir.join("queue.json")).unwrap();
         let q = loaded.quota().expect("quota survives");
-        assert_eq!((q.limit, q.window_secs, q.window_started_at, q.used), (4_194_304, 3600, 100, 123));
+        assert_eq!(
+            (q.limit, q.window_secs, q.window_started_at, q.used),
+            (4_194_304, 3600, 100, 123)
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn queue_accepts_open_and_run_but_rejects_shutdown() {
-        assert_eq!(validate_on_complete("open").unwrap().as_deref(), Some("open"));
         assert_eq!(
-            validate_on_complete("run:C:\\tools\\scan.exe").unwrap().as_deref(),
+            validate_on_complete("open").unwrap().as_deref(),
+            Some("open")
+        );
+        assert_eq!(
+            validate_on_complete("run:C:\\tools\\scan.exe")
+                .unwrap()
+                .as_deref(),
             Some("run:C:\\tools\\scan.exe")
         );
         let err = validate_on_complete("shutdown:60").unwrap_err().to_string();
@@ -567,11 +704,34 @@ mod tests {
     fn category_dirs_prefix_the_stored_name_without_letting_users_choose_it() {
         let (dir, mut store) = temp_queue("category-dir");
         let task = store
-            .add("https://example.com/a.mp4", "a.mp4", None, None, None, Some("video"), &dir)
+            .add(
+                "https://example.com/a.mp4",
+                "a.mp4",
+                None,
+                None,
+                None,
+                Some("video"),
+                &dir,
+            )
             .unwrap();
         assert_eq!(task.name, "video/a.mp4");
-        assert_eq!(target_path(&dir, &task.name), dir.join("video").join("a.mp4"));
-        assert!(store.add("https://example.com/a", "a", None, None, None, Some("../evil"), &dir).is_err());
+        assert_eq!(
+            target_path(&dir, &task.name),
+            dir.join("video").join("a.mp4")
+        );
+        assert!(
+            store
+                .add(
+                    "https://example.com/a",
+                    "a",
+                    None,
+                    None,
+                    None,
+                    Some("../evil"),
+                    &dir
+                )
+                .is_err()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -591,7 +751,10 @@ mod tests {
             .unwrap();
         store.save().unwrap();
         let loaded = QueueStore::load(dir.join("queue.json")).unwrap();
-        assert_eq!(loaded.find(&task.id).unwrap().on_complete.as_deref(), Some("open"));
+        assert_eq!(
+            loaded.find(&task.id).unwrap().on_complete.as_deref(),
+            Some("open")
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }
