@@ -360,7 +360,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
 
 ## 测试与验收
 
-四道门禁（外加格式检查）全绿才算交付（**数字随发漂移，这里的值是 2026-11-03 复核时的实测数**，跑一遍看的是"0 failed"而不是这个数）：
+全部门禁（fmt、lib、bins、integration、clippy、扩展静态检查）全绿才算交付（**数字随发漂移，这里的值是 2026-11-03 复核时的实测数**，跑一遍看的是"0 failed"而不是这个数）：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1
