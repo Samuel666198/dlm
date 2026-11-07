@@ -10,6 +10,7 @@
 | 门禁 | `--lib 311/0` · `--bins 4/0` · `--test integration 117/0` · `clippy 0` · `fmt --check 0` |
 | 产品面 | 内核 + CLI + 本地 Web UI 队列 + Native Messaging 扩展（右键/页内组件/媒体与文件嗅探/HLS 直链） |
 | 最新进展 | `2026-11-03 悬浮球`（扩展 0.2.7）、`2026-10-29 页内下载组件`、`2026-10-29 站点脚本下载拦截`、`2026-10-28 Windows x64 便携包` |
+| 下一轮计划 | [`plans/2026-11-07-v21-product-polish.md`](superpowers/plans/2026-11-07-v21-product-polish.md)（P1 自动重试 / P2 打开文件 / P3 自启 / P4 UI 收尾；托盘暂缓） |
 | 长期归档 | `E:\WorkSpace\archive\2026_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`（`.superpowers/sdd` 的 2026-10-21 快照） |
 
 ## 怎么读
@@ -71,6 +72,7 @@
 | [`plans/2026-10-28-b3a-hls.md`](superpowers/plans/2026-10-28-b3a-hls.md) | 已交付 |
 | [`plans/2026-10-28-c3-categories-update.md`](superpowers/plans/2026-10-28-c3-categories-update.md) | 已交付 |
 | [`plans/2026-10-28-media-sniff.md`](superpowers/plans/2026-10-28-media-sniff.md) | 已交付 |
+| [`plans/2026-11-07-v21-product-polish.md`](superpowers/plans/2026-11-07-v21-product-polish.md) | **下一轮计划**：失败自动重试、打开文件/文件夹、开机自启、UI 收尾；托盘暂缓 |
 
 ## 证据（evidence，一次性实测，不回改）
 
