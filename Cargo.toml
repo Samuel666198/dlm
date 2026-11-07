@@ -10,3 +10,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 sha2 = "0.11"
+
+# 集成测试用的假 `dlm`：按调用次数发不同退出码，用来钉 P1 的自动重试。
+# 只进 `cargo test` 的构建，不随发布包分发（packaging 只拷三件套）。
+[[bin]]
+name = "fake-dlm"
+path = "tests/bin/fake-dlm.rs"
+test = false
+bench = false

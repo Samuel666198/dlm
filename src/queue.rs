@@ -64,15 +64,11 @@ pub struct Task {
 
 /// 自动重试的退避秒数（P1）。`attempts` 是**已经重试过的轮数**（0 = 还没重试过）。
 ///
-/// 三档之后不再自动重试：一轮 30 秒、二轮 120 秒，够覆盖"对端一时抽风"那一类；
-/// 再往上多半是永久错误（404/403/域名没了），继续自动重试只是白烧流量与日志。
-/// 返回 `None` 时调用方应当判定为真正的 `Failed`，把决定权交回用户。
-pub fn retry_backoff(attempts: u32) -> Option<u64> {
-    match attempts {
-        0 => Some(30),
-        1 => Some(120),
-        _ => None,
-    }
+/// `table` 由调用方注入（默认 `[30, 120]`，见 `gui::DEFAULT_RETRY_BACKOFF`），本模块不写死数值 ——
+/// 这样集成测试能用 `[1, 1]` 把"重排 → 再跑"这条链路真正走完，而不用真等两分钟。
+/// 走到表尾之外给 `None`：再多半是永久错误（404/403/域名没了），继续自动重试只是白烧流量与日志。
+pub fn retry_backoff(attempts: u32, table: &[u64]) -> Option<u64> {
+    table.get(attempts as usize).copied()
 }
 
 /// 队列级全局固定窗口配额（A16）。`window_started_at == 0` = 尚未起算。
@@ -773,6 +769,46 @@ mod tests {
             loaded.find(&task.id).unwrap().on_complete.as_deref(),
             Some("open")
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// P1 的退避表：只有表内那几轮给得出间隔，表尾之后把决定权交回用户。
+    #[test]
+    fn retry_backoff_walks_the_injected_table_and_stops_at_its_end() {
+        let default = crate::gui::DEFAULT_RETRY_BACKOFF;
+        assert_eq!(retry_backoff(0, default), Some(30), "第一轮 30 秒");
+        assert_eq!(retry_backoff(1, default), Some(120), "第二轮 120 秒");
+        assert_eq!(retry_backoff(2, default), None, "表尾之后不再自动重试");
+        assert_eq!(
+            retry_backoff(u32::MAX, default),
+            None,
+            "越界也不能溢出或回绕"
+        );
+        assert_eq!(retry_backoff(0, &[]), None, "空表 = 关掉自动重试");
+        assert_eq!(
+            retry_backoff(1, &[1, 1]),
+            Some(1),
+            "注入的表说了算：测试能用 1 秒把链路走完"
+        );
+    }
+
+    /// `attempts` 必须是可缺省的：老队列文件里没有这个字段，读出来得是 0（不是让整份队列失效）。
+    #[test]
+    fn a_queue_file_without_the_attempts_field_loads_as_zero() {
+        let dir = std::env::temp_dir().join(format!("dlm-queue-attempts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("queue.json");
+        // 手写一份"老版本"队列：没有 attempts 字段。
+        fs::write(
+            &path,
+            r#"{"next_id":1,"quota":null,"tasks":[{"id":"1-0","url":"https://x/a","name":"a.bin","referer":null,"status":"queued","pid":null,"exit_code":null,"log":"a.log","created_at":1,"updated_at":1,"start_at":null,"total_len":null,"delivered":null}]}"#,
+        )
+        .unwrap();
+        let store = QueueStore::load(path).unwrap();
+        let task = store.find("1-0").expect("老队列要能读出来");
+        assert_eq!(task.attempts, 0, "缺字段按 0 起算，不重置也不报错");
+        assert!(task.hold_until.is_none());
         let _ = fs::remove_dir_all(dir);
     }
 }

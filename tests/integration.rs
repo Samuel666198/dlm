@@ -27,6 +27,41 @@ fn range_upto(max: u64) -> String {
     format!("bytes=0-{}", max - 1)
 }
 
+/// 假 `dlm` 的路径。`CARGO_BIN_EXE_<name>` 只对**合法标识符**的名字生成环境变量，
+/// `fake-dlm` 带连字符 ⇒ 拿不到那个宏，改从当前测试二进制旁边找（cargo 把 bins 放在同一目录）。
+///
+/// 硬拼 `target/debug` 会踩 `--release` 与自定义 `CARGO_TARGET_DIR` 的坑，所以优先用
+/// "测试 exe 自己所在目录"，再回退到 manifest 下的 `target/debug`。
+fn fake_dlm_exe() -> std::path::PathBuf {
+    let name = if cfg!(windows) {
+        "fake-dlm.exe"
+    } else {
+        "fake-dlm"
+    };
+    if let Ok(current) = std::env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("debug")
+        .join(name)
+}
+
+/// [`fake_dlm_exe`] 的 `&str` 形态。`Command::args` 的数组里所有元素必须是同一个类型，
+/// 而其它参数都是 `&str`，所以这里单独给一个借用版本，而不是把整个数组换成 `OsString`。
+///
+/// 泄漏一次小字符串是有意的：只在测试进程里各泄漏一次，换的是调用点不用到处写
+/// `let p = ...; p.to_string_lossy().to_string()` 的噪声。
+fn fake_dlm_str() -> &'static str {
+    static ONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| fake_dlm_exe().to_string_lossy().to_string())
+}
+
 // ---------------------------------------------------------------- 简报 Step 1 的两条
 
 /// 简报第 1 条：`/blob` 认 Range，预读满限量，长度取 `Content-Range` 的总数。
@@ -9125,6 +9160,262 @@ fn residual_duplicate_traffic_is_bounded_by_one_chunk_per_retighten() -> anyhow:
 }
 
 // ---------------------------------------------------------------- C1–C3 队列 + 本地 UI
+
+/// P1：失败自动重试。
+///
+/// 剧本：假 `dlm` 依次退 1、1、0（`DLM_FAKE_CODES`），`--max-task-retries 2` ⇒ 队列应当
+/// 自己起三次子进程，任务最终 `done`，且 `attempts == 2`。退避用默认表会让这条用例等 150 秒，
+/// 所以这里的 `dlm-gui` 通过 `DLM_TEST_RETRY_BACKOFF_MS` 注入毫秒级表（见 `gui.rs` 里那个
+/// 环境变量的读法：**只有测试会设它**，生产不设就是默认的 30/120 秒）。
+#[test]
+fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-retry")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let counter = dir.path().join("calls.txt");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-retry-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                fake_dlm_str(),
+                "--concurrency",
+                "1",
+                "--max-task-retries",
+                "2",
+                "--token",
+                token,
+            ])
+            .env("DLM_FAKE_COUNTER", &counter)
+            .env("DLM_FAKE_CODES", "1,1,0")
+            .env("DLM_TEST_RETRY_BACKOFF_MS", "50,50")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let resp = client
+        .post(format!("{gui_base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({"url": "https://example.invalid/retry.bin", "name": "retry.bin"})
+                .to_string(),
+        )
+        .send()?;
+    let reply: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(reply["ok"], true, "{reply}");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen_attempts = Vec::new();
+    loop {
+        let resp = client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()?;
+        let text = resp.text()?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        if let Some(task) = tasks.iter().find(|t| t["name"] == "retry.bin") {
+            let attempts = task["attempts"].as_u64().unwrap_or(0) as u32;
+            if seen_attempts.last() != Some(&attempts) {
+                seen_attempts.push(attempts);
+            }
+            match task["status"].as_str() {
+                Some("done") => {
+                    assert_eq!(attempts, 2, "两次退 1 之后成功，attempts 应当是 2：{task}");
+                    break;
+                }
+                Some("failed") => panic!("重试额度内不该判 failed：{task}"),
+                _ => {}
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("任务没有在重试后完成：{text}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 三次调用真的发生了（假 dlm 的计数文件），不是队列自己脑补的状态。
+    let calls: u32 = std::fs::read_to_string(&counter)
+        .context("假 dlm 没有写下计数文件")?
+        .trim()
+        .parse()?;
+    assert_eq!(calls, 3, "退 1、退 1、退 0 ⇒ 子进程恰好起了三次");
+    assert!(
+        seen_attempts.contains(&1),
+        "attempts 应当在中途到过 1（说明它真的是重排后的第二轮）：{seen_attempts:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(out_dir.join("retry.bin"))
+            .context("成功那一轮应当留下落点")?
+            .len(),
+        4
+    );
+    Ok(())
+}
+
+/// P1 反臂：`--max-task-retries 0` = 关掉自动重试。退一次 1 就判 failed，子进程只起一次。
+#[test]
+fn gui_does_not_retry_when_the_cap_is_zero() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-retry-off")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let counter = dir.path().join("calls.txt");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-retry-off-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                fake_dlm_str(),
+                "--concurrency",
+                "1",
+                "--max-task-retries",
+                "0",
+                "--token",
+                token,
+            ])
+            .env("DLM_FAKE_COUNTER", &counter)
+            .env("DLM_FAKE_CODES", "1")
+            .env("DLM_TEST_RETRY_BACKOFF_MS", "50,50")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    client
+        .post(format!("{gui_base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({"url": "https://example.invalid/nope.bin", "name": "nope.bin"})
+                .to_string(),
+        )
+        .send()?;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let resp = client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()?;
+        let text = resp.text()?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        if let Some(task) = tasks.iter().find(|t| t["name"] == "nope.bin") {
+            if task["status"] == "failed" {
+                assert_eq!(
+                    task["attempts"], 0,
+                    "上限 0 时一次都不该重试，attempts 必须还是 0：{task}"
+                );
+                break;
+            }
+            assert_ne!(
+                task["status"], "queued",
+                "上限 0 时不该回队列等重试：{task}"
+            );
+        }
+        if Instant::now() > deadline {
+            panic!("任务没有判 failed：{text}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    std::thread::sleep(Duration::from_millis(300));
+    let calls: u32 = std::fs::read_to_string(&counter)?.trim().parse()?;
+    assert_eq!(calls, 1, "关掉自动重试后子进程只该起一次");
+    Ok(())
+}
 
 /// 启一个真的 `dlm-gui`，走 HTTP API：添加 → done → 落盘；再验 start_at 排队与 pause/resume/remove。
 #[test]

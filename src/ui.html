@@ -209,7 +209,7 @@
     </div>
 
     <div class="list" id="taskList"></div>
-    <div class="empty" id="empty">队列为空。添加一个链接开始。</div>
+    <div class="empty" id="empty">队列为空。可以点右上角“添加任务”，也可以在浏览器里右键链接交给 dlm。</div>
     <div class="footer-note">所有数据在本地 · 队列与断点保存在本机 · <span id="hostFoot">127.0.0.1</span></div>
   </div>
 </div>
@@ -302,7 +302,11 @@
   }
   function statusOf(t) {
     if (t.status === 'running') return ['s-run','下载中'];
-    if (t.status === 'queued') return t.hold_until ? ['s-wait','配额等待'] : ['s-queue','排队中'];
+    if (t.status === 'queued') {
+      // P1：区分"等配额窗口"与"等自动重试"，两者的等待原因不同，用户看到的也该不同。
+      if (t.attempts > 0 && t.hold_until) return ['s-wait','重试等待 ' + t.attempts];
+      return t.hold_until ? ['s-wait','配额等待'] : ['s-queue','排队中'];
+    }
     if (t.status === 'paused') return ['s-pause','已暂停'];
     if (t.status === 'done') return ['s-done','已完成'];
     return ['s-fail','失败'];
@@ -404,7 +408,8 @@
       right.textContent = '断点保留';
     } else if (t.status === 'done') {
       left.textContent = fmtBytes(total == null ? done : total);
-      right.textContent = 'exit ' + (t.exit_code == null ? 0 : t.exit_code);
+      // 成功不显示退出码：那是开发者语言，用户要知道的是“下好了、多大”。
+      right.textContent = '已校验';
     } else {
       left.textContent = '失败';
       right.textContent = t.exit_code == null ? '无退出码' : 'exit ' + t.exit_code;
@@ -475,9 +480,15 @@
     const done = Number(t.delivered) || 0;
     $('#dSize').textContent = (t.status === 'done' ? fmtBytes(total == null ? done : total) : fmtBytes(done) + ' / ' + (total == null ? '?' : fmtBytes(total)));
     $('#dEta').textContent = t.status === 'running' ? '下载中，速率见任务日志'
-      : t.status === 'queued' ? (t.hold_until ? '配额等待至 ' + fmtTime(t.hold_until) : '等待调度')
+      : t.status === 'queued' ? (t.hold_until
+          ? (t.attempts > 0
+              ? '第 ' + t.attempts + ' 次重试，等待至 ' + fmtTime(t.hold_until)
+              : '配额等待至 ' + fmtTime(t.hold_until))
+          : '等待调度')
       : t.status === 'paused' ? '断点已保留，可继续'
-      : t.status === 'failed' ? '任务失败，可继续或删除'
+      : t.status === 'failed' ? (t.attempts > 0
+          ? '重试 ' + t.attempts + ' 次仍失败，可手动继续'
+          : '任务失败，可继续或删除')
       : '已完成并校验';
     $('#dComplete').textContent = t.on_complete || '无';
     $('#dPid').textContent = t.pid == null ? '—' : String(t.pid);
@@ -581,12 +592,47 @@
   $('#dRemove').addEventListener('click', () => { if (selected) action(selected.id, 'remove'); });
 
   const modal = $('#addModal');
-  const openModal = () => { modal.classList.add('open'); setTimeout(() => $('#url').focus(), 30); };
-  const closeModal = () => modal.classList.remove('open');
+  // P4：关掉时把焦点还给触发它的那个按钮 —— 否则键盘用户会被丢回页面顶部。
+  let modalReturnFocus = null;
+  const openModal = () => {
+    modalReturnFocus = document.activeElement;
+    modal.classList.add('open');
+    setTimeout(() => $('#url').focus(), 30);
+  };
+  const closeModal = () => {
+    if (!modal.classList.contains('open')) return;
+    modal.classList.remove('open');
+    if (modalReturnFocus && typeof modalReturnFocus.focus === 'function') {
+      modalReturnFocus.focus();
+    }
+    modalReturnFocus = null;
+  };
   $('#addBtn').addEventListener('click', openModal);
   $('#closeModal').addEventListener('click', closeModal);
   $('#cancelModal').addEventListener('click', closeModal);
   modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+  // 焦点圈：Tab 走到弹窗最后/第一个可聚焦元素时绕回，别让焦点跑到背后的页面上。
+  modal.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const focusable = [...modal.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
+      .filter((el) => el.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+  // Esc：先关最上层的那个（弹窗优先于抽屉）。
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (modal.classList.contains('open')) { closeModal(); return; }
+    if ($('#drawer').classList.contains('open')) closeDrawer();
+  });
   $('#action').addEventListener('change', (e) => { $('#exeField').hidden = e.target.value !== 'run'; });
   function inferName(url) {
     try {

@@ -285,8 +285,10 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 | `--update-url <URL>` | 不检查 | 可选的更新清单 URL（只接受 http/https）；不给就不发任何外网请求 |
 | `--category-dirs` | 关 | 按分类把落点放进 `out-dir/<category>/`；默认只打标签/筛选、不改落盘路径 |
 | `--open` | 关 | 启动后用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件） |
+| `--max-task-retries <N>` | `2` | 失败任务自动重试轮数（`0` = 关闭）；见「失败自动重试」 |
 
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
+- **失败自动重试**（v2.1 P1）：任务以**退出码 1** 结束时自动重排续传，`--max-task-retries <N>`（默认 **2**，`0` = 关闭）。退避表 30 s → 120 s，两轮之后判 `failed` 把决定权交回用户。**退出码 2（参数错）与 3（配额到量）不重试**：前者重试必然同样失败，后者走配额窗口等待、不计入重试轮数。`/api/tasks` 的 `attempts` 是已重试轮数，UI 显示“重试等待 N / 重试 N 次仍失败”。⚠ 已知代价：对端 404/403 这类永久失败也是退出 1，会白重试满次数。
 - **配额**：全局固定窗口，所有任务共享一份额度；按断点覆盖量增量记账（新建任务首轮预读计入，续传预读不计，`Retighten` 重复流量不计）。到量任务退 3、回队列并显示"配额等待至 …"，窗口重置后自动续传。`/api/quota` 给 `{enabled,limit,window_secs,window_started_at,used,resets_at}`。停止粒度按每个任务 dlm 的 worker 算：越过帽最多每个 worker 一块（64 KiB）。
 - **分类**：按文件名扩展名自动归为 video/audio/archive/document/image/program/other，UI 显示并在顶部筛选；默认**不改变落盘目录**；`--category-dirs` 打开后落点变成 `out-dir/<category>/<name>`（任务名里带相对子路径，dlm 的落点闸照旧）。
 - **UI**：单列任务流 + 顶部配额/更新状态；点任务从右侧滑出详情与日志，添加任务用弹窗；不引入前端依赖，页面由 `dlm-gui` 直接内嵌。

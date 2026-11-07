@@ -45,6 +45,8 @@ fn parse() -> Result<GuiConfig> {
         update_url: None,
         category_dirs: false,
         open: false,
+        max_task_retries: 2,
+        retry_backoff: gui::DEFAULT_RETRY_BACKOFF,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -72,9 +74,12 @@ fn parse() -> Result<GuiConfig> {
             }
             "--category-dirs" => config.category_dirs = true,
             "--open" => config.open = true,
+            "--max-task-retries" => {
+                config.max_task_retries = next(&mut args, "--max-task-retries")?.parse()?
+            }
             "--help" | "-h" => {
                 println!(
-                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open]"
+                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open] [--max-task-retries N]"
                 );
                 std::process::exit(0);
             }
@@ -83,6 +88,9 @@ fn parse() -> Result<GuiConfig> {
     }
     if config.concurrency == 0 {
         bail!("--concurrency 至少 1");
+    }
+    if let Some(table) = test_backoff_from_env() {
+        config.retry_backoff = table;
     }
     if config.quota_window_secs == Some(0) {
         bail!("--quota-window 至少 1 秒");
@@ -109,6 +117,34 @@ fn parse() -> Result<GuiConfig> {
 
 fn next(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
     args.next().ok_or_else(|| anyhow::anyhow!("{name} 缺少值"))
+}
+
+/// 集成测试专用：`DLM_TEST_RETRY_BACKOFF_MS=50,50` 把退避表按**毫秒**注入，这里换算成秒。
+///
+/// **生产不会设这个变量**，所以默认仍是 [`gui::DEFAULT_RETRY_BACKOFF`] 的 30/120 **秒**。
+/// 存在的理由只有一个：不注入的话，钉"退 1 两次再成功"那条用例要真等 150 秒，
+/// 而退避表里那两个数是给人用的产品默认值，不该为了测试改成 1 秒。
+///
+/// 换算后每一项至少 1 秒 —— 内部时钟是秒粒度，0 秒会让"等到点"立刻成立，
+/// 那等于没有退避，测出来的东西就不再是"重排 → 等 → 再跑"。
+///
+/// 表里任何一项解析失败 ⇒ 当作没设（回退默认），不静默变成空表 —— 空表等于关掉自动重试，
+/// 那是会让测试"通过得很安静"的假绿。
+fn test_backoff_from_env() -> Option<&'static [u64]> {
+    let raw = std::env::var("DLM_TEST_RETRY_BACKOFF_MS").ok()?;
+    let secs: Vec<u64> = raw
+        .split(',')
+        .map(|s| {
+            s.trim()
+                .parse::<u64>()
+                .ok()
+                .map(|ms| ms.div_ceil(1000).max(1))
+        })
+        .collect::<Option<_>>()?;
+    if secs.is_empty() {
+        return None;
+    }
+    Some(Box::leak(secs.into_boxed_slice()))
 }
 
 fn local_app_data() -> PathBuf {

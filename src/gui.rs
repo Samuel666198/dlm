@@ -46,6 +46,11 @@ pub struct GuiConfig {
     pub category_dirs: bool,
     /// 启动后用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件）。
     pub open: bool,
+    /// P1：一个任务最多自动重试几轮（0 = 关闭自动重试）。超出的那一轮判 `failed`。
+    pub max_task_retries: u32,
+    /// P1：退避表（秒）。生产用 [`DEFAULT_RETRY_BACKOFF`]；集成测试注入 `[1, 1]`
+    /// 把"重排 → 再跑"真正走完，不用真等两分钟。
+    pub retry_backoff: &'static [u64],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +116,8 @@ pub struct TaskView {
     pub start_at: Option<u64>,
     pub hold_until: Option<u64>,
     pub on_complete: Option<String>,
+    /// P1：已经自动重试过的轮数；UI 用它显示“重试 1/2”。
+    pub attempts: u32,
     pub category: &'static str,
 }
 
@@ -147,6 +154,7 @@ impl TaskView {
             start_at: task.start_at,
             hold_until: task.hold_until,
             on_complete: task.on_complete.clone(),
+            attempts: task.attempts,
             category: queue::category_for(&task.name),
         }
     }
@@ -625,6 +633,60 @@ fn apply(
     }
 }
 
+/// 一个任务跑完之后该怎么处置（P1）。抽成纯函数与枚举，是为了让"退出码 → 状态"这张表
+/// 能被单元用例逐格钉住：退出档是 CLI 契约，改错一格就是让用户白等两轮或永远等不到重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinishVerdict {
+    /// 下完了（码 0）。
+    Done,
+    /// 配额到量（码 3）：回队列等窗口，**不计入重试轮数**。
+    QuotaWait,
+    /// 值得再试（码 1 且还有额度）：等 `backoff` 秒后重排。
+    Retry { backoff: u64 },
+    /// 判失败，把决定权交回用户。
+    Fail,
+}
+
+fn finish_verdict(
+    code: Option<i32>,
+    attempts: u32,
+    max_task_retries: u32,
+    table: &[u64],
+) -> FinishVerdict {
+    match code {
+        Some(0) => FinishVerdict::Done,
+        Some(3) => FinishVerdict::QuotaWait,
+        // 码 2 是参数层（clap 用法错误或我们的边界校验）：重试必然同样失败。
+        Some(2) => FinishVerdict::Fail,
+        // 码 1 是"跑到结论但没下完"，也是唯一值得自动再试的一档。
+        Some(1) => match retry_decision(attempts, max_task_retries, table) {
+            Some(backoff) => FinishVerdict::Retry { backoff },
+            None => FinishVerdict::Fail,
+        },
+        // 其它非零码（含被信号打死时的 `None`）不在契约里：不猜，判失败。
+        _ => FinishVerdict::Fail,
+    }
+}
+
+/// P1 默认退避表：第一轮 30 秒、第二轮 120 秒，之后不再自动重试。
+pub const DEFAULT_RETRY_BACKOFF: &[u64] = &[30, 120];
+
+/// **失败自动重试的唯一判据**（P1）：给定"这个任务已经重试过几轮"和"配置允许几轮"，
+/// 回答"这一次还重不重试、等多久"。
+///
+/// 两条独立的上限合取，谁先耗尽都停：
+/// - `table`（默认 [`DEFAULT_RETRY_BACKOFF`]）—— 退避表走到表尾就没得再试；
+/// - `max_task_retries` —— 用户给的轮数上限（`0` 就是关掉自动重试）。
+///
+/// 抽成纯函数是为了让"退出码 1 到底重排还是判失败"这条决定能被表格钉住，
+/// 不用靠起进程、等 30 秒来看。
+fn retry_decision(attempts: u32, max_task_retries: u32, table: &[u64]) -> Option<u64> {
+    if attempts >= max_task_retries {
+        return None;
+    }
+    queue::retry_backoff(attempts, table)
+}
+
 /// 一份额度能切出的单任务上限：够一轮预读才按槽位均分；只剩一份但不够均分时整份给第一个槽位。
 fn quota_slice(available: u64, free_slots: usize) -> Option<u64> {
     if available < MIN_QUOTA_SLICE {
@@ -703,15 +765,31 @@ fn tick(
         children.remove(&id);
         reserved.remove(&id);
         last_delivered.remove(&id);
+        let now = queue::now_secs();
         if let Some(task) = store.find_mut(&id) {
-            task.status = match code {
-                Some(0) => TaskStatus::Done,
-                Some(3) => TaskStatus::Queued,
-                _ => TaskStatus::Failed,
-            };
+            let verdict = finish_verdict(
+                code,
+                task.attempts,
+                config.max_task_retries,
+                config.retry_backoff,
+            );
+            match verdict {
+                FinishVerdict::Done => task.status = TaskStatus::Done,
+                // 码 3 走配额等待，不是重试：`attempts` 不动，否则配额轮会吃掉重试额度。
+                FinishVerdict::QuotaWait => task.status = TaskStatus::Queued,
+                FinishVerdict::Retry { backoff } => {
+                    task.status = TaskStatus::Queued;
+                    task.hold_until = Some(now.saturating_add(backoff));
+                    task.attempts = task.attempts.saturating_add(1);
+                }
+                FinishVerdict::Fail => {
+                    task.status = TaskStatus::Failed;
+                    task.hold_until = None;
+                }
+            }
             task.exit_code = code;
             task.pid = None;
-            task.updated_at = queue::now_secs();
+            task.updated_at = now;
             changed = true;
         }
     }
@@ -1269,6 +1347,111 @@ mod tests {
         );
     }
 
+    /// P1：退出码 → 状态这张表。退出档是 CLI 契约，这一格改错就是让用户白等或永远不重试。
+    #[test]
+    fn finish_verdict_maps_every_contract_exit_code_to_one_outcome() {
+        let table = DEFAULT_RETRY_BACKOFF; // [30, 120]
+        assert_eq!(finish_verdict(Some(0), 0, 2, table), FinishVerdict::Done);
+        assert_eq!(
+            finish_verdict(Some(3), 0, 2, table),
+            FinishVerdict::QuotaWait,
+            "码 3 是配额到量，走等待而不是重试"
+        );
+        assert_eq!(
+            finish_verdict(Some(3), 5, 2, table),
+            FinishVerdict::QuotaWait,
+            "重试额度用完也不影响配额等待：那是两件事"
+        );
+        assert_eq!(
+            finish_verdict(Some(2), 0, 2, table),
+            FinishVerdict::Fail,
+            "码 2 是参数错，重试必然同样失败"
+        );
+        assert_eq!(
+            finish_verdict(Some(1), 0, 2, table),
+            FinishVerdict::Retry { backoff: 30 }
+        );
+        assert_eq!(
+            finish_verdict(Some(1), 1, 2, table),
+            FinishVerdict::Retry { backoff: 120 }
+        );
+        assert_eq!(
+            finish_verdict(Some(1), 2, 2, table),
+            FinishVerdict::Fail,
+            "两轮用完就判失败"
+        );
+        assert_eq!(
+            finish_verdict(Some(1), 0, 0, table),
+            FinishVerdict::Fail,
+            "上限 0 = 关掉自动重试"
+        );
+        assert_eq!(
+            finish_verdict(None, 0, 2, table),
+            FinishVerdict::Fail,
+            "被信号打死（没有退出码）不猜，判失败"
+        );
+        assert_eq!(
+            finish_verdict(Some(7), 0, 2, table),
+            FinishVerdict::Fail,
+            "契约外的退出码不重试"
+        );
+    }
+
+    /// P1 的判据表：退避表与用户上限两条合取，谁先耗尽都停。
+    #[test]
+    fn retry_decision_stops_at_whichever_limit_runs_out_first() {
+        let table = DEFAULT_RETRY_BACKOFF;
+        // 默认上限 2：两轮都能重试，第三轮停。
+        assert_eq!(
+            retry_decision(0, 2, table),
+            Some(30),
+            "第 1 轮：30 秒后重排"
+        );
+        assert_eq!(
+            retry_decision(1, 2, table),
+            Some(120),
+            "第 2 轮：120 秒后重排"
+        );
+        assert_eq!(retry_decision(2, 2, table), None, "第 3 轮：判 failed");
+
+        // 上限 0 = 关掉自动重试：第一轮就不重试，而不是"先等 30 秒再判失败"。
+        assert_eq!(retry_decision(0, 0, table), None, "上限 0 必须当场判失败");
+
+        // 上限 1：只有第一轮。
+        assert_eq!(retry_decision(0, 1, table), Some(30));
+        assert_eq!(retry_decision(1, 1, table), None);
+
+        // 上限比退避表长：退避表那一侧先耗尽，不会出现"等 0 秒"或负数。
+        assert_eq!(retry_decision(2, 99, table), None, "退避表只有两档");
+        assert_eq!(retry_decision(u32::MAX, u32::MAX, table), None);
+    }
+
+    /// `attempts` 必须原样进 `TaskView`：UI 的“重试 1/2”靠它，别在视图层被吞掉。
+    #[test]
+    fn task_view_carries_the_retry_attempt_count() {
+        let task = Task {
+            id: "1".into(),
+            url: "https://example.com/a.bin".into(),
+            name: "a.bin".into(),
+            referer: None,
+            status: TaskStatus::Queued,
+            pid: None,
+            exit_code: Some(1),
+            log: "a.log".into(),
+            created_at: 0,
+            updated_at: 0,
+            start_at: None,
+            hold_until: Some(123),
+            on_complete: None,
+            attempts: 1,
+            total_len: None,
+            delivered: None,
+        };
+        let view = TaskView::from_task(&task, Path::new("D:/dl"));
+        assert_eq!(view.attempts, 1);
+        assert_eq!(view.hold_until, Some(123), "等待到点的时间要带出去");
+    }
+
     #[test]
     fn child_args_carry_the_completion_action_and_the_quota_slice() {
         let mut task = Task {
@@ -1285,6 +1468,7 @@ mod tests {
             start_at: None,
             hold_until: None,
             on_complete: None,
+            attempts: 0,
             total_len: None,
             delivered: None,
         };
