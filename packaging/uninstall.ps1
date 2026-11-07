@@ -5,6 +5,16 @@ foreach ($browser in @('Google\Chrome', 'Microsoft\Edge')) {
     if (Test-Path $key) { Remove-Item -Path $key -Recurse -Force }
 }
 
+# 开机自启（P3）：按值名删，不碰这个键下别人的值。
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+if (Test-Path $RunKey) {
+    $existing = Get-ItemProperty -Path $RunKey -Name 'dlm-gui' -ErrorAction SilentlyContinue
+    if ($existing) {
+        Remove-ItemProperty -Path $RunKey -Name 'dlm-gui' -Force -ErrorAction SilentlyContinue
+        Write-Output 'Removed autostart entry (HKCU Run\dlm-gui).'
+    }
+}
+
 $Shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\dlm.lnk'
 if (Test-Path $Shortcut) { Remove-Item -Path $Shortcut -Force }
 

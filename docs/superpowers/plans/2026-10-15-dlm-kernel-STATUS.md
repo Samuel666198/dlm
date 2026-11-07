@@ -276,6 +276,37 @@
 - **四闸**：仍 `--lib` **307/0** · `--bins` **4/0** · `integration` **117/0** · clippy **0**（本轮纯打包，无 Rust 改动）。
 - **注意**：扩展仍需浏览器开发者模式手动“加载已解压”；zip 在 `target/` 下，不入库。
 
+## 2026-11-08 v2.1 产品手感（P2 / P1 / P4 / P3）
+
+按 [`2026-11-07-v21-product-polish.md`](./2026-11-07-v21-product-polish.md) 执行完四发，托盘 P5 本轮不做。
+
+- **P2 打开文件 / 所在文件夹**：`POST /api/reveal` 的 `{id, mode}`，`mode` = `open` | `select`。
+  落点由服务端按 `queue::target_path(out_dir, task.name)` 自己算，**客户端交来的 `path`/`name` 一律不看**；
+  只对 `done` 且落点文件仍在的任务放行。`select` 是 `explorer.exe /select,<落点>`（同一 argv）。
+  判据：`actions::tests::reveal_*` 三条 + `gui_queue_adds_and_finishes_a_download` 里四条反臂
+  （未知 id、伪造 path、未完成任务、非法 mode）+ 真浏览器 `verify-gui.mjs` 正反两臂。
+- **P1 失败自动重试**：只认退出码 **1**；`--max-task-retries`（默认 2，`0` = 关）；
+  退避 `30 s → 120 s`；码 2/3 不重试，且码 3 不消耗重试额度。
+  判据：`finish_verdict_maps_every_contract_exit_code_to_one_outcome`、
+  `retry_decision_stops_at_whichever_limit_runs_out_first`、`queue::tests::retry_backoff_*`，
+  以及真起子进程的 `gui_retries_a_failed_task_until_it_succeeds`（退 1、1、0 ⇒ 三次调用、attempts=2）
+  与反臂 `gui_does_not_retry_when_the_cap_is_zero`（只调一次、attempts 保持 0）。
+  ⚠ 已知代价：404/403 这类永久失败也是退出 1，会白重试满次数。
+- **P4 UI 收尾**：成功行改显示「已校验」（不再印 `exit 0`）；弹窗 Esc 关闭、关闭后焦点回到触发按钮、
+  Tab 焦点圈；空态补浏览器投递入口。
+- **P3 开机自启 + 单实例**：`--autostart-install/remove` 写删 `HKCU\...\Run\dlm-gui`，
+  `autostart_command` 对含空格路径整体加引号；`--autostart` 起的实例不弹窗口。
+  单实例判据是「端点文件 + 端口上真有人认得这个 token」，陈旧端点文件不阻塞启动。
+  判据：`autostart_command_quotes_only_when_the_path_has_spaces`、
+  `autostart_reg_args_write_and_delete_the_same_named_value`、
+  `probe_existing_instance_says_none_for_every_stale_shape`、
+  `gui_second_instance_reuses_the_running_one`（端点 pid 不被覆盖）、
+  `gui_starts_when_the_endpoint_file_is_stale`。
+- **新增门禁两道**：`check-ui-script.mjs`（`ui.html` 内嵌脚本语法，`include_str!` 进二进制后 cargo 看不出来）
+  与 `gates.ps1` 的工具链解析（`cargo` 不在 PATH 时按 rustup 目录兜底，避免误报红）。
+- **门禁真账（2026-11-08 亲跑）**：`fmt 0` · `--lib` **322/0** · `--bins` **4/0** ·
+  `integration` **121/0** · `clippy 0` · `extension` 通过 · `ui-script` 通过。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。

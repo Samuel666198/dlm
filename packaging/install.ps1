@@ -1,5 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
+# -Autostart: 可选，默认关。打开后把 dlm-gui --autostart 写进 HKCU 的 Run 项，
+# 开机就有一个队列在后台跑（不弹浏览器窗口）。不传这个开关 = 不写任何自启项。
+param([switch]$Autostart)
+
 $ExtId = 'fkebhmogekekphpcggaclfgpfmofhdjk'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Bin = Join-Path $env:LOCALAPPDATA 'dlm\bin'
@@ -64,6 +68,19 @@ Write-Output "manifest=$Manifest"
 Write-Output "host=$HostExe"
 Write-Output "extension=$Ext"
 Write-Output "extension_id=$ExtId"
+if ($Autostart) {
+    # 与 `dlm-gui --autostart-install` 写的是同一个值名（dlm-gui）；
+    # 路径含空格时整体加引号，否则 Windows 会把路径拆成两段。
+    $GuiExe = Join-Path $Bin 'dlm-gui.exe'
+    $Cmd = if ($GuiExe -like '* *') { '"{0}" --autostart' -f $GuiExe } else { '{0} --autostart' -f $GuiExe }
+    $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    New-Item -Path $RunKey -Force | Out-Null
+    New-ItemProperty -Path $RunKey -Name 'dlm-gui' -Value $Cmd -PropertyType String -Force | Out-Null
+    Write-Output "autostart=$Cmd"
+}
+else {
+    Write-Output 'autostart=off (pass -Autostart to enable)'
+}
 Write-Output ''
 Write-Output 'Next steps:'
 Write-Output '1. Open chrome://extensions (or edge://extensions), enable Developer mode.'

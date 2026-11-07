@@ -51,6 +51,10 @@ pub struct GuiConfig {
     /// P1：退避表（秒）。生产用 [`DEFAULT_RETRY_BACKOFF`]；集成测试注入 `[1, 1]`
     /// 把"重排 → 再跑"真正走完，不用真等两分钟。
     pub retry_backoff: &'static [u64],
+    /// P3：跳过单实例探测，强制起一个新进程（测试要并行起多个 GUI 时用）。
+    pub force_new_instance: bool,
+    /// P3：`--autostart` 起的实例不开浏览器窗口，只监听并写端点文件。
+    pub autostart: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,12 +94,14 @@ pub struct QuotaView {
     pub resets_at: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Endpoint {
-    port: u16,
-    token: String,
-    pid: u32,
-    started_at: u64,
+/// B10 端点文件的形状。`pub` 是为了让集成测试能直接读回自己那份、逐字段对账 ——
+/// 它是 `dlm-gui` 与浏览器宿主之间的**外部契约**，不是内部细节。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub port: u16,
+    pub token: String,
+    pub pid: u32,
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,6 +199,21 @@ pub struct RevealReply {
 }
 
 pub fn run(config: GuiConfig) -> Result<()> {
+    // P3 单实例：已经有实例在跑就复用它，不再抢一个端口、也不再起一套 runner。
+    // 判据是"端口上真有人认得这个 token"，所以 GUI 被硬杀留下的陈旧端点文件不会挡住启动。
+    if !config.force_new_instance
+        && let Some(existing) = probe_existing_instance(&config.endpoint)
+    {
+        println!(
+            "dlm-gui already running (pid {}): {}",
+            existing.pid, existing.url
+        );
+        io::stdout().flush().ok();
+        if config.open {
+            open_app_window(&existing.url);
+        }
+        return Ok(());
+    }
     fs::create_dir_all(&config.log_dir)
         .with_context(|| format!("建日志目录失败：{}", config.log_dir.display()))?;
     let mut store = QueueStore::load(config.queue.clone())?;
@@ -241,7 +262,9 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/?t={token}");
     println!("dlm-gui listening on {url}");
     io::stdout().flush().ok();
-    if config.open {
+    // `--autostart` 只把队列跑起来，不弹浏览器窗口：开机时没人看着屏幕，
+    // 而"队列在跑"正是自启唯一要保证的事。
+    if config.open && !config.autostart {
         open_app_window(&url);
     }
 
@@ -449,6 +472,120 @@ fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<()> {
         .with_context(|| format!("写端点临时文件失败：{}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("提交端点文件失败：{}", path.display()))?;
     Ok(())
+}
+
+/// 已经在跑的那个实例（P3 单实例）。
+///
+/// 判据只有一条：**端点文件能读出来，且那个端口上真有一个认得这个 token 的 dlm-gui**。
+/// 只读文件不看端口是不行的 —— GUI 被硬杀会留下陈旧端点文件，那种情况必须能正常启动。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningInstance {
+    pub url: String,
+    pub pid: u32,
+}
+
+/// 探测是否已有实例在跑；`None` = 没有（含端点文件不存在、读不懂、端口没人听、token 不对）。
+///
+/// 探测请求带 `t=<token>`，所以"端口上恰好有别的服务"不会被误认成本程序的实例。
+pub fn probe_existing_instance(endpoint: &Path) -> Option<RunningInstance> {
+    let raw = fs::read(endpoint).ok()?;
+    let parsed: Endpoint = serde_json::from_slice(&raw).ok()?;
+    let url = format!("http://127.0.0.1:{}/?t={}", parsed.port, parsed.token);
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(800))
+        .connect_timeout(Duration::from_millis(300))
+        .build()
+        .ok()?;
+    // 打一个只读、无副作用的路由；200 且 body 是 JSON 数组才算"这是我们自己"。
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{}/api/tasks?t={}",
+            parsed.port, parsed.token
+        ))
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().ok()?;
+    serde_json::from_str::<serde_json::Value>(&body).ok()?;
+    Some(RunningInstance {
+        url,
+        pid: parsed.pid,
+    })
+}
+
+/// 开机自启要写进 `HKCU\...\Run` 的命令行。
+///
+/// 形状要求只有一条但很硬：**exe 路径含空格时必须整体带引号**，否则 Windows 会把
+/// `C:\Program Files\...` 拆成两段，自启项变成一个打不开的坏命令。
+/// 这里不用 `format!("\"{}\" ...")` 硬拼而是显式判断，是为了让"带空格"与"不带空格"
+/// 两种形状都能被单测逐字比对。
+pub fn autostart_command(exe: &Path) -> String {
+    let path = exe.display().to_string();
+    let quoted = if path.contains(' ') {
+        format!("\"{path}\"")
+    } else {
+        path
+    };
+    format!("{quoted} --autostart")
+}
+
+/// `reg.exe` 的参数（P3）：写/删自启项。抽成纯函数便于单测，
+/// 也避免把 `"HKCU\..."` 这种带反斜杠的字符串散在调用点里。
+pub fn autostart_reg_args(exe: &Path) -> Vec<String> {
+    vec![
+        "add".into(),
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run".into(),
+        "/v".into(),
+        AUTOSTART_VALUE.into(),
+        "/t".into(),
+        "REG_SZ".into(),
+        "/d".into(),
+        autostart_command(exe),
+        "/f".into(),
+    ]
+}
+
+pub fn autostart_remove_args() -> Vec<String> {
+    vec![
+        "delete".into(),
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run".into(),
+        "/v".into(),
+        AUTOSTART_VALUE.into(),
+        "/f".into(),
+    ]
+}
+
+/// 自启项的值名。固定一个，卸载按同名删，不碰这个键下别的值。
+pub const AUTOSTART_VALUE: &str = "dlm-gui";
+
+/// 真的写/删自启项。失败原样返回错误（调用方决定是警告还是退出）。
+pub fn set_autostart(enabled: bool) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().context("拿不到 dlm-gui 自身路径")?;
+        let args = if enabled {
+            autostart_reg_args(&exe)
+        } else {
+            autostart_remove_args()
+        };
+        let status = Command::new("reg.exe")
+            .args(&args)
+            .status()
+            .context("调用 reg.exe 失败")?;
+        // 删除一个本就不存在的值会退 1；关自启时那不是错误。
+        if !status.success() && enabled {
+            bail!("写入开机自启失败（reg.exe 退 {:?}）", status.code());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        bail!("开机自启目前只支持 Windows")
+    }
 }
 
 fn snapshot_of(store: &QueueStore, out_dir: &Path) -> Vec<TaskView> {
@@ -1347,7 +1484,89 @@ mod tests {
         );
     }
 
-    /// P1：退出码 → 状态这张表。退出档是 CLI 契约，这一格改错就是让用户白等或永远不重试。
+    /// P3：自启命令最硬的形状要求 —— 路径含空格必须整体带引号，
+    /// 否则 Windows 把 `C:\Program Files\...` 拆成两段，自启项变成打不开的坏命令。
+    #[test]
+    fn autostart_command_quotes_only_when_the_path_has_spaces() {
+        let spaced = autostart_command(Path::new(r"C:\Program Files\dlm\dlm-gui.exe"));
+        assert_eq!(
+            spaced, r#""C:\Program Files\dlm\dlm-gui.exe" --autostart"#,
+            "含空格的路径必须整体加引号"
+        );
+        assert!(
+            spaced.starts_with('"') && spaced.ends_with(" --autostart"),
+            "引号要包住整条路径、且 --autostart 在引号外：{spaced}"
+        );
+
+        let plain = autostart_command(Path::new(r"C:\dlm\dlm-gui.exe"));
+        assert_eq!(
+            plain, r"C:\dlm\dlm-gui.exe --autostart",
+            "不含空格时不加引号（多余引号同样会让某些解析器犯迷糊）"
+        );
+        assert!(!plain.contains('"'), "{plain}");
+    }
+
+    /// P3：reg 参数逐字钉住 —— 值名、类型、以及"删除用同名"这三件事错了会污染别人的自启项。
+    #[test]
+    fn autostart_reg_args_write_and_delete_the_same_named_value() {
+        let write = autostart_reg_args(Path::new(r"C:\dlm\dlm-gui.exe"));
+        assert_eq!(write[0], "add");
+        assert_eq!(
+            write[1], r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "只碰 HKCU 的 Run 键"
+        );
+        assert_eq!(write[2], "/v");
+        assert_eq!(write[3], AUTOSTART_VALUE);
+        assert_eq!(write[4], "/t");
+        assert_eq!(write[5], "REG_SZ");
+        assert_eq!(write[6], "/d");
+        assert_eq!(
+            write[7],
+            autostart_command(Path::new(r"C:\dlm\dlm-gui.exe"))
+        );
+        assert_eq!(write[8], "/f", "覆盖同名值，不弹交互提示");
+
+        let remove = autostart_remove_args();
+        assert_eq!(remove[0], "delete");
+        assert_eq!(remove[1], write[1], "删除必须落在同一个键上");
+        assert_eq!(remove[3], write[3], "删除必须用同一个值名");
+    }
+
+    /// P3：端点文件读不懂 / 端口没人听 / token 不对，都不能被当成"已有实例"。
+    /// 这一格是"陈旧端点文件不阻塞启动"的直接判据。
+    #[test]
+    fn probe_existing_instance_says_none_for_every_stale_shape() {
+        let dir = std::env::temp_dir().join(format!("dlm-instance-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 1) 文件不存在。
+        assert!(probe_existing_instance(&dir.join("missing.json")).is_none());
+
+        // 2) 文件存在但不是 JSON。
+        let garbage = dir.join("garbage.json");
+        fs::write(&garbage, b"not json").unwrap();
+        assert!(probe_existing_instance(&garbage).is_none());
+
+        // 3) 端口没人听（挑一个刚释放掉的端口）。
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let dead = dir.join("dead.json");
+        let endpoint = Endpoint {
+            port,
+            token: "tok".into(),
+            pid: 999_999,
+            started_at: 1,
+        };
+        fs::write(&dead, serde_json::to_vec(&endpoint).unwrap()).unwrap();
+        assert!(
+            probe_existing_instance(&dead).is_none(),
+            "端口没人听时必须回 None（否则 GUI 被硬杀后永远起不来）"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
     #[test]
     fn finish_verdict_maps_every_contract_exit_code_to_one_outcome() {
         let table = DEFAULT_RETRY_BACKOFF; // [30, 120]

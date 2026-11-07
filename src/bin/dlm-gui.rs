@@ -47,6 +47,8 @@ fn parse() -> Result<GuiConfig> {
         open: false,
         max_task_retries: 2,
         retry_backoff: gui::DEFAULT_RETRY_BACKOFF,
+        force_new_instance: false,
+        autostart: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -77,9 +79,23 @@ fn parse() -> Result<GuiConfig> {
             "--max-task-retries" => {
                 config.max_task_retries = next(&mut args, "--max-task-retries")?.parse()?
             }
+            // P3：自启项调起来的那个实例。
+            "--autostart" => config.autostart = true,
+            // P3：显式再起一个（诊断/测试用；正常双击不会走到这里）。
+            "--new-instance" => config.force_new_instance = true,
+            "--autostart-install" => {
+                gui::set_autostart(true)?;
+                println!("已写入开机自启（HKCU\\...\\Run\\{}）", gui::AUTOSTART_VALUE);
+                std::process::exit(0);
+            }
+            "--autostart-remove" => {
+                gui::set_autostart(false)?;
+                println!("已移除开机自启");
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 println!(
-                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open] [--max-task-retries N]"
+                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open] [--max-task-retries N] [--autostart] [--new-instance] [--autostart-install] [--autostart-remove]"
                 );
                 std::process::exit(0);
             }

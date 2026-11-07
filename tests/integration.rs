@@ -9300,6 +9300,212 @@ fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// P3：单实例复用。
+///
+/// 起第一个 `dlm-gui`（写端点文件），再起第二个用**同一个端点文件** ⇒ 第二个应当立刻退出 0，
+/// 并打印第一个的 URL；端点文件里的 pid 必须还是第一个的（证明第二个没抢占端口）。
+#[test]
+fn gui_second_instance_reuses_the_running_one() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-single")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+
+    let base_args = |port: &str, token: &str| -> Vec<String> {
+        vec![
+            "--port".into(),
+            port.into(),
+            "--queue".into(),
+            queue.to_string_lossy().to_string(),
+            "--out-dir".into(),
+            out_dir.to_string_lossy().to_string(),
+            "--log-dir".into(),
+            log_dir.to_string_lossy().to_string(),
+            "--endpoint".into(),
+            endpoint.to_string_lossy().to_string(),
+            "--dlm".into(),
+            env!("CARGO_BIN_EXE_dlm").into(),
+            "--token".into(),
+            token.into(),
+        ]
+    };
+
+    let first = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args(base_args(&port.to_string(), "single-token"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("启动第一个 dlm-gui 失败")?,
+    );
+
+    // 等端点文件出现并真的能服务。
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_millis(500))
+        .build()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let first_ok = loop {
+        let served = client
+            .get(format!("http://127.0.0.1:{port}/api/tasks?t=single-token"))
+            .send()
+            .is_ok_and(|r| r.status().is_success());
+        if served && endpoint.exists() {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(first_ok, "第一个 dlm-gui 没有就绪");
+    let before: dlm::gui::Endpoint = serde_json::from_slice(&std::fs::read(&endpoint)?)?;
+
+    // 第二个实例：同一端点文件、另一个端口号（若它真去绑，会成功；我们要它**不去绑**）。
+    let other_port = {
+        let p = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = p.local_addr()?.port();
+        drop(p);
+        port
+    };
+    let second = Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+        .args(base_args(&other_port.to_string(), "single-token"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("DLM_TEST_RETRY_BACKOFF_MS", "50")
+        .output()
+        .context("启动第二个 dlm-gui 失败")?;
+    let stdout = String::from_utf8_lossy(&second.stdout).to_string();
+    assert!(
+        second.status.success(),
+        "第二个实例应当安静退 0（复用已有）：stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        stdout.contains("already running"),
+        "第二个实例要说明复用了谁：{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("127.0.0.1:{port}")),
+        "复用的 URL 应当是第一个实例的端口：{stdout}"
+    );
+
+    let after: dlm::gui::Endpoint = serde_json::from_slice(&std::fs::read(&endpoint)?)?;
+    assert_eq!(
+        after.pid, before.pid,
+        "端点文件不该被第二个实例覆盖（那说明它真去绑了端口）"
+    );
+    assert_eq!(after.port, before.port);
+    drop(first);
+    Ok(())
+}
+
+/// P3 反臂：端点文件陈旧（端口没人听）时**必须能正常启动**，不能被当成"已有实例"。
+#[test]
+fn gui_starts_when_the_endpoint_file_is_stale() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-stale")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    // 造一份"上次 GUI 被硬杀"留下的端点：端口早没人听了。
+    let dead_port = {
+        let p = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = p.local_addr()?.port();
+        drop(p);
+        port
+    };
+    std::fs::write(
+        &endpoint,
+        serde_json::to_vec(&serde_json::json!({
+            "port": dead_port,
+            "token": "stale-token",
+            "pid": 999_999,
+            "started_at": 1
+        }))?,
+    )?;
+
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--token",
+                "stale-test-token",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_millis(500))
+        .build()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if client
+            .get(format!(
+                "http://127.0.0.1:{port}/api/tasks?t=stale-test-token"
+            ))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("陈旧端点文件把启动挡住了（应当照常监听 {port}）");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // 端点文件被新实例重写成本次监听的端口。
+    let fresh: dlm::gui::Endpoint = serde_json::from_slice(&std::fs::read(&endpoint)?)?;
+    assert_eq!(fresh.port, port, "端点文件应当指向新实例");
+    assert_eq!(fresh.token, "stale-test-token");
+    Ok(())
+}
+
 /// P1 反臂：`--max-task-retries 0` = 关掉自动重试。退一次 1 就判 failed，子进程只起一次。
 #[test]
 fn gui_does_not_retry_when_the_cap_is_zero() -> anyhow::Result<()> {

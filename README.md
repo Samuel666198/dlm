@@ -286,6 +286,9 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 | `--category-dirs` | 关 | 按分类把落点放进 `out-dir/<category>/`；默认只打标签/筛选、不改落盘路径 |
 | `--open` | 关 | 启动后用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件） |
 | `--max-task-retries <N>` | `2` | 失败任务自动重试轮数（`0` = 关闭）；见「失败自动重试」 |
+| `--autostart` | 关 | 自启用：照常监听但**不**打开浏览器窗口 |
+| `--new-instance` | 关 | 跳过单实例探测，强制再起一个（诊断/测试用） |
+| `--autostart-install` / `--autostart-remove` | — | 写/删 `HKCU\...\Run\dlm-gui`，写完即退出 |
 
 - **队列**：`queued/running/paused/done/failed`；`start_at`（Unix 秒）到点才启动；重启时 `running` 改回 `paused`，不假装进程还在。
 - **失败自动重试**（v2.1 P1）：任务以**退出码 1** 结束时自动重排续传，`--max-task-retries <N>`（默认 **2**，`0` = 关闭）。退避表 30 s → 120 s，两轮之后判 `failed` 把决定权交回用户。**退出码 2（参数错）与 3（配额到量）不重试**：前者重试必然同样失败，后者走配额窗口等待、不计入重试轮数。`/api/tasks` 的 `attempts` 是已重试轮数，UI 显示“重试等待 N / 重试 N 次仍失败”。⚠ 已知代价：对端 404/403 这类永久失败也是退出 1，会白重试满次数。
@@ -301,7 +304,9 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
   `select` 拼的是 `explorer.exe /select,<落点>` —— `/select,` 与路径必须在**同一个** argv 里。
 - **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
 - **安全**：只绑 `127.0.0.1`；所有页面/API 都要求 `?t=<token>`；UI 用 `textContent` 插入数据；日志 API 只读 log 目录内文件、最多 64 KiB 尾。
-- **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。`--open` 只是用浏览器 app 模式开一个窗口，不是原生控件。
+- **进程活着 = 调度器活着**：没有 Windows 服务/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。`--open` 只是用浏览器 app 模式开一个窗口，不是原生控件。
+- **开机自启（可选，默认关）**：`dlm-gui --autostart-install` 写 `HKCU\...\Run\dlm-gui`，值形如 `"C:\...\dlm-gui.exe" --autostart`（路径含空格时整体加引号）；`--autostart-remove` 按同名删。安装器 `install.ps1 -Autostart` 也能开。`--autostart` 起的实例**不弹浏览器窗口**，只监听环回并写端点文件。
+- **单实例（P3）**：启动时先读端点文件并打一次 `/api/tasks`；能连上且 token 对 ⇒ 打印已有实例的 URL 后**退 0**，不抢端口、不起第二套 runner。端点文件陈旧（端口没人听）时照常启动 —— 判据是"端口上真有人认得这个 token"，不是"文件存在"。`--new-instance` 可强制再起一个（诊断/测试用）。
 - **不做**：原生 GUI、自动下载/安装更新、队列 Cookie。
 
 验收（不在 Rust 四闸内，需真浏览器）：
