@@ -496,9 +496,9 @@
     $('#dCreated').textContent = fmtTime(t.created_at);
     $('#dUpdated').textContent = fmtTime(t.updated_at);
     $('#dPause').textContent = t.status === 'paused' || t.status === 'failed' ? '继续任务' : '暂停任务';
-    const done = t.status === 'done';
-    $('#dRevealOpen').hidden = !done;
-    $('#dRevealSelect').hidden = !done;
+    const canReveal = t.status === 'done';
+    $('#dRevealOpen').hidden = !canReveal;
+    $('#dRevealSelect').hidden = !canReveal;
   }
   async function loadLog(t) {
     const box = $('#dLogBox');

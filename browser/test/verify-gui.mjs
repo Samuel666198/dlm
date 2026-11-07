@@ -136,7 +136,13 @@ try {
   await cdp('Runtime.enable');
   await cdp('Page.enable');
   const evalText = async (expression) => {
-    const r = await cdp('Runtime.evaluate', { expression, returnByValue: true });
+    // `awaitPromise`：返回 Promise 的表达式（本文件里 P4/P2 那两段 async IIFE）
+    // 不加这个参数会拿到一个空对象，断言就变成"什么都没验到却过了"。
+    const r = await cdp('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
     return r.result?.value;
   };
 
@@ -171,6 +177,68 @@ try {
   const bytes = fs.existsSync(file) ? fs.statSync(file).size : -1;
   log += `file=${file} bytes=${bytes}\n`;
   if (bytes !== 65536) throw new Error(`落盘文件大小不对：${bytes}`);
+
+  // ---- P4：成功行不显示 exit 码；Esc 关弹窗且焦点回到触发按钮 -----------------
+  const doneText = await evalText("Array.from(document.querySelectorAll('.task')).map(e => e.innerText).join('\\n')");
+  log += `p4_done_text=${JSON.stringify(doneText)}\n`;
+  if (doneText.includes('exit 0')) throw new Error(`成功行不该再显示 exit 码：${doneText}`);
+
+  // openModal 用 setTimeout(30) 把焦点移进弹窗，所以要等它跑完再断言。
+  const focusBack = await evalText(`(async () => {
+    const btn = document.querySelector('#addBtn');
+    btn.focus();
+    btn.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const inModal = document.activeElement && document.activeElement.closest('#addModal') !== null;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    return {
+      inModal,
+      closed: !document.querySelector('#addModal').classList.contains('open'),
+      back: document.activeElement === btn,
+    };
+  })()`);
+  log += `p4_modal=${JSON.stringify(focusBack)}\n`;
+  if (!focusBack.inModal) throw new Error('打开弹窗后焦点没有进入弹窗');
+  if (!focusBack.closed) throw new Error('Esc 没有关掉弹窗');
+  if (!focusBack.back) throw new Error('关闭弹窗后焦点没有回到触发按钮');
+
+  // ---- P2：/api/reveal 只收 task id ------------------------------------------
+  const revealUnknown = await evalText(`(async () => {
+    const r = await fetch('/api/reveal?t=' + encodeURIComponent(${JSON.stringify(token)}), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'no-such-task', mode: 'open' }),
+    });
+    return await r.json();
+  })()`);
+  log += `p2_reveal_unknown=${JSON.stringify(revealUnknown)}\n`;
+  if (revealUnknown.ok !== false) {
+    throw new Error(`未知 id 的 reveal 必须拒绝：${JSON.stringify(revealUnknown)}`);
+  }
+
+  const revealDone = await evalText(`(async () => {
+    const task = document.querySelector('.task');
+    const r = await fetch('/api/reveal?t=' + encodeURIComponent(${JSON.stringify(token)}), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: task.dataset.id, mode: 'select', path: 'C:\\\\Windows\\\\System32\\\\calc.exe' }),
+    });
+    return await r.json();
+  })()`);
+  log += `p2_reveal_done=${JSON.stringify(revealDone)}\n`;
+  if (revealDone.ok !== true) {
+    throw new Error(`已完成任务的 reveal 应当成功：${JSON.stringify(revealDone)}`);
+  }
+  if (String(revealDone.path || '').toLowerCase().includes('calc.exe')) {
+    throw new Error(`客户端交来的 path 被采纳了：${revealDone.path}`);
+  }
+  if (!String(revealDone.path || '').endsWith('gui.bin')) {
+    throw new Error(`落点必须来自队列任务名：${revealDone.path}`);
+  }
+  if (!(revealDone.args || []).some((a) => String(a).startsWith('/select,'))) {
+    throw new Error(`/select 必须是一个 argv：${JSON.stringify(revealDone.args)}`);
+  }
 
   const shot = await cdp('Page.captureScreenshot', { format: 'png' });
   fs.mkdirSync(path.dirname(out), { recursive: true });
