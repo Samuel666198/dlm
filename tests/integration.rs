@@ -9251,6 +9251,57 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
     let job_log = std::fs::read_to_string(log_dir.join(format!("{task_id}.log")))?;
     assert!(job_log.contains("下载已完成"), "job log: {job_log}");
 
+    // ---- P2：/api/reveal 只收 task id --------------------------------------
+    // 反臂 1：未知 id ⇒ 任务不存在，且**不**启动任何进程。
+    let resp = client
+        .post(format!("{gui_base}/api/reveal?t={token}"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": "no-such-task", "mode": "open"}).to_string())
+        .send()?;
+    let body: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(body["ok"], false, "未知 id 必须拒：{body}");
+    assert!(
+        body["spawned"].is_null(),
+        "拒的那一支不该带 spawned 字段：{body}"
+    );
+
+    // 反臂 2：客户端塞进来的 `path` / `name` 一律不看 —— 回执里的 path 必须是队列算出来的落点。
+    let resp = client
+        .post(format!("{gui_base}/api/reveal?t={token}"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "id": task_id,
+                "mode": "select",
+                "path": "C:\\Windows\\System32\\calc.exe",
+                "name": "hijack.bin"
+            })
+            .to_string(),
+        )
+        .send()?;
+    let body: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(body["ok"], true, "已完成任务应当可以定位：{body}");
+    let revealed = body["path"].as_str().context("reveal path")?;
+    assert!(
+        !revealed.to_ascii_lowercase().contains("calc.exe"),
+        "客户端交来的 path 被采纳了（那是通用打开任意文件接口）：{revealed}"
+    );
+    assert!(
+        revealed.ends_with("gui.bin"),
+        "落点必须来自队列里的任务名：{revealed}"
+    );
+    assert_eq!(
+        body["program"], "explorer.exe",
+        "/select 走资源管理器：{body}"
+    );
+    let args = body["args"].as_array().context("reveal args")?;
+    assert_eq!(args.len(), 1, "`/select,<路径>` 必须是一个参数：{body}");
+    let only = args[0].as_str().unwrap_or_default();
+    assert!(
+        only.starts_with("/select,") && only.ends_with("gui.bin"),
+        "`/select,` 与路径要在同一个 argv 里：{only}"
+    );
+
     // 计划任务：start_at 在未来 ⇒ 保持 queued；pause/resume/remove 走同一条 API。
     let sched_body = serde_json::json!({
         "url": format!("{node_base}/sz/1024"),
@@ -9282,6 +9333,33 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+
+    // P2 反臂 3：没下完（这里还是 queued）的任务不给开，且不启动任何进程。
+    let resp = client
+        .post(format!("{gui_base}/api/reveal?t={token}"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": later_id, "mode": "open"}).to_string())
+        .send()?;
+    let body: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(body["ok"], false, "未完成任务不该被打开：{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("还没下完"),
+        "拒的理由要说明是没下完：{body}"
+    );
+
+    // P2 反臂 4：非法 mode ⇒ 400，且不投递任何 ticket。
+    let resp = client
+        .post(format!("{gui_base}/api/reveal?t={token}"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": task_id, "mode": "delete"}).to_string())
+        .send()?;
+    assert_eq!(resp.status().as_u16(), 400, "非法 mode 必须是 400");
+    let body: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(body["ok"], false, "{body}");
+
     for (api, want) in [("pause", "paused"), ("resume", "queued")] {
         let resp = client
             .post(format!("{gui_base}/api/{api}?t={token}"))

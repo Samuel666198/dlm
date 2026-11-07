@@ -293,6 +293,10 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 - **更新检查**：默认关闭；`--update-url <URL>` 给清单后启动时后台 GET 一次（10 秒超时），`/api/update` 给 `{enabled,current,latest,available,url,notes,checked_at,error}`；只通知，不自动下载安装。没有硬编码更新服务器。
 - **完成后动作**：队列只接 `open` 与 `run:<exe>`（与 CLI 同形，由子进程执行）；`shutdown` 在 API 层拒绝——队列可能同时完成多个任务，关机副作用不可控。
 - **暂停/恢复/删除**：暂停 = kill 子进程（断点保留），恢复 = 重新入队并续传；删除保留目标文件，删任务与日志（日志跨轮 append）。
+- **打开文件 / 打开所在文件夹**（v2.1 P2）：已完成任务的详情页与任务行有这两个按钮，走 `POST /api/reveal`
+  的 `{id, mode}`（`mode` = `open` | `select`）。**接口只收 task id，不收路径**：落点由服务端按任务名
+  与 `--out-dir` 自己算（任务名入队时已禁 `/ \ :`），客户端塞进来的 `path` 字段一律不看。
+  `select` 拼的是 `explorer.exe /select,<落点>` —— `/select,` 与路径必须在**同一个** argv 里。
 - **一任务一进程**：每个任务 spawn 一个 `dlm --quiet`，stdout/stderr 进该任务日志。队列**不存 Cookie**，认证/带 Cookie 的下载继续走 B2。
 - **安全**：只绑 `127.0.0.1`；所有页面/API 都要求 `?t=<token>`；UI 用 `textContent` 插入数据；日志 API 只读 log 目录内文件、最多 64 KiB 尾。
 - **进程活着 = 调度器活着**：没有 Windows 服务/开机自启/托盘；`start_at` 与配额等待都要让 `dlm-gui` 一直开着。`--open` 只是用浏览器 app 模式开一个窗口，不是原生控件。

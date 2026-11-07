@@ -54,8 +54,25 @@ pub struct Task {
     /// 完成后动作原始串（`open` / `run:<exe>`）；队列拒绝 `shutdown`。
     #[serde(default)]
     pub on_complete: Option<String>,
+    /// 已经自动重试过几轮（P1）。`--max-task-retries` 拿它比上限；用户手动“继续”不重置它，
+    /// 只有重新入队（新任务）才从 0 起算 —— 否则手动点一次就能无限绕过上限。
+    #[serde(default)]
+    pub attempts: u32,
     pub total_len: Option<u64>,
     pub delivered: Option<u64>,
+}
+
+/// 自动重试的退避秒数（P1）。`attempts` 是**已经重试过的轮数**（0 = 还没重试过）。
+///
+/// 三档之后不再自动重试：一轮 30 秒、二轮 120 秒，够覆盖"对端一时抽风"那一类；
+/// 再往上多半是永久错误（404/403/域名没了），继续自动重试只是白烧流量与日志。
+/// 返回 `None` 时调用方应当判定为真正的 `Failed`，把决定权交回用户。
+pub fn retry_backoff(attempts: u32) -> Option<u64> {
+    match attempts {
+        0 => Some(30),
+        1 => Some(120),
+        _ => None,
+    }
 }
 
 /// 队列级全局固定窗口配额（A16）。`window_started_at == 0` = 尚未起算。
@@ -330,6 +347,7 @@ impl QueueStore {
             start_at,
             hold_until: None,
             on_complete,
+            attempts: 0,
             total_len: None,
             delivered: None,
         };

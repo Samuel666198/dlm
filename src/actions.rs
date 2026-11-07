@@ -84,6 +84,53 @@ pub fn execute(plan: &ActionPlan) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 队列 UI 的“打开文件 / 打开所在文件夹”（v2.1 P2）。
+///
+/// 只回答“给一个落点和一个模式，要启动什么进程”，与 [`plan`] 同一姿态：不做 IO、不查队列。
+/// 落点**必须由调用方从队列任务自己算出来**（`queue::target_path`），不接受客户端交来的路径 ——
+/// 否则这个接口就变成一个通用的“打开任意文件”入口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevealMode {
+    /// 用默认程序打开这个文件：`explorer.exe <落点>`。
+    Open,
+    /// 在资源管理器里选中它：`explorer.exe /select,<落点>`。
+    Select,
+}
+
+impl RevealMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Select => "select",
+        }
+    }
+}
+
+impl FromStr for RevealMode {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "open" => Ok(Self::Open),
+            "select" => Ok(Self::Select),
+            other => Err(format!("打开方式只认 open 或 select，收到 {other:?}")),
+        }
+    }
+}
+
+/// `/select,<路径>` 是**一个**参数：逗号后面直接跟路径，中间不许有空格把它拆开。
+/// 拆成 `["/select,", path]` 时资源管理器会把路径当成第二个“要打开的东西”，行为不对（实测见证据）。
+pub fn reveal_plan(mode: RevealMode, file: &Path) -> ActionPlan {
+    let args = match mode {
+        RevealMode::Open => vec![file.to_path_buf()],
+        RevealMode::Select => vec![PathBuf::from(format!("/select,{}", file.display()))],
+    };
+    ActionPlan {
+        program: PathBuf::from("explorer.exe"),
+        args,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +220,46 @@ mod tests {
             args: vec![PathBuf::from("D:/dl/a.bin")],
         };
         assert!(execute(&plan).is_err());
+    }
+
+    #[test]
+    fn reveal_open_is_explorer_with_the_landing_path_only() {
+        let plan = reveal_plan(RevealMode::Open, Path::new("D:/dl/a.bin"));
+        assert_eq!(plan.program, PathBuf::from("explorer.exe"));
+        assert_eq!(plan.args, vec![PathBuf::from("D:/dl/a.bin")]);
+        assert_eq!(plan.args.len(), 1);
+    }
+
+    /// `/select,<路径>` 必须是**一个** argv：拆开时资源管理器会把路径当成另一件要打开的东西。
+    #[test]
+    fn reveal_select_keeps_the_switch_and_the_path_in_one_argument() {
+        let plan = reveal_plan(RevealMode::Select, Path::new("D:/dl/a.bin"));
+        assert_eq!(plan.program, PathBuf::from("explorer.exe"));
+        assert_eq!(
+            plan.args,
+            vec![PathBuf::from("/select,D:/dl/a.bin")],
+            "`/select,` 与路径必须在同一个参数里"
+        );
+        assert_eq!(plan.args.len(), 1, "拆成两个参数就不是语义那件事了");
+        let only = plan.args[0].to_string_lossy().to_string();
+        assert!(only.starts_with("/select,"), "{only}");
+        assert!(
+            !only.starts_with("/select, "),
+            "多一个空格会让资源管理器把路径读成第二件东西：{only}"
+        );
+    }
+
+    #[test]
+    fn reveal_mode_parses_only_the_two_documented_words() {
+        assert_eq!("open".parse::<RevealMode>().unwrap(), RevealMode::Open);
+        assert_eq!("select".parse::<RevealMode>().unwrap(), RevealMode::Select);
+        assert_eq!(
+            " select ".parse::<RevealMode>().unwrap(),
+            RevealMode::Select
+        );
+        let err = "delete".parse::<RevealMode>().unwrap_err();
+        assert!(err.contains("open") && err.contains("select"), "{err}");
+        assert_eq!(RevealMode::Open.as_str(), "open");
+        assert_eq!(RevealMode::Select.as_str(), "select");
     }
 }

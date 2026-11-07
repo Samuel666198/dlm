@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::actions;
 use crate::consts::PROBE_READ_BYTES;
 use crate::queue::{self, QueueStore, Task, TaskStatus};
 
@@ -163,6 +164,24 @@ enum Ticket {
     Pause(String),
     Resume(String),
     Remove(String),
+    /// P2：打开文件 / 打开所在文件夹。**`mode` 与 `id` 就够了** —— 落点由 runner 从队列自己算，
+    /// 不接受客户端交来的路径（见 `handle_http` 里那段注释）。
+    Reveal {
+        id: String,
+        mode: actions::RevealMode,
+        reply: Sender<std::result::Result<RevealReply, String>>,
+    },
+}
+
+/// `/api/reveal` 的回执。`plan` 原样带回 argv，方便调用方（和测试）核对到底要启动什么，
+/// 而**不是**让人相信一个 `ok:true`。
+#[derive(Debug, Clone, Serialize)]
+pub struct RevealReply {
+    pub ok: bool,
+    pub spawned: bool,
+    pub path: String,
+    pub program: String,
+    pub args: Vec<String>,
 }
 
 pub fn run(config: GuiConfig) -> Result<()> {
@@ -563,6 +582,44 @@ fn apply(
                 let _ = fs::remove_file(task.log);
                 return true;
             }
+            false
+        }
+        Ticket::Reveal { id, mode, reply } => {
+            // 落点**只能**由队列里的任务名推出：`name` 在入队时已过 `validate_name`
+            // （不含 `/ \ :`），所以 `out_dir.join(name)` 不会越出目录。
+            // 这条路线里没有任何一格接受客户端交来的路径 —— 那是通用"打开任意文件"接口，不做。
+            let Some(task) = store.find_mut(&id) else {
+                let _ = reply.send(Err("任务不存在".to_string()));
+                return false;
+            };
+            if task.status != TaskStatus::Done {
+                let _ = reply.send(Err("任务还没下完".to_string()));
+                return false;
+            }
+            let path = queue::target_path(&config.out_dir, &task.name);
+            if !path.is_file() {
+                let _ = reply.send(Err("落点文件不在了".to_string()));
+                return false;
+            }
+            let plan = actions::reveal_plan(mode, &path);
+            let spawned = match actions::execute(&plan) {
+                Ok(()) => true,
+                Err(err) => {
+                    let _ = reply.send(Err(format!("{err:#}")));
+                    return false;
+                }
+            };
+            let _ = reply.send(Ok(RevealReply {
+                ok: true,
+                spawned,
+                path: path.to_string_lossy().to_string(),
+                program: plan.program.to_string_lossy().to_string(),
+                args: plan
+                    .args
+                    .iter()
+                    .map(|a| a.to_string_lossy().to_string())
+                    .collect(),
+            }));
             false
         }
     }
@@ -968,6 +1025,58 @@ fn handle_http(
             };
             let _ = tx.send(ticket);
             respond(stream, 200, "application/json", br#"{"ok":true}"#)
+        }
+        ("POST", "/api/reveal") => {
+            let value: Value = match serde_json::from_slice(&request.body) {
+                Ok(v) => v,
+                Err(_) => {
+                    return respond(
+                        stream,
+                        400,
+                        "application/json",
+                        br#"{"ok":false,"error":"bad json"}"#,
+                    );
+                }
+            };
+            let Some(id) = value.get("id").and_then(Value::as_str) else {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    br#"{"ok":false,"error":"missing id"}"#,
+                );
+            };
+            let raw_mode = value.get("mode").and_then(Value::as_str).unwrap_or("open");
+            let mode = match raw_mode.parse::<actions::RevealMode>() {
+                Ok(m) => m,
+                Err(err) => {
+                    let body = serde_json::to_vec(&json!({"ok": false, "error": err})).unwrap();
+                    return respond(stream, 400, "application/json", &body);
+                }
+            };
+            // 客户端交来的 `path` / `name` 之类字段**一律不看**：落点只按 task id 从队列算。
+            let (reply, reply_rx) = mpsc::channel();
+            if tx
+                .send(Ticket::Reveal {
+                    id: id.to_string(),
+                    mode,
+                    reply,
+                })
+                .is_err()
+            {
+                return respond(
+                    stream,
+                    200,
+                    "application/json",
+                    br#"{"ok":false,"error":"queue unavailable"}"#,
+                );
+            }
+            let body = match reply_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Ok(reply)) => serde_json::to_vec(&reply).unwrap(),
+                Ok(Err(err)) => serde_json::to_vec(&json!({"ok": false, "error": err})).unwrap(),
+                Err(_) => br#"{"ok":false,"error":"queue busy"}"#.to_vec(),
+            };
+            respond(stream, 200, "application/json", &body)
         }
         ("GET", "/api/log") => {
             let Some(id) = request

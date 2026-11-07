@@ -231,7 +231,7 @@
       <div><small>创建</small><b id="dCreated">—</b></div>
       <div><small>更新</small><b id="dUpdated">—</b></div>
     </div>
-    <div class="drawer-btns"><button class="btn main" id="dPause">暂停任务</button><button class="btn" id="dLog">刷新日志</button><button class="btn danger" id="dRemove">删除</button></div>
+    <div class="drawer-btns"><button class="btn main" id="dPause">暂停任务</button><button class="btn" id="dRevealOpen" hidden>打开文件</button><button class="btn" id="dRevealSelect" hidden>打开所在文件夹</button><button class="btn" id="dLog">刷新日志</button><button class="btn danger" id="dRemove">删除</button></div>
     <div class="log-title"><span>JOB LOG · TAIL</span><span id="dLogSize"></span></div>
     <pre class="log" id="dLogBox">打开任务后读取日志。</pre>
   </div>
@@ -277,7 +277,9 @@
     pause:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5v14M15 5v14"/></svg>',
     play:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 5 11 7-11 7V5Z"/></svg>',
     log:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 7 3 3-3 3M11 13h6M5 17h12"/></svg>',
-    trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12"/></svg>'
+    trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12"/></svg>',
+    open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
+    folder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7a1 1 0 0 1 1-1h5l2 2h7a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7Z"/></svg>'
   };
 
   function fmtBytes(n) {
@@ -421,6 +423,10 @@
     };
     if (t.status === 'running' || t.status === 'queued') mk('pause', '暂停', icon.pause);
     if (t.status === 'paused' || t.status === 'failed') mk('resume', '继续', icon.play);
+    if (t.status === 'done') {
+      mk('reveal-open', '打开文件', icon.open);
+      mk('reveal-select', '打开所在文件夹', icon.folder);
+    }
     mk('log', '详情', icon.log);
     mk('remove', '删除', icon.trash);
     el.append(f, main, meter, actions);
@@ -479,6 +485,9 @@
     $('#dCreated').textContent = fmtTime(t.created_at);
     $('#dUpdated').textContent = fmtTime(t.updated_at);
     $('#dPause').textContent = t.status === 'paused' || t.status === 'failed' ? '继续任务' : '暂停任务';
+    const done = t.status === 'done';
+    $('#dRevealOpen').hidden = !done;
+    $('#dRevealSelect').hidden = !done;
   }
   async function loadLog(t) {
     const box = $('#dLogBox');
@@ -509,6 +518,22 @@
     if (act === 'log') { selectedId = id; openDrawer(t); render(); return; }
     if (act === 'remove') {
       if (!confirm('删除任务？目标文件会保留。')) return;
+    }
+    if (act === 'reveal-open' || act === 'reveal-select') {
+      const mode = act === 'reveal-open' ? 'open' : 'select';
+      try {
+        const r = await api('/api/reveal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, mode })
+        });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || '打开失败');
+        toast(mode === 'open' ? '已打开文件' : '已定位到文件夹');
+      } catch (err) {
+        toast(err.message || '打开失败');
+      }
+      return;
     }
     const path = act === 'pause' ? '/api/pause' : act === 'resume' ? '/api/resume' : '/api/remove';
     try {
@@ -551,6 +576,8 @@
     action(selected.id, act);
   });
   $('#dLog').addEventListener('click', () => { if (selected) loadLog(selected); });
+  $('#dRevealOpen').addEventListener('click', () => { if (selected) action(selected.id, 'reveal-open'); });
+  $('#dRevealSelect').addEventListener('click', () => { if (selected) action(selected.id, 'reveal-select'); });
   $('#dRemove').addEventListener('click', () => { if (selected) action(selected.id, 'remove'); });
 
   const modal = $('#addModal');
