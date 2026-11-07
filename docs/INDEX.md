@@ -94,6 +94,7 @@
 | [`evidence/2026-10-28-user-agent-403.md`](evidence/2026-10-28-user-agent-403.md) | UA 缺失导致 403 |
 | [`evidence/2026-10-29-inpage-widget.md`](evidence/2026-10-29-inpage-widget.md) | 页内组件与站点脚本拦截 |
 | [`evidence/2026-11-03-floating-ball.md`](evidence/2026-11-03-floating-ball.md) | 悬浮球拖动、位置记忆、闲置淡出与面板标签页 |
+| [`evidence/2026-11-08-v21-product-polish.md`](evidence/2026-11-08-v21-product-polish.md) | v2.1 四项交付与验收（打开文件/自动重试/UI 收尾/自启与单实例） |
 
 ## 不在 `docs/` 的账本
 

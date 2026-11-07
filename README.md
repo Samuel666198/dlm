@@ -424,6 +424,7 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/evidence/2026-10-28-b3a-hls.md`](docs/evidence/2026-10-28-b3a-hls.md) | B3a HLS 证据 |
 | [`docs/evidence/2026-10-29-inpage-widget.md`](docs/evidence/2026-10-29-inpage-widget.md) | 页内下载组件（确认/进度/停止）与站点脚本拦截证据 |
 | [`docs/evidence/2026-11-03-floating-ball.md`](docs/evidence/2026-11-03-floating-ball.md) | 悬浮球拖动/位置记忆/闲置淡出与面板标签页证据 |
+| [`docs/evidence/2026-11-08-v21-product-polish.md`](docs/evidence/2026-11-08-v21-product-polish.md) | v2.1 交付证据：打开文件/自动重试/UI 收尾/自启与单实例 |
 | [`docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md`](docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md) | 交接稿：接手顺序、硬纪律、已裁定不要重做、具名欠账 |
 | [`docs/superpowers/plans/2026-10-21-三路路线图.md`](docs/superpowers/plans/2026-10-21-三路路线图.md) | 下一阶段路线图（A/B/C 三路与完成状态） |
 | [`docs/superpowers/plans/2026-10-21-能力对照表.md`](docs/superpowers/plans/2026-10-21-能力对照表.md) | 能力对照表的实现计划 |
