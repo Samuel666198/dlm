@@ -307,6 +307,33 @@
 - **门禁真账（2026-11-08 亲跑）**：`fmt 0` · `--lib` **322/0** · `--bins` **4/0** ·
   `integration` **121/0** · `clippy 0` · `extension` 通过 · `ui-script` 通过。
 
+## 2026-11-10 原生外壳（十步全做完）
+
+`dlm-gui` 从「本地 HTTP + 系统浏览器 `--app` 外壳」换成**原生窗口 + 托盘**。
+浏览器扩展零改动（它走 `扩展 → 宿主 → POST /api/add`，与 UI 怎么画无关）。
+
+- **框架**：`eframe 0.37`（glow 后端）+ `tray-icon 0.21`。C0 裁定已改写。
+- **界面**：标题栏/工具条/左侧分类栏/任务列表/状态栏/详情抽屉/新建弹窗/设置面板。
+  暖纸底 + 陶土橙单强调色；数字列等宽对齐；**图标用 Painter 画矢量**（字体字符在雅黑里是方框）。
+- **托盘**：显示窗口/全部暂停/新建任务/退出；关窗收托盘不退出（实测：进程在、窗口隐藏、HTTP 仍 200）。
+- **设置**：`%LOCALAPPDATA%\dlm\settings.json`，字段全带 `serde(default)`；优先级 CLI > 文件 > 默认。
+- **剪贴板**：默认**关**（隐私）。`GetClipboardSequenceNumber` 判变化才开剪贴板；
+  匹配不引入 regex，固定扩展名集合 + 只看 path 不看 query。实测复制链接立刻命中。
+- **按 host 限连接**：放**队列层**（`HostGate`）而不是 `scheduler.rs` ——
+  每任务一进程各有各的调度器，改调度器只能限单任务内。7 条单测钉住。
+- **休眠**：`shutdown /h`（不用 `rundll32 powrprof.dll,SetSuspendState`：参数解析不可靠、
+  休眠没开时会静默变睡眠且退出码仍是 0）。队列继续拒绝 shutdown/hibernate，只留 CLI。
+
+**实测数字**：`dlm-gui.exe` 4.75 → **10.99 MB**；启动到窗口 **573 ms**
+（`--headless` 也要 541ms ⇒ 窗口渲染只占 32ms，慢在依赖初始化，未达 300ms 目标）。
+仍显著快于旧版（Edge 冷启动 1–3 秒）。
+
+**已知缺口**：`--autostart` 完全隐藏窗口没做成（勘误 E14，试过四条路）。
+托盘本身的显示/隐藏/退出不受影响。
+
+**门禁**：`fmt` · `--lib` **342/0** · `--bins` **4/0** · `integration` **121/0** ·
+`clippy` · `extension`。`ui-script` 门禁随 `ui.html` 删除。
+
 ## 今日断点（2026-10-19 控制员；**已被上面 2026-10-20 那节取代，保留是为了让"当时怎么判断的"可读**）
 
 **四闸真账（控制员在 `d7092e7` 这棵源码树上亲跑）**：`cargo test --lib` **215 passed / 0 failed**（3.01 s）· `cargo test --bins` 3 · `cargo test --test integration` **90 / 0**（63.69 s）· `cargo clippy --all-targets -- -D warnings` 零命中。工作树干净、未 push。
