@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dlm · 原生界面草案</title>
+<style>
+:root{
+  --paper:#F6F3EC;         /* 窗口底：暖纸 */
+  --surface:#FFFDF8;       /* 列表底 */
+  --surface-2:#F1EDE4;     /* 侧栏/工具条 */
+  --line:#E4DFD2;
+  --line-soft:#EDE8DC;
+  --ink:#2A2720;
+  --ink-2:#6C6860;
+  --ink-3:#9C978D;
+  --accent:#C06340;        /* 陶土橙 */
+  --accent-ink:#A34F31;
+  --accent-soft:#F2E1D7;
+  --ok:#4E7A5C;
+  --ok-soft:#E4EDE4;
+  --warn:#A9762A;
+  --warn-soft:#F3EAD7;
+  --bad:#A2443A;
+  --bad-soft:#F4E2DF;
+  --r:9px;
+  --sans:-apple-system,"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --serif:"Iowan Old Style","Source Serif 4",Georgia,"Songti SC","SimSun",serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,"SF Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:#DEDAD0;
+  font:13px/1.5 var(--sans);
+  color:var(--ink);
+  display:flex;flex-direction:column;align-items:center;
+  padding:28px 20px 40px;gap:14px;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ---------- 页面外壳（不是产品的一部分，只是看 demo 用） ---------- */
+.demo-bar{display:flex;align-items:center;gap:8px;font-size:12px;color:#5C594F}
+.demo-bar b{font-weight:600;color:#3B382F}
+.demo-bar button{
+  font:inherit;padding:5px 11px;border-radius:99px;cursor:pointer;
+  border:1px solid #C8C3B6;background:#F3F0E8;color:#4A473E;
+}
+.demo-bar button[aria-pressed="true"]{background:#3B382F;border-color:#3B382F;color:#F6F3EC}
+
+/* ---------- 窗口 ---------- */
+.window{
+  width:1120px;height:700px;background:var(--paper);
+  border:1px solid #CFC9BB;border-radius:12px;overflow:hidden;
+  display:flex;flex-direction:column;
+  box-shadow:0 24px 60px -28px rgba(42,39,32,.45),0 2px 6px rgba(42,39,32,.10);
+  position:relative;
+}
+
+/* 标题栏 */
+.titlebar{
+  height:34px;flex:0 0 34px;display:flex;align-items:center;gap:10px;
+  padding:0 8px 0 14px;background:var(--surface-2);
+  border-bottom:1px solid var(--line);
+}
+.appmark{
+  width:16px;height:16px;border-radius:4px;background:var(--accent);
+  display:grid;place-items:center;color:#fff;font:600 10px/1 var(--sans);
+}
+.titlebar h1{font:600 12px/1 var(--sans);letter-spacing:.2px;color:var(--ink-2)}
+.titlebar .dot{width:3px;height:3px;border-radius:50%;background:var(--ink-3)}
+.titlebar .state{font-size:11.5px;color:var(--ink-3)}
+.spacer{flex:1}
+.wctl{display:flex;gap:2px}
+.wctl i{
+  width:34px;height:26px;border-radius:5px;display:grid;place-items:center;
+  color:var(--ink-2);font-style:normal;font-size:11px;
+}
+.wctl i.close:hover{background:var(--bad);color:#fff}
+
+/* 工具条 */
+.toolbar{
+  height:50px;flex:0 0 50px;display:flex;align-items:center;gap:2px;
+  padding:0 10px;background:var(--surface);border-bottom:1px solid var(--line);
+}
+.tb{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  min-width:56px;height:40px;padding:0 8px;border:0;border-radius:7px;
+  background:transparent;color:var(--ink-2);cursor:pointer;font:inherit;
+}
+.tb:hover{background:var(--surface-2)}
+.tb svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round}
+.tb span{font-size:11px;line-height:1}
+.tb.primary{background:var(--accent);color:#FFF9F4}
+.tb.primary:hover{background:var(--accent-ink)}
+.tb[disabled]{opacity:.38;cursor:default}
+.tb[disabled]:hover{background:transparent}
+.tb-sep{width:1px;height:26px;background:var(--line);margin:0 7px}
+
+/* 主体 */
+.body{flex:1;display:flex;min-height:0;background:var(--surface)}
+
+/* 侧栏 */
+.side{
+  width:212px;flex:0 0 212px;background:var(--surface-2);
+  border-right:1px solid var(--line);padding:12px 8px;overflow:auto;
+}
+.side h2{
+  font:600 10.5px/1 var(--sans);letter-spacing:.9px;text-transform:uppercase;
+  color:var(--ink-3);padding:6px 8px 7px;
+}
+.side ul{list-style:none}
+.side li{
+  display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:7px;
+  color:var(--ink-2);cursor:pointer;font-size:12.5px;
+}
+.side li:hover{background:#E9E4D8}
+.side li.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.side li svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;opacity:.8}
+.side li .n{margin-left:auto;font:500 11px/1 var(--mono);color:var(--ink-3)}
+.side li.on .n{color:var(--accent-ink)}
+.side hr{border:0;border-top:1px solid var(--line);margin:9px 8px}
+
+/* 列表 */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.thead,.row{
+  display:grid;
+  grid-template-columns:1fr 92px 150px 96px 84px 88px;
+  align-items:center;gap:12px;padding:0 16px;
+}
+.thead{
+  height:34px;flex:0 0 34px;background:var(--surface);
+  border-bottom:1px solid var(--line);
+  font:600 10.5px/1 var(--sans);letter-spacing:.7px;text-transform:uppercase;
+  color:var(--ink-3);
+}
+.thead .r,.row .r{text-align:right}
+.rows{flex:1;overflow:auto}
+.row{
+  height:52px;border-bottom:1px solid var(--line-soft);cursor:default;
+  position:relative;
+}
+.row:hover{background:#FBF8F2}
+.row.on{background:#FBF6F0}
+.row.on::before{
+  content:"";position:absolute;left:0;top:8px;bottom:8px;width:2.5px;
+  border-radius:2px;background:var(--accent);
+}
+.name{min-width:0}
+.name b{
+  display:block;font-weight:500;font-size:12.5px;color:var(--ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.name small{
+  display:block;font-size:11px;color:var(--ink-3);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;margin-top:2px;
+}
+.size,.speed,.eta{font:500 12px/1 var(--mono);color:var(--ink-2);font-variant-numeric:tabular-nums}
+.eta{color:var(--ink-3)}
+.bar{display:flex;align-items:center;gap:8px}
+.track{flex:1;height:4px;border-radius:99px;background:#E7E2D5;overflow:hidden}
+.track i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.track i.done{background:var(--ok)}
+.pct{font:500 11px/1 var(--mono);color:var(--ink-2);min-width:34px;text-align:right;
+  font-variant-numeric:tabular-nums}
+
+.pill{
+  display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;
+  font-size:11px;font-weight:600;line-height:1.3;white-space:nowrap;
+}
+.pill::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+.p-run{background:var(--accent-soft);color:var(--accent-ink)}
+.p-done{background:var(--ok-soft);color:var(--ok)}
+.p-wait{background:var(--warn-soft);color:var(--warn)}
+.p-bad{background:var(--bad-soft);color:var(--bad)}
+
+/* 状态栏 */
+.status{
+  height:32px;flex:0 0 32px;display:flex;align-items:center;gap:14px;
+  padding:0 14px;background:var(--surface-2);border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--ink-3);
+}
+.status b{font:600 11.5px/1 var(--mono);color:var(--ink-2)}
+.status .grow{flex:1}
+.quota{display:flex;align-items:center;gap:7px}
+.quota .track{width:78px;height:4px}
+
+/* 抽屉 */
+.drawer{
+  position:absolute;top:84px;right:0;bottom:32px;width:372px;
+  background:var(--surface);border-left:1px solid var(--line);
+  transform:translateX(100%);transition:transform .18s ease;
+  display:flex;flex-direction:column;box-shadow:-14px 0 30px -22px rgba(42,39,32,.4);
+}
+.drawer.open{transform:none}
+.drawer header{padding:16px 18px 12px;border-bottom:1px solid var(--line-soft)}
+.drawer header h3{font:600 14px/1.35 var(--serif);color:var(--ink);word-break:break-all}
+.drawer header p{font-size:11.5px;color:var(--ink-3);margin-top:5px;word-break:break-all}
+.drawer .acts{display:flex;gap:7px;padding:13px 18px;flex-wrap:wrap;
+  border-bottom:1px solid var(--line-soft)}
+.btn{
+  font:inherit;font-size:12px;padding:6px 11px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--line);background:var(--surface);color:var(--ink);
+}
+.btn:hover{background:var(--surface-2)}
+.btn.main{background:var(--accent);border-color:var(--accent);color:#FFF9F4}
+.btn.main:hover{background:var(--accent-ink)}
+.btn.danger{color:var(--bad);border-color:#E8CFCA}
+.btn.danger:hover{background:var(--bad-soft)}
+.log{padding:13px 18px;overflow:auto;flex:1}
+.log h4{font:600 10.5px/1 var(--sans);letter-spacing:.8px;text-transform:uppercase;
+  color:var(--ink-3);margin-bottom:9px}
+.log pre{
+  font:11.5px/1.65 var(--mono);color:var(--ink-2);white-space:pre-wrap;
+  word-break:break-all;background:#F7F4ED;border:1px solid var(--line-soft);
+  border-radius:7px;padding:11px 12px;
+}
+
+/* 空态 */
+.empty{
+  flex:1;display:none;flex-direction:column;align-items:center;justify-content:center;
+  gap:9px;color:var(--ink-3);text-align:center;padding:40px;
+}
+.empty svg{width:44px;height:44px;stroke:currentColor;fill:none;stroke-width:1.3;
+  stroke-linecap:round;stroke-linejoin:round;opacity:.5}
+.empty b{font:600 13px/1.5 var(--sans);color:var(--ink-2)}
+.empty p{font-size:12px;max-width:310px;line-height:1.7}
+body[data-state="empty"] .rows,
+body[data-state="empty"] .thead{display:none}
+body[data-state="empty"] .empty{display:flex}
+
+/* 托盘菜单预览 */
+.tray{
+  position:absolute;right:14px;bottom:44px;width:196px;
+  background:var(--surface);border:1px solid #CFC9BB;border-radius:10px;
+  padding:6px;display:none;flex-direction:column;
+  box-shadow:0 18px 40px -18px rgba(42,39,32,.5);
+}
+body[data-state="tray"] .tray{display:flex}
+.tray .hd{
+  display:flex;align-items:center;gap:7px;padding:7px 9px 8px;
+  border-bottom:1px solid var(--line-soft);margin-bottom:4px;
+}
+.tray .hd b{font:600 11.5px/1 var(--sans);color:var(--ink-2)}
+.tray .hd span{font:500 10.5px/1 var(--mono);color:var(--ink-3);margin-left:auto}
+.tray button{
+  display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;
+  border:0;border-radius:6px;background:transparent;font:inherit;font-size:12.5px;
+  color:var(--ink);cursor:pointer;text-align:left;
+}
+.tray button:hover{background:var(--surface-2)}
+.tray button svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;opacity:.75}
+.tray hr{border:0;border-top:1px solid var(--line-soft);margin:4px 6px}
+</style>
+</head>
+<body data-state="default">
+
+<div class="demo-bar">
+  <b>dlm 原生界面草案</b>
+  <span>·</span>
+  <button data-view="default" aria-pressed="true">有任务</button>
+  <button data-view="empty" aria-pressed="false">空队列</button>
+  <button data-view="tray" aria-pressed="false">托盘菜单</button>
+  <span style="margin-left:6px;color:#8A867B">点任务行看详情抽屉</span>
+</div>
+
+<div class="window">
+
+  <!-- 标题栏 -->
+  <div class="titlebar">
+    <div class="appmark">d</div>
+    <h1>dlm</h1>
+    <span class="dot"></span>
+    <span class="state" id="tbState">2 个任务在下载</span>
+    <span class="spacer"></span>
+    <div class="wctl"><i>—</i><i>▢</i><i class="close">✕</i></div>
+  </div>
+
+  <!-- 工具条 -->
+  <div class="toolbar">
+    <button class="tb primary">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建任务</span>
+    </button>
+    <button class="tb">
+      <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><span>继续</span>
+    </button>
+    <button class="tb" disabled>
+      <svg viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg><span>暂停</span>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb">
+      <svg viewBox="0 0 24 24"><path d="M9 5v14M15 5v14M4 4h16"/></svg><span>全部暂停</span>
+    </button>
+    <button class="tb">
+      <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12"/></svg><span>删除</span>
+    </button>
+    <button class="tb">
+      <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12M3 4l18 16"/></svg><span>删除全部</span>
+    </button>
+    <div class="tb-sep"></div>
+    <button class="tb">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg><span>设置</span>
+    </button>
+    <button class="tb">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>计划任务</span>
+    </button>
+  </div>
+
+  <!-- 主体 -->
+  <div class="body">
+
+    <aside class="side">
+      <h2>任务</h2>
+      <ul>
+        <li class="on">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>全部任务<span class="n">8</span>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/></svg>进行中<span class="n">2</span>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg>已完成<span class="n">5</span>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>失败<span class="n">1</span>
+        </li>
+      </ul>
+      <hr>
+      <h2>分类</h2>
+      <ul>
+        <li><svg viewBox="0 0 24 24"><path d="M14 3v5h5"/><path d="M6 3h8l5 5v13H6z"/></svg>文档<span class="n">3</span></li>
+        <li><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M10 9l6 3-6 3z"/></svg>视频<span class="n">1</span></li>
+        <li><svg viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>音频<span class="n">0</span></li>
+        <li><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M4 12h16"/></svg>压缩包<span class="n">2</span></li>
+        <li><svg viewBox="0 0 24 24"><path d="M4 4h10l6 6v10H4z"/><path d="M14 4v6h6"/></svg>程序<span class="n">2</span></li>
+      </ul>
+    </aside>
+
+    <div class="main">
+      <div class="thead">
+        <div>文件名</div>
+        <div class="r">大小</div>
+        <div>进度</div>
+        <div class="r">速度</div>
+        <div class="r">剩余</div>
+        <div>状态</div>
+      </div>
+
+      <div class="rows">
+        <div class="row on">
+          <div class="name"><b>model.safetensors</b><small>modelscope.cn · Qwen-Image-2.1-Turbo</small></div>
+          <div class="size r">16.6 GiB</div>
+          <div class="bar"><div class="track"><i style="width:99.3%"></i></div><div class="pct">99.3%</div></div>
+          <div class="speed r">—</div>
+          <div class="eta r">已中断</div>
+          <div><span class="pill p-wait">待续传</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>ubuntu-24.04-desktop-amd64.iso</b><small>releases.ubuntu.com</small></div>
+          <div class="size r">5.7 GiB</div>
+          <div class="bar"><div class="track"><i style="width:42%"></i></div><div class="pct">42%</div></div>
+          <div class="speed r">11.8 M/s</div>
+          <div class="eta r">3:12</div>
+          <div><span class="pill p-run">下载中</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>blender-4.2.1-windows-x64.msi</b><small>mirror.blender.org</small></div>
+          <div class="size r">312 MiB</div>
+          <div class="bar"><div class="track"><i style="width:76%"></i></div><div class="pct">76%</div></div>
+          <div class="speed r">1.2 M/s</div>
+          <div class="eta r">4:51</div>
+          <div><span class="pill p-run">下载中</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>年报-2026-终稿.pdf</b><small>intranet.local · 需要登录</small></div>
+          <div class="size r">8.4 MiB</div>
+          <div class="bar"><div class="track"><i style="width:0%"></i></div><div class="pct">—</div></div>
+          <div class="speed r">—</div>
+          <div class="eta r">—</div>
+          <div><span class="pill p-wait">已暂停</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>dataset-train-part1.tar.zst</b><small>hf-mirror.com</small></div>
+          <div class="size r">4.1 GiB</div>
+          <div class="bar"><div class="track"><i style="width:0%"></i></div><div class="pct">—</div></div>
+          <div class="speed r">—</div>
+          <div class="eta r">—</div>
+          <div><span class="pill p-bad">失败 · 404</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>0001.jpg</b><small>pic.example.com</small></div>
+          <div class="size r">88.7 KiB</div>
+          <div class="bar"><div class="track"><i class="done" style="width:100%"></i></div><div class="pct">100%</div></div>
+          <div class="speed r">—</div>
+          <div class="eta r">—</div>
+          <div><span class="pill p-done">已完成</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>APO_UI_Installer_9.1.3.exe</b><small>download.example.com</small></div>
+          <div class="size r">27.6 MiB</div>
+          <div class="bar"><div class="track"><i class="done" style="width:100%"></i></div><div class="pct">100%</div></div>
+          <div class="speed r">—</div>
+          <div class="eta r">—</div>
+          <div><span class="pill p-done">已完成</span></div>
+        </div>
+
+        <div class="row">
+          <div class="name"><b>BingWallpaperInstaller.exe</b><small>download.example.com</small></div>
+          <div class="size r">218 MiB</div>
+          <div class="bar"><div class="track"><i class="done" style="width:100%"></i></div><div class="pct">100%</div></div>
+          <div class="speed r">—</div>
+          <div class="eta r">—</div>
+          <div><span class="pill p-done">已完成</span></div>
+        </div>
+      </div>
+
+      <div class="empty">
+        <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
+        <b>队列是空的</b>
+        <p>点右上角「新建任务」，或在浏览器里右键链接交给 dlm。<br>扩展会在页面上留一个悬浮球，随时能投递。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 状态栏 -->
+  <div class="status">
+    <span>总速度 <b id="stSpeed">13.0 M/s</b></span>
+    <span>·</span>
+    <span id="stCount">2 个在跑 · 1 个待续传</span>
+    <span class="grow"></span>
+    <span class="quota">配额 <div class="track"><i style="width:42%"></i></div> 2.1/5 GiB</span>
+    <span>·</span>
+    <span>v0.1.0</span>
+  </div>
+
+  <!-- 详情抽屉 -->
+  <div class="drawer" id="drawer">
+    <header>
+      <h3>model.safetensors</h3>
+      <p>https://cdn-lfs-cn-1.modelscope.cn/…/model.safetensors</p>
+    </header>
+    <div class="acts">
+      <button class="btn main">继续</button>
+      <button class="btn">打开文件</button>
+      <button class="btn">打开所在文件夹</button>
+      <button class="btn danger">删除</button>
+    </div>
+    <div class="log">
+      <h4>日志</h4>
+      <pre>16.6 GiB / 16.6 GiB   99.3%
+8 条连接 · 已收 16,599.2 MiB
+最后一次写入 22:05:22
+---
+断点已保留，etag 与总长均可比对
+重跑同一条 URL 将从 99.3% 接着下</pre>
+    </div>
+  </div>
+
+  <!-- 托盘菜单 -->
+  <div class="tray">
+    <div class="hd"><div class="appmark">d</div><b>dlm 正在后台</b><span>2</span></div>
+    <button><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/></svg>显示窗口</button>
+    <button><svg viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg>全部暂停</button>
+    <button><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建任务</button>
+    <hr>
+    <button><svg viewBox="0 0 24 24"><path d="M16 17l5-5-5-5M21 12H9M12 19H5V5h7"/></svg>退出</button>
+  </div>
+</div>
+
+<script>
+const rows = [...document.querySelectorAll('.row')];
+const drawer = document.getElementById('drawer');
+rows.forEach((r) => r.addEventListener('click', () => {
+  rows.forEach((x) => x.classList.remove('on'));
+  r.classList.add('on');
+  drawer.classList.add('open');
+}));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') drawer.classList.remove('open');
+});
+const FULL_COUNTS = ['8','2','5','1','3','1','0','2','2'];
+function setState(view) {
+  document.body.dataset.state = view;
+  document.querySelectorAll('.demo-bar button').forEach((x) =>
+    x.setAttribute('aria-pressed', String(x.dataset.view === view)));
+  // 空态时全窗口的数字要自洽，否则侧栏还写着 8 个任务、状态栏还报 13 M/s。
+  const empty = view === 'empty';
+  document.getElementById('tbState').textContent = empty ? '空闲，等待任务' : '2 个任务在下载';
+  document.getElementById('stSpeed').textContent = empty ? '0 M/s' : '13.0 M/s';
+  document.getElementById('stCount').textContent = empty ? '队列空闲' : '2 个在跑 · 1 个待续传';
+  document.querySelectorAll('.side .n').forEach((n, i) => {
+    n.textContent = empty ? '0' : FULL_COUNTS[i];
+  });
+}
+document.querySelectorAll('.demo-bar button').forEach((b) => {
+  b.addEventListener('click', () => setState(b.dataset.view));
+});
+
+// 支持用 URL 直接看某个状态，方便截图核对：?state=tray|empty&drawer=1
+const q = new URLSearchParams(location.search);
+if (q.get('state')) setState(q.get('state'));
+if (q.get('drawer')) {
+  rows[0].click();
+}
+</script>
+</body>
+</html>
