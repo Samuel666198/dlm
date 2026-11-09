@@ -22,10 +22,14 @@ pub(crate) fn run(
     rx: Receiver<Ticket>,
     snapshot: Arc<Mutex<Vec<TaskView>>>,
     quota_snapshot: Arc<Mutex<Option<QuotaView>>>,
+    per_host: usize,
 ) {
     let mut children: HashMap<String, Child> = HashMap::new();
+
     let mut reserved: HashMap<String, u64> = HashMap::new();
     let mut last_delivered: HashMap<String, u64> = HashMap::new();
+    // 跨任务的 host 连接预算（勘误 E4）：这是改 scheduler.rs 做不到的那一层。
+    let mut gate = HostGate::new(per_host);
     loop {
         let mut changed = false;
         match rx.recv_timeout(Duration::from_millis(500)) {
@@ -52,6 +56,7 @@ pub(crate) fn run(
             &mut children,
             &mut reserved,
             &mut last_delivered,
+            &mut gate,
             &config,
         );
         if changed {
@@ -285,11 +290,57 @@ pub(crate) fn child_args(
     args
 }
 
+/// 跨任务的 host 连接预算（勘误 E4）。
+///
+/// 打包成结构体是因为它有两个必须一起维护的映射：已用量、每个任务占了多少。
+/// 分开传会让 `tick` 的参数超过 clippy 的 7 个上限，也容易漏掉归还。
+pub(crate) struct HostGate {
+    /// 每个 host 已占用的连接数。
+    pub usage: crate::gui::host_budget::HostUsage,
+    /// 每个在跑任务占了这个 host 几条，结束时按同数归还。
+    pub per_task: HashMap<String, (String, usize)>,
+    /// 同一 host 的连接上限。0 = 不限。
+    pub per_host: usize,
+}
+
+impl HostGate {
+    pub fn new(per_host: usize) -> Self {
+        Self {
+            usage: HashMap::new(),
+            per_task: HashMap::new(),
+            per_host,
+        }
+    }
+
+    /// 这个 host 还能不能再起一单要 `want` 条连接的任务。
+    pub fn allows(&self, url: &str, want: usize) -> bool {
+        let used = self
+            .usage
+            .get(&crate::gui::host_budget::host_of(url))
+            .copied()
+            .unwrap_or(0);
+        crate::gui::host_budget::can_start(used, want, self.per_host)
+    }
+
+    pub fn take(&mut self, task_id: &str, url: &str, want: usize) {
+        let host = crate::gui::host_budget::host_of(url);
+        crate::gui::host_budget::acquire(&mut self.usage, &host, want);
+        self.per_task.insert(task_id.to_string(), (host, want));
+    }
+
+    pub fn give_back(&mut self, task_id: &str) {
+        if let Some((host, want)) = self.per_task.remove(task_id) {
+            crate::gui::host_budget::release(&mut self.usage, &host, want);
+        }
+    }
+}
+
 fn tick(
     store: &mut QueueStore,
     children: &mut HashMap<String, Child>,
     reserved: &mut HashMap<String, u64>,
     last_delivered: &mut HashMap<String, u64>,
+    gate: &mut HostGate,
     config: &GuiConfig,
 ) -> bool {
     let mut changed = false;
@@ -323,6 +374,8 @@ fn tick(
         children.remove(&id);
         reserved.remove(&id);
         last_delivered.remove(&id);
+        // 任务结束，把 host 预算还回去。
+        gate.give_back(&id);
         let now = queue::now_secs();
         if let Some(task) = store.find_mut(&id) {
             let verdict = finish_verdict(
@@ -385,6 +438,7 @@ fn tick(
 
     // 4) 派发。
     while children.len() < config.concurrency {
+        let want = connections_per_task(config);
         let next = store
             .tasks()
             .iter()
@@ -392,10 +446,12 @@ fn tick(
                 t.status == TaskStatus::Queued
                     && t.start_at.is_none_or(|s| s <= now)
                     && t.hold_until.is_none_or(|s| s <= now)
+                    // 按 host 的连接预算（勘误 E4）：同 host 上已占用的 + 这一单
+                    // 要用的超过上限，就跳过它去看下一个（可能是别的 host）。
+                    && gate.allows(&t.url, want)
             })
             .cloned();
         let Some(task) = next else { break };
-
         let quota_slice = if let Some(quota) = store.quota() {
             if quota.window_started_at == 0 {
                 changed |= store.quota_start(now);
@@ -453,6 +509,8 @@ fn tick(
             Ok(child) => {
                 let pid = child.id();
                 children.insert(task.id.clone(), child);
+                // 记下这一单占了这个 host 几条，结束时按同数归还。
+                gate.take(&task.id, &task.url, want);
                 if let Some(slice) = quota_slice {
                     reserved.insert(task.id.clone(), slice);
                 }
@@ -478,4 +536,13 @@ fn tick(
         }
     }
     changed
+}
+
+/// 一个任务会开几条连接。
+///
+/// 现在队列不透传 `--connections`（README 记着这是已接受的限制），
+/// 所以按 dlm 的默认值算。等设置面板把 `connections` 透传进来（勘误 E5），
+/// 这里改成读设置即可，预算逻辑不用动。
+fn connections_per_task(_config: &GuiConfig) -> usize {
+    crate::consts::DEFAULT_CONNECTIONS
 }

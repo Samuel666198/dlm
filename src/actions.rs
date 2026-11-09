@@ -19,6 +19,16 @@ pub enum CompletionAction {
     Run(PathBuf),
     /// `shutdown.exe /s /t <delay_secs>`；最少 60 秒（防误触）。
     Shutdown { delay_secs: u64 },
+    /// `shutdown.exe /h`（休眠）。
+    ///
+    /// 用 `shutdown /h` 而不是 `rundll32 powrprof.dll,SetSuspendState`：
+    /// 后者的三个参数靠 rundll32 解析、不可靠，且 Hibernate 位取决于系统是否
+    /// 开着休眠（`powercfg /h`），关着就静默变成睡眠，退出码还是 0。
+    /// `shutdown /h` 在休眠没开时**直接失败**，行为可判定。
+    ///
+    /// **队列不接受这个动作**（见 `queue::validate_on_complete`）：队列可能同时
+    /// 完成多个任务，一次休眠会打断别的任务。只在 CLI 的 `--on-complete` 用。
+    Hibernate,
 }
 
 impl FromStr for CompletionAction {
@@ -38,10 +48,15 @@ impl FromStr for CompletionAction {
                     }
                     return Ok(Self::Shutdown { delay_secs });
                 }
+                if raw == "hibernate" {
+                    return Ok(Self::Hibernate);
+                }
                 match raw.strip_prefix("run:") {
                     Some(exe) if !exe.trim().is_empty() => Ok(Self::Run(PathBuf::from(exe))),
                     Some(_) => Err("完成后动作 run: 后面必须跟一个程序路径".into()),
-                    None => Err("完成后动作只认 open、run:<exe> 或 shutdown:<秒数>".into()),
+                    None => {
+                        Err("完成后动作只认 open、run:<exe>、shutdown:<秒数> 或 hibernate".into())
+                    }
                 }
             }
         }
@@ -71,6 +86,10 @@ pub fn plan(action: &CompletionAction, file: &Path) -> ActionPlan {
                 PathBuf::from("/t"),
                 PathBuf::from(delay_secs.to_string()),
             ],
+        },
+        CompletionAction::Hibernate => ActionPlan {
+            program: PathBuf::from("shutdown.exe"),
+            args: vec![PathBuf::from("/h")],
         },
     }
 }
@@ -134,6 +153,15 @@ pub fn reveal_plan(mode: RevealMode, file: &Path) -> ActionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hibernate_parses_and_plans_shutdown_h() {
+        let action: CompletionAction = "hibernate".parse().unwrap();
+        assert_eq!(action, CompletionAction::Hibernate);
+        let plan = plan(&action, Path::new("D:/dl/a.bin"));
+        assert_eq!(plan.program, PathBuf::from("shutdown.exe"));
+        assert_eq!(plan.args, vec![PathBuf::from("/h")], "休眠不接受落点参数");
+    }
 
     #[test]
     fn parses_open_run_and_shutdown() {

@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod clipboard;
+pub mod host_budget;
 pub mod http;
 pub mod runner;
 pub mod settings;
@@ -163,12 +164,13 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let (tx, rx): (Sender<Ticket>, _) = mpsc::channel();
     let runner_cfg = config.clone();
     // UI 与 runner 共享同一份快照句柄：runner 写，UI 读。
+    let per_host = 8usize; // 队列层预算；设置面板接进来后改成读设置（勘误 E5）
     let ui_snapshot = Arc::clone(&snapshot);
     let ui_quota = Arc::clone(&quota_snapshot);
     let ui_update = Arc::clone(&update_snapshot);
     std::thread::Builder::new()
         .name("dlm-gui-runner".into())
-        .spawn(move || runner::run(runner_cfg, store, rx, snapshot, quota_snapshot))
+        .spawn(move || runner::run(runner_cfg, store, rx, snapshot, quota_snapshot, per_host))
         .context("启动队列 runner 失败")?;
 
     let token = config.token.clone().unwrap_or_else(random_token);

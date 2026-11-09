@@ -361,8 +361,10 @@ impl QueueStore {
 pub fn validate_on_complete(raw: &str) -> Result<Option<String>> {
     match CompletionAction::from_str(raw) {
         Ok(CompletionAction::Open | CompletionAction::Run(_)) => Ok(Some(raw.to_string())),
-        Ok(CompletionAction::Shutdown { .. }) => {
-            bail!("队列不支持 shutdown，请在 CLI 用 --on-complete shutdown:<秒数>")
+        Ok(CompletionAction::Shutdown { .. } | CompletionAction::Hibernate) => {
+            // 队列可能同时完成多个任务，一次关机/休眠会打断别的任务。
+            // 这是既有裁定，休眠与 shutdown 同等对待（勘误 E9）。
+            bail!("队列不支持 shutdown / hibernate，请在 CLI 用 --on-complete")
         }
         Err(err) => bail!("{err}"),
     }
