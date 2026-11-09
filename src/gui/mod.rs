@@ -68,6 +68,9 @@ pub struct GuiConfig {
     /// P3：跳过单实例探测，强制起一个新进程（测试要并行起多个 GUI 时用）。
     pub force_new_instance: bool,
     /// P3：`--autostart` 起的实例不开浏览器窗口，只监听并写端点文件。
+    /// 只起 runner + HTTP，**不初始化 eframe**。集成测试必须用它 —— 否则每跑一次
+    /// 测试就弹十几个真窗口，无 GPU 的机器直接红掉（勘误 E2）。
+    pub headless: bool,
     pub autostart: bool,
 }
 
@@ -181,14 +184,59 @@ pub fn run(config: GuiConfig) -> Result<()> {
         open_app_window(&url);
     }
 
+    // HTTP accept 循环始终在独立线程里：headless 时它是唯一的服务，
+    // 将来接 eframe 时主线程要留给窗口事件循环（勘误 E1）。
+    let http_listener = listener;
+    let http_token = token.clone();
+    let http_tx = tx.clone();
+    let http_log_dir = config.log_dir.clone();
+    std::thread::Builder::new()
+        .name("dlm-gui-http".into())
+        .spawn(move || {
+            serve_http(
+                http_listener,
+                http_token,
+                http_tx,
+                http_snapshot,
+                http_quota,
+                http_update,
+                http_log_dir,
+            );
+        })
+        .context("启动 HTTP 线程失败")?;
+
+    if config.headless {
+        // 勘误 E2：集成测试只跑 runner + HTTP。主线程停在这里直到进程被杀，
+        // 与之前的行为一致 —— 测试靠 kill 结束。
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
+
+    // 非 headless：这里将来接 eframe（步骤 2 的下一步）。
+    let _ = fs::remove_file(&config.endpoint);
+    Ok(())
+}
+
+/// HTTP accept 循环。抽成独立函数，headless 与将来的窗口模式共用一份。
+#[allow(clippy::too_many_arguments)]
+fn serve_http(
+    listener: TcpListener,
+    token: String,
+    tx: Sender<Ticket>,
+    snapshot: Arc<Mutex<Vec<TaskView>>>,
+    quota_snapshot: Arc<Mutex<Option<QuotaView>>>,
+    update_snapshot: Arc<Mutex<UpdateView>>,
+    log_dir: PathBuf,
+) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let token = token.clone();
         let tx = tx.clone();
-        let snapshot = Arc::clone(&http_snapshot);
-        let quota_snapshot = Arc::clone(&http_quota);
-        let update_snapshot = Arc::clone(&http_update);
-        let log_dir = config.log_dir.clone();
+        let snapshot = Arc::clone(&snapshot);
+        let quota_snapshot = Arc::clone(&quota_snapshot);
+        let update_snapshot = Arc::clone(&update_snapshot);
+        let log_dir = log_dir.clone();
         std::thread::spawn(move || {
             let _ = http::handle_http(
                 &mut stream,
@@ -201,8 +249,6 @@ pub fn run(config: GuiConfig) -> Result<()> {
             );
         });
     }
-    let _ = fs::remove_file(&config.endpoint);
-    Ok(())
 }
 
 fn apply_quota_config(config: &GuiConfig, store: &mut QueueStore) -> Result<bool> {

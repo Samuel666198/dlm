@@ -49,6 +49,7 @@ fn parse() -> Result<GuiConfig> {
         retry_backoff: gui::DEFAULT_RETRY_BACKOFF,
         force_new_instance: false,
         autostart: false,
+        headless: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -83,6 +84,8 @@ fn parse() -> Result<GuiConfig> {
             "--autostart" => config.autostart = true,
             // P3：显式再起一个（诊断/测试用；正常双击不会走到这里）。
             "--new-instance" => config.force_new_instance = true,
+            // 勘误 E2：集成测试用，只起 runner + HTTP，不初始化窗口。
+            "--headless" => config.headless = true,
             "--autostart-install" => {
                 gui::set_autostart(true)?;
                 println!("已写入开机自启（HKCU\\...\\Run\\{}）", gui::AUTOSTART_VALUE);
@@ -95,7 +98,7 @@ fn parse() -> Result<GuiConfig> {
             }
             "--help" | "-h" => {
                 println!(
-                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open] [--max-task-retries N] [--autostart] [--new-instance] [--autostart-install] [--autostart-remove]"
+                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open] [--max-task-retries N] [--autostart] [--new-instance] [--headless] [--autostart-install] [--autostart-remove]"
                 );
                 std::process::exit(0);
             }

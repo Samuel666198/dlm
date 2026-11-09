@@ -9210,6 +9210,7 @@ fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
                 "1",
                 "--max-task-retries",
                 "2",
+                "--headless",
                 "--token",
                 token,
             ])
@@ -9339,6 +9340,7 @@ fn gui_second_instance_reuses_the_running_one() -> anyhow::Result<()> {
             endpoint.to_string_lossy().to_string(),
             "--dlm".into(),
             env!("CARGO_BIN_EXE_dlm").into(),
+            "--headless".into(),
             "--token".into(),
             token.into(),
         ]
@@ -9468,6 +9470,7 @@ fn gui_starts_when_the_endpoint_file_is_stale() -> anyhow::Result<()> {
                 endpoint.to_str().context("endpoint utf8")?,
                 "--dlm",
                 env!("CARGO_BIN_EXE_dlm"),
+                "--headless",
                 "--token",
                 "stale-test-token",
             ])
@@ -9550,6 +9553,7 @@ fn gui_does_not_retry_when_the_cap_is_zero() -> anyhow::Result<()> {
                 "1",
                 "--max-task-retries",
                 "0",
+                "--headless",
                 "--token",
                 token,
             ])
@@ -9665,6 +9669,7 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
                 env!("CARGO_BIN_EXE_dlm"),
                 "--concurrency",
                 "2",
+                "--headless",
                 "--token",
                 token,
             ])
@@ -10071,6 +10076,7 @@ fn gui_quota_stops_and_resumes_across_a_window() -> anyhow::Result<()> {
                 "262144",
                 "--quota-window",
                 "2",
+                "--headless",
                 "--token",
                 token,
             ])
@@ -10253,6 +10259,7 @@ fn gui_rejects_shutdown_completion_action() -> anyhow::Result<()> {
                 endpoint.to_str().context("endpoint utf8")?,
                 "--dlm",
                 env!("CARGO_BIN_EXE_dlm"),
+                "--headless",
                 "--token",
                 token,
             ])
@@ -10352,6 +10359,7 @@ fn host_to_queue_end_to_end() -> anyhow::Result<()> {
                 endpoint.to_str().context("endpoint utf8")?,
                 "--dlm",
                 env!("CARGO_BIN_EXE_dlm"),
+                "--headless",
                 "--token",
                 token,
             ])
@@ -10481,6 +10489,7 @@ fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
                 endpoint.to_str().context("endpoint utf8")?,
                 "--dlm",
                 env!("CARGO_BIN_EXE_dlm"),
+                "--headless",
                 "--token",
                 token,
                 "--update-url",
