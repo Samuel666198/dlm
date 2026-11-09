@@ -19,8 +19,11 @@ use crate::queue;
 use super::Ticket;
 use super::snapshot::{QuotaView, TaskView, UpdateView};
 
-/// 内嵌的浏览器 UI。原生 UI 上线后这一份会删掉（设计稿第 10 步）。
-pub const INDEX_HTML: &str = include_str!("../ui.html");
+/// 这个页面**不是**应用界面 —— 原生窗口才是。
+///
+/// 它只给浏览器扩展与人工排查用：说明队列在哪、窗口怎么找回来。
+/// 原来那份 719 行的 `ui.html` 已随原生 UI 上线删除（设计稿第 10 步）。
+pub const LANDING_HTML: &str = include_str!("landing.html");
 
 pub(crate) fn handle_http(
     stream: &mut TcpStream,
@@ -51,7 +54,7 @@ pub(crate) fn handle_http(
             stream,
             200,
             "text/html; charset=utf-8",
-            INDEX_HTML.as_bytes(),
+            LANDING_HTML.as_bytes(),
         ),
         ("GET", "/api/tasks") => {
             let tasks = snapshot.lock().map(|g| g.clone()).unwrap_or_default();

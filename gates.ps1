@@ -100,12 +100,9 @@ Invoke-Gate -Name 'clippy' -Note 'cargo clippy --all-targets -D warnings' -Body 
 if ($Node) {
 
     Invoke-Gate -Name 'extension' -Note 'check-extension-static.mjs' -Body { & $Node browser/test/check-extension-static.mjs }
-    # UI 脚本语法：`include_str!` 嵌进二进制的页面写错了，Rust 四闸看不出来，只会白屏。
-    Invoke-Gate -Name 'ui-script' -Note 'check-ui-script.mjs' -Body { & $Node browser/test/check-ui-script.mjs }
 }
 else {
     $script:Results += [pscustomobject]@{ Gate = 'extension'; Result = 'SKIP'; Detail = 'node not found' }
-    $script:Results += [pscustomobject]@{ Gate = 'ui-script'; Result = 'SKIP'; Detail = 'node not found' }
 }
 Write-Host ''
 Write-Host '=== summary ===' -ForegroundColor Cyan

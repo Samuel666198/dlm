@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dlm · 扩展入口</title>
+<style>
+  :root{
+    --paper:#F6F3EC; --surface:#FFFDF8; --line:#E4DFD2;
+    --ink:#2A2720; --ink-2:#6C6860; --ink-3:#9C978D; --accent:#C06340;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    min-height:100vh;background:var(--paper);color:var(--ink);
+    font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    display:flex;align-items:center;justify-content:center;padding:32px;
+    -webkit-font-smoothing:antialiased;
+  }
+  main{max-width:520px;width:100%}
+  .mark{
+    width:38px;height:38px;border-radius:10px;background:var(--accent);
+    display:grid;place-items:center;margin-bottom:20px;
+  }
+  .mark svg{width:20px;height:20px;stroke:#FFF9F4;fill:none;stroke-width:2;
+    stroke-linecap:round;stroke-linejoin:round}
+  h1{font-size:19px;font-weight:600;letter-spacing:-.2px;margin-bottom:8px}
+  p{color:var(--ink-2);margin-bottom:14px}
+  .note{
+    background:var(--surface);border:1px solid var(--line);border-radius:9px;
+    padding:14px 16px;color:var(--ink-2);font-size:13px;
+  }
+  .note b{color:var(--ink);font-weight:600}
+  code{
+    font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;
+    font-size:12.5px;background:#F1EDE4;border-radius:4px;padding:1px 5px;
+  }
+  .foot{margin-top:18px;font-size:12px;color:var(--ink-3)}
+</style>
+</head>
+<body>
+<main>
+  <div class="mark">
+    <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M4 19h16"/></svg>
+  </div>
+
+  <h1>dlm 现在是原生窗口</h1>
+  <p>这个页面只剩一个用途：给浏览器扩展投递任务。队列、进度、设置都在桌面窗口里。</p>
+
+  <div class="note">
+    <b>找窗口？</b> 看任务栏，或点系统托盘里的 dlm 图标。
+    关掉窗口不会退出程序 —— 它会收进托盘继续跑。
+  </div>
+
+  <p style="margin-top:16px">
+    扩展仍然照常工作：右键链接、页内悬浮球都会把任务投到这里。
+  </p>
+
+  <p class="foot">
+    HTTP 接口：<code>/api/add</code> · <code>/api/tasks</code> · <code>/api/pause</code> ·
+    <code>/api/reveal</code> —— 全部要求 <code>?t=&lt;token&gt;</code>
+  </p>
+</main>
+</body>
+</html>

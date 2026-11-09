@@ -7,7 +7,7 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `sdd/dlm-kernel`，未 push、无远程 |
-| 门禁 | `fmt 0` · `--lib 322/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查 · UI 脚本语法（统一走根目录 `gates.ps1`） |
+| 门禁 | `fmt 0` · `--lib 342/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查（统一走根目录 `gates.ps1`） |
 | 产品面 | 内核 + CLI + 本地 Web UI 队列 + Native Messaging 扩展（右键/页内组件/媒体与文件嗅探/HLS 直链） |
 | 最新进展 | `2026-11-03 悬浮球`（扩展 0.2.7）、`2026-10-29 页内下载组件`、`2026-10-29 站点脚本下载拦截`、`2026-10-28 Windows x64 便携包` |
 | v2.1 交付 | [`plans/2026-11-07-v21-product-polish.md`](superpowers/plans/2026-11-07-v21-product-polish.md) 已全部落地（P2 打开文件 / P1 自动重试 / P4 UI 收尾 / P3 自启与单实例）；托盘 P5 暂缓 |

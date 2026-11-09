@@ -263,7 +263,15 @@ target/debug/dlm.exe --url https://example.com/master.m3u8 --hls --out-dir D:/dl
 
 ## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
 
-**C0 裁定**：本地 Web UI，零新 crate（默认依赖仍是 6 个）。没有原生窗口；浏览器打开页面即可。
+**C0 裁定（2026-11-10 修订）**：**原生窗口**。用 `eframe`（glow 后端）+ `tray-icon`，
+不再用系统浏览器当外壳。原裁定"本地 Web UI、零新 crate、无原生窗口"作废。
+
+改动理由：浏览器外壳拿不到三件事 —— 真实窗口与托盘、不依赖浏览器、启动快。
+见 [`docs/superpowers/specs/2026-11-10-native-shell-full-design.md`](docs/superpowers/specs/2026-11-10-native-shell-full-design.md)
+与[勘误](docs/superpowers/specs/2026-11-10-native-shell-errata.md)。
+
+**HTTP 服务保留**：它是浏览器扩展的入口（`扩展 → 宿主 → POST /api/add`），
+与 UI 怎么画无关。`GET /` 现在返回一页说明，不再是应用界面。
 
 ```bash
 cargo build --bins
@@ -313,7 +321,7 @@ target/debug/dlm-gui.exe                 # 打印 http://127.0.0.1:<port>/?t=<to
 
 ```bash
 cargo test --test integration              # 含 gui_queue_adds_and_finishes_a_download
-node browser/test/verify-gui.mjs            # Chrome/Edge，添加→done→截图
+node browser/test/verify-media-sniff.mjs    # Chrome/Edge，页内悬浮球与投递
 ```
 
 证据：[`docs/evidence/2026-10-22-c3-gui.md`](docs/evidence/2026-10-22-c3-gui.md)（真浏览器截图与日志）。
