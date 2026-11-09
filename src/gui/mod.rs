@@ -8,8 +8,10 @@
 //! 只绑 127.0.0.1；所有 HTTP 路径都要求 `?t=<token>`；队列不存 Cookie。
 
 pub mod app;
+pub mod clipboard;
 pub mod http;
 pub mod runner;
+pub mod settings;
 pub mod snapshot;
 
 #[cfg(test)]
@@ -246,7 +248,12 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 app::fonts::resolved_font_name().unwrap_or("（无，中文将显示为方框）"),
                 if cjk { "" } else { " [装载失败]" }
             );
-            let mut app = app::App::new(ui_snapshot, ui_quota, ui_update, ui_tx);
+            let settings_dir = config
+                .queue
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let mut app = app::App::new(ui_snapshot, ui_quota, ui_update, ui_tx, settings_dir);
             // `--autostart` 纯托盘：等 20 帧（≈330ms）窗口稳定后再藏起来。
             // 太早发 `Visible(false)` 会被随后的窗口初始化覆盖（实测）。
             app.start_hidden = if autostart { 20 } else { 0 };

@@ -26,6 +26,7 @@ use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 pub mod dialog;
 pub mod fonts;
 pub mod list;
+pub mod settings_ui;
 pub mod sidebar;
 pub mod status;
 pub mod theme;
@@ -63,6 +64,18 @@ pub struct App {
     pub window_visible: bool,
     /// 托盘句柄。None = 建不起来（无托盘环境），此时关窗即退出。
     pub tray: Option<tray::Tray>,
+    /// 剪贴板监视线程句柄。`None` = 没在跑。
+    pub(super) clipboard: Option<crate::gui::clipboard::Watcher>,
+    /// 设置面板是否打开。
+    pub(super) settings_open: bool,
+    /// 已保存的设置。
+    pub(super) settings: crate::gui::settings::Settings,
+    /// 面板里的草稿。点保存才写回 `settings`。
+    pub(super) draft: crate::gui::settings::Settings,
+    /// 设置文件所在目录（`queue.json` 同级）。
+    pub(super) settings_dir: std::path::PathBuf,
+    /// 保存失败的提示。
+    pub(super) settings_error: Option<String>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
@@ -75,7 +88,15 @@ impl App {
         quota: QuotaSlot,
         update: UpdateSlot,
         tx: Sender<Ticket>,
+        settings_dir: std::path::PathBuf,
     ) -> Self {
+        let settings = crate::gui::settings::Settings::load(&settings_dir);
+        // 设置里开了剪贴板监视就在启动时起来（默认关，见 settings.rs）。
+        let clipboard = if settings.watch_clipboard {
+            crate::gui::clipboard::spawn()
+        } else {
+            None
+        };
         Self {
             snapshot,
             quota,
@@ -89,6 +110,12 @@ impl App {
             close_to_tray: true,
             window_visible: true,
             tray: tray::Tray::new(),
+            clipboard,
+            settings_open: false,
+            settings: settings.clone(),
+            draft: settings,
+            settings_dir,
+            settings_error: None,
             start_hidden: 0,
         }
     }
@@ -150,6 +177,26 @@ impl App {
                 }
             }
         }
+    }
+
+    /// 设置里那些"立刻生效"的项。
+    ///
+    /// 目前只有剪贴板监视：开了就起线程，关了就让线程退出（勘误旁注：
+    /// 不能靠"启动时不启动"，热切换要能停）。
+    pub(super) fn apply_settings_runtime(&mut self) {
+        let want = self.settings.watch_clipboard;
+        let running = self.clipboard.is_some();
+        match (want, running) {
+            (true, false) => {
+                self.clipboard = crate::gui::clipboard::spawn();
+            }
+            (false, true) => {
+                // 丢句柄 = 置停止标志，线程下一轮自己退。
+                self.clipboard = None;
+            }
+            _ => {}
+        }
+        self.close_to_tray = self.settings.close_to_tray;
     }
 
     /// 发一个 ticket。队列已退出时静默丢弃 —— UI 不该因为 runner 挂了而崩。
@@ -217,6 +264,9 @@ impl eframe::App for App {
 
         if self.adding {
             self.add_dialog(&ctx);
+        }
+        if self.settings_open {
+            self.settings_panel(&ctx);
         }
     }
 }

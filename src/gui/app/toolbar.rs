@@ -105,7 +105,9 @@ impl App {
             ui.add_space(6.0);
 
             if tool_button(ui, Icon::Gear, "设置", true, false).clicked() {
-                // 设置面板在步骤 5 接。
+                self.settings_open = true;
+                self.draft = self.settings.clone();
+                self.settings_error = None;
             }
         });
     }
