@@ -189,3 +189,28 @@ winit/eframe/托盘/关窗/剪贴板 —— 它只把 `Ui` 渲到离屏纹理。
 | C5 | 剪贴板默认 | **关**（已确认） |
 | C6 | "启动更快"的数 | 首帧 ≤ 300ms（待校准） |
 | C7 | 人工截图能否当长期 UI 验收 | 不能，用 agent-desktop 冒烟替代 |
+
+## E14 `--autostart` 隐藏窗口未解决（实测记录）
+
+目标：`--autostart` 起的实例不弹窗（P3）。
+
+**试过四条路，全部无效**（用 `IsWindowVisible` 实测）：
+
+| 做法 | 结果 |
+|---|---|
+| `ViewportBuilder::with_visible(false)` | 窗口仍可见 |
+| 首帧 `ViewportCommand::Visible(false)` | 命令发出，仍可见 |
+| 第 20 帧再发 `Visible(false)` | 同上 |
+| Win32 `ShowWindow(GetActiveWindow())` / `EnumWindows` 按 pid 找 | 调用执行，`MainWindowHandle` 仍可见 |
+
+**判断**：eframe 在窗口事件循环里会重新显示窗口，外部隐藏被覆盖；
+或者 `MainWindowHandle` 指向的是另一个隐藏窗口而真正可见的那个没被找到。
+
+**现状**：`--autostart` 仍会短暂显示窗口，随后被 `hide_window()` 尝试隐藏。
+**这是已知缺口，不是已完成项。** 后续可选方向：
+1. 读 eframe 的 viewport 事件，在 `ViewportEvent::Visible` 之后立刻隐藏
+2. 放弃 `--autostart` 的"完全不弹窗"，改成"启动后最小化到托盘"（`SW_MINIMIZE`）
+3. 用 `winit` 的 `Window::set_visible`（绕过 eframe 的封装）
+
+托盘本身的「关窗收托盘」「显示窗口」「退出」三条语义**已验证通过**，
+不受此缺口影响。

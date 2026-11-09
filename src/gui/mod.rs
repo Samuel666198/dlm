@@ -223,11 +223,15 @@ pub fn run(config: GuiConfig) -> Result<()> {
     // HTTP 已经在 serve_http 线程里跑（勘误 E1）。
     let ui_tx = tx.clone();
 
+    let autostart = config.autostart;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size(theme::WINDOW_DEFAULT)
             .with_min_inner_size(theme::WINDOW_MIN)
-            .with_title("dlm"),
+            .with_title("dlm")
+            .with_icon(window_icon())
+            // `--autostart` 纯托盘：开机时没人看屏幕，只保证队列在跑（P3）。
+            .with_visible(!config.autostart),
         ..Default::default()
     };
     eframe::run_native(
@@ -242,12 +246,11 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 app::fonts::resolved_font_name().unwrap_or("（无，中文将显示为方框）"),
                 if cjk { "" } else { " [装载失败]" }
             );
-            Ok(Box::new(app::App::new(
-                ui_snapshot,
-                ui_quota,
-                ui_update,
-                ui_tx,
-            )))
+            let mut app = app::App::new(ui_snapshot, ui_quota, ui_update, ui_tx);
+            // `--autostart` 纯托盘：等 20 帧（≈330ms）窗口稳定后再藏起来。
+            // 太早发 `Visible(false)` 会被随后的窗口初始化覆盖（实测）。
+            app.start_hidden = if autostart { 20 } else { 0 };
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("起窗口失败：{e}"))?;
@@ -591,4 +594,53 @@ pub fn random_token() -> String {
 pub(crate) fn discard_reply() -> Sender<std::result::Result<String, String>> {
     let (tx, _rx) = mpsc::channel();
     tx
+}
+
+/// 窗口图标：与托盘同一份像素。
+///
+/// `egui::IconData` 要 RGBA 与尺寸；`tray_icon::Icon` 不暴露像素，所以这里
+/// 重新生成一份（32×32，成本可忽略）。
+fn window_icon() -> eframe::egui::IconData {
+    const SIZE: u32 = 32;
+    let accent = [0xC0u8, 0x63, 0x40, 0xFF];
+    let white = [0xFFu8, 0xFF, 0xFF, 0xFF];
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let i = ((y * SIZE + x) * 4) as usize;
+            let r = 7i32;
+            let dx = if (x as i32) < r {
+                r - x as i32
+            } else if x as i32 > SIZE as i32 - 1 - r {
+                x as i32 - (SIZE as i32 - 1 - r)
+            } else {
+                0
+            };
+            let dy = if (y as i32) < r {
+                r - y as i32
+            } else if y as i32 > SIZE as i32 - 1 - r {
+                y as i32 - (SIZE as i32 - 1 - r)
+            } else {
+                0
+            };
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            rgba[i..i + 4].copy_from_slice(&accent);
+            let cx = SIZE as i32 / 2;
+            let in_shaft = (x as i32 - cx).abs() <= 1 && (9..=18).contains(&(y as i32));
+            let in_head = {
+                let d = y as i32 - 17;
+                (0..=6).contains(&d) && (x as i32 - cx).abs() <= 6 - d
+            };
+            if in_shaft || in_head {
+                rgba[i..i + 4].copy_from_slice(&white);
+            }
+        }
+    }
+    eframe::egui::IconData {
+        rgba,
+        width: SIZE,
+        height: SIZE,
+    }
 }

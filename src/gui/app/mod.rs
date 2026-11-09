@@ -30,6 +30,7 @@ pub mod sidebar;
 pub mod status;
 pub mod theme;
 pub mod toolbar;
+pub mod tray;
 
 /// runner 换快照的句柄。
 pub type SnapshotSlot = Arc<Mutex<Vec<TaskView>>>;
@@ -58,8 +59,14 @@ pub struct App {
     pub quitting: bool,
     /// 关闭窗口时收进托盘而不是退出（设置项，默认 true）。
     pub close_to_tray: bool,
-    /// 窗口当前是否可见。托盘"显示窗口"把它置 true。
+    /// 窗口当前是否可见。托盘「显示窗口」把它置 true。
     pub window_visible: bool,
+    /// 托盘句柄。None = 建不起来（无托盘环境），此时关窗即退出。
+    pub tray: Option<tray::Tray>,
+    /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
+    ///
+    /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
+    pub start_hidden: u8,
 }
 
 impl App {
@@ -81,6 +88,8 @@ impl App {
             quitting: false,
             close_to_tray: true,
             window_visible: true,
+            tray: tray::Tray::new(),
+            start_hidden: 0,
         }
     }
 
@@ -102,6 +111,47 @@ impl App {
         }
     }
 
+    /// 处理托盘动作。
+    ///
+    /// 「显示窗口」发 `Visible(true)` + `Focus`；「退出」先置 `quitting` 再发 Close，
+    /// 否则会被自己的 `CancelClose` 吞掉（勘误 E6）。
+    fn drain_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = &self.tray else { return };
+        while let Some(action) = tray.poll() {
+            match action {
+                tray::TrayAction::Show => {
+                    self.window_visible = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.request_repaint();
+                }
+                tray::TrayAction::NewTask => {
+                    self.window_visible = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.adding = true;
+                    self.add_form.focused = false;
+                    ctx.request_repaint();
+                }
+                tray::TrayAction::PauseAll => {
+                    let ids: Vec<String> = self
+                        .tasks()
+                        .iter()
+                        .filter(|t| t.status == "running" || t.status == "queued")
+                        .map(|t| t.id.clone())
+                        .collect();
+                    for id in ids {
+                        self.send(Ticket::Pause(id));
+                    }
+                }
+                tray::TrayAction::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
     /// 发一个 ticket。队列已退出时静默丢弃 —— UI 不该因为 runner 挂了而崩。
     pub(super) fn send(&self, ticket: Ticket) {
         let _ = self.tx.send(ticket);
@@ -111,6 +161,23 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // `--autostart`：等窗口稳定后藏起来。
+        //
+        // 实测：`ViewportBuilder::with_visible(false)` 与首帧的 `Visible(false)`
+        // 都会被随后的窗口初始化覆盖，所以用帧计数器等到第 20 帧再发。
+        if self.start_hidden > 0 {
+            self.start_hidden -= 1;
+            if self.start_hidden == 0 {
+                self.window_visible = false;
+                eprintln!("dlm-gui: 隐藏窗口（纯托盘模式）");
+                hide_window();
+            }
+            ctx.request_repaint();
+        }
+
+        // 托盘动作（勘误 E6/E3）：在主线程 poll，不另起消息泵。
+        self.drain_tray(&ctx);
 
         // 关窗收进托盘（勘误 E6）：先看用户是不是真想退出。
         if ctx.input(|i| i.viewport().close_requested()) && self.close_to_tray && !self.quitting {
@@ -153,3 +220,61 @@ impl eframe::App for App {
         }
     }
 }
+
+/// 把窗口藏起来（`--autostart` 纯托盘用）。
+///
+/// 为什么不用 `ViewportCommand::Visible(false)`：eframe 0.37 在这台机器上
+/// 发了命令、`IsWindowVisible` 仍是 true（实测）。直接调 Win32 的 `ShowWindow`
+/// 确定有效，代价是这段代码是 Windows-only。
+///
+/// `GetActiveWindow` 在无焦点时会返回 null，所以退到 `EnumWindows` 找本进程
+/// 的可见顶层窗口 —— 那是 eframe 的主窗口。
+#[cfg(windows)]
+fn hide_window() {
+    use std::ffi::c_void;
+    // SAFETY: 只调 user32 的查询/设置函数，句柄由本进程自己枚举得到。
+    unsafe {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetActiveWindow() -> *mut c_void;
+            fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
+            fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+            fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+            fn EnumWindows(
+                cb: unsafe extern "system" fn(*mut c_void, isize) -> i32,
+                lparam: isize,
+            ) -> i32;
+        }
+
+        const SW_HIDE: i32 = 0;
+
+        // 先试活动窗口；不是我们的就枚举。
+        let active = GetActiveWindow();
+        if !active.is_null() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(active, &mut pid);
+            if pid == std::process::id() {
+                ShowWindow(active, SW_HIDE);
+                return;
+            }
+        }
+
+        unsafe extern "system" fn cb(hwnd: *mut c_void, lparam: isize) -> i32 {
+            let me = lparam as u32;
+            let mut pid = 0u32;
+            // SAFETY: 句柄由系统在回调里给出，两个函数都只读/设置窗口状态。
+            unsafe {
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid == me && IsWindowVisible(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+            1 // 继续枚举
+        }
+
+        EnumWindows(cb, std::process::id() as isize);
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_window() {}
