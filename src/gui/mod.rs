@@ -7,6 +7,7 @@
 //!
 //! 只绑 127.0.0.1；所有 HTTP 路径都要求 `?t=<token>`；队列不存 Cookie。
 
+pub mod app;
 pub mod http;
 pub mod runner;
 pub mod snapshot;
@@ -30,6 +31,7 @@ use serde_json::Value;
 
 use crate::actions;
 use crate::consts::PROBE_READ_BYTES;
+use crate::gui::app::theme;
 use crate::queue::{self, QueueStore};
 
 pub use snapshot::{QuotaView, TaskView, UpdateView, quota_view, snapshot_of};
@@ -156,8 +158,12 @@ pub fn run(config: GuiConfig) -> Result<()> {
             })
             .context("启动更新检查线程失败")?;
     }
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx): (Sender<Ticket>, _) = mpsc::channel();
     let runner_cfg = config.clone();
+    // UI 与 runner 共享同一份快照句柄：runner 写，UI 读。
+    let ui_snapshot = Arc::clone(&snapshot);
+    let ui_quota = Arc::clone(&quota_snapshot);
+    let ui_update = Arc::clone(&update_snapshot);
     std::thread::Builder::new()
         .name("dlm-gui-runner".into())
         .spawn(move || runner::run(runner_cfg, store, rx, snapshot, quota_snapshot))
@@ -213,7 +219,39 @@ pub fn run(config: GuiConfig) -> Result<()> {
         }
     }
 
-    // 非 headless：这里将来接 eframe（步骤 2 的下一步）。
+    // 非 headless：起原生窗口。主线程归 eframe 的事件循环，
+    // HTTP 已经在 serve_http 线程里跑（勘误 E1）。
+    let ui_tx = tx.clone();
+
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size(theme::WINDOW_DEFAULT)
+            .with_min_inner_size(theme::WINDOW_MIN)
+            .with_title("dlm"),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "dlm",
+        options,
+        Box::new(move |cc| {
+            theme::apply(&cc.egui_ctx);
+            // 中文字形：default_fonts 只有拉丁，不装这个满屏方框。
+            let cjk = app::fonts::install(&cc.egui_ctx);
+            eprintln!(
+                "dlm-gui: 中文字体 = {}{}",
+                app::fonts::resolved_font_name().unwrap_or("（无，中文将显示为方框）"),
+                if cjk { "" } else { " [装载失败]" }
+            );
+            Ok(Box::new(app::App::new(
+                ui_snapshot,
+                ui_quota,
+                ui_update,
+                ui_tx,
+            )))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("起窗口失败：{e}"))?;
+
     let _ = fs::remove_file(&config.endpoint);
     Ok(())
 }
@@ -542,4 +580,15 @@ pub fn random_token() -> String {
     );
     hasher.write_u32(std::process::id());
     format!("{:016x}", hasher.finish())
+}
+
+// ---------------------------------------------------------------- UI 辅助
+
+/// UI 线程发 `Ticket::Add` 时用的丢弃式回执通道。
+///
+/// UI 不能阻塞等回执（会死锁：runner 要先处理完 ticket 才会回），所以给一个
+/// 立刻丢弃的接收端。任务是否成功由快照里的状态体现，不靠这个回执。
+pub(crate) fn discard_reply() -> Sender<std::result::Result<String, String>> {
+    let (tx, _rx) = mpsc::channel();
+    tx
 }

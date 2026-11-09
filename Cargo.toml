@@ -11,6 +11,11 @@ serde_json = "1"
 anyhow = "1"
 sha2 = "0.11"
 
+# 原生外壳（v2.1 步骤 2+）。**保留 default_fonts**：关掉它窗口里一个字都没有
+# （勘误 E3）。不启 wgpu —— 默认后端本来就是 glow，wgpu 是 opt-in。
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+tray-icon = { version = "0.21", default-features = false }
+
 # 集成测试用的假 `dlm`：按调用次数发不同退出码，用来钉 P1 的自动重试。
 # 只进 `cargo test` 的构建，不随发布包分发（packaging 只拷三件套）。
 [[bin]]
