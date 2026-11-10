@@ -178,8 +178,20 @@ for (const c of CASES) {
   await evaluate(`(() => { ${S}.getElementById("dlm-panel").hidden = true; return true; })()`);
   await sleep(150);
 
+  // 0) 悬浮球必须可见。页面上没有可下载内容时，曾经 host.hidden=!any 会把整个
+  //    组件设成 display:none，球根本点不到 —— 这是「哪个网站都不行」的直接原因。
+  const hostStyle = await evaluate(`(() => {
+    const h = document.getElementById("dlm-native-box");
+    const cs = getComputedStyle(h);
+    return { display: cs.display, hidden: h.hidden };
+  })()`);
+  log.push(`${c.mode}: host display=${hostStyle.display} hidden=${hostStyle.hidden}`);
+  if (hostStyle.display === "none") failures.push(`${c.mode}: 悬浮球被 display:none 隐藏了`);
+
   // 1) 点球应开面板
   const ball = await centerOf(`${S}.getElementById("dlm-toggle")`);
+  if (!ball || ball.w === 0) failures.push(`${c.mode}: 悬浮球尺寸为 0，点不到`);
+  log.push(`${c.mode}: 球尺寸=${ball && ball.w}px`);
   await realClick(ball.x, ball.y);
   const opened = await panelOpen();
   log.push(`${c.mode}: 球点击开面板=${opened}`);

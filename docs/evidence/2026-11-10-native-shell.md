@@ -280,3 +280,77 @@ pointer-blocked: 球开面板=true  标签切换=true  折叠按钮=true
 （1）归因于站点事件拦截，（2）用 CDP 合成事件当成真实点击的等价物。
 真正有效的是把状态一层层打印出来 —— 标记显示路由命中、`openPanel` 执行、
 `collapsed=false`，但 `any=false` 且 `panel.hidden` 仍为 true，问题就此定位。
+## 附四：最后一层 —— 悬浮球被整块 display:none 藏掉（0.2.11 修复）
+
+附三修掉「空页面上 render() 提前返回」之后，在真实页面上仍然看不到球。
+用 CDP 读计算样式，拿到了决定性的一行：
+
+```
+{ host: true, hostHidden: true, hostDisplay: "none", ballRect: { x:0, y:0, w:0, h:0 } }
+```
+
+`render()` 里还有一句：
+
+```js
+host.hidden = !any;   // any 为 false 时 → display:none
+```
+
+页面上没检测到任何下载时，整个宿主元素被设成 `display:none`，**悬浮球直接消失**，
+用户连点都点不到。之前以为 `:host { display: block }` 会盖住 `[hidden]` 的
+`display:none`，实测并不会 —— 真机上 `getComputedStyle(host).display` 就是 `"none"`。
+
+恒驻的悬浮球不该按「有没有内容」决定存亡。闲置状态本来就由透明度下降表达，
+不需要消失。删掉这一行。
+
+### 两处修改合起来才完整
+
+| 版本 | 改了什么 | 效果 |
+|---|---|---|
+| 0.2.10 | 面板开合两行移到提前返回之前，删掉 `if (!any) return;` | 球可见时，点它能开面板 |
+| 0.2.11 | 删掉 `host.hidden = !any;` | 没内容时球也在，点得到 |
+
+只做 0.2.10 时，在「无内容」页面上球根本不可见，用户看到的现象仍然是「没反应」。
+
+### 验证
+
+真实页面（`http://samueldemac-mini:7863/panel/#logs`，SPA 控制台）：
+
+```
+{ host: true, hostHidden: false, hostDisplay: "block", ballRect: { x:1094, y:575, w:48, h:48 } }
+```
+
+OS 物理点击球心（映射 屏幕 = 视口*1.50 + (23,266)）：
+
+```
+面板起始 hidden=true  → 点击后 面板打开 = true
+```
+
+截图见 `docs/evidence/2026-11-10-ext-0211-ball.png`：面板在真实页面上展开，
+显示「本页」、三个标签、重置位置、v0.2.11。
+
+回归测试新增两条断言，钉住这次的教训：
+
+```
+host display 必须是 block（不能是 none）
+球尺寸必须 > 0（能点到）
+```
+
+三种页面全绿，球尺寸均为 48px。
+
+### 三轮误判的复盘
+
+同一个问题我错了三次，值得记下来：
+
+1. **归因于站点拦截事件** —— 用 CDP 合成事件测出「干净页能开」，就推断是被站点
+   `stopPropagation` 干掉了。实际上 CDP 合成点击和真实点击并不等价，而且我的测试页
+   带可下载链接，`any` 为 true，恰好绕过了故障分支。
+2. **加了 window 捕获路由** —— 改造本身无害（更抗站点干扰），但完全没碰到真因。
+3. **以为 `:host{display:block}` 覆盖了 `[hidden]`** —— 没有实测就下结论，实际是
+   `display:none`。
+
+真正管用的是**把状态一层层打出来**：路由命中 → `openPanel` 执行 → `collapsed=false`
+→ 但 `any=false` 且 `panel.hidden` 仍为 true。以及**直接读计算样式**，
+`getComputedStyle(host).display === "none"` 一量就结案。
+
+教训：验收脚本的测试页不能只用「有内容」的情形；`hidden` 属性在自定义元素上
+是否生效必须实测；合成输入不能当作真实输入的等价物。

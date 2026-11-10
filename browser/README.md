@@ -99,7 +99,7 @@ node browser/test/verify-native-ping.mjs --browser "C:\Program Files (x86)\Micro
 - 宿主把 dlm 的进度行解析成 `op:"progress"`（400 ms 节流），子进程退出后回 `op:"done"`；
   页面与 popup 的完成/失败状态都来自这里。
 - 工具栏 popup 显示宿主状态与当前标签页的下载列表。
-- Service Worker 用**带版本号的文件名**（当前 `background-0.2.10.js`，manifest 里指过去）：
+- Service Worker 用**带版本号的文件名**（当前 `background-0.2.11.js`，manifest 里指过去）：
   未打包扩展的 SW 会被浏览器缓存，只改内容、重启浏览器仍可能跑旧代码；换文件名才能强制重取。
   排查标记：页面 `document.documentElement` 的 `data-dlm-version`、storage 的 `buildVersion`。
 - 宿主 `hls:true` 强制直连 `dlm --hls`，不走队列（队列不接不可续传的 HLS）；

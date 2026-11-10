@@ -595,15 +595,18 @@ function render() {
   host.dataset.dlmReady = state.hostReady ? "1" : "0";
   const anyActive = state.active.size > 0;
   const any = state.items.length > 0 || anyActive || state.finished.length > 0 || !!state.confirm;
-  host.hidden = !any;
 
-  // 面板开合只由用户点击决定，**与有没有内容无关**。
+  // 这里有两件事必须和「有没有内容」解耦，否则页面上没检测到下载时悬浮球就是废的：
   //
-  // 这两行原本在 `if (!any) return;` 之后，于是页面上没检测到任何下载时
-  // render() 直接返回，panel.hidden 永远不会被更新 —— 表现为「点悬浮球没反应，
-  // 只有点了页面里的下载链接（产生 state.confirm，any 变 true）面板才冒出来」。
-  // 而 :host 显式写了 display:block，覆盖了 [hidden] 的 display:none，
-  // 所以球一直可见，把这个 bug 盖住了。
+  // 1) 不要藏 host。原来写作 `host.hidden = !any;`，实测若为 true 则命中
+  //    UA 的 [hidden]{display:none}，即使 :host 写了 display:block 也盖不住
+  //    （真机上量到 hostDisplay = "none"，球根本没渲染，ballRect 全是 0）。
+  //    悬浮球应当常驻，闲置靠透明度下降表达，而不是消失。
+  //
+  // 2) 面板开合只由用户点击（state.collapsed）决定。这两行原本在
+  //    `if (!any) return;` 之后，于是空页面上 render() 提前返回，panel.hidden
+  //    永不更新 —— 表现为「点球没反应，只有点了页面里的下载链接才展开面板」
+  //    （链接会写入 state.confirm，让 any 变 true 才走到那两行）。
   shadow.getElementById("dlm-panel").hidden = state.collapsed;
   shadow.getElementById("dlm-toggle").setAttribute("aria-expanded", state.collapsed ? "false" : "true");
 
