@@ -3,24 +3,33 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root{color-scheme:light;font-family:"Segoe UI Variable","Segoe UI",system-ui,"Microsoft YaHei",sans-serif}
+  /* 与原生窗口、页内悬浮球同一套语言：暖纸底 + 陶土橙单强调色。
+     色值对齐 src/gui/app/theme.rs，改动时三处一起改。 */
+  :root{
+    color-scheme:light;
+    font-family:"Segoe UI Variable","Segoe UI",system-ui,"Microsoft YaHei",sans-serif;
+    --card:#fffdf8; --ink:#2a2720; --muted:#6c6860; --faint:#9c978d;
+    --line:#e4dfd2; --page:#f1ede4; --accent:#c06340; --accent-ink:#a34f31;
+    --accent-soft:#f2e1d7;
+  }
   *{box-sizing:border-box}
-  body{margin:0;width:360px;background:#f7f8fa;color:#171b22}
-  header{display:flex;align-items:center;justify-content:space-between;padding:13px 14px 11px;border-bottom:1px solid #e6e9ee}
+  body{margin:0;width:360px;background:var(--page);color:var(--ink)}
+  header{display:flex;align-items:center;justify-content:space-between;padding:13px 14px 11px;border-bottom:1px solid var(--line)}
   .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;letter-spacing:-.02em}
-  .mark{width:24px;height:24px;border-radius:6px;background:#0f766e;color:#fff;display:grid;place-items:center;font-size:13px}
-  .status{font:10px ui-monospace,Consolas,monospace;color:#6c7687;border:1px solid #e6e9ee;background:#fff;border-radius:6px;padding:4px 7px}
+  .mark{width:24px;height:24px;border-radius:7px;background:var(--accent);color:#fff9f4;display:grid;place-items:center;font-size:13px}
+  .status{font:10px ui-monospace,Consolas,monospace;color:var(--muted);border:1px solid var(--line);background:var(--card);border-radius:6px;padding:4px 7px}
   main{padding:10px 12px 12px}
-  .hint{font-size:11px;color:#9aa4b2;padding:8px 2px 10px}
-  .item{border:1px solid #e6e9ee;background:#fff;border-radius:8px;padding:9px;margin-bottom:7px}
+  .hint{font-size:11px;color:var(--faint);padding:8px 2px 10px}
+  .item{border:1px solid var(--line);background:var(--card);border-radius:9px;padding:9px;margin-bottom:7px}
   .row{display:flex;align-items:center;gap:7px}
-  .kind{font:9px ui-monospace,Consolas,monospace;color:#0f766e;border:1px solid #cfe8e2;background:#e7f4f1;border-radius:4px;padding:1px 4px}
-  .url{flex:1;min-width:0;font:10px ui-monospace,Consolas,monospace;color:#6c7687;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .dl{flex:0 0 auto;border:0;border-radius:5px;background:#0f766e;color:#fff;font-size:11px;padding:5px 9px;cursor:pointer}
-  .dl:hover{background:#0b655e}
-  .empty{font-size:11px;color:#9aa4b2;text-align:center;padding:22px 8px}
-  footer{display:flex;justify-content:space-between;align-items:center;padding:0 14px 12px;font:10px ui-monospace,Consolas,monospace;color:#9aa4b2}
-  button.ghost{font-size:10px;border:1px solid #e6e9ee;background:#fff;color:#6c7687;border-radius:5px;padding:4px 7px;cursor:pointer}
+  .kind{font:9px ui-monospace,Consolas,monospace;color:var(--accent-ink);border:1px solid #e8cfc2;background:var(--accent-soft);border-radius:4px;padding:1px 4px}
+  .url{flex:1;min-width:0;font:10px ui-monospace,Consolas,monospace;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dl{flex:0 0 auto;border:0;border-radius:6px;background:var(--accent);color:#fff9f4;font-size:11px;padding:5px 9px;cursor:pointer}
+  .dl:hover{background:var(--accent-ink)}
+  .empty{font-size:11px;color:var(--faint);text-align:center;padding:22px 8px}
+  footer{display:flex;justify-content:space-between;align-items:center;padding:0 14px 12px;font:10px ui-monospace,Consolas,monospace;color:var(--faint)}
+  button.ghost{font-size:10px;border:1px solid var(--line);background:var(--card);color:var(--muted);border-radius:6px;padding:4px 7px;cursor:pointer}
+  button.ghost:hover{background:var(--accent-soft);color:var(--accent-ink)}
 </style>
 </head>
 <body>

@@ -4,7 +4,7 @@ let currentTab = null;
 function setStatus(text, bad) {
   const el = $("status");
   el.textContent = text;
-  el.style.color = bad ? "#b4232f" : "#6c7687";
+  el.style.color = bad ? "#a2443a" : "#6c6860";
 }
 
 function render(items) {

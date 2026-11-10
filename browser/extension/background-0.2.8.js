@@ -140,7 +140,7 @@ function connect() {
       const mode = msg.mode || "direct";
       store({ lastJob: { ...msg, mode }, lastResult: null, lastError: null });
       chrome.action.setBadgeText({ text: "↓" });
-      chrome.action.setBadgeBackgroundColor({ color: "#0f766e" });
+      chrome.action.setBadgeBackgroundColor({ color: "#c06340" });
       sendToJobTab(msg.tab, { ...msg, mode, op: "job-accepted" });
       console.log("dlm job accepted", mode, msg);
     } else if (msg && msg.op === "error") {
