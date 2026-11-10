@@ -358,7 +358,7 @@ C 的 `dlm-gui` 是本地环回 HTTP，不是常驻服务。
 ## 版本号（两套，各自独立）
 
 - **内核 / CLI / GUI**：`Cargo.toml` 的 `version`，当前 **0.1.0**。`dlm --version`、`User-Agent: dlm/<版本>` 与便携包名都用它。
-- **浏览器扩展**：`browser/extension/manifest.json` 的 `version`，当前 **0.2.8**。扩展的 Service Worker 文件名带版本号（`background-<version>.js`，见 [`browser/README.md`](browser/README.md)），升级扩展时同时改这两处。
+- **浏览器扩展**：`browser/extension/manifest.json` 的 `version`，当前 **0.2.9**。扩展的 Service Worker 文件名带版本号（`background-<version>.js`，见 [`browser/README.md`](browser/README.md)），升级扩展时同时改这两处。
 
 两者**不要求相等**：扩展可以独立迭代，内核也可以独立发版。看包名 `dlm-0.1.0-win-x64.zip` 时，0.1.0 是内核版本，不是扩展版本。
 

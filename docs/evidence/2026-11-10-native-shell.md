@@ -155,3 +155,59 @@ tray-icon = { version = "0.21", default-features = false }
 **未验证**：面板交互。合成鼠标点击打不进 shadow DOM 的 pointer 处理器，
 面板没打开。球本身渲染正确，面板用的是同一组 CSS 变量，样式必然跟随，
 但"点开面板"这一步需要真人点一次确认。
+## 附二：悬浮球点不开、面板按钮全哑（0.2.9 修复）
+
+用户实测反馈：**点悬浮球没反应，只有点页面里的下载链接才会展开面板，而展开后按钮一个都点不动。**
+
+### 根因
+
+不是配色改坏的，是更早就存在的结构问题 —— 而且**一直没被测出来**。
+
+`content.js` 把点击监听挂在**元素自己身上**（球、折叠、标签页、任务按钮）。
+悬浮球与面板住在页面的 shadow DOM 里，事件从真实目标冒泡。站点只要在
+document 捕获阶段 `stopPropagation()`，事件就到不了 shadow DOM，于是球点不开、
+面板按钮全哑。而"点链接会展开面板"是因为那条路走的是我们自己的
+`onDocumentClick`（同样在 document 捕获，但它本身就在那一站）。
+
+**为什么旧测试没发现**：`verify-widget-ball.mjs` 用 `element.click()`
+程序化触发 —— 只发一个 `click`，绕过整条指针链路，所以永远测不出真实点击的问题。
+
+### 实测复现（CDP 真实输入事件）
+
+| 页面 | 球点击开面板 |
+|---|---|
+| 干净页 | ✅ true |
+| 站点在 document 捕获拦 `click` | ❌ false |
+| 再拦 `pointerdown`/`pointerup` | ❌ false |
+
+### 修复
+
+把 host 内**所有**点击统一到 **window 捕获阶段**路由（`onWindowClick` +
+`runHostAction`）。`window` 是捕获路径上 `document` 的上一站，任何 document
+级拦截都盖不住它。
+
+- 移除球、折叠、本页、复位、确认、标签页的元素级监听，按 id / `data-*` 统一路由
+- 动态生成的「停止」「下载」按钮改用 `data-job` / `data-dl-url` 承载参数
+- 顺手修掉一个竞态：拖拽结束后 `suppressClick` 原本用 `setTimeout(0)` 清零，
+  常抢在 `click` 到达之前就清了，导致拖完反而开面板。改成只置位、由随后的
+  `click` 消费，下一次 `pointerdown` 兜底清零
+
+### 回归测试
+
+新增 `browser/test/verify-ball-composed-events.mjs`：三种页面（干净 / 拦 click /
+拦 pointer）各跑一遍，用 `Input.dispatchMouseEvent` 点**真鼠标**，断言
+球能开面板、标签能切换、「×」能关面板。
+
+```
+clean:           球点击开面板=true  标签切换=true  折叠按钮=true
+click-blocked:   球点击开面板=true  标签切换=true  折叠按钮=true
+pointer-blocked: 球点击开面板=true  标签切换=true  折叠按钮=true
+```
+
+旧验收 `verify-widget-ball.mjs` 仍然通过（拖动、位置记忆、闲置淡出、面板方向）。
+
+### 残留限制
+
+拖动仍然靠挂在球上的 `pointerdown`。站点若连 `pointerdown` 都拦，
+**拖不动**（但能点开，因为点击走 window 捕获）。要一并修需把指针链路也搬到
+window 捕获，代价是 `setPointerCapture` 的时序要自己兜。

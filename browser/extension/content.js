@@ -285,40 +285,16 @@ function ensureWidget() {
   shadow.getElementById("dlm-ver").textContent = "v" + chrome.runtime.getManifest().version;
 
   const ball = shadow.getElementById("dlm-toggle");
-  ball.addEventListener("click", (ev) => {
-    if (suppressClick) {
-      suppressClick = false;
-      ev.preventDefault();
-      return;
-    }
-    togglePanel();
-  });
+  // 点击不挂在这里：统一走 window 捕获路由（onWindowClick）。挂在元素上时，
+  // 站点只要在 document 捕获阶段 stopPropagation()，事件就到不了 shadow DOM，
+  // 球就点不开了（实测复现）。
   ball.addEventListener("pointerdown", onPointerDown);
   ball.addEventListener("pointermove", onPointerMove);
   ball.addEventListener("pointerup", onPointerUp);
   ball.addEventListener("pointercancel", onPointerUp);
   ball.addEventListener("pointerenter", markActivity);
 
-  shadow.getElementById("dlm-fold").addEventListener("click", closePanel);
-  shadow.getElementById("dlm-submit").addEventListener("click", () => {
-    sendDownload(location.href, "file", true);
-  });
-  shadow.getElementById("dlm-reset").addEventListener("click", resetPosition);
-  shadow.getElementById("dlm-confirm-no").addEventListener("click", () => {
-    state.confirm = null;
-    markActivity();
-    render();
-  });
-  shadow.getElementById("dlm-confirm-yes").addEventListener("click", () => {
-    const pending = state.confirm;
-    state.confirm = null;
-    if (pending) sendDownload(pending.url, pending.kind, false);
-    markActivity();
-    render();
-  });
-  for (const tab of shadow.querySelectorAll(".tab")) {
-    tab.addEventListener("click", () => setTab(tab.dataset.tab));
-  }
+  // 面板里的按钮和标签页也不挂监听：同样走 onWindowClick 统一路由。
 
   chrome.storage.local.get([POS_KEY], (values) => {
     const pos = values && values[POS_KEY];
@@ -381,6 +357,8 @@ function resetPosition() {
 
 function onPointerDown(ev) {
   if (ev.button !== 0) return;
+  // 新的一次按下：清掉上一次拖拽留下的点击抑制。
+  suppressClick = false;
   const rect = host.getBoundingClientRect();
   drag = {
     id: ev.pointerId,
@@ -412,10 +390,9 @@ function onPointerUp(ev) {
   rootEl.classList.remove("dragging");
   if (moved) {
     savePosition();
+    // 只置位，由随后的 click 消费。原来这里 setTimeout(0) 清零，
+    // 和 click 到达的时序是竞态 —— 常常在 click 之前就清了，拖完反而开面板。
     suppressClick = true;
-    setTimeout(() => {
-      suppressClick = false;
-    }, 0);
   }
 }
 
@@ -529,7 +506,7 @@ function renderActive() {
     const stop = el("button", "ghost", entry.stopping ? "停止中…" : "停止");
     stop.type = "button";
     stop.disabled = !!entry.stopping;
-    stop.addEventListener("click", () => cancelJob(job));
+    stop.dataset.job = job;
     actions.appendChild(stop);
     row.appendChild(actions);
     box.appendChild(row);
@@ -574,7 +551,8 @@ function renderLinks() {
     row.appendChild(info);
     const btn = el("button", "dl", "下载");
     btn.type = "button";
-    btn.addEventListener("click", () => sendDownload(item.url, item.kind, false));
+    btn.dataset.dlUrl = item.url;
+    btn.dataset.dlKind = item.kind;
     row.appendChild(btn);
     box.appendChild(row);
   }
@@ -791,6 +769,88 @@ function onDocumentClick(ev) {
   ev.stopPropagation();
   confirmClick(a, url, kind);
 }
+// host 内所有点击的统一入口。
+//
+// ## 为什么在 window 捕获阶段
+//
+// 悬浮球和面板住在页面的 shadow DOM 里，事件从真实目标冒泡到 window。
+// 站点只要在 document 捕获阶段 stopPropagation()，事件就到不了 shadow DOM ——
+// 球点不开、面板按钮全哑。实测：干净页能开面板，站点拦 click 后打不开，
+// 再拦 pointerdown 后同样打不开。
+//
+// window 是捕获路径上 document 的上一站，任何 document 级拦截都盖不住它。
+//
+// ## 为什么不给每个按钮挂监听
+//
+// 挂了也没用（被拦），而且两处都在时会重复触发。所以这里一处路由全部动作。
+function onWindowClick(ev) {
+  if (host && ev.composedPath().includes(host)) {
+    if (runHostAction(ev)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+    return;
+  }
+  onDocumentClick(ev);
+}
+
+// 按元素 id / data-* 路由 host 内的点击。返回 true 表示已处理。
+function runHostAction(ev) {
+  const raw = ev.composedPath()[0];
+  if (!(raw instanceof Element)) return false;
+  // 点到按钮里的 <span> 也要归到按钮上。
+  const el = raw.closest("button,[data-tab],[data-job],[data-dl-url]") || raw;
+
+  switch (el.id) {
+    case "dlm-toggle":
+      // 拖拽结束时抑制紧随其后的这次点击。
+      if (suppressClick) {
+        suppressClick = false;
+        return true;
+      }
+      togglePanel();
+      return true;
+    case "dlm-fold":
+      closePanel();
+      return true;
+    case "dlm-submit":
+      sendDownload(location.href, "file", true);
+      return true;
+    case "dlm-reset":
+      resetPosition();
+      return true;
+    case "dlm-confirm-no":
+      state.confirm = null;
+      markActivity();
+      render();
+      return true;
+    case "dlm-confirm-yes": {
+      const pending = state.confirm;
+      state.confirm = null;
+      if (pending) sendDownload(pending.url, pending.kind, false);
+      markActivity();
+      render();
+      return true;
+    }
+    default:
+      break;
+  }
+
+  const data = el.dataset || {};
+  if (data.tab) {
+    setTab(data.tab);
+    return true;
+  }
+  if (data.job) {
+    cancelJob(data.job);
+    return true;
+  }
+  if (data.dlUrl) {
+    sendDownload(data.dlUrl, data.dlKind || "file", false);
+    return true;
+  }
+  return false;
+}
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg) return;
@@ -883,7 +943,7 @@ chrome.storage.onChanged.addListener(() => {
   });
 });
 
-document.addEventListener("click", onDocumentClick, true);
+window.addEventListener("click", onWindowClick, true);
 window.addEventListener("message", onPageHookMessage);
 setInterval(updateIdle, 1000);
 render();
