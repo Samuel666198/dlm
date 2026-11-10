@@ -596,10 +596,19 @@ function render() {
   const anyActive = state.active.size > 0;
   const any = state.items.length > 0 || anyActive || state.finished.length > 0 || !!state.confirm;
   host.hidden = !any;
-  if (!any) return;
 
+  // 面板开合只由用户点击决定，**与有没有内容无关**。
+  //
+  // 这两行原本在 `if (!any) return;` 之后，于是页面上没检测到任何下载时
+  // render() 直接返回，panel.hidden 永远不会被更新 —— 表现为「点悬浮球没反应，
+  // 只有点了页面里的下载链接（产生 state.confirm，any 变 true）面板才冒出来」。
+  // 而 :host 显式写了 display:block，覆盖了 [hidden] 的 display:none，
+  // 所以球一直可见，把这个 bug 盖住了。
   shadow.getElementById("dlm-panel").hidden = state.collapsed;
   shadow.getElementById("dlm-toggle").setAttribute("aria-expanded", state.collapsed ? "false" : "true");
+
+  // 不在这里提前返回。以前 `if (!any) return;` 会让「没有内容」时整块渲染被跳过，
+  // 面板于是既打不开、标签状态也不会更新。各分区渲染函数自己会处理空列表。
 
   const agg = aggregate();
   const ring = shadow.getElementById("dlm-ring");

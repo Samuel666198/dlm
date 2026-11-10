@@ -41,10 +41,13 @@ const CASES = [
   { mode: "pointer-blocked", block: ["pointerdown", "pointerup", "click"] },
 ];
 
+// 注意：页面里**故意不放**可下载链接。
+// 曾经这里有一个 <a href="/file.bin">，扩展会把它识别成可下载项，于是
+// render() 里的 any 为 true，恰好掩盖了「空页面上点球没反应」的 bug。
 const pageFor = ({ mode, block }) => `<!doctype html><meta charset="utf-8">
 <title>dlm ball ${mode}</title>
 <body style="font-family:sans-serif;padding:24px">
-<h1>${mode}</h1><p><a href="/file.bin">file.bin</a></p>
+<h1>${mode}</h1><p>页面上没有任何可下载内容。</p>
 <script>
 ${block.map((k) => `document.addEventListener("${k}", (e) => e.stopPropagation(), true);`).join("\n")}
 </script></body>`;

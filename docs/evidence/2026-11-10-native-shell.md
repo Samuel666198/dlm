@@ -155,7 +155,10 @@ tray-icon = { version = "0.21", default-features = false }
 **未验证**：面板交互。合成鼠标点击打不进 shadow DOM 的 pointer 处理器，
 面板没打开。球本身渲染正确，面板用的是同一组 CSS 变量，样式必然跟随，
 但"点开面板"这一步需要真人点一次确认。
-## 附二：悬浮球点不开、面板按钮全哑（0.2.9 修复）
+## 附二：悬浮球点不开、面板按钮全哑（0.2.9，诊断有误）
+
+> **注意：这一节的诊断是错的。** window 捕获改造没有解决问题，真正原因见附三。
+> 改造本身无害且更健壮，予以保留（站点拦 document 事件确实会让挂在元素上的监听器失效）。
 
 用户实测反馈：**点悬浮球没反应，只有点页面里的下载链接才会展开面板，而展开后按钮一个都点不动。**
 
@@ -211,3 +214,69 @@ pointer-blocked: 球点击开面板=true  标签切换=true  折叠按钮=true
 拖动仍然靠挂在球上的 `pointerdown`。站点若连 `pointerdown` 都拦，
 **拖不动**（但能点开，因为点击走 window 捕获）。要一并修需把指针链路也搬到
 window 捕获，代价是 `setPointerCapture` 的时序要自己兜。
+## 附三：真正的原因 —— 空页面上 render() 提前返回（0.2.10 修复）
+
+上一节（附二）的 window 捕获改造没有解决用户的问题。用户反馈「哪个网站都不行」，
+这条信息推翻了「站点拦截事件」的判断。重新调查后找到真正原因，与事件传播无关。
+
+### 根因
+
+```js
+function render() {
+  ...
+  const any = state.items.length > 0 || anyActive || state.finished.length > 0 || !!state.confirm;
+  host.hidden = !any;
+  if (!any) return;                                              // ← 提前返回
+
+  shadow.getElementById("dlm-panel").hidden = state.collapsed;   // ← 永远执行不到
+  ...
+}
+```
+
+页面上**没检测到任何下载**时 `any === false`，`render()` 直接返回，`panel.hidden`
+永远不会被更新。于是点悬浮球 → `togglePanel()` → `openPanel()` → `state.collapsed = false`
+→ `render()` 提前返回 → 面板仍未显示。
+
+而点页面里的下载链接会写入 `state.confirm`，`any` 变 true，`render()` 才会走到那两行 ——
+这就是「**只有点下载面板才会展开，展开后按钮也点不动**」的全部原因：
+按钮不是点不动，是面板本来就是靠 `state.confirm` 那条路才显示出来的。
+
+### 为什么一直没被发现
+
+1. 所有验收脚本的测试页都带可下载链接，扩展会识别成 `state.items`，`any` 恒为 true，
+   恰好绕过这个分支。
+2. `:host { all: initial; display: block; }` 显式设置了 `display`，覆盖了
+   UA 样式表里 `[hidden] { display: none }` 的效果，所以 `host.hidden = true` 并不会
+   真的把球藏起来 —— 球一直可见，掩盖了「无内容时整块渲染被跳过」的事实。
+
+### 修复
+
+把面板开合的两行移到 `host.hidden = !any;` 之前，并删掉 `if (!any) return;`。
+面板是否可见只由用户点击（`state.collapsed`）决定，与有没有内容无关；
+各分区渲染函数本来就会自己处理空列表。
+
+### 验证（在用户的真实浏览器 Tabbit 里）
+
+用 CDP 反解出屏幕↔视口映射（`屏幕 = 视口*1.5 + (23, 318.5)`，150% 缩放），
+再用 `agent-desktop` 发**操作系统级真实点击**打中球心：
+
+```
+A) OS 物理点击 (1700,1217) → 面板打开 = true
+B) CDP 点击 (视口 1118,599) → 面板打开 = true
+```
+
+回归测试 `verify-ball-composed-events.mjs` 的测试页已改成**不放任何可下载链接**
+（原来的链接页正是掩盖 bug 的原因），三种页面全绿：
+
+```
+clean:           球开面板=true  标签切换=true  折叠按钮=true
+click-blocked:   球开面板=true  标签切换=true  折叠按钮=true
+pointer-blocked: 球开面板=true  标签切换=true  折叠按钮=true
+```
+
+### 教训
+
+诊断「点了没反应」时，不要停在「事件没收到」的假设上。这次的两次误判分别是
+（1）归因于站点事件拦截，（2）用 CDP 合成事件当成真实点击的等价物。
+真正有效的是把状态一层层打印出来 —— 标记显示路由命中、`openPanel` 执行、
+`collapsed=false`，但 `any=false` 且 `panel.hidden` 仍为 true，问题就此定位。
