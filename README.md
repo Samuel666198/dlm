@@ -3,16 +3,21 @@
 多连接分段下载器**内核 + CLI**。把 IDM 已实测确认的分段机制（开放终点请求、按最大剩余段中点劈分、
 窗口化子请求、丢弃重取）自己实现一遍，其中"分段调度"这一层是**不依赖网络与磁盘的纯状态机**，可逐条钉死测试。
 
-v1 是内核与命令行；v2 已加 B1/B2/B10/B3b 浏览器投递（无 Cookie 的公开直链可进队列，页面媒体/文件嗅探）与 C1–C3 本地 Web UI
-（`dlm-gui`：任务队列、全局固定窗口配额、完成后动作、环回 HTTP + 内嵌单页）。不做原生 GUI、Windows 服务、守护进程、站点抓取。
+v1 是内核与命令行；v2 已加 B1/B2/B10/B3b 浏览器投递（无 Cookie 的公开直链可进队列，页面媒体/文件嗅探）
+与 C1–C3 产品层（`dlm-gui`：任务队列、全局固定窗口配额、完成后动作、环回 HTTP）。
+`dlm-gui` 自 2026-11-10 起是**原生窗口 + 托盘**（eframe/egui），环回 HTTP 保留给浏览器扩展当入口。
+不做 Windows 服务、守护进程、站点抓取。
+
+> **接手先读** [`docs/2026-11-11-交接-HANDOVER.md`](docs/2026-11-11-交接-HANDOVER.md)。
 
 ```
 cargo build                     # 工具链由 rust-toolchain.toml 钉为 msvc
 target/debug/dlm.exe --url https://example.com/big.iso --out-dir D:/dl
 ```
 
-依赖 6 个 crate（`clap` derive、`reqwest` blocking+rustls、`serde`、`serde_json`、`anyhow`、`sha2`），
-`std::thread` 并发、每段一条阻塞连接、无 tokio。
+依赖 8 个 crate：内核侧 `clap` derive、`reqwest` blocking+rustls、`serde`、`serde_json`、`anyhow`、`sha2`；
+原生外壳另加 `eframe 0.37`（仅 glow + `default_fonts`）与 `tray-icon 0.21`（两者都必须是
+`default-features = false`，否则会拉进 GTK/macOS 依赖）。`std::thread` 并发、每段一条阻塞连接、无 tokio。
 
 ## 退出码
 
@@ -261,7 +266,7 @@ target/debug/dlm.exe --url https://example.com/master.m3u8 --hls --out-dir D:/dl
 - **不做** DASH、DRM、队列 HLS。浏览器里的 HLS/媒体直链由 B3b-lite 扩展嗅探并直连 `--hls`；
   普通文件链接由同一面板交给队列/直连；直接投递 `.m3u8` 到队列仍按普通文件处理。
 
-## 产品层：本地 Web UI（C0–C3，`dlm-gui`）
+## 产品层：原生 GUI（C0–C3，`dlm-gui`）
 
 **C0 裁定（2026-11-10 修订）**：**原生窗口**。用 `eframe`（glow 后端）+ `tray-icon`，
 不再用系统浏览器当外壳。原裁定"本地 Web UI、零新 crate、无原生窗口"作废。
@@ -424,6 +429,7 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`packaging/build-package.ps1`](packaging/build-package.ps1) | Windows x64 release zip 打包脚本 |
 | [`packaging/install.ps1`](packaging/install.ps1) | 包内用户级安装器（HKCU） |
 | [`gates.ps1`](gates.ps1) | 一条命令跑全部门禁（fmt/lib/bins/integration/clippy/扩展静态检查），失败退 1 |
+| [`docs/2026-11-11-交接-HANDOVER.md`](docs/2026-11-11-交接-HANDOVER.md) | **当前交接**：现状、五分钟跑起来、架构坑、欠账、硬纪律 |
 | [`docs/INDEX.md`](docs/INDEX.md) | 文档总索引：阅读顺序、E/R/T 编号释义、每篇文档的状态 |
 | [`docs/evidence/2026-10-28-package.md`](docs/evidence/2026-10-28-package.md) | 便携包产物、hash 与冒烟记录 |
 | [`docs/evidence/2026-10-28-tabbit-extension.md`](docs/evidence/2026-10-28-tabbit-extension.md) | Tabbit 1.18 扩展加载记录与快捷方式回退点 |
@@ -433,6 +439,8 @@ spec §7 的四场景（48 MiB 全速、限速劈分、掐断再续、无 Range 
 | [`docs/evidence/2026-10-29-inpage-widget.md`](docs/evidence/2026-10-29-inpage-widget.md) | 页内下载组件（确认/进度/停止）与站点脚本拦截证据 |
 | [`docs/evidence/2026-11-03-floating-ball.md`](docs/evidence/2026-11-03-floating-ball.md) | 悬浮球拖动/位置记忆/闲置淡出与面板标签页证据 |
 | [`docs/evidence/2026-11-08-v21-product-polish.md`](docs/evidence/2026-11-08-v21-product-polish.md) | v2.1 交付证据：打开文件/自动重试/UI 收尾/自启与单实例 |
+| [`docs/evidence/2026-11-10-native-shell.md`](docs/evidence/2026-11-10-native-shell.md) | 原生外壳交付证据：窗口/托盘/设置/剪贴板/限流/休眠 |
+| [`docs/evidence/2026-11-11-extension-ball-fixes.md`](docs/evidence/2026-11-11-extension-ball-fixes.md) | 扩展悬浮球点击失效的三轮排障与修复（0.2.9→0.2.11） |
 | [`docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md`](docs/superpowers/plans/2026-10-21-下一任交接-HANDOFF.md) | 交接稿：接手顺序、硬纪律、已裁定不要重做、具名欠账 |
 | [`docs/superpowers/plans/2026-10-21-三路路线图.md`](docs/superpowers/plans/2026-10-21-三路路线图.md) | 下一阶段路线图（A/B/C 三路与完成状态） |
 | [`docs/superpowers/plans/2026-10-21-能力对照表.md`](docs/superpowers/plans/2026-10-21-能力对照表.md) | 能力对照表的实现计划 |

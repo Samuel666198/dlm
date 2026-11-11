@@ -2,23 +2,28 @@
 
 **这是 `docs/` 的唯一入口。** 读完这一页，再去读具体文档；不要从 `STATUS` 的旧 dated 小节或某份证据开始。
 
-## 当前状态（2026-11-03 复核）
+## 当前状态（2026-11-11 复核）
+
+**接手先读：[`2026-11-11-交接-HANDOVER.md`](2026-11-11-交接-HANDOVER.md)。** 本页是文档地图，那份才是当前交接。
 
 | 项 | 值 |
 |---|---|
-| 分支 | `sdd/dlm-kernel`，未 push、无远程 |
+| 分支 | `sdd/dlm-kernel`，未 push、无远程；最新 `5a5fc47` |
 | 门禁 | `fmt 0` · `--lib 342/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查（统一走根目录 `gates.ps1`） |
-| 产品面 | 内核 + CLI + 本地 Web UI 队列 + Native Messaging 扩展（右键/页内组件/媒体与文件嗅探/HLS 直链） |
-| 最新进展 | `2026-11-03 悬浮球`（扩展 0.2.7）、`2026-10-29 页内下载组件`、`2026-10-29 站点脚本下载拦截`、`2026-10-28 Windows x64 便携包` |
+| 产品面 | 内核 + CLI + **原生窗口/托盘 GUI** + Native Messaging 扩展（右键/页内悬浮球/媒体与文件嗅探/HLS 直链） |
+| 最新进展 | `2026-11-10 原生外壳交付`（窗口/托盘/设置/剪贴板/限流/休眠）、`2026-11-11 扩展悬浮球点击失效修复`（0.2.11）、`2026-11-08 v2.1 打磨` |
+| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,337,247 B，`sha256=8dc25c61de0484af7056cb14ffb4aa872a2a5639eab7517dd0f79e682e3b2186`；扩展 0.2.11 |
 | v2.1 交付 | [`plans/2026-11-07-v21-product-polish.md`](superpowers/plans/2026-11-07-v21-product-polish.md) 已全部落地（P2 打开文件 / P1 自动重试 / P4 UI 收尾 / P3 自启与单实例）；托盘 P5 暂缓 |
+| 欠账 | errata E14（`--autostart` 隐藏窗口未解决）、E15（启动 573ms > 300ms 目标）、exe 内嵌图标、设置项透传 —— 详见交接文件的「欠账」表 |
 | 长期归档 | `E:\WorkSpace\archive\2026_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`（`.superpowers/sdd` 的 2026-10-21 快照） |
 
 ## 怎么读
 
 | 你的目的 | 按这个顺序读 |
 |---|---|
-| 第一次接手 | 本页 → [`plans/2026-10-21-下一任交接-HANDOFF.md`](superpowers/plans/2026-10-21-下一任交接-HANDOFF.md) → [`plans/2026-10-15-dlm-kernel-STATUS.md`](superpowers/plans/2026-10-15-dlm-kernel-STATUS.md) 顶部的 2026-11-03 复核块与 2026-10-20 收口节 → `git log --oneline -8` |
+| 第一次接手 | [`2026-11-11-交接-HANDOVER.md`](2026-11-11-交接-HANDOVER.md) → 本页 → `git log --oneline -12` |
 | 改内核 | [`specs/2026-10-15-dlm-kernel-design.md`](superpowers/specs/2026-10-15-dlm-kernel-design.md) → [`plans/2026-10-15-dlm-kernel.md`](superpowers/plans/2026-10-15-dlm-kernel.md) 文末 `## 勘误` E1–E33（**与正文冲突以勘误为准**） |
+| 改原生外壳（窗口/托盘） | [`specs/2026-11-09-native-shell-design.md`](superpowers/specs/2026-11-09-native-shell-design.md) → [`specs/2026-11-10-native-shell-errata.md`](superpowers/specs/2026-11-10-native-shell-errata.md) E1–E15（**同样以勘误为准**）→ [`evidence/2026-11-10-native-shell.md`](evidence/2026-11-10-native-shell.md) |
 | 改产品层（GUI/队列） | [`specs/2026-10-22-dlm-product-ui-design.md`](superpowers/specs/2026-10-22-dlm-product-ui-design.md) → [`plans/2026-10-22-C1-C3-product-ui.md`](superpowers/plans/2026-10-22-C1-C3-product-ui.md) → [`specs/2026-10-27-dlm-quota-queue-b10-design.md`](superpowers/specs/2026-10-27-dlm-quota-queue-b10-design.md) |
 | 改浏览器扩展 | `browser/README.md` → [`evidence/2026-10-29-inpage-widget.md`](evidence/2026-10-29-inpage-widget.md) → [`evidence/2026-10-28-media-sniff.md`](evidence/2026-10-28-media-sniff.md) |
 | 看下一阶段 | [`plans/2026-10-21-三路路线图.md`](superpowers/plans/2026-10-21-三路路线图.md) → [`evidence/2026-10-21-idm能力对照表.md`](evidence/2026-10-21-idm能力对照表.md) 的 §10–§12 增量 |
@@ -96,6 +101,7 @@
 | [`evidence/2026-11-03-floating-ball.md`](evidence/2026-11-03-floating-ball.md) | 悬浮球拖动、位置记忆、闲置淡出与面板标签页 |
 | [`evidence/2026-11-08-v21-product-polish.md`](evidence/2026-11-08-v21-product-polish.md) | v2.1 四项交付与验收（打开文件/自动重试/UI 收尾/自启与单实例） |
 | [`evidence/2026-11-10-native-shell.md`](evidence/2026-11-10-native-shell.md) | 原生外壳交付：窗口/托盘/设置/剪贴板/限流/休眠 |
+| [`evidence/2026-11-11-extension-ball-fixes.md`](evidence/2026-11-11-extension-ball-fixes.md) | 扩展悬浮球点击失效：三轮排障与修复（0.2.9→0.2.11），含误判复盘 |
 
 ## 不在 `docs/` 的账本
 
