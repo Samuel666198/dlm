@@ -10551,8 +10551,32 @@ fn hls_stub(
         while !stop_thread.load(Ordering::Acquire) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 4096];
-                    let _ = stream.read(&mut buf);
+                    // 连接 socket 是**阻塞**的，即使 listener 是非阻塞的。
+                    //
+                    // 这里原本是 `let _ = stream.read(&mut buf);` —— 在 Windows 上
+                    // 非阻塞 listener 的 accept 出来的 socket 会**继承非阻塞标志**，
+                    // 于是 read 可能立刻返回 `WouldBlock`，而错误被 `let _` 吞掉，
+                    // `buf` 仍是全零 ⇒ path 解析成空串 ⇒ 走到 404 分支。
+                    //
+                    // 症状是 `hls_downloads_master_playlist_segments_in_order` 偶发
+                    // 「HLS 清单返回 HTTP 404」，单跑必过、并发跑偶尔红 —— 因为
+                    // 请求字节到得晚一点点就会踩中。实测复现过一次（2026-11-12）。
+                    //
+                    // 修法：显式设回阻塞，并且**读够一行请求头**再解析，
+                    // 不能假设一次 read 就能拿全。
+                    let _ = stream.set_nonblocking(false);
+                    let mut buf = Vec::with_capacity(4096);
+                    let mut chunk = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 64 * 1024 {
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     let request = String::from_utf8_lossy(&buf);
                     let path = request
                         .lines()

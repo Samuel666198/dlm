@@ -194,6 +194,10 @@ const STYLE = `
   .done:last-child { border-bottom: 0; }
   .done .name { flex: 1; font-weight: 400; }
   .done .meta { font-size: 10px; }
+  /* E16：继续按钮。比 .ghost 小一号 —— 它挂在列表行里，不能把行撑高。 */
+  .done button.ghost {
+    min-height: 22px; padding: 0 8px; font-size: 10px; flex: 0 0 auto;
+  }
   .check { color: var(--accent); font-weight: 500; }
   .cross { color: var(--danger); font-weight: 500; }
   .link { display: flex; align-items: center; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
@@ -476,6 +480,44 @@ function cancelJob(job) {
   });
 }
 
+// E16：点「继续」。
+//
+// 两条路：
+//   - 队列任务：发 {op:"resume", queue:id}，宿主转 POST /api/resume。
+//   - 直连任务：发 {op:"resume", url}，宿主重投同一个 URL；
+//     dlm 看到同名目标旁的 .dlm.json 就判 Resume，接着下。
+//
+// 两条都**不假设成功**：回执 ok=false 时把错误显示在这一行上，
+// 而不是假装已经继续了。
+function resumeJob(item, index) {
+  item.resuming = true;
+  render();
+  const payload = item.queue
+    ? { op: "resume", queue: item.queue }
+    : { op: "resume", url: item.url, name: item.name, referer: item.referer };
+  chrome.runtime.sendMessage(payload, (reply) => {
+    item.resuming = false;
+    if (chrome.runtime.lastError) {
+      item.message = "继续失败：扩展未响应";
+      render();
+      return;
+    }
+    if (!reply || reply.ok === false) {
+      item.message = (reply && reply.message) || "继续失败";
+      render();
+      return;
+    }
+    // 成功：把这一条从「最近」拿掉 —— 它已经回到进行中（队列）或被重新投递（直连）。
+    // 留在「最近」里会让人以为还有两条。
+    state.finished = state.finished.filter((_, i) => i !== index);
+    if (reply.mode === "redeliver" || reply.job) {
+      // 直连重投：宿主会给一个新的 job，交给既有的 job-accepted 处理流程。
+      state.tab = "active";
+    }
+    render();
+  });
+}
+
 function renderActive() {
   const box = shadow.getElementById("dlm-active");
   box.replaceChildren();
@@ -530,10 +572,40 @@ function renderFinished() {
     else if (item.message) text = item.message;
     else text = "失败（退出码 " + (item.code ?? "?") + "）";
     row.appendChild(el("span", "meta", text));
+
+    // E16：暂停/停止/失败之后要能接着下。
+    //
+    // 之前这一行只有一个 <span>，一个按钮都没有 —— 用户停了就再也点不到"继续"，
+    // 只能自己回去重找链接。断点其实一直在（`.dlm.json` 就躺在目标文件旁边），
+    // 缺的只是这个入口。
+    //
+    // 两种续法在数据上不同，所以按钮带不同的 data 属性：
+    //   data-queue → 队列任务，走宿主 POST /api/resume
+    //   data-resume-url → 直连任务，重投同一个 URL 让 dlm 自己判 Resume
+    if (canResume(item)) {
+      const resume = el("button", "ghost", item.resuming ? "继续中…" : "继续");
+      resume.type = "button";
+      resume.disabled = !!item.resuming;
+      if (item.queue) resume.dataset.queue = item.queue;
+      else resume.dataset.resumeUrl = item.url;
+      if (item.kind) resume.dataset.resumeKind = item.kind;
+      row.appendChild(resume);
+    }
     box.appendChild(row);
   }
   shadow.getElementById("dlm-recent-count").textContent = String(state.finished.length);
   shadow.getElementById("dlm-recent-empty").hidden = state.finished.length > 0;
+}
+
+/// 这一条能不能续。
+///
+/// - 队列任务：只要不是"下载完成"就可能有进度可续（队列里的 paused/failed 都能 resume）。
+/// - 直连任务：被停止或失败过、且我们记得它的 URL，就能重投。
+/// - 完成的（ok）不给按钮：没什么可续的，点了只会重新下一份。
+function canResume(item) {
+  if (!item || item.ok) return false;
+  if (item.queue) return true;
+  return !!item.url && (item.canceled || item.failed);
 }
 
 function renderLinks() {
@@ -857,6 +929,14 @@ function runHostAction(ev) {
     cancelJob(data.job);
     return true;
   }
+  // E16：继续。两个 data 属性二选一，队列优先。
+  if (data.queue || data.resumeUrl) {
+    const index = state.finished.findIndex(
+      (it) => (data.queue && it.queue === data.queue) || (data.resumeUrl && it.url === data.resumeUrl)
+    );
+    if (index >= 0) resumeJob(state.finished[index], index);
+    return true;
+  }
   if (data.dlUrl) {
     sendDownload(data.dlUrl, data.dlKind || "file", false);
     return true;
@@ -883,6 +963,10 @@ chrome.runtime.onMessage.addListener((msg) => {
         speed: 0,
         eta: 0,
         stopping: false,
+        // E16：留住原始请求，停止/失败后「继续」要靠它重投。
+        url: msg.url,
+        referer: msg.referer,
+        kind: msg.hls ? "hls" : "file",
       });
       state.collapsed = false;
       state.tab = "active";
@@ -916,12 +1000,20 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg.op === "job-done") {
     state.done.add(msg.job);
+    const entry = state.active.get(msg.job);
     state.active.delete(msg.job);
     state.finished.unshift({
       name: msg.name || "下载任务",
       ok: !!msg.ok,
       canceled: !!msg.canceled,
+      // E16：失败要能被 canResume 认出来（不然"失败后继续"没有按钮）。
+      failed: !msg.ok && !msg.canceled,
       code: msg.code,
+      // E16：续传需要原始 URL —— 直连任务重投时要用它。
+      // 从进行中的条目里捞；捞不到就没有按钮（宁可少给，不给一个点了没用的）。
+      url: entry && entry.url ? entry.url : undefined,
+      referer: entry && entry.referer ? entry.referer : undefined,
+      kind: entry && entry.kind ? entry.kind : undefined,
     });
     state.finished = state.finished.slice(0, 3);
     markActivity();

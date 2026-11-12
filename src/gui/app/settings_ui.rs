@@ -6,6 +6,8 @@
 use eframe::egui;
 
 use super::App;
+use crate::gui::RuntimeTuning;
+use crate::gui::Ticket;
 use crate::gui::app::theme;
 
 impl App {
@@ -55,6 +57,11 @@ impl App {
                         self.settings = self.draft.clone();
                         // 剪贴板开关变化要立刻生效。
                         self.apply_settings_runtime();
+                        // E18：连接数 / 限速 / 每 host 上限也立刻生效。
+                        // 不发这一条的话，用户改完得重启程序 —— 设置界面等于在说谎。
+                        self.send(Ticket::ApplyRuntime(RuntimeTuning::from_settings(
+                            &self.settings,
+                        )));
                         self.settings_error = None;
                         open = false;
                     }

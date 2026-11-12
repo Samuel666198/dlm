@@ -159,7 +159,120 @@ impl Host {
         match value.get("op").and_then(Value::as_str) {
             Some("download") => self.download(&value),
             Some("cancel") => self.cancel(&value),
+            // E16：队列任务的「继续」。扩展够不到 `dlm-gui` 的 HTTP（它只会 Native Messaging），
+            // 所以由宿主代转一次 `POST /api/resume`。直连模式的任务不走这里 ——
+            // 它们没有队列 id，续的办法是重投同一个 URL（见 `resume` 的实现说明）。
+            Some("resume") => self.resume(&value),
             _ => native::respond(payload),
+        }
+    }
+
+    /// E16：把队列任务的「继续」转给 `dlm-gui`。
+    ///
+    /// 两种形状：
+    /// - `{"op":"resume","queue":"<id>"}`：队列任务，转 `POST /api/resume`。
+    /// - `{"op":"resume","url":"…"}`：直连任务（宿主自己起的 `dlm.exe` 被 taskkill 了）。
+    ///   队列里没有它，**没有 id 可续**，只能重投同一个 URL 让 `dlm` 自己判 `Resume`
+    ///   （断点文件在同名目标旁边）。回执里明写 `mode: "redeliver"`，
+    ///   免得扩展以为这是一次真正的队列续传。
+    fn resume(&mut self, value: &Value) -> Vec<u8> {
+        let queue_id = value
+            .get("queue")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        if let Some(id) = queue_id {
+            return self.resume_queue(id);
+        }
+        // 没有队列 id ⇒ 走重投。参数形状与 `download` 一致。
+        //
+        // **A 方案（2026-11-12 裁定）：重投必须强制直连，不许再走 `try_queue`。**
+        //
+        // 为什么：直连任务的落点一直是宿主的 `config.download_dir`（固定值），
+        // 断点文件 `<名字>.dlm.json` 就躺在那里。而队列的落点是 `dlm-gui --out-dir`，
+        // 是**另一个目录**。之前重投会先试队列，被接走 ⇒ 落到队列目录 ⇒ 那里没有
+        // 断点文件 ⇒ `dlm` 判 `Fresh` 从 0 开始，而用户以为自己只是点了「继续」。
+        //
+        // 实测证据（2026-11-12）：原任务在 `out2\resumable.bin` 有 8 MB 半截 + 断点，
+        // 重投却下到 `out\resumable.bin` 且从 0 开始，日志写着
+        // 「全长 41943040 B，落盘 41943040 B」。
+        //
+        // 强制直连之后，落点与原任务**必然相同**，续传才真的成立。
+        // 代价：重投绕过队列的限流与配额 —— 可以接受，因为直连任务本来就走这条路
+        // （带 Cookie 的下载一直是直连），重投保持同一条路反而更一致。
+        let mut redeliver = value.clone();
+        if let Some(obj) = redeliver.as_object_mut() {
+            obj.insert("op".into(), Value::String("download".into()));
+        }
+        let mut reply = self.download_direct(&redeliver);
+        // 在回执里补一句"这是重投，不是队列续传"，让扩展能显示不同文案。
+        if let Ok(mut parsed) = serde_json::from_slice::<Value>(&reply)
+            && let Some(obj) = parsed.as_object_mut()
+        {
+            obj.insert("mode".into(), Value::String("redeliver".into()));
+            if let Ok(bytes) = serde_json::to_vec(&parsed) {
+                reply = bytes;
+            }
+        }
+        reply
+    }
+
+    /// `POST /api/resume`。队列不可达时明确失败，**不**悄悄退化成重投 ——
+    /// 那会多下一个文件，而用户以为自己只是点了「继续」。
+    fn resume_queue(&self, id: &str) -> Vec<u8> {
+        let Some(path) = &self.config.gui_endpoint else {
+            return error("队列不可达：没有端点文件（dlm-gui 没在跑？）");
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return error("队列不可达：读不到端点文件");
+        };
+        let Ok(endpoint) = serde_json::from_str::<GuiEndpoint>(&text) else {
+            return error("队列不可达：端点文件读不懂");
+        };
+        let client = match reqwest::blocking::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                eprintln!("dlm-native-host: resume client failed: {err}");
+                return error("队列不可达：建不了客户端");
+            }
+        };
+        let body = json!({ "id": id });
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{}/api/resume?t={}",
+                endpoint.port, endpoint.token
+            ))
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send();
+        match response {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().unwrap_or_default();
+                if status != reqwest::StatusCode::OK {
+                    return error("队列拒绝了继续请求");
+                }
+                let ok = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("ok").and_then(Value::as_bool))
+                    .unwrap_or(false);
+                serde_json::to_vec(&json!({
+                    "op": "resume",
+                    "mode": "queue",
+                    "queue": id,
+                    "ok": ok,
+                    "message": if ok { "已继续" } else { "队列没有这个任务，或它不在可继续的状态" },
+                }))
+                .expect("json! serializable")
+            }
+            Err(err) => {
+                eprintln!("dlm-native-host: resume request failed: {err}");
+                error("队列不可达：继续请求没发出去")
+            }
         }
     }
 
@@ -181,8 +294,6 @@ impl Host {
         let referer = text("referer");
         let cookie = text("cookie");
         let hls = value.get("hls").and_then(Value::as_bool).unwrap_or(false);
-        let tab = value.get("tab").and_then(Value::as_i64);
-        let display_name = name.map(str::to_string).unwrap_or_else(|| derive_name(url));
 
         // B10：无 Cookie 且队列可达 ⇒ 交给队列（队列的落点是 `dlm-gui --out-dir`）。
         // 带 Cookie 的下载仍走 B2 直连：队列不存 Cookie。
@@ -194,8 +305,8 @@ impl Host {
                         "op": "accepted",
                         "mode": "queue",
                         "id": id,
-                        "name": display_name,
-                        "tab": tab,
+                        "name": name.map(str::to_string).unwrap_or_else(|| derive_name(url)),
+                        "tab": value.get("tab").and_then(Value::as_i64),
                     }))
                     .expect("json! serializable");
                 }
@@ -204,6 +315,35 @@ impl Host {
                 QueueOutcome::Unavailable => {}
             }
         }
+        self.download_direct(value)
+    }
+
+    /// 无条件走直连：起一个自己的 `dlm.exe`，落点是 `config.download_dir`。
+    ///
+    /// 从 `download` 里拆出来是给 E16 的「重投」用的 —— 那条路**必须**跳过队列，
+    /// 否则落点会变成队列的 `--out-dir`，断点文件不在那里，续传就变成从头下。
+    /// 拆成两个函数而不是加一个 bool 参数：两种意图（"按规则分流" vs "就要直连"）
+    /// 在调用点一眼能分开，比 `download(v, true)` 好读。
+    fn download_direct(&mut self, value: &Value) -> Vec<u8> {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        };
+        let Some(url) = text("url") else {
+            return error("download needs a url");
+        };
+        let lower = url.to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return error("only http/https urls are accepted");
+        }
+        let name = text("name");
+        let referer = text("referer");
+        let cookie = text("cookie");
+        let hls = value.get("hls").and_then(Value::as_bool).unwrap_or(false);
+        let tab = value.get("tab").and_then(Value::as_i64);
+        let display_name = name.map(str::to_string).unwrap_or_else(|| derive_name(url));
 
         if let Err(err) = fs::create_dir_all(&self.config.download_dir) {
             eprintln!("dlm-native-host: create download dir failed: {err}");
@@ -379,6 +519,11 @@ impl Host {
             "job": job,
             "tab": tab,
             "name": display_name,
+            // E16：把原始请求回给扩展 —— 停止/失败后「继续」要靠它重投。
+            // 不回显 cookie（那是凭据，不该进扩展的存储）。
+            "url": url,
+            "referer": referer,
+            "hls": hls,
             "log": log_path.to_string_lossy(),
         }))
         .expect("json! serializable")
@@ -768,6 +913,125 @@ mod tests {
         assert_eq!(reply["op"], "accepted", "{reply}");
         assert_eq!(reply["mode"], "queue", "{reply}");
         assert_eq!(reply["id"], "q-1");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **E16**：队列任务的「继续」必须真的打到 `POST /api/resume`，并把回执转回扩展。
+    ///
+    /// 这条用例钉的是"扩展够不到 GUI 的 HTTP，所以宿主必须代转"这个事实。
+    /// 少了它，扩展面板上的「继续」按钮就是装饰 —— 点下去什么都不发生。
+    #[test]
+    fn e16_resume_forwards_a_queue_id_to_the_gui() {
+        let (port, handle) = one_shot_stub(r#"{"ok":true}"#);
+        let dir = std::env::temp_dir().join(format!("dlm-e16-resume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut host = Host::new(HostConfig {
+            gui_endpoint: Some(endpoint_file(&dir, port)),
+            dlm_exe: dir.join("no-such-dlm.exe"),
+            ..config(&dir)
+        });
+        let reply: Value =
+            serde_json::from_slice(&host.handle(br#"{"op":"resume","queue":"q-42"}"#)).unwrap();
+        handle.join().unwrap();
+        assert_eq!(reply["op"], "resume", "{reply}");
+        assert_eq!(reply["mode"], "queue", "{reply}");
+        assert_eq!(reply["queue"], "q-42", "{reply}");
+        assert_eq!(reply["ok"], true, "{reply}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **E16**：队列不可达时，「继续」必须**明确失败**，不许悄悄退化成重投。
+    ///
+    /// 悄悄重投会多下一个文件，而用户以为自己只是点了"继续"。
+    /// 判据：没有端点文件 ⇒ 回执是 `op:error`，且**没有** `mode:queue` 的成功形状。
+    #[test]
+    fn e16_resume_without_a_reachable_queue_fails_instead_of_redelivering() {
+        let dir = std::env::temp_dir().join(format!("dlm-e16-noqueue-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut host = Host::new(HostConfig {
+            gui_endpoint: None,
+            dlm_exe: dir.join("no-such-dlm.exe"),
+            ..config(&dir)
+        });
+        let reply: Value =
+            serde_json::from_slice(&host.handle(br#"{"op":"resume","queue":"q-42"}"#)).unwrap();
+        assert_eq!(reply["op"], "error", "{reply}");
+        assert!(
+            reply.get("mode").is_none(),
+            "失败回执不该带 mode:queue，否则扩展会当成成功：{reply}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **E16**：直连任务（没有队列 id）的「继续」是**重投**，回执要明写 `mode:redeliver`。
+    ///
+    /// 它与队列续传是两回事：队列续传是同一个任务被推回 `queued`；
+    /// 重投是重新起一个 `dlm.exe`，靠同名目标旁的 `.dlm.json` 让它自己判 `Resume`。
+    /// 回执不区分这两者，扩展就没法给用户不同的文案。
+    #[test]
+    fn e16_resume_without_a_queue_id_is_flagged_as_a_redelivery() {
+        let dir = std::env::temp_dir().join(format!("dlm-e16-redeliver-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 用一个必然启动失败的可执行文件：这里只验"分流到了 download 那条路"，
+        // 不验真的下起来（那需要网络）。
+        let mut host = Host::new(HostConfig {
+            gui_endpoint: None,
+            dlm_exe: dir.join("no-such-dlm.exe"),
+            ..config(&dir)
+        });
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"resume","url":"https://example.invalid/a.bin"}"#),
+        )
+        .unwrap();
+        // 起不来 ⇒ error，但**不能**是 cancel/未知任务那类错误：
+        // 它必须走到 download 那条路才发现可执行文件不存在。
+        assert_eq!(reply["op"], "error", "{reply}");
+        assert!(
+            reply["message"].as_str().unwrap_or("").contains("dlm"),
+            "错误应来自启动 dlm 失败，而不是分流错：{reply}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **E16 / A 方案**：重投**不许**走队列，必须强制直连。
+    ///
+    /// 这条用例是 A 方案的判据。它构造一个**可达**的队列桩，
+    /// 然后断言重投**没有**落到队列上 —— 回执不是 `mode:queue`。
+    ///
+    /// 为什么必须这样：直连任务的落点是宿主的 `download_dir`，断点文件在那里；
+    /// 队列的落点是 `dlm-gui --out-dir`，是另一个目录。重投若走队列，
+    /// 就会在另一个目录从 0 开始下，而用户以为自己只是点了「继续」。
+    /// 实测见过（2026-11-12）：原任务 `out2\` 有 8 MB 半截，重投却下到 `out\`。
+    ///
+    /// 判据写法：桩**会**返回 `{"ok":true,"id":"q-9"}`。如果代码还在走队列，
+    /// 回执就会是 `mode:queue` + `id:q-9`，断言当场红。
+    #[test]
+    fn e16_redelivery_skips_the_queue_even_when_it_is_reachable() {
+        let (port, handle) = one_shot_stub(r#"{"ok":true,"id":"q-9"}"#);
+        let dir = std::env::temp_dir().join(format!("dlm-e16-skipq-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut host = Host::new(HostConfig {
+            // 队列可达 —— 这正是要证明"即使可达也不去"的前提。
+            gui_endpoint: Some(endpoint_file(&dir, port)),
+            dlm_exe: dir.join("no-such-dlm.exe"),
+            ..config(&dir)
+        });
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"resume","url":"https://example.invalid/a.bin"}"#),
+        )
+        .unwrap();
+        // 桩只会被 accept 一次；如果重投走了队列，它会被消费掉。
+        // 这里不 join（可能没被连接），但断言足以说明问题。
+        assert_ne!(
+            reply["mode"], "queue",
+            "重投绝不能被队列接走 —— 那会换落点、断点文件找不到、从 0 重下：{reply}"
+        );
+        assert!(reply.get("id").is_none(), "不该有队列 id：{reply}");
+        drop(handle);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -2,19 +2,20 @@
 
 **这是 `docs/` 的唯一入口。** 读完这一页，再去读具体文档；不要从 `STATUS` 的旧 dated 小节或某份证据开始。
 
-## 当前状态（2026-11-11 复核）
+## 当前状态（2026-11-12 复核）
 
 **接手先读：[`2026-11-11-交接-HANDOVER.md`](2026-11-11-交接-HANDOVER.md)。** 本页是文档地图，那份才是当前交接。
 
 | 项 | 值 |
 |---|---|
-| 分支 | `sdd/dlm-kernel`，未 push、无远程；最新 `5a5fc47` |
-| 门禁 | `fmt 0` · `--lib 342/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查（统一走根目录 `gates.ps1`） |
+| 分支 | `sdd/dlm-kernel`，未 push、无远程 |
+| 门禁 | `fmt 0` · `--lib 350/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查（统一走根目录 `gates.ps1`） |
 | 产品面 | 内核 + CLI + **原生窗口/托盘 GUI** + Native Messaging 扩展（右键/页内悬浮球/媒体与文件嗅探/HLS 直链） |
-| 最新进展 | `2026-11-10 原生外壳交付`（窗口/托盘/设置/剪贴板/限流/休眠）、`2026-11-11 扩展悬浮球点击失效修复`（0.2.11）、`2026-11-08 v2.1 打磨` |
-| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,337,247 B，`sha256=8dc25c61de0484af7056cb14ffb4aa872a2a5639eab7517dd0f79e682e3b2186`；扩展 0.2.11 |
-| v2.1 交付 | [`plans/2026-11-07-v21-product-polish.md`](superpowers/plans/2026-11-07-v21-product-polish.md) 已全部落地（P2 打开文件 / P1 自动重试 / P4 UI 收尾 / P3 自启与单实例）；托盘 P5 暂缓 |
-| 欠账 | errata E14（`--autostart` 隐藏窗口未解决）、E15（启动 573ms > 300ms 目标）、exe 内嵌图标、设置项透传 —— 详见交接文件的「欠账」表 |
+| 最新进展 | `2026-11-12 第二版：E16/E17/E18/E19 + 重投 A 方案`、`2026-11-10 原生外壳交付`、`2026-11-11 扩展悬浮球修复`（0.2.11） |
+| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,437,323 B，`sha256=97d3025429b2d8cf86d7fdb438e8ad3acf2c52febd3fd5ac6a1e33f06adcd4a6`（**第二版**）；扩展 0.2.11 |
+| 已修 | **E16**（继续入口）· **E17**（粘贴）· **E18**（设置透传）· **E19**（剪贴板提示）· 直连重投落点（A 方案）—— 见 [`evidence/2026-11-12-四项修复记录.md`](evidence/2026-11-12-四项修复记录.md) |
+| 欠账 | errata E14（`--autostart` 隐藏窗口）· E15（启动 573ms）· exe 内嵌图标 · 设置面板缺保存目录/自启开关 |
+| 明确不做 | **站点抓取 / WebGrabber**（产品级功能，单独立项）；IE 内核监视、全局热键、代理服务器、声音事件 —— 见 [`evidence/2026-11-12-IDM选项面板与站点抓取对标.md`](evidence/2026-11-12-IDM选项面板与站点抓取对标.md) |
 | 长期归档 | `E:\WorkSpace\archive\2026_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`（`.superpowers/sdd` 的 2026-10-21 快照） |
 
 ## 怎么读
@@ -102,6 +103,11 @@
 | [`evidence/2026-11-08-v21-product-polish.md`](evidence/2026-11-08-v21-product-polish.md) | v2.1 四项交付与验收（打开文件/自动重试/UI 收尾/自启与单实例） |
 | [`evidence/2026-11-10-native-shell.md`](evidence/2026-11-10-native-shell.md) | 原生外壳交付：窗口/托盘/设置/剪贴板/限流/休眠 |
 | [`evidence/2026-11-11-extension-ball-fixes.md`](evidence/2026-11-11-extension-ball-fixes.md) | 扩展悬浮球点击失效：三轮排障与修复（0.2.9→0.2.11），含误判复盘 |
+| [`evidence/2026-11-11-暂停与续传缺口.md`](evidence/2026-11-11-暂停与续传缺口.md) | E16：暂停后没有「继续」入口 —— 三条投递路径的入口缺口定位（只读，未修） |
+| [`evidence/2026-11-11-首个测试版包.md`](evidence/2026-11-11-首个测试版包.md) | 首个测试版：包 hash、打包时实测、建议实测顺序、已知会坏清单、反馈位 |
+| [`evidence/2026-11-11-粘贴失效与MCP选型.md`](evidence/2026-11-11-粘贴失效与MCP选型.md) | E17：桌面端粘贴失效根因（`eframe` 缺 `clipboard` feature）；MCP vs CLI 选型裁定（选 CLI，且已存在） |
+| [`evidence/2026-11-12-IDM选项面板与站点抓取对标.md`](evidence/2026-11-12-IDM选项面板与站点抓取对标.md) | IDM 选项面板逐项对照（E18 设置不透传、E19 剪贴板无反应）；站点抓取裁定不做 |
+| [`evidence/2026-11-12-四项修复记录.md`](evidence/2026-11-12-四项修复记录.md) | 第二版：E16/E17/E18/E19 修复内容、实测证据、测试竞态修复、直连重投的设计问题 |
 
 ## 不在 `docs/` 的账本
 

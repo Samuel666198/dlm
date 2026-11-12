@@ -13,7 +13,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
    `install.ps1`、`uninstall.ps1`、`START-HERE.txt`、`README-PACKAGE.md`、主 README；
 3. 生成 `target/package/dlm-<version>-win-x64.zip`，打印字节数与 sha256。
 
-包名版本号从 `Cargo.toml` 的 `version` 读取（当前 0.1.0），也可 `-Version 0.1.0` 覆盖；**扩展版本独立**，取自 `browser/extension/manifest.json`（当前 0.2.6），包名不反映扩展版本。
+包名版本号从 `Cargo.toml` 的 `version` 读取（当前 0.1.0），也可 `-Version 0.1.0` 覆盖；**扩展版本独立**，取自 `browser/extension/manifest.json`（当前 0.2.11），包名不反映扩展版本。
 
 ## 安装器行为
 
@@ -23,7 +23,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
 - 复制扩展到 `%LOCALAPPDATA%\dlm\extension`；
 - 写 `%LOCALAPPDATA%\dlm\native-host\com.dlm.host.json`；
 - 注册 HKCU Chrome/Edge 的 Native Messaging 宿主；
-- 创建开始菜单快捷方式（`dlm-gui.exe --open`）。
+- 创建开始菜单快捷方式（`dlm-gui.exe`，**不带 `--open`** —— Web UI 已删除，
+  带 `--open` 会额外弹一个只显示说明页的浏览器 app 窗口）。
 
 扩展仍需在 `chrome://extensions` / `edge://extensions` 开发者模式里手动“加载已解压”。
 `uninstall.ps1` 删除注册、快捷方式、已安装 exe/扩展，不删队列、日志和下载文件。
@@ -33,7 +34,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
 - 打包产物在 `target/` 下，按仓库约定不入库。
 - 不要用仓库里的 `browser/native-host/install.ps1`（它是开发树安装器，指向 `target/debug`）；
   包内使用 `packaging/install.ps1`。
-- 原生 GUI 目前是 Web UI 的浏览器 app 模式窗口；不是原生控件。
+- 原生 GUI 是 eframe/egui 真窗口 + 托盘，不是浏览器 app 模式窗口。
 
 ## Tabbit Browser（本机 1.18）
 

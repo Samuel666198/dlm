@@ -106,6 +106,49 @@ pub(crate) enum Ticket {
         mode: actions::RevealMode,
         reply: Sender<std::result::Result<RevealReply, String>>,
     },
+    /// E18：设置保存后通知 runner 换一份**运行时**参数。
+    ///
+    /// 只带 runner 真正用得上的三项，不带整份 `Settings`：
+    /// 界面偏好（关窗收托盘之类）住在 UI 线程，传过来只会让 runner 多一份没人读的副本。
+    /// 没有这一条时，用户改完设置必须重启程序才生效 —— 那等于设置界面在说谎。
+    ApplyRuntime(RuntimeTuning),
+}
+
+/// runner 侧的运行时参数：从 `Settings` 投影出来，**只含影响子进程的那几项**。
+///
+/// 单独成一个结构而不是直接传 `Settings`：`Settings` 里还有界面偏好与剪贴板开关，
+/// 那些归 UI 线程；runner 拿着它们只会诱导后来的人从错误的地方读状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeTuning {
+    /// 每个任务交给 `dlm --connections` 的连接数。
+    pub connections: usize,
+    /// 全局限速，KiB/s（0 = 不限），转成 `--max-speed` 的字节/秒。
+    pub max_speed_kib: u64,
+    /// 队列层的每 host 连接预算。
+    pub per_host: usize,
+}
+
+impl RuntimeTuning {
+    /// 从设置投影。**夹住下界 1**：`--connections 0` 是参数错误，
+    /// 而 `DragValue` 的下界是 1，正常路径不会出现 0；这里兜住手改 JSON 的情况。
+    pub fn from_settings(s: &settings::Settings) -> Self {
+        Self {
+            connections: s.connections.max(1),
+            max_speed_kib: s.max_speed_kib,
+            per_host: s.per_host_connections,
+        }
+    }
+
+    /// `--max-speed` 的值：字节/秒，0 = 不限。
+    pub fn max_speed_bytes(&self) -> u64 {
+        self.max_speed_kib.saturating_mul(1024)
+    }
+}
+
+impl Default for RuntimeTuning {
+    fn default() -> Self {
+        Self::from_settings(&settings::Settings::default())
+    }
 }
 
 /// `/api/reveal` 的回执。`plan` 原样带回 argv，方便调用方（和测试）核对到底要启动什么，
@@ -164,13 +207,20 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let (tx, rx): (Sender<Ticket>, _) = mpsc::channel();
     let runner_cfg = config.clone();
     // UI 与 runner 共享同一份快照句柄：runner 写，UI 读。
-    let per_host = 8usize; // 队列层预算；设置面板接进来后改成读设置（勘误 E5）
+    // E18：运行时参数从设置投影。以前这里是 `let per_host = 8usize;`，
+    // 连接数与限速则压根没往下传 —— 设置面板改了不生效。
+    let settings_dir = config
+        .queue
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let tuning = RuntimeTuning::from_settings(&settings::Settings::load(&settings_dir));
     let ui_snapshot = Arc::clone(&snapshot);
     let ui_quota = Arc::clone(&quota_snapshot);
     let ui_update = Arc::clone(&update_snapshot);
     std::thread::Builder::new()
         .name("dlm-gui-runner".into())
-        .spawn(move || runner::run(runner_cfg, store, rx, snapshot, quota_snapshot, per_host))
+        .spawn(move || runner::run(runner_cfg, store, rx, snapshot, quota_snapshot, tuning))
         .context("启动队列 runner 失败")?;
 
     let token = config.token.clone().unwrap_or_else(random_token);

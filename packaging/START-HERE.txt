@@ -16,7 +16,10 @@ dlm Windows x64 portable package
 
 4. Start dlm from the Start Menu, or run:
 
-   %LOCALAPPDATA%\dlm\bin\dlm-gui.exe --open
+   %LOCALAPPDATA%\dlm\bin\dlm-gui.exe
+
+   This opens the native window (there is no web UI any more).
+   Closing the window keeps dlm running in the system tray.
 
 5. Browser: right-click a link/image/video, use the page "dlm" button,
    or click the "media N" panel for detected HLS/media URLs.

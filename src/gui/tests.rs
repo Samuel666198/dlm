@@ -259,7 +259,7 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
         total_len: None,
         delivered: None,
     };
-    let plain: Vec<String> = child_args(&task, Path::new("D:/dl"), None)
+    let plain: Vec<String> = child_args(&task, Path::new("D:/dl"), None, RuntimeTuning::default())
         .into_iter()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
@@ -272,10 +272,15 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
     assert!(!plain.iter().any(|s| s == "--max-bytes"));
 
     task.on_complete = Some("open".into());
-    let with_action: Vec<String> = child_args(&task, Path::new("D:/dl"), Some(4096))
-        .into_iter()
-        .map(|s| s.to_string_lossy().to_string())
-        .collect();
+    let with_action: Vec<String> = child_args(
+        &task,
+        Path::new("D:/dl"),
+        Some(4096),
+        RuntimeTuning::default(),
+    )
+    .into_iter()
+    .map(|s| s.to_string_lossy().to_string())
+    .collect();
     assert!(
         with_action
             .windows(2)
@@ -285,6 +290,143 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
         with_action
             .windows(2)
             .any(|w| w[0] == "--max-bytes" && w[1] == "4096")
+    );
+}
+
+/// **E18**：设置里的连接数与限速必须真的出现在子进程 argv 上。
+///
+/// 这条用例存在的理由：`connections`/`max_speed` 曾经能改能存盘，但 `child_args`
+/// 压根不传它们，子进程永远跑 `DEFAULT_CONNECTIONS` 且不限速。界面上写着 16，
+/// 实际 8 —— 没有任何东西会红，因为两处代码从来没有互相说过话。
+/// 判据只有一条：**改设置 ⇒ argv 跟着变**。
+#[test]
+fn e18_connections_and_speed_reach_the_child_argv() {
+    let task = Task {
+        id: "1".into(),
+        url: "https://example.com/a.bin".into(),
+        name: "a.bin".into(),
+        referer: None,
+        status: TaskStatus::Queued,
+        pid: None,
+        exit_code: None,
+        log: "a.log".into(),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+    };
+
+    let argv = |tuning: RuntimeTuning| -> Vec<String> {
+        child_args(&task, Path::new("D:/dl"), None, tuning)
+            .into_iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect()
+    };
+
+    // 设置成 16 连接 + 2 MiB/s。
+    let tuning = RuntimeTuning {
+        connections: 16,
+        max_speed_kib: 2048,
+        per_host: 16,
+    };
+    let got = argv(tuning);
+    assert!(
+        got.windows(2)
+            .any(|w| w[0] == "--connections" && w[1] == "16"),
+        "--connections 必须跟着设置走，实际 argv：{got:?}"
+    );
+    assert!(
+        got.windows(2)
+            .any(|w| w[0] == "--max-speed" && w[1] == "2097152"),
+        "限速要换算成字节/秒（2048 KiB/s = 2097152 B/s），实际 argv：{got:?}"
+    );
+
+    // 不限速（0）⇒ 不传 `--max-speed`：传 0 与不传等价，但少一个参数更干净。
+    let unlimited = argv(RuntimeTuning {
+        connections: 4,
+        max_speed_kib: 0,
+        per_host: 8,
+    });
+    assert!(
+        !unlimited.iter().any(|s| s == "--max-speed"),
+        "限速为 0 时不该出现 --max-speed，实际 argv：{unlimited:?}"
+    );
+    assert!(
+        unlimited
+            .windows(2)
+            .any(|w| w[0] == "--connections" && w[1] == "4")
+    );
+
+    // 手改 JSON 把 connections 写成 0 ⇒ 夹到 1，不能让 `dlm` 报参数错误。
+    let clamped = argv(RuntimeTuning {
+        connections: 0,
+        max_speed_kib: 0,
+        per_host: 8,
+    });
+    assert!(
+        clamped
+            .windows(2)
+            .any(|w| w[0] == "--connections" && w[1] == "1"),
+        "connections=0 必须夹到 1，实际 argv：{clamped:?}"
+    );
+}
+
+/// **E18**：`RuntimeTuning` 从设置投影时，三个字段都要对上；
+/// 并且 host 预算用的连接数必须与传给子进程的是同一个值。
+///
+/// 后半条是关键：`connections_per_task` 与 `child_args` 如果读两个不同的数，
+/// 就会出现「预算按 8 算、实际开 16 条」，每 host 上限形同虚设。
+#[test]
+fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
+    let s = crate::gui::settings::Settings {
+        connections: 12,
+        max_speed_kib: 512,
+        per_host_connections: 24,
+        ..Default::default()
+    };
+
+    let tuning = RuntimeTuning::from_settings(&s);
+    assert_eq!(tuning.connections, 12);
+    assert_eq!(tuning.max_speed_kib, 512);
+    assert_eq!(tuning.per_host, 24);
+    assert_eq!(tuning.max_speed_bytes(), 512 * 1024);
+
+    // 同一个 tuning 既喂给子进程参数，又决定 host 预算 —— 一个来源。
+    let task = Task {
+        id: "1".into(),
+        url: "https://example.com/a.bin".into(),
+        name: "a.bin".into(),
+        referer: None,
+        status: TaskStatus::Queued,
+        pid: None,
+        exit_code: None,
+        log: "a.log".into(),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+    };
+    let argv: Vec<String> = child_args(&task, Path::new("D:/dl"), None, tuning)
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    let from_argv = argv
+        .windows(2)
+        .find(|w| w[0] == "--connections")
+        .map(|w| w[1].clone())
+        .expect("必须传 --connections");
+    assert_eq!(
+        from_argv,
+        super::runner::connections_per_task_for_test(tuning).to_string(),
+        "argv 里的连接数与 host 预算算的是不是同一个值"
     );
 }
 

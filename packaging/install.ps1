@@ -56,7 +56,10 @@ try {
     $ws = New-Object -ComObject WScript.Shell
     $lnk = $ws.CreateShortcut($Shortcut)
     $lnk.TargetPath = Join-Path $Bin 'dlm-gui.exe'
-    $lnk.Arguments = '--open'
+    # 不传 `--open`：原生窗口就是界面。传了会额外用 Edge/Chrome 开一个 app 模式窗口，
+    # 而那个窗口现在只剩一张「dlm 现在是原生窗口」的说明页 —— 双击图标弹两个窗口，
+    # 第一个测试版本不该是这个体验。
+    $lnk.Arguments = ''
     $lnk.WorkingDirectory = $Bin
     $lnk.Description = 'dlm download manager'
     $lnk.Save()
@@ -86,4 +89,5 @@ Write-Output 'Next steps:'
 Write-Output '1. Open chrome://extensions (or edge://extensions), enable Developer mode.'
 Write-Output "2. Load unpacked: $Ext"
 Write-Output '3. Start dlm from the Start Menu, or run:'
-Write-Output "   $Bin\dlm-gui.exe --open"
+Write-Output "   $Bin\dlm-gui.exe"
+Write-Output '   (the app is the native window; closing it keeps dlm running in the tray)'

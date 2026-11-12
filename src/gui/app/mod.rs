@@ -23,6 +23,7 @@ use eframe::egui;
 use crate::gui::Ticket;
 use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 
+pub mod clipboard_hint;
 pub mod dialog;
 pub mod fonts;
 pub mod list;
@@ -80,6 +81,15 @@ pub struct App {
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
     pub start_hidden: u8,
+
+    /// E19：剪贴板发现、但用户还没决定要不要下的链接。
+    ///
+    /// `Some` 时工具条下方出现一条提示条：「发现下载链接 … [下载] [忽略]」。
+    /// **不自动开始下载**（IDM 是自动开始的）：用户复制链接常常只是要发给别人，
+    /// 直接开始下载会让人措手不及。
+    pub(super) clipboard_hit: Option<crate::gui::clipboard::Hit>,
+    /// 用户忽略过的链接：同一条不再提示。
+    pub(super) clipboard_dismissed: Option<String>,
 }
 
 impl App {
@@ -117,6 +127,8 @@ impl App {
             settings_dir,
             settings_error: None,
             start_hidden: 0,
+            clipboard_hit: None,
+            clipboard_dismissed: None,
         }
     }
 
@@ -250,6 +262,14 @@ impl eframe::App for App {
         egui::Panel::top("toolbar")
             .exact_size(theme::TOOLBAR_H)
             .show(ui, |ui| self.toolbar(ui));
+
+        // E19：剪贴板提示条，贴在工具条下面。只有真的有命中时才占高度。
+        self.drain_clipboard(&ctx);
+        if self.clipboard_hit.is_some() {
+            egui::Panel::top("clipboard-hint")
+                .exact_size(theme::CLIPBOARD_HINT_H)
+                .show(ui, |ui| self.clipboard_hint_bar(ui));
+        }
 
         egui::Panel::bottom("status")
             .exact_size(theme::STATUS_H)

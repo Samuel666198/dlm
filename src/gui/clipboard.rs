@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// 认得的下载扩展名。与 `queue::category_for` 的口径保持一致，另外加上常见分卷。
 const EXTENSIONS: &[&str] = &[
@@ -99,6 +100,11 @@ pub struct Hit {
 /// 监视线程的句柄。`Drop` 时置停止标志，线程下一轮自己退。
 pub struct Watcher {
     stop: Arc<AtomicBool>,
+    /// E19：命中就从这个口交给 UI 线程。
+    ///
+    /// 之前这里没有任何出口 —— 命中只 `eprintln!`，而发布版是 GUI 子进程，
+    /// 用户根本看不到 stderr，于是"监视剪贴板"这个开关看起来完全没反应。
+    pub hits: Receiver<Hit>,
 }
 
 impl Drop for Watcher {
@@ -113,11 +119,12 @@ pub fn spawn() -> Option<Watcher> {
     {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let (tx, hits) = channel();
         std::thread::Builder::new()
             .name("dlm-clipboard".into())
-            .spawn(move || watch_loop(stop_thread))
+            .spawn(move || watch_loop(stop_thread, tx))
             .ok()?;
-        Some(Watcher { stop })
+        Some(Watcher { stop, hits })
     }
     #[cfg(not(windows))]
     {
@@ -126,7 +133,7 @@ pub fn spawn() -> Option<Watcher> {
 }
 
 #[cfg(windows)]
-fn watch_loop(stop: Arc<AtomicBool>) {
+fn watch_loop(stop: Arc<AtomicBool>, tx: Sender<Hit>) {
     use std::ffi::c_void;
 
     // SAFETY: 只调 user32 的剪贴板 API，句柄都由系统给出并在本函数内释放。
@@ -188,7 +195,15 @@ fn watch_loop(stop: Arc<AtomicBool>) {
             if let Some(text) = text
                 && let Some(hit) = detect(&text)
             {
-                // 目前只把命中记到 stderr；UI 侧的提示条在下一步接。
+                // E19：交给 UI 线程弹提示条。
+                //
+                // 这里**不自动开始下载**（IDM 是自动开始的）。理由是隐私与误触：
+                // 用户复制链接常常只是要发给别人，直接开始下载会让人措手不及。
+                // 所以提示条上给一个「下载」按钮，点一下才真的投递 —— 语义是
+                // 「发现了，要不要下」，而不是「已经在下」。
+                //
+                // `send` 失败 = UI 已经丢了 `Watcher`（关闭监视），这一条自然作废。
+                let _ = tx.send(hit.clone());
                 eprintln!("dlm-gui: 剪贴板发现下载链接 {}", hit.url);
             }
         }

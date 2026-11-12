@@ -15,33 +15,44 @@ use crate::actions;
 use crate::queue::{self, QueueStore, Task, TaskStatus};
 
 use super::snapshot::{QuotaView, TaskView, quota_view, snapshot_of};
-use super::{GuiConfig, MIN_QUOTA_SLICE, RevealReply, Ticket};
+use super::{GuiConfig, MIN_QUOTA_SLICE, RevealReply, RuntimeTuning, Ticket};
 pub(crate) fn run(
     config: GuiConfig,
     mut store: QueueStore,
     rx: Receiver<Ticket>,
     snapshot: Arc<Mutex<Vec<TaskView>>>,
     quota_snapshot: Arc<Mutex<Option<QuotaView>>>,
-    per_host: usize,
+    tuning: RuntimeTuning,
 ) {
     let mut children: HashMap<String, Child> = HashMap::new();
 
     let mut reserved: HashMap<String, u64> = HashMap::new();
     let mut last_delivered: HashMap<String, u64> = HashMap::new();
+    // E18：运行时参数由设置投影而来，`ApplyRuntime` 会就地替换。
+    // 之前这里是裸的 `per_host: usize`（调用方硬编码 8），连接数与限速压根没往下传。
+    let mut tuning = tuning;
     // 跨任务的 host 连接预算（勘误 E4）：这是改 scheduler.rs 做不到的那一层。
-    let mut gate = HostGate::new(per_host);
+    let mut gate = HostGate::new(tuning.per_host);
     loop {
         let mut changed = false;
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(ticket) => {
-                changed |= apply(
-                    ticket,
-                    &mut store,
-                    &mut children,
-                    &mut reserved,
-                    &mut last_delivered,
-                    &config,
-                )
+                // `ApplyRuntime` 不碰队列，所以它不走 `apply`（那条路返回"队列变没变"）。
+                // 换 tuning 与 gate 都在这儿做，且**立刻生效**：下一轮 `tick` 派发时就用新值。
+                if let Ticket::ApplyRuntime(next) = &ticket {
+                    tuning = *next;
+                    gate.set_per_host(next.per_host);
+                    changed = true;
+                } else {
+                    changed |= apply(
+                        ticket,
+                        &mut store,
+                        &mut children,
+                        &mut reserved,
+                        &mut last_delivered,
+                        &config,
+                    );
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
@@ -58,6 +69,7 @@ pub(crate) fn run(
             &mut last_delivered,
             &mut gate,
             &config,
+            tuning,
         );
         if changed {
             let _ = store.save();
@@ -80,6 +92,9 @@ fn apply(
     config: &GuiConfig,
 ) -> bool {
     match ticket {
+        // 在 `run` 里就地处理（要动 `tuning` 与 `gate`，两者都不在这条路的参数里）。
+        // 这里必须是显式分支：漏了它穷举就不全，编译器会红 —— 这正是想要的。
+        Ticket::ApplyRuntime(_) => false,
         Ticket::Add {
             url,
             name,
@@ -260,11 +275,18 @@ pub(crate) fn quota_slice(available: u64, free_slots: usize) -> Option<u64> {
     })
 }
 
-/// 构造 `dlm` 子进程参数。抽成纯函数是为了让"配额切片 / 完成后动作到底传没传"能单测。
+/// 构造 `dlm` 子进程参数。抽成纯函数是为了让"配额切片 / 完成后动作 / **连接数与限速**
+/// 到底传没传"能单测。
+///
+/// **E18**：`--connections` 与 `--max-speed` 曾经根本没出现在这张表里 ——
+/// 设置面板能改能存，子进程却永远跑 `DEFAULT_CONNECTIONS` 且不限速。
+/// 现在两者都从 [`RuntimeTuning`] 来，且**总是显式传**：
+/// 不传时 `dlm` 用自己的默认值，那个默认值与设置面板显示的值是两本账。
 pub(crate) fn child_args(
     task: &Task,
     out_dir: &Path,
     quota_slice: Option<u64>,
+    tuning: RuntimeTuning,
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
         "--url".into(),
@@ -274,7 +296,15 @@ pub(crate) fn child_args(
         "--out-name".into(),
         task.name.clone().into(),
         "--quiet".into(),
+        "--connections".into(),
+        tuning.connections.max(1).to_string().into(),
     ];
+    // 限速 0 = 不限，那正是 `dlm` 的默认；传 0 与不传等价，但显式传能让
+    // "设置里的 0"与"忘了传"在 argv 上区分开，排查时省一轮。
+    if tuning.max_speed_kib > 0 {
+        args.push("--max-speed".into());
+        args.push(tuning.max_speed_bytes().to_string().into());
+    }
     if let Some(referer) = &task.referer {
         args.push("--referer".into());
         args.push(referer.into());
@@ -322,6 +352,16 @@ impl HostGate {
         crate::gui::host_budget::can_start(used, want, self.per_host)
     }
 
+    /// E18：设置改了每 host 上限，就地替换。
+    ///
+    /// **只换上限，不动已用量与 per_task**：已占的连接是真实存在的，
+    /// 清掉它们会让"归还"算错（归还时按 `per_task` 里记的数扣）。
+    /// 新上限在**下一次** `allows` 判定时生效 —— 已经在跑的任务不受影响，
+    /// 这是对的：改设置不该把正在下载的任务踢掉。
+    pub fn set_per_host(&mut self, per_host: usize) {
+        self.per_host = per_host;
+    }
+
     pub fn take(&mut self, task_id: &str, url: &str, want: usize) {
         let host = crate::gui::host_budget::host_of(url);
         crate::gui::host_budget::acquire(&mut self.usage, &host, want);
@@ -342,6 +382,7 @@ fn tick(
     last_delivered: &mut HashMap<String, u64>,
     gate: &mut HostGate,
     config: &GuiConfig,
+    tuning: RuntimeTuning,
 ) -> bool {
     let mut changed = false;
     // 1) 采样：按覆盖量增量记配额。先采再 reap，子进程退出前最后一截也算得到。
@@ -438,7 +479,8 @@ fn tick(
 
     // 4) 派发。
     while children.len() < config.concurrency {
-        let want = connections_per_task(config);
+        // E18：连接数从设置来，不再是编译期常量。
+        let want = connections_per_task(tuning);
         let next = store
             .tasks()
             .iter()
@@ -501,7 +543,7 @@ fn tick(
         let baseline = store.delivered(&config.out_dir, &task.name).unwrap_or(0);
         let mut command = Command::new(&config.dlm_exe);
         command
-            .args(child_args(&task, &config.out_dir, quota_slice))
+            .args(child_args(&task, &config.out_dir, quota_slice, tuning))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
@@ -540,9 +582,23 @@ fn tick(
 
 /// 一个任务会开几条连接。
 ///
-/// 现在队列不透传 `--connections`（README 记着这是已接受的限制），
-/// 所以按 dlm 的默认值算。等设置面板把 `connections` 透传进来（勘误 E5），
-/// 这里改成读设置即可，预算逻辑不用动。
-fn connections_per_task(_config: &GuiConfig) -> usize {
-    crate::consts::DEFAULT_CONNECTIONS
+/// **E18 之前**这里返回 `consts::DEFAULT_CONNECTIONS`（写死 8），因为队列不透传
+/// `--connections`。现在从 [`RuntimeTuning`] 取，设置面板改了立刻生效。
+///
+/// 这个数必须与 `child_args` 传给子进程的 `--connections` **是同一个值** ——
+/// 否则 host 预算按 8 算、实际开 16 条，每 host 上限就形同虚设。
+/// 两处都读同一个 `tuning.connections`，这条一致性由构造方式保证，不需要再对账。
+fn connections_per_task(tuning: RuntimeTuning) -> usize {
+    tuning.connections.max(1)
+}
+
+/// 给 `gui::tests` 用的只读投影。
+///
+/// 存在的唯一理由：E18 的用例要断言「argv 里的 `--connections` 与 host 预算
+/// 用的是同一个值」。把 `connections_per_task` 直接 `pub(crate)` 也能测，
+/// 但那会让这个内部函数在整个 crate 里可见 —— 加一层命名明确的测试口，
+/// 以后有人想在生产代码里调它会先看到 `_for_test` 三个字。
+#[cfg(test)]
+pub(crate) fn connections_per_task_for_test(tuning: RuntimeTuning) -> usize {
+    connections_per_task(tuning)
 }

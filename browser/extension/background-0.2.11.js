@@ -256,6 +256,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     return true;
   }
+  // E16：继续。宿主按有没有 queue id 分两条路（队列走 /api/resume，直连走重投）。
+  // 扩展这边只转发，不判断"能不能续" —— 那是队列与断点文件的事实，不是扩展能猜的。
+  if (msg && msg.op === "resume") {
+    if (!port) connect();
+    if (!port) {
+      sendResponse({ ok: false, message: "native host unavailable" });
+      return true;
+    }
+    const payload = { op: "resume" };
+    if (msg.queue) payload.queue = msg.queue;
+    if (msg.url) {
+      payload.url = msg.url;
+      if (msg.name) payload.name = msg.name;
+      if (msg.referer) payload.referer = msg.referer;
+      if (msg.hls) payload.hls = true;
+    }
+    try {
+      port.postMessage(payload);
+      sendResponse({ ok: true });
+    } catch (err) {
+      sendResponse({ ok: false, message: String(err) });
+    }
+    return true;
+  }
   if (msg && msg.op === "page-links") {
     const tabId = sender.tab && sender.tab.id;
     const items = Array.isArray(msg.items) ? msg.items : [];

@@ -13,7 +13,13 @@ sha2 = "0.11"
 
 # 原生外壳（v2.1 步骤 2+）。**保留 default_fonts**：关掉它窗口里一个字都没有
 # （勘误 E3）。不启 wgpu —— 默认后端本来就是 glow，wgpu 是 opt-in。
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+#
+# **`clipboard` 不能省（E17）**：`default-features = false` 把 eframe 的 default 全关了，
+# 而 `clipboard` 本来在 default 里。少了它，`egui-winit/clipboard` → `arboard` 整条链
+# 都不会被编译，于是 Ctrl+V 粘贴、右键菜单的剪切/复制/粘贴、Ctrl+C 全部静默失效 ——
+# egui 收不到剪贴板事件，输入框保持为空，看起来像"粘贴键坏了"。
+# 判据：`Cargo.lock` 里必须查得到 `arboard`。
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
 tray-icon = { version = "0.21", default-features = false }
 
 # 集成测试用的假 `dlm`：按调用次数发不同退出码，用来钉 P1 的自动重试。
