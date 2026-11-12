@@ -75,6 +75,10 @@ impl App {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("配额").size(11.5).color(theme::INK_3));
                 }
+
+                // 有新版 / 检查失败时，这里多一枚可点的标记。没更新的机器看不到任何东西。
+                ui.add_space(12.0);
+                self.update_badge(ui);
             });
         });
     }

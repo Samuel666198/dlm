@@ -44,6 +44,10 @@ if ($Cargo) {
 $script:Failed = 0
 $script:Results = @()
 
+# 更新检查会在启动 10 秒后请求 raw.githubusercontent.com。门禁里不许有真实外网请求：
+# 断网的机器会变红，联网的机器会悄悄依赖网络。子进程继承这个变量 ⇒ 一处设置覆盖全部用例。
+$env:DLM_NO_UPDATE_CHECK = '1'
+
 function Invoke-Gate {
     param(
         [string]$Name,

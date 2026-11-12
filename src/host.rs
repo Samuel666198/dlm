@@ -107,6 +107,9 @@ pub struct Host {
     notify: Option<Notify>,
     jobs: Jobs,
     canceled: Canceled,
+    /// 上一次转给 `dlm-gui` 的「扩展运行版本」。同一版本只转一次 ——
+    /// 扩展每次连宿主都会 ping，每 ping 都发一个 HTTP 请求是白花钱。
+    last_ext_version: Option<String>,
 }
 
 impl Host {
@@ -117,6 +120,7 @@ impl Host {
             notify: None,
             jobs: Arc::new(Mutex::new(HashMap::new())),
             canceled: Arc::new(Mutex::new(HashSet::new())),
+            last_ext_version: None,
         }
     }
 
@@ -163,8 +167,71 @@ impl Host {
             // 所以由宿主代转一次 `POST /api/resume`。直连模式的任务不走这里 ——
             // 它们没有队列 id，续的办法是重投同一个 URL（见 `resume` 的实现说明）。
             Some("resume") => self.resume(&value),
+            // 扩展连上来第一件事就是 ping/hello：顺手把它的运行版本转给 GUI。
+            // 回执仍由 `native::respond` 生成（宿主不自造协议）。
+            Some(op @ ("ping" | "hello")) => {
+                self.report_ext_version(op, &value);
+                native::respond(payload)
+            }
             _ => native::respond(payload),
         }
+    }
+
+    /// 把「扩展正在跑的版本」转给 `dlm-gui`（`POST /api/ext-hello`）。
+    ///
+    /// ## 为什么要转
+    ///
+    /// 扩展是「加载已解压」，浏览器**不允许**程序化替换。所以更新扩展只能做到
+    /// 「把新文件写到磁盘 + 提示用户重载 + 确认他真的重载了」。
+    /// 最后那一步只能靠扩展自己说：它连宿主时带上 `manifest.version`。
+    ///
+    /// ## 三件不做的事
+    ///
+    /// - **同一版本只转一次**：扩展每次连宿主都 ping，每 ping 一个 HTTP 请求是白花钱。
+    /// - **失败静默**：GUI 没起来、端点文件过期、端口没人听 —— 一律忽略。
+    ///   宿主的存在意义是「让下载能用」，不能因为版本上报失败就影响下载。
+    /// - **不阻塞回执**：2 秒超时，超了就放弃，回执早就发出去了。
+    fn report_ext_version(&mut self, op: &str, value: &Value) {
+        eprintln!("dlm-native-host: 扩展 {op}");
+        let Some(version) = value
+            .get("ext_version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return;
+        };
+        if self.last_ext_version.as_deref() == Some(version) {
+            return;
+        }
+        self.last_ext_version = Some(version.to_string());
+        let Some(path) = &self.config.gui_endpoint else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(endpoint) = serde_json::from_str::<GuiEndpoint>(&text) else {
+            return;
+        };
+        eprintln!("dlm-native-host: 扩展运行版本 {version} 转给 dlm-gui");
+        let url = format!(
+            "http://127.0.0.1:{}/api/ext-hello?t={}",
+            endpoint.port, endpoint.token
+        );
+        let _ = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .and_then(|client| {
+                client
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(json!({ "version": version }).to_string())
+                    .send()
+                    .map(|_| ())
+            });
     }
 
     /// E16：把队列任务的「继续」转给 `dlm-gui`。
@@ -800,6 +867,72 @@ mod tests {
         let pong: Value = serde_json::from_slice(&host.handle(br#"{"op":"ping"}"#)).unwrap();
         assert_eq!(pong["op"], "pong");
         assert_eq!(pong["host"], "com.dlm.host");
+    }
+
+    /// 扩展上报的运行版本必须真的打到 `POST /api/ext-hello`，而且**同一版本只打一次**。
+    ///
+    /// 这是「用户到底重载了扩展没有」的唯一证据来源：扩展是「加载已解压」，
+    /// 浏览器不许程序化替换，桌面端只能靠它自己说。宿主不转发 ⇒ 界面永远显示旧版本。
+    #[test]
+    fn the_host_forwards_the_running_extension_version_to_the_gui() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let stub = std::thread::spawn(move || {
+            // 只接两个连接：新版本一次、再换一个版本一次。
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let body = r#"{"ok":true}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("dlm-ext-ver-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut host = Host::new(HostConfig {
+            gui_endpoint: Some(endpoint_file(&dir, port)),
+            dlm_exe: dir.join("no-such-dlm.exe"),
+            ..config(&dir)
+        });
+
+        // 同一个版本 ping 两次：只该上报一次。
+        let pong: Value =
+            serde_json::from_slice(&host.handle(br#"{"op":"ping","ext_version":"0.2.12"}"#))
+                .unwrap();
+        assert_eq!(pong["op"], "pong");
+        assert_eq!(pong["ext_version"], "0.2.12", "回执要回显扩展版本：{pong}");
+        assert_eq!(pong["core_version"], env!("CARGO_PKG_VERSION"));
+        let _ = host.handle(br#"{"op":"ping","ext_version":"0.2.12"}"#);
+        // 换一个版本：要再上报一次。
+        let _ = host.handle(br#"{"op":"hello","ext_version":"0.2.13"}"#);
+        stub.join().unwrap();
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            2,
+            "同一版本重复 ping 不该重复上报：{requests:?}"
+        );
+        assert!(
+            requests[0].contains("POST /api/ext-hello?t=tok"),
+            "{}",
+            requests[0]
+        );
+        assert!(requests[0].contains("0.2.12"), "{}", requests[0]);
+        assert!(requests[1].contains("0.2.13"), "{}", requests[1]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -9,14 +9,60 @@ use serde::Serialize;
 
 use crate::queue::{self, QueueStore, Task, TaskStatus};
 
+/// 更新状态。
+///
+/// ## 三个版本号（见 `docs/evidence/2026-11-12-更新功能裁定.md` 第三节）
+///
+/// | 字段 | 含义 |
+/// |---|---|
+/// | `current` / `latest` | **发行版** `release`：用户感知的「软件版本」，更新与否只看它 |
+/// | `core` / `core_current` | 桌面端三个 exe 的版本，与 `Cargo.toml` 一致 |
+/// | `extension` | 扩展版本，与 `manifest.json` 一致 |
+///
+/// `available` 只由 `release` 决定。`core`/`extension` 是给人看的：
+/// 告诉用户「这次更新会不会连带换扩展」。
+///
+/// ## 清单缺 sha256 ⇒ `available` 但不可安装
+///
+/// 装进安装目录的东西必须校验摘要，没有摘要的包不许装。但「有新版本」和
+/// 「能自动装这个版本」是两件事，不能混成一个布尔：
+///
+/// | 字段 | 含义 |
+/// |---|---|
+/// | `available` | 清单里确实有更新的发行版（事实） |
+/// | `installable` | 这个包能自动装（有摘要、满足 `min_core`） |
+/// | `blocked` | 不可安装的原因，给人看 |
+///
+/// 混在一起的话，「清单坏了」会显示成「没有更新」——用户永远等不到提示。
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateView {
     pub enabled: bool,
+    /// 本机发行版版本（`gui::RELEASE`）。
     pub current: String,
+    /// 清单里的发行版版本。
     pub latest: Option<String>,
     pub available: bool,
+    /// 能不能自动装：有摘要、满足 `min_core`。
+    pub installable: bool,
+    /// 不可安装的原因（`available` 为真而 `installable` 为假时才有）。
+    pub blocked: Option<String>,
+    /// 本机桌面端版本（`Cargo.toml`）。
+    pub core_current: String,
+    /// 清单里的桌面端版本。
+    pub core: Option<String>,
+    /// 清单里的扩展版本。
+    pub extension: Option<String>,
+    /// 浏览器里**正在跑**的扩展版本：扩展连上宿主时自己报的（E16 之后的双向 ping）。
+    ///
+    /// 与 `extension`（清单里的目标版本）成对出现才有意义：
+    /// `extension_running != extension` ⇒ 用户还没重载扩展。
+    pub extension_running: Option<String>,
     pub url: Option<String>,
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
     pub notes: Option<String>,
+    pub min_core: Option<String>,
+    pub published_at: Option<String>,
     pub checked_at: Option<u64>,
     pub error: Option<String>,
 }
@@ -25,11 +71,21 @@ impl UpdateView {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            current: env!("CARGO_PKG_VERSION").to_string(),
+            current: crate::gui::RELEASE.to_string(),
             latest: None,
             available: false,
+            installable: false,
+            blocked: None,
+            core_current: env!("CARGO_PKG_VERSION").to_string(),
+            core: None,
+            extension: None,
+            extension_running: None,
             url: None,
+            sha256: None,
+            size: None,
             notes: None,
+            min_core: None,
+            published_at: None,
             checked_at: None,
             error: None,
         }

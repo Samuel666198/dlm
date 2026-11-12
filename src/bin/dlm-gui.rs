@@ -42,7 +42,8 @@ fn parse() -> Result<GuiConfig> {
             .join("dlm")
             .join("gui")
             .join("endpoint.json"),
-        update_url: None,
+        update_url: Some(gui::DEFAULT_UPDATE_URL.to_string()),
+        update_check_delay_secs: gui::UPDATE_CHECK_DELAY_SECS,
         category_dirs: false,
         open: false,
         max_task_retries: 2,
@@ -74,8 +75,13 @@ fn parse() -> Result<GuiConfig> {
                     bail!("--update-url 只接受 http:// 或 https://");
                 }
                 config.update_url = Some(raw);
+                // 显式给了清单地址：有人正在验证更新链路，别让他等那十秒冷启动延迟。
+                config.update_check_delay_secs = 0;
             }
             "--category-dirs" => config.category_dirs = true,
+            // 默认会查更新（`gui::DEFAULT_UPDATE_URL`）。这一条断网/离线环境用：
+            // 关掉后 `gui::run` 一个外网请求都不发。
+            "--no-update-check" => config.update_url = None,
             "--open" => config.open = true,
             "--max-task-retries" => {
                 config.max_task_retries = next(&mut args, "--max-task-retries")?.parse()?
@@ -98,7 +104,7 @@ fn parse() -> Result<GuiConfig> {
             }
             "--help" | "-h" => {
                 println!(
-                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--category-dirs] [--open] [--max-task-retries N] [--autostart] [--new-instance] [--headless] [--autostart-install] [--autostart-remove]"
+                    "dlm-gui [--port N] [--queue FILE] [--out-dir DIR] [--log-dir DIR] [--dlm EXE] [--concurrency N] [--token T] [--quota BYTES] [--quota-window SECS] [--endpoint FILE] [--update-url URL] [--no-update-check] [--category-dirs] [--open] [--max-task-retries N] [--autostart] [--new-instance] [--headless] [--autostart-install] [--autostart-remove]"
                 );
                 std::process::exit(0);
             }

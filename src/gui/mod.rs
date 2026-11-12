@@ -44,6 +44,30 @@ pub const DEFAULT_RETRY_BACKOFF: &[u64] = &[30, 120];
 /// 配额切片下限：新建任务首轮预读要落盘并计入配额，切片小于它一定超窗。
 const MIN_QUOTA_SLICE: u64 = PROBE_READ_BYTES;
 
+/// 本机**发行版**版本：用户感知的「软件版本」。
+///
+/// 与 `Cargo.toml` 的 `core` 版本分开（见 `docs/evidence/2026-11-12-更新功能裁定.md`）：
+/// 用户不在乎「内核 0.1.0 变 0.1.1」，只在乎「这个软件更新了」。
+/// 更新判断只比这一个字段。
+///
+/// **发版时这个常量要跟着改**，否则刚装上的新版本会认为自己还是旧的，
+/// 每启动一次就提示一次「有更新」。
+pub const RELEASE: &str = "0.1.0";
+
+/// 默认更新清单地址。
+///
+/// 放在 `main` 分支的仓库根：raw.githubusercontent 走 CDN、不吃 GitHub API 配额
+/// （未认证 API 只有 60 次/小时，多开几次或调试时很容易打满）。
+pub const DEFAULT_UPDATE_URL: &str =
+    "https://raw.githubusercontent.com/Samuel666198/dlm/main/latest.json";
+
+/// 启动后延迟多久再查更新（秒）。
+///
+/// 启动已经 573 ms 超目标（E15），检查放在独立线程里不阻塞主线程；再加一层延迟是为了
+/// 让冷启动的第一秒只做「把窗口画出来」这一件事。副作用也有用：集成测试起 GUI 后
+/// 往往一两秒内就杀掉，于是根本不会发这次外网请求。
+pub const UPDATE_CHECK_DELAY_SECS: u64 = 10;
+
 #[derive(Debug, Clone)]
 pub struct GuiConfig {
     pub queue: PathBuf,
@@ -61,6 +85,10 @@ pub struct GuiConfig {
     pub endpoint: PathBuf,
     /// C3：更新清单 URL；`None` = 不检查、不发任何外网请求。
     pub update_url: Option<String>,
+    /// 决定「启动多久之后才去查更新」：自动检查用 [`UPDATE_CHECK_DELAY_SECS`]
+    /// （别跟首帧抢时间），**显式给了 `--update-url` 就是 0** ——
+    /// 那时是有人在专门验证更新链路，等十秒只会让验证变慢。
+    pub update_check_delay_secs: u64,
     /// C3：按分类建子目录（默认关；关时只打标签/筛选）。
     pub category_dirs: bool,
     /// 启动后用 Edge/Chrome 的 `--app` 模式打开 Web UI（窗口外壳，不是原生控件）。
@@ -192,29 +220,46 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let http_snapshot = Arc::clone(&snapshot);
     let http_quota = Arc::clone(&quota_snapshot);
     let http_update = Arc::clone(&update_snapshot);
-    if let Some(url) = config.update_url.clone() {
-        let snapshot = Arc::clone(&update_snapshot);
-        std::thread::Builder::new()
-            .name("dlm-gui-update".into())
-            .spawn(move || {
-                let view = check_update(&url);
-                if let Ok(mut guard) = snapshot.lock() {
-                    *guard = view;
-                }
-            })
-            .context("启动更新检查线程失败")?;
+    // 设置要在更新检查之前读：`auto_check_update` 决定这次要不要查。
+    // 先读设置、再起线程，顺序不能反 —— 反了就是又一处「定义在设置里、没人调用」。
+    let settings_dir = config
+        .queue
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let settings = settings::Settings::load(&settings_dir);
+    // 门禁/集成测试统一离线：`gates.ps1` 会设 `DLM_NO_UPDATE_CHECK=1`，
+    // 子进程继承它。用一个环境变量而不是让八九处起 GUI 的用例各自加参数 ——
+    // 漏一处就会在门禁里真发一次外网请求，那种测试是假绿：机器断网就变红。
+    let offline = std::env::var_os("DLM_NO_UPDATE_CHECK").is_some();
+    match (&config.update_url, settings.auto_check_update && !offline) {
+        (Some(url), true) => {
+            let url = url.clone();
+            let delay = config.update_check_delay_secs;
+            let snapshot = Arc::clone(&update_snapshot);
+            std::thread::Builder::new()
+                .name("dlm-gui-update".into())
+                .spawn(move || {
+                    // 延迟到冷启动过去再查：不跟首帧抢带宽，也给测试留出「起完就杀」的窗口。
+                    if delay > 0 {
+                        std::thread::sleep(Duration::from_secs(delay));
+                    }
+                    let view = check_update(&url);
+                    install_update_view(&snapshot, view);
+                })
+                .context("启动更新检查线程失败")?;
+        }
+        (Some(_), false) => {
+            eprintln!("dlm-gui: 更新检查已在设置里关闭");
+        }
+        (None, _) => {}
     }
     let (tx, rx): (Sender<Ticket>, _) = mpsc::channel();
     let runner_cfg = config.clone();
     // UI 与 runner 共享同一份快照句柄：runner 写，UI 读。
     // E18：运行时参数从设置投影。以前这里是 `let per_host = 8usize;`，
     // 连接数与限速则压根没往下传 —— 设置面板改了不生效。
-    let settings_dir = config
-        .queue
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
-    let tuning = RuntimeTuning::from_settings(&settings::Settings::load(&settings_dir));
+    let tuning = RuntimeTuning::from_settings(&settings);
     let ui_snapshot = Arc::clone(&snapshot);
     let ui_quota = Arc::clone(&quota_snapshot);
     let ui_update = Arc::clone(&update_snapshot);
@@ -305,7 +350,14 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
-            let mut app = app::App::new(ui_snapshot, ui_quota, ui_update, ui_tx, settings_dir);
+            let mut app = app::App::new(
+                ui_snapshot,
+                ui_quota,
+                ui_update,
+                ui_tx,
+                settings_dir,
+                config.update_url.clone(),
+            );
             // `--autostart` 纯托盘：等 20 帧（≈330ms）窗口稳定后再藏起来。
             // 太早发 `Visible(false)` 会被随后的窗口初始化覆盖（实测）。
             app.start_hidden = if autostart { 20 } else { 0 };
@@ -407,16 +459,11 @@ fn version_is_newer(current: &str, latest: &str) -> bool {
 }
 
 fn check_update(url: &str) -> UpdateView {
-    let current = env!("CARGO_PKG_VERSION").to_string();
     let fail = |error: String| UpdateView {
         enabled: true,
-        current: current.clone(),
-        latest: None,
-        available: false,
-        url: None,
-        notes: None,
         checked_at: Some(queue::now_secs()),
         error: Some(error),
+        ..UpdateView::disabled()
     };
     let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
     if reqwest::Url::parse(url)
@@ -445,28 +492,99 @@ fn check_update(url: &str) -> UpdateView {
         Ok(value) => value,
         Err(err) => return fail(format!("清单 JSON 解析失败：{err}")),
     };
-    let Some(latest) = value
-        .get("version")
-        .or_else(|| value.get("latest"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-    else {
-        return fail("更新清单缺 version/latest".to_string());
-    };
-    UpdateView {
+    parse_manifest(&value).unwrap_or_else(&fail)
+}
+
+/// 解析更新清单。
+///
+/// 两种格式都认：
+///
+/// | 版本 | 字段 |
+/// |---|---|
+/// | 现在（三个版本号） | `release` / `core` / `extension` / `sha256` / `size` / `min_core` |
+/// | 老（C3 骨架期） | `version` 或 `latest`，没有摘要 |
+///
+/// 老清单没有 `sha256`，而**没有摘要的包不许装**：那种情况下 `available` 仍为真
+/// （确实有新版），但 `installable` 为假、`blocked` 写明原因。
+/// 这样界面能显示「有新版，但只能手动装」，而不是「没有更新」。
+fn parse_manifest(value: &Value) -> std::result::Result<UpdateView, String> {
+    let release = manifest_str(value, "release")
+        .or_else(|| manifest_str(value, "version"))
+        .or_else(|| manifest_str(value, "latest"))
+        .ok_or_else(|| "更新清单缺 release（旧格式为 version/latest）".to_string())?;
+    let core_local = env!("CARGO_PKG_VERSION").to_string();
+    let mut view = UpdateView {
         enabled: true,
-        current: current.clone(),
-        available: version_is_newer(&current, &latest),
-        latest: Some(latest),
-        url: value.get("url").and_then(Value::as_str).map(str::to_string),
-        notes: value
-            .get("notes")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        current: RELEASE.to_string(),
+        available: version_is_newer(RELEASE, &release),
+        installable: false,
+        blocked: None,
+        latest: Some(release),
+        core_current: core_local.clone(),
+        core: manifest_str(value, "core"),
+        extension: manifest_str(value, "extension"),
+        extension_running: None,
+        url: manifest_str(value, "url"),
+        sha256: manifest_str(value, "sha256").map(|s| s.to_ascii_lowercase()),
+        size: value.get("size").and_then(Value::as_u64),
+        notes: manifest_str(value, "notes"),
+        min_core: manifest_str(value, "min_core"),
+        published_at: manifest_str(value, "published_at"),
         checked_at: Some(queue::now_secs()),
         error: None,
+    };
+    if !view.available {
+        return Ok(view);
     }
+    // min_core：低于它不能自动更新，只能整包重装（内核没有跨版本迁移能力）。
+    if let Some(min_core) = &view.min_core
+        && version_is_newer(&core_local, min_core)
+    {
+        view.blocked = Some(format!(
+            "新版本要求桌面端至少 {min_core}（当前 {core_local}），需要手动重装"
+        ));
+        return Ok(view);
+    }
+    // 没有摘要的包不许装：装进安装目录的东西不校验等于任意代码执行。
+    // 注意这里**不改** `available` —— 「有新版本」是事实，不能因为清单坏了就说没更新。
+    if view.sha256.is_none() {
+        view.blocked =
+            Some("清单缺 sha256，无法校验下载内容；这个版本只能手动下载安装".to_string());
+        return Ok(view);
+    }
+    view.installable = true;
+    Ok(view)
+}
+
+/// 清单里的一个非空字符串字段。空白串当作没写。
+pub(crate) fn manifest_str(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 把新查到的视图换进槽里，但**保留** `extension_running`。
+///
+/// 那个字段来自扩展的实时上报（`POST /api/ext-hello`），不是清单里的东西。
+/// 整份覆盖会让「浏览器里跑的是哪个版本」在每次检查更新之后凭空丢掉 ——
+/// 于是界面永远在提示「请重载扩展」，而用户早就重载过了。
+pub(crate) fn install_update_view(
+    slot: &Arc<Mutex<UpdateView>>,
+    view: UpdateView,
+) -> Option<String> {
+    let mut guard = match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let running = guard.extension_running.clone();
+    *guard = UpdateView {
+        extension_running: running.clone(),
+        ..view
+    };
+    running
 }
 
 /// 用浏览器的 app 模式开一个没有地址栏的窗口；找不到 Edge/Chrome 就交给系统默认浏览器。

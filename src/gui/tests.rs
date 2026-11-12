@@ -472,6 +472,130 @@ fn update_check_reads_a_local_manifest() {
     assert!(view.checked_at.is_some());
 }
 
+fn manifest(json: &str) -> Value {
+    serde_json::from_str(json).expect("测试用的清单 JSON 要合法")
+}
+
+/// 新清单（三个版本号 + 摘要）要把每个字段都搬到视图上。
+///
+/// 这是更新功能的地基：清单里的 `release` 决定「要不要更新」，`core` / `extension`
+/// 只用来告诉用户「这次会不会连带换扩展」。任何一个字段没接上，界面就会少一句话。
+#[test]
+fn update_manifest_carries_the_three_version_numbers_and_the_digest() {
+    let view = parse_manifest(&manifest(
+        r#"{
+            "release": "9.0.0",
+            "core": "0.2.0",
+            "extension": "0.3.0",
+            "url": "https://example.invalid/dlm.zip",
+            "sha256": "AABBCC",
+            "size": 1234,
+            "notes": "修了粘贴",
+            "min_core": "0.1.0",
+            "published_at": "2026-11-12T11:25:00Z"
+        }"#,
+    ))
+    .expect("清单合法");
+    assert!(view.enabled);
+    assert_eq!(view.current, RELEASE, "本机发行版版本来自 RELEASE 常量");
+    assert_eq!(view.core_current, env!("CARGO_PKG_VERSION"));
+    assert_eq!(view.latest.as_deref(), Some("9.0.0"));
+    assert!(view.available);
+    assert!(view.installable, "有摘要、满足 min_core ⇒ 可自动装");
+    assert!(view.blocked.is_none(), "{:?}", view.blocked);
+    assert_eq!(view.core.as_deref(), Some("0.2.0"));
+    assert_eq!(view.extension.as_deref(), Some("0.3.0"));
+    assert_eq!(view.url.as_deref(), Some("https://example.invalid/dlm.zip"));
+    assert_eq!(view.sha256.as_deref(), Some("aabbcc"), "摘要统一小写");
+    assert_eq!(view.size, Some(1234));
+    assert_eq!(view.notes.as_deref(), Some("修了粘贴"));
+    assert_eq!(view.min_core.as_deref(), Some("0.1.0"));
+    assert_eq!(view.published_at.as_deref(), Some("2026-11-12T11:25:00Z"));
+    assert!(view.error.is_none());
+}
+
+/// 没有摘要 ⇒ **照样说「有新版」**，但不可自动装，原因写进 `blocked`。
+///
+/// 这两件事混成一个布尔值就会出事：清单坏了会显示成「没有更新」，用户永远等不到提示。
+#[test]
+fn a_manifest_without_a_digest_is_announced_but_not_installable() {
+    let view = parse_manifest(&manifest(
+        r#"{"release":"9.0.0","url":"https://x.invalid/a"}"#,
+    ))
+    .expect("清单合法");
+    assert!(view.available, "有更新的发行版就是有");
+    assert!(!view.installable, "没摘要不许装");
+    let blocked = view.blocked.expect("要给原因");
+    assert!(blocked.contains("sha256"), "{blocked}");
+    assert!(view.error.is_none(), "这不是检查失败，是清单内容不完整");
+}
+
+/// 清单自己声明了 `min_core`，本机内核低于它 ⇒ 只能整包重装。
+#[test]
+fn a_manifest_whose_min_core_is_ahead_of_us_is_not_installable() {
+    let view = parse_manifest(&manifest(
+        r#"{"release":"9.0.0","sha256":"aa","min_core":"99.0.0"}"#,
+    ))
+    .expect("清单合法");
+    assert!(view.available);
+    assert!(!view.installable);
+    let blocked = view.blocked.expect("要给原因");
+    assert!(
+        blocked.contains("99.0.0"),
+        "原因里要点明要求的内核版本：{blocked}"
+    );
+    assert!(blocked.contains("手动"), "{blocked}");
+}
+
+/// 清单里的版本与本机相同 ⇒ 没有更新，也谈不上可安装。
+#[test]
+fn the_same_release_is_not_an_update() {
+    let view = parse_manifest(&manifest(&format!(
+        r#"{{"release":"{RELEASE}","sha256":"aa"}}"#
+    )))
+    .expect("清单合法");
+    assert!(!view.available);
+    assert!(!view.installable);
+    assert!(view.blocked.is_none());
+}
+
+/// 老格式（C3 骨架期的 `version` / `latest`）还得认：清单一旦发出去，旧更新器就会一直来读。
+#[test]
+fn the_legacy_manifest_still_parses_as_a_release() {
+    let by_version = parse_manifest(&manifest(
+        r#"{"version":"99.0.0","url":"https://x.invalid/a"}"#,
+    ))
+    .expect("老格式要认");
+    assert_eq!(by_version.latest.as_deref(), Some("99.0.0"));
+    assert!(by_version.available);
+    assert!(!by_version.installable, "老格式没有摘要，不许自动装");
+
+    let by_latest = parse_manifest(&manifest(r#"{"latest":"99.0.0"}"#)).expect("老格式要认");
+    assert_eq!(by_latest.latest.as_deref(), Some("99.0.0"));
+}
+
+/// 一个版本号都没有 ⇒ 这是坏清单，必须报错而不是安静地当「没有更新」。
+#[test]
+fn a_manifest_without_any_version_is_an_error() {
+    let err = parse_manifest(&manifest(r#"{"url":"https://x.invalid/a","notes":"嗯"}"#))
+        .expect_err("缺版本要报错");
+    assert!(err.contains("release"), "{err}");
+}
+
+/// 更新源固定在 `main` 分支的仓库根：这一条是发布约定，不是实现细节。
+/// 改了它，所有已发出去的更新器都会找不到清单（或找到一个不存在的）。
+#[test]
+fn the_default_update_url_is_the_release_branch_manifest() {
+    assert_eq!(
+        DEFAULT_UPDATE_URL,
+        "https://raw.githubusercontent.com/Samuel666198/dlm/main/latest.json"
+    );
+    assert_eq!(
+        UPDATE_CHECK_DELAY_SECS, 10,
+        "启动后延迟查更新的秒数：别跟首帧抢时间（E15）"
+    );
+}
+
 #[test]
 fn endpoint_file_contains_the_port_and_token() {
     let dir = std::env::temp_dir().join(format!("dlm-endpoint-{}", std::process::id()));

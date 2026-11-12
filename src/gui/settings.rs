@@ -50,6 +50,13 @@ pub struct Settings {
     pub tray_hint: bool,
     /// 是否已经提示过（避免每次都说）。与 `tray_hint` 分开，语义才清楚。
     pub tray_hint_shown: bool,
+
+    // ---- 更新 ----
+    /// 启动后自动检查更新。**默认开**（用户裁定：默认自动检查）。
+    ///
+    /// 关掉之后 `gui::run` **不再起检查线程**，一个外网请求都不发 ——
+    /// 这是「设置里能关」的实际含义，不能只在界面上打个勾。
+    pub auto_check_update: bool,
 }
 
 impl Default for Settings {
@@ -65,6 +72,7 @@ impl Default for Settings {
             close_to_tray: true,
             tray_hint: true,
             tray_hint_shown: false,
+            auto_check_update: true,
         }
     }
 }
@@ -127,6 +135,7 @@ mod tests {
         assert!(d.close_to_tray, "关窗收托盘是默认行为");
         assert!(d.tray_hint, "首次收进托盘要提示");
         assert!(!d.tray_hint_shown);
+        assert!(d.auto_check_update, "更新检查默认开（用户裁定）");
     }
 
     /// 老文件缺字段必须能读出来 —— 否则升级一次设置就全丢。
@@ -175,6 +184,7 @@ mod tests {
             watch_clipboard: true,
             close_to_tray: false,
             on_complete: "open".into(),
+            auto_check_update: false,
             ..Default::default()
         };
         s.save(&dir).unwrap();
@@ -186,6 +196,7 @@ mod tests {
         assert!(back.watch_clipboard);
         assert!(!back.close_to_tray);
         assert_eq!(back.on_complete, "open");
+        assert!(!back.auto_check_update, "更新检查开关也要落盘、要读回来");
         let _ = std::fs::remove_dir_all(dir);
     }
 

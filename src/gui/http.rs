@@ -80,6 +80,40 @@ pub(crate) fn handle_http(
                 serde_json::to_vec(&update).unwrap_or_else(|_| br#"{"enabled":false}"#.to_vec());
             respond(stream, 200, "application/json", &body)
         }
+        ("POST", "/api/ext-hello") => {
+            // 扩展连上宿主时，把自己**正在跑**的 `manifest.version` 报上来，
+            // 宿主转这一发。桌面端据此判断「用户到底重载了扩展没有」——
+            // 扩展是「加载已解压」，浏览器不许程序化替换，只能靠它自己说。
+            let value: Value = match serde_json::from_slice(&request.body) {
+                Ok(v) => v,
+                Err(_) => {
+                    return respond(
+                        stream,
+                        400,
+                        "application/json",
+                        br#"{"ok":false,"error":"bad json"}"#,
+                    );
+                }
+            };
+            let version = value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let Some(version) = version else {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    br#"{"ok":false,"error":"missing version"}"#,
+                );
+            };
+            if let Ok(mut guard) = update_snapshot.lock() {
+                guard.extension_running = Some(version.to_string());
+            }
+            eprintln!("dlm-gui: 扩展上报运行版本 {version}");
+            respond(stream, 200, "application/json", br#"{"ok":true}"#)
+        }
         ("POST", "/api/add") => {
             let value: Value = match serde_json::from_slice(&request.body) {
                 Ok(v) => v,

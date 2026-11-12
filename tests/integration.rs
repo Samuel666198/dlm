@@ -10495,6 +10495,9 @@ fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
                 "--update-url",
                 &format!("http://127.0.0.1:{manifest_port}/manifest.json"),
             ])
+            // 门禁把 `DLM_NO_UPDATE_CHECK=1` 灌给所有子进程让测试保持离线；
+            // 唯独这条用例是在测更新检查本身，所以它要把那个变量摘掉。
+            .env_remove("DLM_NO_UPDATE_CHECK")
             .stdout(Stdio::null())
             .stderr(Stdio::from(gui_stderr))
             .spawn()
@@ -10528,6 +10531,16 @@ fn gui_update_check_exposes_a_local_manifest() -> anyhow::Result<()> {
     assert_eq!(update["latest"], "99.0.0", "{update}");
     assert_eq!(update["available"], true, "{update}");
     assert_eq!(update["notes"], "local", "{update}");
+    // 老格式清单没有 sha256 ⇒ 报告「有新版」，但明确不可自动装。
+    // 这两个结论分开写，是为了钉住「清单残缺」不等于「没有更新」。
+    assert_eq!(update["available"], true, "{update}");
+    assert_eq!(update["installable"], false, "{update}");
+    assert_eq!(update["current"], dlm::gui::RELEASE, "{update}");
+    assert_eq!(
+        update["core_current"],
+        env!("CARGO_PKG_VERSION"),
+        "{update}"
+    );
     Ok(())
 }
 

@@ -74,11 +74,42 @@ pub fn respond(payload: &[u8]) -> Vec<u8> {
     };
     let op = value.get("op").and_then(Value::as_str).unwrap_or("");
     let reply = match op {
-        "ping" => json!({"op": "pong", "host": HOST_NAME, "version": env!("CARGO_PKG_VERSION")}),
-        "hello" => json!({"op": "hello", "host": HOST_NAME, "version": env!("CARGO_PKG_VERSION")}),
+        "ping" => versioned("pong", &value),
+        "hello" => versioned("hello", &value),
         _ => json!({"op": "error", "message": "unknown op"}),
     };
     serde_json::to_vec(&reply).expect("json! serializable")
+}
+
+/// 带双向版本号的回执。
+///
+/// ## 为什么回执里有两个内核版本字段
+///
+/// `version` 是 C3 时期就有的名字，已经在扩展里读着（`popup.js` 显示「宿主 0.1.0」）。
+/// `core_version` 是同一件东西的**明确**名字：清单里 `core` 指的就是它。
+/// 两个都发，老扩展不会因为改名而失去显示，新代码读语义清楚的那个。
+///
+/// ## `ext_version` 是回显
+///
+/// 扩展报上来的 `manifest.version` 原样带回：一来确认收到，二来扩展只读一条回执
+/// 就能同时显示「宿主 X · 扩展 Y」，不用自己拼。
+fn versioned(op: &str, request: &Value) -> Value {
+    let mut reply = json!({
+        "op": op,
+        "host": HOST_NAME,
+        "version": env!("CARGO_PKG_VERSION"),
+        "core_version": env!("CARGO_PKG_VERSION"),
+    });
+    if let Some(ext) = request
+        .get("ext_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        && let Some(obj) = reply.as_object_mut()
+    {
+        obj.insert("ext_version".into(), Value::String(ext.to_string()));
+    }
+    reply
 }
 
 /// 一直服务到 stdin EOF；每一帧都回一帧。
@@ -148,6 +179,30 @@ mod tests {
         assert_eq!(reply["op"], "pong");
         assert_eq!(reply["host"], HOST_NAME);
         assert_eq!(reply["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            reply["core_version"], reply["version"],
+            "两个名字指的是同一件东西：清单里的 core"
+        );
+        assert!(
+            reply.get("ext_version").is_none(),
+            "扩展没报版本时不该凭空造一个字段：{reply}"
+        );
+    }
+
+    /// 双向版本号：扩展报上来的 `ext_version` 原样带回，扩展只读一条回执就能显示两边版本。
+    #[test]
+    fn ping_echoes_the_extension_version_it_was_given() {
+        let reply: Value =
+            serde_json::from_slice(&respond(br#"{"op":"ping","ext_version":"0.2.12"}"#)).unwrap();
+        assert_eq!(reply["ext_version"], "0.2.12");
+        assert_eq!(reply["core_version"], env!("CARGO_PKG_VERSION"));
+
+        let hello: Value =
+            serde_json::from_slice(&respond(br#"{"op":"hello","ext_version":" "}"#)).unwrap();
+        assert!(
+            hello.get("ext_version").is_none(),
+            "空白版本号当作没报：{hello}"
+        );
     }
 
     #[test]

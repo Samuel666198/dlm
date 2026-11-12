@@ -85,8 +85,14 @@ chrome.storage.local.get(["lastPong", "lastError", "lastJob", "lastResult"], (va
       !values.lastResult.ok
     );
   } else if (values.lastJob) setStatus(values.lastJob.mode === "queue" ? "已加入队列" : "已交给 dlm");
-  else if (values.lastPong) setStatus("宿主 " + (values.lastPong.version || "ok"));
-  else setStatus(values.lastError || "宿主未连接", true);
+  else if (values.lastPong) {
+    // 两边版本一起显示：核对「桌面端和扩展是不是同一对」不用再开两个窗口。
+    // 扩展跑的是**内存里这份**（`getManifest()`），不是磁盘上的文件 ——
+    // 换了磁盘文件但没点「重新加载」时，这里显示的仍是旧版本，这正是要看的信息。
+    const host = values.lastPong.core_version || values.lastPong.version || "ok";
+    const ext = values.lastPong.ext_version || chrome.runtime.getManifest().version;
+    setStatus("宿主 " + host + " · 扩展 " + ext);
+  } else setStatus(values.lastError || "宿主未连接", true);
 });
 $("refresh").addEventListener("click", refresh);
 refresh();

@@ -15,7 +15,7 @@
 //! 0.37 把入口从 `update(ctx, frame)` 改成了 `ui(&mut Ui, frame)`，
 //! 面板要用 `egui::CentralPanel` 之类自己包。这里按新 API 写。
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -33,6 +33,7 @@ pub mod status;
 pub mod theme;
 pub mod toolbar;
 pub mod tray;
+pub mod update_ui;
 
 /// runner 换快照的句柄。
 pub type SnapshotSlot = Arc<Mutex<Vec<TaskView>>>;
@@ -44,9 +45,19 @@ pub type UpdateSlot = Arc<Mutex<UpdateView>>;
 pub struct App {
     pub(super) snapshot: SnapshotSlot,
     pub(super) quota: QuotaSlot,
-    #[allow(dead_code)] // 更新检查在步骤 5 接进 UI；句柄先留着。
     pub(super) update: UpdateSlot,
     pub(super) tx: Sender<Ticket>,
+
+    /// 更新清单地址（`--update-url`，缺省是 `gui::DEFAULT_UPDATE_URL`；
+    /// `--no-update-check` 时为 `None`）。「立即检查」用它。
+    pub(super) update_url: Option<String>,
+    /// 手动检查的结果通道：查完由 UI 线程写回 `update` 槽。
+    ///
+    /// 为什么不用「线程直接写槽 + 置个布尔」：秒粒度的 `checked_at` 分不清
+    /// 「这次查完的」和「启动时那次查完的」，界面会一直显示「检查中」。
+    pub(super) update_rx: Option<Receiver<UpdateView>>,
+    /// 更新面板是否打开。
+    pub(super) update_open: bool,
 
     /// 当前选中的任务 id（详情抽屉）。
     pub(super) selected: Option<String>,
@@ -99,6 +110,7 @@ impl App {
         update: UpdateSlot,
         tx: Sender<Ticket>,
         settings_dir: std::path::PathBuf,
+        update_url: Option<String>,
     ) -> Self {
         let settings = crate::gui::settings::Settings::load(&settings_dir);
         // 设置里开了剪贴板监视就在启动时起来（默认关，见 settings.rs）。
@@ -112,6 +124,9 @@ impl App {
             quota,
             update,
             tx,
+            update_url,
+            update_rx: None,
+            update_open: false,
             selected: None,
             filter: None,
             adding: false,
@@ -271,6 +286,9 @@ impl eframe::App for App {
                 .show(ui, |ui| self.clipboard_hint_bar(ui));
         }
 
+        // 更新：把手动检查的结果收进槽里（非阻塞）。
+        self.drain_update(&ctx);
+
         egui::Panel::bottom("status")
             .exact_size(theme::STATUS_H)
             .show(ui, |ui| self.status_bar(ui));
@@ -287,6 +305,9 @@ impl eframe::App for App {
         }
         if self.settings_open {
             self.settings_panel(&ctx);
+        }
+        if self.update_open {
+            self.update_panel(&ctx);
         }
     }
 }

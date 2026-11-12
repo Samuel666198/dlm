@@ -143,6 +143,20 @@ impl App {
                 );
             }
         });
+
+        ui.add_space(10.0);
+        section(ui, "更新");
+
+        // 关掉之后 `gui::run` 不起检查线程，一个外网请求都不发 ——
+        // 勾选框背后要真有这个行为，否则就是「界面在说谎」。
+        row(ui, "自动检查更新", |ui| {
+            ui.checkbox(&mut self.draft.auto_check_update, "");
+            ui.label(
+                egui::RichText::new("启动后查一次清单；关掉则不发任何外网请求")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+        });
     }
 }
 

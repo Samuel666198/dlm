@@ -166,7 +166,12 @@ function connect() {
     setTimeout(connect, 1500);
   });
 
-  port.postMessage({ op: "ping" });
+  // 双向版本号：报上自己**正在跑**的 manifest.version，宿主回执里带 core_version。
+  //
+  // 为什么必须报：扩展是「加载已解压」，浏览器不许程序化替换或重载。
+  // 桌面端换了磁盘上的扩展文件之后，只能靠扩展自己说「我现在跑的是 0.2.12」
+  // 才能确认用户真的点了「重新加载」—— 否则界面会一直以为磁盘上那份还没生效。
+  port.postMessage({ op: "ping", ext_version: chrome.runtime.getManifest().version });
 }
 
 function submitTask(task) {
