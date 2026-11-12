@@ -8,14 +8,17 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 | `sdd/dlm-kernel`，未 push、无远程 |
+| **GitHub** | **https://github.com/Samuel666198/dlm**（公开） |
+| 分支 | 开发 `sdd/dlm-kernel` @ `efcc10f`（已 push）；发布 `main` @ `57a267e`（**默认分支**，孤儿分支只放 `latest.json`） |
 | 门禁 | `fmt 0` · `--lib 350/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查（统一走根目录 `gates.ps1`） |
 | 产品面 | 内核 + CLI + **原生窗口/托盘 GUI** + Native Messaging 扩展（右键/页内悬浮球/媒体与文件嗅探/HLS 直链） |
-| 最新进展 | `2026-11-12 第二版：E16/E17/E18/E19 + 重投 A 方案`、`2026-11-10 原生外壳交付`、`2026-11-11 扩展悬浮球修复`（0.2.11） |
-| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,437,323 B，`sha256=97d3025429b2d8cf86d7fdb438e8ad3acf2c52febd3fd5ac6a1e33f06adcd4a6`（**第二版**）；扩展 0.2.11 |
+| 最新进展 | `2026-11-12 第二版`（E16/E17/E18/E19 + 重投 A 方案）· `2026-11-12 GitHub 建仓与发布通道` · `2026-11-12 README 重写（去外部产品名，465→165 行）` |
+| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,437,323 B，`sha256=97d3025429b2d8cf86d7fdb438e8ad3acf2c52febd3fd5ac6a1e33f06adcd4a6`；扩展 0.2.11。已同步到 `%LOCALAPPDATA%`，三个 exe 与包内逐字节一致 |
+| 下一步 | **更新功能**（裁定已定，代码未写）：[`evidence/2026-11-12-更新功能裁定.md`](evidence/2026-11-12-更新功能裁定.md) |
+| 另一批任务 | 详情抽屉 + 统一目录 + 速度/剩余两列：[`evidence/2026-11-12-详情抽屉与统一目录梳理.md`](evidence/2026-11-12-详情抽屉与统一目录梳理.md) |
 | 已修 | **E16**（继续入口）· **E17**（粘贴）· **E18**（设置透传）· **E19**（剪贴板提示）· 直连重投落点（A 方案）—— 见 [`evidence/2026-11-12-四项修复记录.md`](evidence/2026-11-12-四项修复记录.md) |
-| 欠账 | errata E14（`--autostart` 隐藏窗口）· E15（启动 573ms）· exe 内嵌图标 · 设置面板缺保存目录/自启开关 |
-| 明确不做 | **站点抓取 / WebGrabber**（产品级功能，单独立项）；IE 内核监视、全局热键、代理服务器、声音事件 —— 见 [`evidence/2026-11-12-IDM选项面板与站点抓取对标.md`](evidence/2026-11-12-IDM选项面板与站点抓取对标.md) |
+| 欠账 | 详情抽屉未画 · 下载目录三处不一致（`settings.out_dir` 死代码）· 速度/剩余列恒 `—` · 直连任务桌面端看不到 · errata E14（`--autostart` 隐藏窗口）· E15（启动 573ms）· exe 无内嵌图标 |
+| 明确不做 | **站点抓取 / WebGrabber**（产品级功能，单独立项）；IE 内核监视、全局热键、代理服务器、声音事件 |
 | 长期归档 | `E:\WorkSpace\archive\2026_retired\dlm-sdd-2026-10-15-dlm-kernel.zip`（`.superpowers/sdd` 的 2026-10-21 快照） |
 
 ## 怎么读
@@ -108,6 +111,10 @@
 | [`evidence/2026-11-11-粘贴失效与MCP选型.md`](evidence/2026-11-11-粘贴失效与MCP选型.md) | E17：桌面端粘贴失效根因（`eframe` 缺 `clipboard` feature）；MCP vs CLI 选型裁定（选 CLI，且已存在） |
 | [`evidence/2026-11-12-IDM选项面板与站点抓取对标.md`](evidence/2026-11-12-IDM选项面板与站点抓取对标.md) | IDM 选项面板逐项对照（E18 设置不透传、E19 剪贴板无反应）；站点抓取裁定不做 |
 | [`evidence/2026-11-12-四项修复记录.md`](evidence/2026-11-12-四项修复记录.md) | 第二版：E16/E17/E18/E19 修复内容、实测证据、测试竞态修复、直连重投的设计问题 |
+| [`evidence/2026-11-12-详情抽屉与统一目录梳理.md`](evidence/2026-11-12-详情抽屉与统一目录梳理.md) | 详情抽屉是半截、下载目录三处不一致、速度/剩余列恒 `—` |
+| [`evidence/2026-11-12-安装位置与下载目录方案.md`](evidence/2026-11-12-安装位置与下载目录方案.md) | 装 `E:\Program Files\dlm` / 数据 `E:\ProgramData\dlm` / 下载 `E:\dlm-downloads` |
+| [`evidence/2026-11-12-更新功能方案.md`](evidence/2026-11-12-更新功能方案.md) | 更新功能现状（半截）与设计；扩展不能自更新的硬约束 |
+| [`evidence/2026-11-12-更新功能裁定.md`](evidence/2026-11-12-更新功能裁定.md) | 裁定：GitHub 公开仓库 + 默认自动检查 + 不上商店；实施顺序 |
 
 ## 不在 `docs/` 的账本
 
