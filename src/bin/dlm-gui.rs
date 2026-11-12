@@ -1,6 +1,17 @@
 //! dlm 产品层入口：本地 Web UI + 队列。默认依赖仍是 6 个（无 GUI crate）。
 //!
 //! 运行后打印 `http://127.0.0.1:<port>/?t=<token>`；用浏览器打开。进程活着 = 队列/调度器活着。
+//!
+//! ## 为什么是 windows 子系统（不弹那个黑终端）
+//!
+//! Rust 默认把 bin 编成**控制台**子系统，于是双击 `dlm-gui.exe` 时 Windows 先开一个
+//! 黑窗口再跑 GUI —— 用户看到的就是「打开软件附带出现一个终端」，关掉它还会连带杀掉程序。
+//! 改成 `windows` 子系统后不分配控制台。
+//!
+//! 代价与判据：`println!`/`eprintln!` 仍然照常工作，**前提是有人把 stdout/stderr 接走**
+//! （集成测试就是 `.stdout(Stdio::piped())` / 重定向到文件）；没人接的时候这些行直接丢弃 ——
+//! 对 GUI 来说这正是想要的。`dlm.exe`（CLI）**必须保持控制台子系统**，否则命令行下看不到输出。
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,10 +22,12 @@ use dlm::gui::{self, GuiConfig};
 use dlm::queue::QueueStore;
 
 fn main() -> ExitCode {
+    let headless = std::env::args().any(|a| a == "--headless");
     let config = match parse() {
         Ok(config) => config,
         Err(err) => {
             eprintln!("dlm-gui: {err:#}");
+            report_fatal(&format!("{err:#}"), headless);
             return ExitCode::from(2);
         }
     };
@@ -22,9 +35,52 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("dlm-gui: {err:#}");
+            report_fatal(&format!("{err:#}"), headless);
             ExitCode::FAILURE
         }
     }
+}
+
+/// 起不来的时候**必须让人看见**。
+///
+/// 这个 exe 是 `windows` 子系统（为了不弹黑终端），于是没有控制台可以 `eprintln!` 给人看：
+/// 双击以后失败，用户只会看到「什么也没发生」。所以 GUI 模式下补一个消息框。
+///
+/// `headless` 时不弹（集成测试都用 `--headless`，弹框会把用例挂死），只留 stderr。
+fn report_fatal(message: &str, headless: bool) {
+    if headless {
+        return;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::ffi::OsStrExt;
+        let text = std::ffi::OsStr::new(message);
+        let mut wide: Vec<u16> = text.encode_wide().collect();
+        wide.push(0);
+        let caption: Vec<u16> = "dlm 启动失败"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        const MB_OK: u32 = 0x0000_0000;
+        const MB_ICONERROR: u32 = 0x0000_0010;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(
+                hwnd: *mut core::ffi::c_void,
+                text: *const u16,
+                caption: *const u16,
+                kind: u32,
+            ) -> i32;
+        }
+        MessageBoxW(
+            std::ptr::null_mut(),
+            wide.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = message;
 }
 
 fn parse() -> Result<GuiConfig> {

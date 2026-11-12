@@ -64,7 +64,8 @@ Write-Output "iscc=$iscc"
 Write-Output "version=$version release=$releaseVer stage=$stage"
 
 # 2. 编译安装包
-& $iscc "/DAppVersion=$releaseVer" "/DSourceDir=$stage" "/DOutDir=$Out" (Join-Path $PSScriptRoot 'installer.iss')
+$ico = Join-Path $Root 'assets\icon\dlm.ico'
+& $iscc "/DAppVersion=$releaseVer" "/DSourceDir=$stage" "/DOutDir=$Out" "/DIcoFile=$ico" (Join-Path $PSScriptRoot 'installer.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC 失败（exit $LASTEXITCODE）" }
 
 # 3. 报数

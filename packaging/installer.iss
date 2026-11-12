@@ -24,6 +24,11 @@
 #ifndef OutDir
   #define OutDir "..\target\package"
 #endif
+; 安装包自己的图标（Setup.exe 在资源管理器里显示的那个）。
+; 与 exe 内嵌的是同一份 .ico，由 build.rs 编进资源段。
+#ifndef IcoFile
+  #define IcoFile ""
+#endif
 
 #define AppName "dlm"
 #define AppPublisher "dlm"
@@ -58,6 +63,9 @@ CloseApplications=yes
 RestartApplications=no
 UninstallDisplayName={#AppName} {#AppVersion}
 UninstallDisplayIcon={app}\dlm-gui.exe
+#if FileExists(IcoFile)
+SetupIconFile={#IcoFile}
+#endif
 
 [Languages]
 Name: "chinese"; MessagesFile: "compiler:Default.isl"
