@@ -1,4 +1,4 @@
-# dlm gates: run every check with one command.
+﻿# dlm gates: run every check with one command.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1 -SkipIntegration
