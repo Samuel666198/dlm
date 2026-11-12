@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Continue'
+﻿$ErrorActionPreference = 'Continue'
 
 foreach ($browser in @('Google\Chrome', 'Microsoft\Edge')) {
     $key = "HKCU:\Software\$browser\NativeMessagingHosts\com.dlm.host"

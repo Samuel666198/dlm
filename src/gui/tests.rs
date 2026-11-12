@@ -461,7 +461,10 @@ fn update_check_reads_a_local_manifest() {
         )
         .unwrap();
     });
-    let view = check_update(&format!("http://127.0.0.1:{port}/update.json"));
+    let view = check_update(
+        &format!("http://127.0.0.1:{port}/update.json"),
+        &local_now(),
+    );
     handle.join().unwrap();
     assert!(view.enabled, "{view:?}");
     assert_eq!(view.latest.as_deref(), Some("99.0.0"));
@@ -476,13 +479,29 @@ fn manifest(json: &str) -> Value {
     serde_json::from_str(json).expect("测试用的清单 JSON 要合法")
 }
 
+/// 本机现状：发行版版本 = 编译期常量、磁盘上还没装扩展。
+///
+/// 这些用例钉的是**清单那一侧**的解析，所以本机这一侧固定住；
+/// 「装过一次更新之后本机版本从 `installed.json` 来」由 `updater::tests` 单独钉。
+fn local_now() -> crate::updater::LocalState {
+    crate::updater::LocalState {
+        release: RELEASE.to_string(),
+        extension: None,
+    }
+}
+
+/// 清单 JSON → 视图，配一份固定的本机现状。
+fn parse(value: &Value) -> std::result::Result<UpdateView, String> {
+    parse_manifest(value, &local_now())
+}
+
 /// 新清单（三个版本号 + 摘要）要把每个字段都搬到视图上。
 ///
 /// 这是更新功能的地基：清单里的 `release` 决定「要不要更新」，`core` / `extension`
 /// 只用来告诉用户「这次会不会连带换扩展」。任何一个字段没接上，界面就会少一句话。
 #[test]
 fn update_manifest_carries_the_three_version_numbers_and_the_digest() {
-    let view = parse_manifest(&manifest(
+    let view = parse(&manifest(
         r#"{
             "release": "9.0.0",
             "core": "0.2.0",
@@ -519,7 +538,7 @@ fn update_manifest_carries_the_three_version_numbers_and_the_digest() {
 /// 这两件事混成一个布尔值就会出事：清单坏了会显示成「没有更新」，用户永远等不到提示。
 #[test]
 fn a_manifest_without_a_digest_is_announced_but_not_installable() {
-    let view = parse_manifest(&manifest(
+    let view = parse(&manifest(
         r#"{"release":"9.0.0","url":"https://x.invalid/a"}"#,
     ))
     .expect("清单合法");
@@ -533,7 +552,7 @@ fn a_manifest_without_a_digest_is_announced_but_not_installable() {
 /// 清单自己声明了 `min_core`，本机内核低于它 ⇒ 只能整包重装。
 #[test]
 fn a_manifest_whose_min_core_is_ahead_of_us_is_not_installable() {
-    let view = parse_manifest(&manifest(
+    let view = parse(&manifest(
         r#"{"release":"9.0.0","sha256":"aa","min_core":"99.0.0"}"#,
     ))
     .expect("清单合法");
@@ -550,7 +569,7 @@ fn a_manifest_whose_min_core_is_ahead_of_us_is_not_installable() {
 /// 清单里的版本与本机相同 ⇒ 没有更新，也谈不上可安装。
 #[test]
 fn the_same_release_is_not_an_update() {
-    let view = parse_manifest(&manifest(&format!(
+    let view = parse(&manifest(&format!(
         r#"{{"release":"{RELEASE}","sha256":"aa"}}"#
     )))
     .expect("清单合法");
@@ -562,7 +581,7 @@ fn the_same_release_is_not_an_update() {
 /// 老格式（C3 骨架期的 `version` / `latest`）还得认：清单一旦发出去，旧更新器就会一直来读。
 #[test]
 fn the_legacy_manifest_still_parses_as_a_release() {
-    let by_version = parse_manifest(&manifest(
+    let by_version = parse(&manifest(
         r#"{"version":"99.0.0","url":"https://x.invalid/a"}"#,
     ))
     .expect("老格式要认");
@@ -570,14 +589,14 @@ fn the_legacy_manifest_still_parses_as_a_release() {
     assert!(by_version.available);
     assert!(!by_version.installable, "老格式没有摘要，不许自动装");
 
-    let by_latest = parse_manifest(&manifest(r#"{"latest":"99.0.0"}"#)).expect("老格式要认");
+    let by_latest = parse(&manifest(r#"{"latest":"99.0.0"}"#)).expect("老格式要认");
     assert_eq!(by_latest.latest.as_deref(), Some("99.0.0"));
 }
 
 /// 一个版本号都没有 ⇒ 这是坏清单，必须报错而不是安静地当「没有更新」。
 #[test]
 fn a_manifest_without_any_version_is_an_error() {
-    let err = parse_manifest(&manifest(r#"{"url":"https://x.invalid/a","notes":"嗯"}"#))
+    let err = parse(&manifest(r#"{"url":"https://x.invalid/a","notes":"嗯"}"#))
         .expect_err("缺版本要报错");
     assert!(err.contains("release"), "{err}");
 }

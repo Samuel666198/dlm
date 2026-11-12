@@ -58,6 +58,11 @@ pub struct App {
     pub(super) update_rx: Option<Receiver<UpdateView>>,
     /// 更新面板是否打开。
     pub(super) update_open: bool,
+    /// 本机现状（发行版版本 + 磁盘扩展版本）。「立即检查」重查时一起带上 ——
+    /// 不然刚装完更新，界面还拿编译期常量当自己的版本。
+    pub(super) local: crate::updater::LocalState,
+    /// 「立即更新」失败时的提示（更新器起不来之类）。
+    pub(super) update_install_error: Option<String>,
 
     /// 当前选中的任务 id（详情抽屉）。
     pub(super) selected: Option<String>,
@@ -111,6 +116,7 @@ impl App {
         tx: Sender<Ticket>,
         settings_dir: std::path::PathBuf,
         update_url: Option<String>,
+        local: crate::updater::LocalState,
     ) -> Self {
         let settings = crate::gui::settings::Settings::load(&settings_dir);
         // 设置里开了剪贴板监视就在启动时起来（默认关，见 settings.rs）。
@@ -127,6 +133,8 @@ impl App {
             update_url,
             update_rx: None,
             update_open: false,
+            local,
+            update_install_error: None,
             selected: None,
             filter: None,
             adding: false,

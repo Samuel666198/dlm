@@ -68,10 +68,11 @@ impl App {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        let local = self.local.clone();
         let spawned = std::thread::Builder::new()
             .name("dlm-gui-update-manual".into())
             .spawn(move || {
-                let _ = tx.send(crate::gui::check_update(&url));
+                let _ = tx.send(crate::gui::check_update(&url, &local));
             });
         if spawned.is_ok() {
             self.update_rx = Some(rx);
@@ -128,6 +129,9 @@ impl App {
         let mut open = self.update_open;
         let mut check_now = false;
         let mut close = false;
+        let mut install = false;
+        let mut copy_ext_page = false;
+        let mut open_ext_dir = false;
         let mut open_page = None;
 
         egui::Window::new("更新")
@@ -169,23 +173,19 @@ impl App {
                 } else {
                     format!("桌面端 {} → {core_target}", view.core_current)
                 };
-                ui.label(egui::RichText::new(core_line).size(11.5).color(theme::INK_2));
+                ui.label(
+                    egui::RichText::new(core_line)
+                        .size(11.5)
+                        .color(theme::INK_2),
+                );
 
                 // 扩展：不上商店，所以永远要用户手动重载。
-                // `extension_running` 是扩展自己报的「我现在跑的是哪个版本」——
-                // 它等于清单版本才说明用户真的重载过了。
-                if let Some(ext) = &view.extension {
-                    let line = match &view.extension_running {
-                        Some(running) if running == ext => {
-                            format!("扩展 {ext}（浏览器里已在运行）")
-                        }
-                        Some(running) => format!(
-                            "扩展 {ext}（浏览器里跑的还是 {running}，需到 chrome://extensions 点『重新加载』）"
-                        ),
-                        None => {
-                            format!("扩展 {ext}（需到浏览器里点『重新加载』）")
-                        }
-                    };
+                // 三个版本号（清单 / 磁盘 / 浏览器里跑的）的关系，就是这段话的全部信息量。
+                if let Some(line) = extension_status(
+                    view.extension.as_deref(),
+                    view.extension_disk.as_deref(),
+                    view.extension_running.as_deref(),
+                ) {
                     ui.label(egui::RichText::new(line).size(11.5).color(theme::INK_2));
                 }
 
@@ -230,10 +230,30 @@ impl App {
                 };
                 ui.label(egui::RichText::new(meta).size(10.0).color(theme::INK_3));
 
+                if let Some(err) = &self.update_install_error {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(err).size(11.0).color(theme::BAD));
+                }
+
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
+                    // 能不能自动装，由 `installable` 说：有摘要、满足 min_core。
+                    // 不能装时按钮是灰的，原因上面那行 `blocked` 已经写清楚。
+                    let can_install = view.installable && self.update_rx.is_none();
+                    let install_hint = if view.installable {
+                        "下载并安装：会关掉 dlm，装完自动重开"
+                    } else {
+                        "这个版本不能自动安装（原因见上）"
+                    };
+                    if ui
+                        .add_enabled(can_install, egui::Button::new("立即更新"))
+                        .on_hover_text(install_hint)
+                        .clicked()
+                    {
+                        install = true;
+                    }
                     let can_check = self.update_url.is_some() && !checking;
                     if ui
                         .add_enabled(can_check, egui::Button::new("立即检查"))
@@ -253,8 +273,53 @@ impl App {
                         });
                     }
                 });
+
+                // 扩展要用户手动重载。浏览器**不允许**程序化打开 `chrome://extensions`
+                // （`start chrome://…` 会被当成非法地址），所以这里能做的是：
+                // 把地址复制到剪贴板、把扩展目录打开。按钮上写清楚是「复制」，不写「打开」。
+                if extension_needs_reload(
+                    view.extension_disk.as_deref(),
+                    view.extension_running.as_deref(),
+                ) {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("扩展重载")
+                                .size(10.5)
+                                .color(theme::INK_3),
+                        );
+                        if ui
+                            .button("复制 chrome://extensions")
+                            .on_hover_text("粘到浏览器地址栏回车，点『重新加载』")
+                            .clicked()
+                        {
+                            copy_ext_page = true;
+                        }
+                        if ui.button("打开扩展目录").clicked() {
+                            open_ext_dir = true;
+                        }
+                    });
+                }
             });
 
+        if install {
+            match crate::gui::spawn_updater(&self.update_view(), &self.settings_dir) {
+                Ok(()) => {
+                    // 更新器已经起来了，它会等我们退出再动文件。现在退出。
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(err) => {
+                    self.update_install_error = Some(format!("启动更新器失败：{err:#}"));
+                }
+            }
+        }
+        if copy_ext_page {
+            ctx.copy_text("chrome://extensions".to_string());
+        }
+        if open_ext_dir {
+            open_external(&crate::gui::default_extension_dir().display().to_string());
+        }
         if check_now {
             self.check_update_now(ctx);
         }
@@ -266,6 +331,50 @@ impl App {
         }
         self.update_open = open;
     }
+}
+
+/// 扩展那一行怎么说。
+///
+/// 三个版本号的关系是这段话的全部信息量：
+///
+/// | 来源 | 含义 |
+/// |---|---|
+/// | `target` | 清单（更新包）里带的扩展版本 |
+/// | `disk` | 磁盘上已经落地的版本（updater 写进去的） |
+/// | `running` | 浏览器里**真正在跑**的版本（扩展自己报的） |
+fn extension_status(
+    target: Option<&str>,
+    disk: Option<&str>,
+    running: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    match (target, disk) {
+        (Some(t), Some(d)) if t != d => parts.push(format!("更新包里的扩展是 {t}，磁盘上还是 {d}")),
+        (Some(_), Some(d)) => parts.push(format!("扩展 {d}")),
+        (Some(t), None) => parts.push(format!("更新包里的扩展是 {t}")),
+        (None, Some(d)) => parts.push(format!("扩展 {d}")),
+        (None, None) => {}
+    }
+    match (disk, running) {
+        (Some(d), Some(r)) if d == r => parts.push("浏览器里已在运行".to_string()),
+        (_, Some(r)) => parts.push(format!(
+            "浏览器里跑的还是 {r}，请到 chrome://extensions 点『重新加载』"
+        )),
+        (Some(_), None) => {
+            parts.push("浏览器还没上报版本；若刚更新过，请点一次『重新加载』".to_string())
+        }
+        (None, None) => {}
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// 是不是「文件已就位、浏览器还在跑旧的」那种状态 —— 也正是要显示重载按钮的时候。
+fn extension_needs_reload(disk: Option<&str>, running: Option<&str>) -> bool {
+    matches!((disk, running), (Some(d), Some(r)) if d != r)
 }
 
 /// 包地址 ⇒ 发布页地址。
@@ -319,5 +428,42 @@ mod tests {
         assert_eq!(release_page("https://example.invalid/dlm.zip"), None);
         assert_eq!(release_page("file:///releases/download/x"), None);
         assert_eq!(release_page(""), None);
+    }
+
+    /// 「文件已就位、浏览器还在跑旧的」是唯一需要提示重载的状态。
+    #[test]
+    fn the_extension_line_names_all_three_versions_when_they_disagree() {
+        // 装完了但没重载：磁盘 0.2.13，浏览器里 0.2.11。
+        let line = extension_status(Some("0.2.13"), Some("0.2.13"), Some("0.2.11")).unwrap();
+        assert!(line.contains("0.2.13"), "{line}");
+        assert!(line.contains("0.2.11"), "{line}");
+        assert!(line.contains("重新加载"), "{line}");
+        assert!(extension_needs_reload(Some("0.2.13"), Some("0.2.11")));
+    }
+
+    /// 已经重载过 ⇒ 说「已在运行」，且不再显示重载按钮。
+    #[test]
+    fn a_reloaded_extension_needs_no_action() {
+        let line = extension_status(Some("0.2.13"), Some("0.2.13"), Some("0.2.13")).unwrap();
+        assert!(line.contains("已在运行"), "{line}");
+        assert!(!extension_needs_reload(Some("0.2.13"), Some("0.2.13")));
+        assert!(
+            !extension_needs_reload(Some("0.2.13"), None),
+            "没上报就不催"
+        );
+    }
+
+    /// 还没装：清单里有新版扩展，磁盘上还是旧的。
+    #[test]
+    fn an_uninstalled_extension_says_the_package_carries_a_newer_one() {
+        let line = extension_status(Some("0.2.13"), Some("0.2.12"), Some("0.2.12")).unwrap();
+        assert!(line.contains("更新包里的扩展是 0.2.13"), "{line}");
+        assert!(line.contains("磁盘上还是 0.2.12"), "{line}");
+    }
+
+    /// 什么都不知道就说空话，别在界面上刷一行「扩展」。
+    #[test]
+    fn no_extension_information_renders_nothing() {
+        assert_eq!(extension_status(None, None, None), None);
     }
 }

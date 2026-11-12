@@ -52,6 +52,11 @@ pub struct UpdateView {
     pub core: Option<String>,
     /// 清单里的扩展版本。
     pub extension: Option<String>,
+    /// **磁盘上**那份扩展的版本（`%LOCALAPPDATA%\dlm\extension\manifest.json`）。
+    ///
+    /// updater 把新扩展写到这里；它与 `extension_running` 不相等，就说明
+    /// 文件已经就位但浏览器还在跑旧的 —— 那正是「请重载」要说的那句话。
+    pub extension_disk: Option<String>,
     /// 浏览器里**正在跑**的扩展版本：扩展连上宿主时自己报的（E16 之后的双向 ping）。
     ///
     /// 与 `extension`（清单里的目标版本）成对出现才有意义：
@@ -79,6 +84,7 @@ impl UpdateView {
             core_current: env!("CARGO_PKG_VERSION").to_string(),
             core: None,
             extension: None,
+            extension_disk: None,
             extension_running: None,
             url: None,
             sha256: None,

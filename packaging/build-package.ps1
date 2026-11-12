@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = '',
     # 发行版版本：用户感知的「软件版本」。缺省跟内核版本一致。
     [string]$Release = '',
@@ -19,6 +19,18 @@ if (-not $Version) {
 }
 if (-not $Release) { $Release = $Version }
 if (-not $MinCore) { $MinCore = $Version }
+
+# 发行版版本必须与代码里的 `gui::RELEASE` 一致。
+#
+# 为什么卡这一条：从源码装的用户没有 `installed.json`，本机版本就等于 `gui::RELEASE`。
+# 如果清单发的是 0.1.1 而代码里还写着 0.1.0，那些人每次启动都会被告知「有新版 0.1.1」，
+# 点了更新装完还是 0.1.1 —— 界面在说谎，而且是永远说下去的那种。
+$source = Get-Content -Raw (Join-Path $Root 'src\gui\mod.rs')
+$m = [regex]::Match($source, 'pub const RELEASE:\s*&str\s*=\s*"([^"]+)"')
+if (-not $m.Success) { throw '找不到 gui::RELEASE（src\gui\mod.rs）' }
+if ($m.Groups[1].Value -ne $Release) {
+    throw "发行版版本不一致：-Release $Release，而 src\gui\mod.rs 里 gui::RELEASE = $($m.Groups[1].Value)。先把常量改掉再打包。"
+}
 if (-not $Url) {
     $Url = "https://github.com/Samuel666198/dlm/releases/download/v$Release/dlm-$Version-win-x64.zip"
 }
@@ -38,7 +50,7 @@ try {
     Pop-Location
 }
 
-foreach ($name in @('dlm.exe', 'dlm-gui.exe', 'dlm-native-host.exe')) {
+foreach ($name in @('dlm.exe', 'dlm-gui.exe', 'dlm-native-host.exe', 'dlm-updater.exe')) {
     $src = Join-Path $Root "target\release\$name"
     if (-not (Test-Path $src)) { throw "Missing release binary: $src" }
     Copy-Item $src (Join-Path $Stage $name) -Force

@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 # -Autostart: 可选，默认关。打开后把 dlm-gui --autostart 写进 HKCU 的 Run 项，
 # 开机就有一个队列在后台跑（不弹浏览器窗口）。不传这个开关 = 不写任何自启项。
@@ -12,7 +12,7 @@ $HostDir = Join-Path $env:LOCALAPPDATA 'dlm\native-host'
 $Manifest = Join-Path $HostDir 'com.dlm.host.json'
 $HostExe = Join-Path $Bin 'dlm-native-host.exe'
 
-foreach ($name in @('dlm.exe', 'dlm-gui.exe', 'dlm-native-host.exe')) {
+foreach ($name in @('dlm.exe', 'dlm-gui.exe', 'dlm-native-host.exe', 'dlm-updater.exe')) {
     $src = Join-Path $Root $name
     if (-not (Test-Path $src)) { throw "Package is incomplete: missing $name" }
 }
@@ -24,7 +24,7 @@ New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 New-Item -ItemType Directory -Force -Path $Ext | Out-Null
 New-Item -ItemType Directory -Force -Path $HostDir | Out-Null
 
-foreach ($name in @('dlm.exe', 'dlm-gui.exe', 'dlm-native-host.exe')) {
+foreach ($name in @('dlm.exe', 'dlm-gui.exe', 'dlm-native-host.exe', 'dlm-updater.exe')) {
     try {
         Copy-Item (Join-Path $Root $name) (Join-Path $Bin $name) -Force
     } catch {

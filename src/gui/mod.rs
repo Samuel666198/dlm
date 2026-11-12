@@ -36,6 +36,7 @@ use crate::actions;
 use crate::consts::PROBE_READ_BYTES;
 use crate::gui::app::theme;
 use crate::queue::{self, QueueStore};
+use crate::updater;
 
 pub use snapshot::{QuotaView, TaskView, UpdateView, quota_view, snapshot_of};
 
@@ -228,6 +229,8 @@ pub fn run(config: GuiConfig) -> Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
     let settings = settings::Settings::load(&settings_dir);
+    // 本机现状（发行版版本 + 磁盘扩展版本）：既决定「要不要更新」，也决定界面怎么说。
+    let local = updater::local_state(&settings_dir, &default_extension_dir());
     // 门禁/集成测试统一离线：`gates.ps1` 会设 `DLM_NO_UPDATE_CHECK=1`，
     // 子进程继承它。用一个环境变量而不是让八九处起 GUI 的用例各自加参数 ——
     // 漏一处就会在门禁里真发一次外网请求，那种测试是假绿：机器断网就变红。
@@ -236,6 +239,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
         (Some(url), true) => {
             let url = url.clone();
             let delay = config.update_check_delay_secs;
+            let local = local.clone();
             let snapshot = Arc::clone(&update_snapshot);
             std::thread::Builder::new()
                 .name("dlm-gui-update".into())
@@ -244,7 +248,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
                     if delay > 0 {
                         std::thread::sleep(Duration::from_secs(delay));
                     }
-                    let view = check_update(&url);
+                    let view = check_update(&url, &local);
                     install_update_view(&snapshot, view);
                 })
                 .context("启动更新检查线程失败")?;
@@ -263,6 +267,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let ui_snapshot = Arc::clone(&snapshot);
     let ui_quota = Arc::clone(&quota_snapshot);
     let ui_update = Arc::clone(&update_snapshot);
+    let ui_local = local.clone();
     std::thread::Builder::new()
         .name("dlm-gui-runner".into())
         .spawn(move || runner::run(runner_cfg, store, rx, snapshot, quota_snapshot, tuning))
@@ -357,6 +362,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 ui_tx,
                 settings_dir,
                 config.update_url.clone(),
+                ui_local,
             );
             // `--autostart` 纯托盘：等 20 帧（≈330ms）窗口稳定后再藏起来。
             // 太早发 `Visible(false)` 会被随后的窗口初始化覆盖（实测）。
@@ -458,9 +464,10 @@ fn version_is_newer(current: &str, latest: &str) -> bool {
     version_key(latest) > version_key(current)
 }
 
-fn check_update(url: &str) -> UpdateView {
+fn check_update(url: &str, local: &updater::LocalState) -> UpdateView {
     let fail = |error: String| UpdateView {
         enabled: true,
+        current: local.release.clone(),
         checked_at: Some(queue::now_secs()),
         error: Some(error),
         ..UpdateView::disabled()
@@ -492,7 +499,7 @@ fn check_update(url: &str) -> UpdateView {
         Ok(value) => value,
         Err(err) => return fail(format!("清单 JSON 解析失败：{err}")),
     };
-    parse_manifest(&value).unwrap_or_else(&fail)
+    parse_manifest(&value, local).unwrap_or_else(&fail)
 }
 
 /// 解析更新清单。
@@ -507,7 +514,10 @@ fn check_update(url: &str) -> UpdateView {
 /// 老清单没有 `sha256`，而**没有摘要的包不许装**：那种情况下 `available` 仍为真
 /// （确实有新版），但 `installable` 为假、`blocked` 写明原因。
 /// 这样界面能显示「有新版，但只能手动装」，而不是「没有更新」。
-fn parse_manifest(value: &Value) -> std::result::Result<UpdateView, String> {
+fn parse_manifest(
+    value: &Value,
+    local: &updater::LocalState,
+) -> std::result::Result<UpdateView, String> {
     let release = manifest_str(value, "release")
         .or_else(|| manifest_str(value, "version"))
         .or_else(|| manifest_str(value, "latest"))
@@ -515,14 +525,16 @@ fn parse_manifest(value: &Value) -> std::result::Result<UpdateView, String> {
     let core_local = env!("CARGO_PKG_VERSION").to_string();
     let mut view = UpdateView {
         enabled: true,
-        current: RELEASE.to_string(),
-        available: version_is_newer(RELEASE, &release),
+        // 本机发行版版本来自 `installed.json`（装过一次更新之后就不再是编译期常量）。
+        current: local.release.clone(),
+        available: version_is_newer(&local.release, &release),
         installable: false,
         blocked: None,
         latest: Some(release),
         core_current: core_local.clone(),
         core: manifest_str(value, "core"),
         extension: manifest_str(value, "extension"),
+        extension_disk: local.extension.clone(),
         extension_running: None,
         url: manifest_str(value, "url"),
         sha256: manifest_str(value, "sha256").map(|s| s.to_ascii_lowercase()),
@@ -585,6 +597,97 @@ pub(crate) fn install_update_view(
         ..view
     };
     running
+}
+
+/// 已安装扩展的目录。与 `packaging/install.ps1` 里的 `$Ext` 同一个地方。
+pub fn default_extension_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("dlm")
+        .join("extension")
+}
+
+/// 起 `dlm-updater.exe` 把这一版装上。**调用方随后必须退出自己**。
+///
+/// ## 为什么先把 updater 拷到临时目录
+///
+/// 更新会替换安装目录里的 exe。如果 updater 也是从安装目录跑起来的，
+/// 它就没法替换自己 —— 于是 `dlm-updater.exe` 永远停在旧版本。
+/// 拷一份到临时目录再跑，安装目录里的那份就是可以被覆盖的普通文件。
+///
+/// ## 为什么把 `--wait-pid` 传成自己的进程号
+///
+/// 替换要 rename 正在被占用的 exe，Windows 会拒绝。updater 先等我们退出，
+/// 是唯一可靠的做法（「先睡两秒再试」那种是赌）。
+pub(crate) fn spawn_updater(view: &UpdateView, data_dir: &Path) -> Result<()> {
+    let url = view
+        .url
+        .clone()
+        .context("清单里没有下载地址，无法自动更新")?;
+    let sha256 = view
+        .sha256
+        .clone()
+        .context("清单里没有 sha256，拒绝自动安装（没有摘要就无法校验）")?;
+    let release = view.latest.clone().context("清单里没有发行版版本")?;
+    let core = view
+        .core
+        .clone()
+        .unwrap_or_else(|| view.core_current.clone());
+    let extension = view
+        .extension
+        .clone()
+        .or_else(|| view.extension_disk.clone())
+        .unwrap_or_default();
+    let install_dir = std::env::current_exe()
+        .context("拿不到自己的可执行文件路径")?
+        .parent()
+        .map(Path::to_path_buf)
+        .context("拿不到安装目录")?;
+    let gui_exe = install_dir.join("dlm-gui.exe");
+    let updater_src = install_dir.join("dlm-updater.exe");
+    if !updater_src.is_file() {
+        bail!(
+            "安装目录里没有 dlm-updater.exe（{}）。这一版包装得不全，请手动下载安装",
+            updater_src.display()
+        );
+    }
+    let staged_dir = std::env::temp_dir().join(format!("dlm-updater-{}", queue::now_secs()));
+    fs::create_dir_all(&staged_dir)
+        .with_context(|| format!("建临时目录失败：{}", staged_dir.display()))?;
+    let staged_updater = staged_dir.join("dlm-updater.exe");
+    fs::copy(&updater_src, &staged_updater)
+        .with_context(|| format!("把 updater 拷到临时目录失败：{}", staged_updater.display()))?;
+
+    let mut cmd = Command::new(&staged_updater);
+    cmd.arg("--url")
+        .arg(&url)
+        .arg("--sha256")
+        .arg(&sha256)
+        .arg("--install-dir")
+        .arg(&install_dir)
+        .arg("--extension-dir")
+        .arg(default_extension_dir())
+        .arg("--data-dir")
+        .arg(data_dir)
+        .arg("--release")
+        .arg(&release)
+        .arg("--core")
+        .arg(&core)
+        .arg("--extension")
+        .arg(&extension)
+        .arg("--wait-pid")
+        .arg(std::process::id().to_string())
+        .arg("--restart")
+        .arg(&gui_exe)
+        .arg("--log")
+        .arg(data_dir.join("logs").join("update.log"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.spawn()
+        .with_context(|| format!("启动更新器失败：{}", staged_updater.display()))?;
+    Ok(())
 }
 
 /// 用浏览器的 app 模式开一个没有地址栏的窗口；找不到 Edge/Chrome 就交给系统默认浏览器。
