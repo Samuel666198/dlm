@@ -3,9 +3,9 @@
   "core": "0.1.0",
   "extension": "0.2.11",
   "url": "https://github.com/Samuel666198/dlm/releases/download/v0.1.0/dlm-0.1.0-win-x64.zip",
-  "sha256": "",
-  "size": 0,
+  "sha256": "97d3025429b2d8cf86d7fdb438e8ad3acf2c52febd3fd5ac6a1e33f06adcd4a6",
+  "size": 9437323,
   "notes": "首个公开版本。",
   "min_core": "0.1.0",
-  "published_at": "2026-11-12T18:30:00Z"
+  "published_at": "2026-11-12T11:25:00Z"
 }
