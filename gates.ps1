@@ -1,4 +1,4 @@
-﻿# dlm gates: run every check with one command.
+# dlm gates: run every check with one command.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1 -SkipIntegration
@@ -47,6 +47,13 @@ $script:Results = @()
 # 更新检查会在启动 10 秒后请求 raw.githubusercontent.com。门禁里不许有真实外网请求：
 # 断网的机器会变红，联网的机器会悄悄依赖网络。子进程继承这个变量 ⇒ 一处设置覆盖全部用例。
 $env:DLM_NO_UPDATE_CHECK = '1'
+
+# 「打开落点 / 在资源管理器里选中」这类外壳动作，门禁里一律不真的启动：
+# 有一批用例会走到 `/api/reveal`，落点是 `target/harness-scratch/<pid>-<tag>-<n>/dl`
+# 这种**用例临时目录**；用例结束就删，屏幕上那个资源管理器窗口随即弹
+# 「位置不可用 … 不可用」对话框 —— 每跑一次门禁就在桌面上留一个（2026-11-12 实测）。
+# 回执里的程序名/参数仍按真实计划断言，只是 `spawned` 说 false。
+$env:DLM_NO_SHELL_OPEN = '1'
 
 function Invoke-Gate {
     param(

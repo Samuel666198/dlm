@@ -187,11 +187,17 @@ fn apply(
                 return false;
             }
             let plan = actions::reveal_plan(mode, &path);
-            let spawned = match actions::execute(&plan) {
-                Ok(()) => true,
-                Err(err) => {
-                    let _ = reply.send(Err(format!("{err:#}")));
-                    return false;
+            // 门禁/测试里不许真弹资源管理器窗口：落点是用例的临时目录，用完就删，
+            // 窗口会立刻变成「位置不可用」对话框留在用户桌面上。回执照实说 `spawned: false`。
+            let spawned = if actions::shell_suppressed() {
+                false
+            } else {
+                match actions::execute(&plan) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        let _ = reply.send(Err(format!("{err:#}")));
+                        return false;
+                    }
                 }
             };
             let _ = reply.send(Ok(RevealReply {

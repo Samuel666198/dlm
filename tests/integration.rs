@@ -6353,6 +6353,21 @@ fn run_dlm(args: &[&str]) -> anyhow::Result<std::process::Output> {
         .with_context(|| format!("起二进制失败：{bin}"))
 }
 
+/// 起 `dlm.exe`，但**允许真启动完成动作**（把 `DLM_NO_SHELL_OPEN` 摘掉）。
+///
+/// 只有「动作失败只警告」那一条用例用它：它要的正是「程序起不来 ⇒ 打一行警告」。
+/// 被门禁的抑制变量挡住的话，那句警告根本不会出现，用例会假红。
+/// 安全：那条用例的完成动作指向一个**不存在**的 exe（`run:dlm-no-such-completion-action-exe`），
+/// 起不来就不会有任何窗口。
+fn run_dlm_allow_shell(args: &[&str]) -> anyhow::Result<std::process::Output> {
+    let bin = env!("CARGO_BIN_EXE_dlm");
+    std::process::Command::new(bin)
+        .args(args)
+        .env_remove("DLM_NO_SHELL_OPEN")
+        .output()
+        .with_context(|| format!("起二进制失败：{bin}"))
+}
+
 fn stdout_of(o: &std::process::Output) -> String {
     String::from_utf8_lossy(&o.stdout).to_string()
 }
@@ -9034,7 +9049,7 @@ fn a_completion_action_failure_does_not_change_a_successful_exit_code() -> anyho
     let (_srv, base) = harness::spawn()?;
     let dir = harness::tmp_dir("a3-action-fail")?;
     let dir_text = dir.path().to_str().context("临时目录不是 UTF-8")?;
-    let out = run_dlm(&[
+    let out = run_dlm_allow_shell(&[
         "--url",
         &format!("{base}/sz/65536"),
         "--out-dir",
@@ -9673,6 +9688,10 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
                 "--token",
                 token,
             ])
+            // 这条用例会走 `/api/reveal`。落点是本用例的临时目录，用完就被删 ——
+            // 真启动资源管理器的话，那个窗口会当场变成「位置不可用」对话框。
+            // 显式置上（不依赖门禁的环境设置），并在下面断言 `spawned: false`。
+            .env("DLM_NO_SHELL_OPEN", "1")
             .stdout(Stdio::null())
             .stderr(Stdio::from(gui_stderr))
             .spawn()
@@ -9802,6 +9821,10 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
     assert!(
         only.starts_with("/select,") && only.ends_with("gui.bin"),
         "`/select,` 与路径要在同一个 argv 里：{only}"
+    );
+    assert_eq!(
+        body["spawned"], false,
+        "DLM_NO_SHELL_OPEN 置上 ⇒ 不许真启动资源管理器（窗口会指向已删的临时目录）：{body}"
     );
 
     // 计划任务：start_at 在未来 ⇒ 保持 queued；pause/resume/remove 走同一条 API。

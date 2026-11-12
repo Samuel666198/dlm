@@ -94,6 +94,33 @@ pub fn plan(action: &CompletionAction, file: &Path) -> ActionPlan {
     }
 }
 
+/// 环境变量：置上就**不真的**启动外壳动作，只记一行日志。
+///
+/// ## 为什么需要它
+///
+/// 门禁里有一批用例会走到「打开落点」/「在资源管理器里选中」，于是**真的**拉起
+/// `explorer.exe`，指向 `target/harness-scratch/<pid>-<tag>-<n>/dl` —— 那是**用例的临时目录**。
+/// 用例一结束 `TmpDir::drop` 就把目录删了，屏幕上那个资源管理器窗口随即弹出
+///
+/// ```text
+/// 位置不可用  …\target\harness-scratch\44048-gui-queue-25\dl 不可用
+/// ```
+///
+/// 也就是每跑一次门禁就在用户桌面上留一个这种对话框（实测 2026-11-12：跑几次攒几个）。
+/// 而且这类窗口**不是**被测行为的一部分：真正要钉的是「回执里的程序名与参数」，
+/// 那条断言留在用例里，启动进程这一步在门禁里没有必要。
+///
+/// ## 置上之后发生什么
+///
+/// `execute` 什么都不启动，调用方**仍然拿到真实的 [`ActionPlan`]**（程序名、参数都不变），
+/// 只是回执里的 `spawned` 说 `false` —— 不骗人：确实没启动。
+pub const NO_SHELL_ENV: &str = "DLM_NO_SHELL_OPEN";
+
+/// 这个进程要不要真的启动外壳动作（见 [`NO_SHELL_ENV`]）。
+pub fn shell_suppressed() -> bool {
+    std::env::var_os(NO_SHELL_ENV).is_some()
+}
+
 /// 启动后**不等待**：`open`/`run` 是旁路动作，dlm 的退出码与下载结果不由子进程决定。
 pub fn execute(plan: &ActionPlan) -> anyhow::Result<()> {
     Command::new(&plan.program)

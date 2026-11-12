@@ -98,9 +98,23 @@ fn dispatch() -> Result<u8> {
                 eprintln!("警告：将在 {delay_secs} 秒后关机；取消请运行 shutdown /a");
             }
             // R19：动作失败只警告，不改下载结果/退出码（"动作失败不许掩盖下载结果"）。
-            if let Err(err) =
-                dlm::actions::execute(&dlm::actions::plan(action, &task.target_path()))
-            {
+            //
+            // `DLM_NO_SHELL_OPEN` 置上时（门禁/测试）**不启动**，但仍把「本该启动什么」说清楚：
+            // 真正要验的是计划本身，不是真的弹出个资源管理器窗口。
+            let action_plan = dlm::actions::plan(action, &task.target_path());
+            if dlm::actions::shell_suppressed() {
+                eprintln!(
+                    "完成后动作已跳过（{} 置上）：本该启动 {} {}",
+                    dlm::actions::NO_SHELL_ENV,
+                    action_plan.program.display(),
+                    action_plan
+                        .args
+                        .iter()
+                        .map(|a| a.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            } else if let Err(err) = dlm::actions::execute(&action_plan) {
                 eprintln!("警告：完成后动作失败：{err:#}");
             }
         } else {
