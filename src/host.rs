@@ -582,6 +582,7 @@ impl Host {
 
         serde_json::to_vec(&json!({
             "op": "accepted",
+            "request_id": value.get("request_id").cloned().unwrap_or(Value::Null),
             "mode": "direct",
             "job": job,
             "tab": tab,
@@ -950,11 +951,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let mut host = Host::new(config(&dir));
         let reply: Value = serde_json::from_slice(
-            &host.handle(br#"{"op":"download","url":"https://example.invalid/x","name":"x.bin"}"#),
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/x","name":"x.bin","request_id":"r-1"}"#),
         )
         .unwrap();
         assert_eq!(reply["op"], "accepted", "{reply}");
         assert_eq!(reply["mode"], "direct", "没有端点文件 ⇒ 回退直连：{reply}");
+        assert_eq!(
+            reply["request_id"], "r-1",
+            "回执必须原样带回 request_id，扩展才能把 accepted 对应到具体那次下载：{reply}"
+        );
         let log = reply["log"].as_str().expect("log path");
         assert!(
             std::path::Path::new(log).exists(),
@@ -972,7 +977,7 @@ mod tests {
             let _ = tx.send(bytes);
         }));
         let reply: Value = serde_json::from_slice(
-            &host.handle(br#"{"op":"download","url":"https://example.invalid/x","name":"x.bin"}"#),
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/x","name":"x.bin","request_id":"r-1"}"#),
         )
         .unwrap();
         assert_eq!(reply["op"], "accepted", "{reply}");
