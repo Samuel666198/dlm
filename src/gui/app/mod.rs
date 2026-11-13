@@ -28,6 +28,7 @@ pub mod clipboard_hint;
 pub mod dialog;
 pub mod drawer;
 pub mod fonts;
+pub mod grab_ui;
 pub mod list;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
@@ -77,6 +78,18 @@ pub struct App {
     pub(super) basket_open: bool,
     /// 快速添加窗口里的多行文本。
     pub(super) basket_text: String,
+    /// 站点抓取窗口（0.4.0 · A）
+    pub(super) grab_open: bool,
+    pub(super) grab_url: String,
+    pub(super) grab_depth: u8,
+    pub(super) grab_same_host: bool,
+    pub(super) grab_include: String,
+    pub(super) grab_exclude: String,
+    pub(super) grab_busy: bool,
+    pub(super) grab_plan: Option<crate::grab::GrabPlan>,
+    pub(super) grab_checked: Vec<bool>,
+    pub(super) grab_error: Option<String>,
+    pub(super) grab_rx: Option<std::sync::mpsc::Receiver<Result<crate::grab::GrabPlan, String>>>,
     /// 下一帧是否把焦点给搜索框（Ctrl+F）。
     pub(super) focus_search: bool,
     /// 速率采样：每个任务上一轮的 `delivered` 与时刻。
@@ -197,6 +210,17 @@ impl App {
             search: String::new(),
             basket_open: false,
             basket_text: String::new(),
+            grab_open: false,
+            grab_url: String::new(),
+            grab_depth: 1,
+            grab_same_host: true,
+            grab_include: String::new(),
+            grab_exclude: String::new(),
+            grab_busy: false,
+            grab_plan: None,
+            grab_checked: Vec::new(),
+            grab_error: None,
+            grab_rx: None,
             focus_search: false,
             adding: false,
             add_form: dialog::AddForm::default(),
@@ -335,6 +359,7 @@ impl eframe::App for App {
         self.sample_rates();
         self.handle_shortcuts(&ctx);
         self.basket(ui);
+        self.grab_window(ui);
 
         // `--autostart`：等窗口稳定后藏起来。
         //

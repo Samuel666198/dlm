@@ -1,9 +1,9 @@
-feat(grab): robots.txt 最小判定并接进 scan
+feat(gui): 站点抓取窗口——扫描、清单勾选、入队
 
-- robots_allows()：只看 User-agent:* 段落的 Disallow 前缀；不认 Allow 优先级与 Crawl-delay
-  （宁可少抓）；空 Disallow = 全允许；读不到 robots 当没有限制
-- scan() 每次抓取前读一次 {origin}/robots.txt（256 KiB 上限），命中 Disallow 的页面进
-  skipped 清单并注明原因，不再请求
-- origin_of() 新增；用例：Disallow 前缀匹配、空/无 robots、origin 解析（lib 417 → 419）
+- 工具栏「站点抓取」打开浮窗：起始页、深度 1–3、只抓同站、包含/排除通配
+- 「扫描」在后台线程跑 grab::scan（不阻塞 UI），结果经 mpsc 回主线程；
+  清单可全选/全不选，被规则跳过的条目只读展示原因
+- 「加入队列」只把勾选项发 Ticket::Add —— 扫描本身不建任何任务
+- split_patterns 认半角/中文逗号与分号；用例 1 组（lib 419 → 420）
 
 门禁：见输出

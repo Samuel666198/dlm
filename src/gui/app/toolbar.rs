@@ -119,6 +119,10 @@ impl App {
                 self.basket_open = true;
             }
             ui.add_space(6.0);
+            if ui.button("站点抓取").clicked() {
+                self.grab_open = true;
+            }
+            ui.add_space(6.0);
             if tool_button(ui, Icon::Gear, "设置", true, false).clicked() {
                 self.settings_open = true;
                 self.draft = self.settings.clone();
