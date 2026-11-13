@@ -414,7 +414,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
     assert_eq!(tuning.connections, 12);
     assert_eq!(tuning.max_speed_kib, 512);
     assert_eq!(tuning.per_host, 24);
-    assert_eq!(tuning.max_speed_bytes(), 512 * 1024);
+    assert_eq!(tuning.max_speed_now(), 512, "没有窗口时回全局值（KiB/s）");
 
     // 同一个 tuning 既喂给子进程参数，又决定 host 预算 —— 一个来源。
     let task = Task {
