@@ -835,3 +835,103 @@ mod tests {
         assert!(host_of("file:///x").is_none());
     }
 }
+/// 站点抓取模板：**按站点记**，同一站下次打开就是上次那套规则。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Template {
+    /// 站点 host（不含 scheme 与路径）。
+    pub host: String,
+    pub name: String,
+    pub depth: u8,
+    pub same_host: bool,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+impl Template {
+    /// 从一条起始 URL 和当前规则造模板。
+    pub fn capture(start: &str, name: &str, rules: &GrabRules) -> Option<Self> {
+        Some(Self {
+            host: host_of(start)?,
+            name: name.to_string(),
+            depth: rules.depth,
+            same_host: rules.same_host,
+            include: rules.include.clone(),
+            exclude: rules.exclude.clone(),
+        })
+    }
+
+    /// 模板还原成规则（host 不参与，它只用来挑模板）。
+    pub fn rules(&self) -> GrabRules {
+        GrabRules {
+            same_host: self.same_host,
+            depth: self.depth,
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+        }
+    }
+}
+
+/// 这个站点可用的模板（按名字排序，界面直接列）。
+pub fn templates_for<'a>(list: &'a [Template], start: &str) -> Vec<&'a Template> {
+    let Some(host) = host_of(start) else {
+        return Vec::new();
+    };
+    let mut out: Vec<&Template> = list.iter().filter(|t| t.host == host).collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 存一条模板：同站同名覆盖，否则追加。
+pub fn upsert_template(list: &mut Vec<Template>, t: Template) {
+    match list
+        .iter_mut()
+        .find(|x| x.host == t.host && x.name == t.name)
+    {
+        Some(slot) => *slot = t,
+        None => list.push(t),
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    fn rules(depth: u8, inc: &[&str]) -> GrabRules {
+        GrabRules {
+            depth,
+            include: inc.iter().map(|s| s.to_string()).collect(),
+            ..GrabRules::default()
+        }
+    }
+
+    #[test]
+    fn a_template_round_trips_rules_and_is_scoped_to_its_host() {
+        let start = "https://a.example/downloads/";
+        let t = Template::capture(start, "素材站", &rules(2, &["*.zip"])).expect("host 可解析");
+        assert_eq!(t.host, "a.example");
+        assert_eq!(t.rules(), rules(2, &["*.zip"]));
+
+        let other = Template::capture("https://b.example/", "别的站", &rules(1, &[])).unwrap();
+        let list = vec![t, other];
+        assert_eq!(templates_for(&list, start).len(), 1, "只挑同站模板");
+        assert!(
+            templates_for(&list, "ftp://a.example/").is_empty(),
+            "非 http 没有模板"
+        );
+    }
+
+    #[test]
+    fn saving_the_same_name_twice_replaces_instead_of_piling_up() {
+        let mut list = Vec::new();
+        upsert_template(
+            &mut list,
+            Template::capture("https://a.example/", "x", &rules(1, &[])).unwrap(),
+        );
+        upsert_template(
+            &mut list,
+            Template::capture("https://a.example/", "x", &rules(3, &["*.mp4"])).unwrap(),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].depth, 3, "同名覆盖，用新规则");
+    }
+}

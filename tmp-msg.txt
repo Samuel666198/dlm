@@ -1,0 +1,10 @@
+feat(grab): 抓取模板按站点记（0.6.0 阶段 3 地基）
+
+- Template {host,name,depth,same_host,include,exclude}；capture() 从起始 URL + 规则生成
+- templates_for() 只返回同站模板并按名字排序；upsert_template() 同站同名覆盖，不堆重复
+- 用例 2 组：往返与站点隔离、同名覆盖
+
+说明：这是阶段 3 的数据层，先落地方案里已确认的「模板按站点记」；
+阶段 1 的 ⋯ 菜单/＋新建▾ 仍待整块重做。
+
+门禁：见输出
