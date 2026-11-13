@@ -9,6 +9,7 @@ pub mod hls;
 pub mod host;
 pub mod native;
 pub mod probe;
+pub mod proxy;
 pub mod queue;
 pub mod rate;
 pub mod report;
