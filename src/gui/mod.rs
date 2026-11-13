@@ -16,6 +16,7 @@ pub mod runner;
 pub mod scan;
 pub mod settings;
 pub mod snapshot;
+pub mod speed_schedule;
 
 #[cfg(test)]
 mod tests;
