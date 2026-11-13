@@ -8,6 +8,7 @@
     "nativeMessaging",
     "storage",
     "contextMenus",
+    "downloads",
     "cookies",
     "webRequest",
     "scripting"

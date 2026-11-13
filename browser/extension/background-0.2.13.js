@@ -3,6 +3,7 @@
 // B10：宿主对无 Cookie 的公开直链优先交给 dlm-gui 队列，回执用 mode 区分 queue/direct。
 // B3b：webRequest 只读嗅探 .m3u8/媒体直链/附件与二进制响应；HLS 强制直连 dlm --hls。
 
+importScripts("takeover.js");
 const HOST = "com.dlm.host";
 const MEDIA_KEY = "mediaByTab";
 const mediaStore = chrome.storage.session || chrome.storage.local;
@@ -362,4 +363,63 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!url) return;
   const hls = /\.m3u8(?:$|[?#])/i.test(url);
   submitPage(url, info.pageUrl || (tab && tab.url) || url, hls, tab && tab.id);
+});
+// ---------------------------------------------------------------- downloads 接管
+// 默认关闭。开启后：浏览器新建的下载若命中白名单/站点规则，就交给宿主；
+// **收到 request_id 匹配的 accepted 才 cancel**，2 秒没回执就放手，绝不制造"两边都没下成"。
+const TAKEOVER_KEY = "takeover";
+const TAKEOVER_ACK_MS = 2000;
+let takeoverCfg = { enabled: false, whitelist: [], minBytes: 1048576, blocklist: [] };
+const pendingTakeover = new Map();
+
+function loadTakeoverCfg() {
+  try {
+    chrome.storage.local.get([TAKEOVER_KEY, "siteBlock"], (got) => {
+      const saved = (got && got[TAKEOVER_KEY]) || {};
+      takeoverCfg = {
+        enabled: !!saved.enabled,
+        whitelist: Array.isArray(saved.whitelist) ? saved.whitelist : [],
+        minBytes: Number(saved.minBytes) || 0,
+        blocklist: Array.isArray(got && got.siteBlock) ? got.siteBlock : [],
+      };
+    });
+  } catch (err) {
+    // 扩展上下文失效：保持关闭
+  }
+}
+
+function takeoverRequestId() {
+  return "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function watchDownloads() {
+  if (!chrome.downloads || !chrome.downloads.onCreated) return;
+  chrome.downloads.onCreated.addListener((item) => {
+    if (!takeoverCfg.enabled) return;
+    const verdict = globalThis.dlmTakeover.shouldTakeover(item, takeoverCfg);
+    if (!verdict.take) return;
+    const requestId = takeoverRequestId();
+    const timer = setTimeout(() => {
+      pendingTakeover.delete(requestId);
+      store({ lastTakeover: { ok: false, reason: "no-ack" } });
+    }, TAKEOVER_ACK_MS);
+    pendingTakeover.set(requestId, { downloadId: item.id, timer });
+    const sent = submitTask({
+      op: "download",
+      request_id: requestId,
+      url: item.finalUrl || item.url,
+      referer: item.referrer || "",
+      tab: item.tabId,
+    });
+    if (!sent) {
+      clearTimeout(timer);
+      pendingTakeover.delete(requestId);
+    }
+  });
+}
+
+loadTakeoverCfg();
+watchDownloads();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes[TAKEOVER_KEY] || changes.siteBlock)) loadTakeoverCfg();
 });

@@ -6,16 +6,33 @@
 <style>
   body { font: 13px/1.6 "Segoe UI", sans-serif; margin: 24px; color: #2b2b2b; }
   h1 { font-size: 15px; margin: 0 0 4px; }
-  p.hint { color: #777; margin: 0 0 16px; }
-  textarea { width: 420px; height: 160px; font: 12px/1.5 Consolas, monospace; padding: 8px; }
+  h2 { font-size: 13px; margin: 22px 0 6px; }
+  p.hint { color: #777; margin: 0 0 10px; }
+  textarea { width: 420px; height: 110px; font: 12px/1.5 Consolas, monospace; padding: 8px; }
+  input[type=number] { width: 110px; }
   button { margin-top: 10px; padding: 5px 14px; }
   #saved { color: #2e7d32; margin-left: 10px; }
+  label.row { display: block; margin: 6px 0; }
 </style>
 </head>
 <body>
-  <h1>站点规则（A3）</h1>
-  <p class="hint">一行一个域名。命中这些站点时，<b>Alt+点击</b>与「下载本页所有链接」都不会交给 dlm。</p>
+  <h1>dlm 扩展设置</h1>
+
+  <h2>接管浏览器下载</h2>
+  <p class="hint">
+    开启后，浏览器自己发起的下载（JS 触发 / 302 / iframe / 附件）若命中下面的类型，会交给 dlm；
+    <b>只有 dlm 确认建好任务之后</b>才会取消浏览器下载，2 秒没回执就放手。
+  </p>
+  <label class="row"><input type="checkbox" id="tk-enabled" /> 启用接管（默认关闭）</label>
+  <label class="row">扩展名白名单（逗号分隔）：<br />
+    <textarea id="tk-whitelist" spellcheck="false"></textarea>
+  </label>
+  <label class="row">小于这个体积的不接管（字节，0 = 不限）：<input type="number" id="tk-minbytes" min="0" step="1024" /></label>
+
+  <h2>站点规则（黑名单）</h2>
+  <p class="hint">一行一个域名。命中这些站点时，接管、Alt+点击、本页链接都不会交给 dlm。</p>
   <textarea id="block" spellcheck="false" placeholder="example.com&#10;video.example.net"></textarea>
+
   <div><button id="save">保存</button><span id="saved"></span></div>
   <script src="options.js"></script>
 </body>
