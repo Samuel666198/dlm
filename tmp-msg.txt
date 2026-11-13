@@ -1,9 +1,10 @@
-feat(speed): 限速计划核心——窗口解析与按分钟取速（0.5.0 第 1 步）
+feat(speed): 限速计划接进设置与派发（0.5.0 第 1 步完成）
 
-- SpeedWindow：`22:00-06:00=512` 解析/回写；写错就报错不猜
-- contains()：同日半开区间、跨零点、start==end 视为全天三种形状分别有测试
-- rate_at()：按顺序先命中先用，空表回全局值（重叠语义由界面顺序决定，不做隐式取最小）
-- 用例 6 组，lib 420 → 426
+- Settings 新增 speed_windows: Vec<String>（serde default，旧配置文件照常读）
+- RuntimeTuning 保存已解析窗口；max_speed_now() 用本机本地时间（Win32 GetLocalTime）
+  现算当前该用多少 —— 跨窗口边界不用重启
+- runner 每次派发用 max_speed_now() 生成 --max-speed，替换原来的静态值
+- 解析不了的窗口行直接忽略（不让一行写错把整套限速废掉）
+- lib 426 全绿；max_speed_bytes 随静态用法一并删除
 
-下一步：接进设置页与 runner 的动态取值。
 门禁：见输出

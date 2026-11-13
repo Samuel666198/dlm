@@ -333,6 +333,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
     let tuning = RuntimeTuning {
         connections: 16,
         max_speed_kib: 2048,
+        speed_windows: Vec::new(),
         per_host: 16,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
@@ -356,6 +357,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
     let unlimited = argv(RuntimeTuning {
         connections: 4,
         max_speed_kib: 0,
+        speed_windows: Vec::new(),
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
@@ -377,6 +379,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
     let clamped = argv(RuntimeTuning {
         connections: 0,
         max_speed_kib: 0,
+        speed_windows: Vec::new(),
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
@@ -402,6 +405,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
     let s = crate::gui::settings::Settings {
         connections: 12,
         max_speed_kib: 512,
+        speed_windows: Vec::new(),
         per_host_connections: 24,
         ..Default::default()
     };

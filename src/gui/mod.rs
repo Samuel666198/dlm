@@ -156,6 +156,8 @@ pub(crate) struct RuntimeTuning {
     pub connections: usize,
     /// 全局限速，KiB/s（0 = 不限），转成 `--max-speed` 的字节/秒。
     pub max_speed_kib: u64,
+    /// 限速计划（已解析）。派发前用 `max_speed_now()` 取"此刻该用多少"。
+    pub speed_windows: Vec<speed_schedule::SpeedWindow>,
     /// 队列层的每 host 连接预算。
     pub per_host: usize,
     /// 新任务的落点目录。
@@ -184,6 +186,16 @@ impl RuntimeTuning {
     ///
     /// 落点没设时退回「下载文件夹」（`Settings::effective_out_dir`）；
     /// 真正的启动路径用 [`Self::from_settings_with`] 把 `--out-dir` 传进来。
+    /// 此刻该用多少 KiB/s：命中限速窗口就用窗口值，否则回全局限速。
+    ///
+    /// 每次派发前现算 —— 后台任务跨过窗口边界时不需要重启就能换挡。
+    pub fn max_speed_now(&self) -> u64 {
+        speed_schedule::rate_at(
+            speed_schedule::local_minute_of_day(),
+            &self.speed_windows,
+            self.max_speed_kib as u32,
+        ) as u64
+    }
     pub fn from_settings(s: &settings::Settings) -> Self {
         Self::from_settings_with(s, &s.effective_out_dir(), false)
     }
@@ -197,6 +209,11 @@ impl RuntimeTuning {
         Self {
             connections: s.connections.max(1),
             max_speed_kib: s.max_speed_kib,
+            speed_windows: s
+                .speed_windows
+                .iter()
+                .filter_map(|w| speed_schedule::SpeedWindow::parse(w).ok())
+                .collect(),
             per_host: s.per_host_connections,
             out_dir: s
                 .out_dir
@@ -207,11 +224,6 @@ impl RuntimeTuning {
             rename_template: s.rename_template.clone(),
             on_duplicate: naming::OnDuplicate::parse(&s.on_duplicate),
         }
-    }
-
-    /// `--max-speed` 的值：字节/秒，0 = 不限。
-    pub fn max_speed_bytes(&self) -> u64 {
-        self.max_speed_kib.saturating_mul(1024)
     }
 }
 

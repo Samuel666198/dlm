@@ -95,6 +95,43 @@ pub fn rate_at(minute: u16, windows: &[SpeedWindow], fallback: u32) -> u32 {
         .map_or(fallback, |w| w.kibps)
 }
 
+/// 本机"当天第几分钟"。Windows 走 `GetLocalTime`：用户写 22:00 指的是本地时间，
+/// 用 UTC 会整体偏 8 小时 —— 这种错用户只会觉得"限速没生效"。
+#[cfg(windows)]
+pub fn local_minute_of_day() -> u16 {
+    #[repr(C)]
+    struct SysTime {
+        year: u16,
+        month: u16,
+        dow: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        ms: u16,
+    }
+    unsafe extern "system" {
+        fn GetLocalTime(out: *mut SysTime);
+    }
+    let mut t = SysTime {
+        year: 0,
+        month: 0,
+        dow: 0,
+        day: 0,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        ms: 0,
+    };
+    unsafe { GetLocalTime(&mut t) };
+    (t.hour % 24) * 60 + (t.minute % 60)
+}
+
+#[cfg(not(windows))]
+pub fn local_minute_of_day() -> u16 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

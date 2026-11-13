@@ -332,9 +332,11 @@ pub(crate) fn child_args(
     ];
     // 限速 0 = 不限，那正是 `dlm` 的默认；传 0 与不传等价，但显式传能让
     // "设置里的 0"与"忘了传"在 argv 上区分开，排查时省一轮。
-    if tuning.max_speed_kib > 0 {
+    // 每次派发现算：限速窗口跨过边界时，新起的子进程立刻换挡。
+    let max_speed_kib = tuning.max_speed_now();
+    if max_speed_kib > 0 {
         args.push("--max-speed".into());
-        args.push(tuning.max_speed_bytes().to_string().into());
+        args.push((max_speed_kib * 1024).to_string().into());
     }
     if let Some(referer) = &task.referer {
         args.push("--referer".into());
