@@ -289,10 +289,10 @@ pub fn plan(start: &str, pages: &[(String, String)], rules: &GrabRules) -> GrabP
         .filter(|(url, _)| url == start)
         .cloned()
         .collect();
-    if frontier.is_empty() {
-        if let Some((url, html)) = pages.first() {
-            frontier.push((url.clone(), html.clone()));
-        }
+    if frontier.is_empty()
+        && let Some((url, html)) = pages.first()
+    {
+        frontier.push((url.clone(), html.clone()));
     }
 
     for level in 1..=rules.depth.max(1) {
