@@ -76,10 +76,41 @@ mod tests {
     }
 
     #[test]
+    fn plan_for_folds_directory_and_connections_into_one_answer() {
+        let rules = vec![rule("*/releases/*", Some("D:\\软件"), Some(8))];
+        let (dir, conn) = plan_for(
+            "https://x.example/releases/a.zip",
+            &rules,
+            "D:\\Downloads",
+            4,
+        );
+        assert_eq!(dir, "D:\\软件");
+        assert_eq!(conn, 8);
+
+        let (dir, conn) = plan_for("https://x.example/other/a.zip", &rules, "D:\\Downloads", 4);
+        assert_eq!((dir.as_str(), conn), ("D:\\Downloads", 4));
+    }
+
+    #[test]
     fn a_rule_with_empty_fields_only_overrides_what_it_names() {
         let rules = vec![rule("*github.com*", None, Some(2))];
         let url = "https://github.com/a/b.zip";
         assert_eq!(dir_for(url, &rules, "D:\\Downloads"), "D:\\Downloads");
         assert_eq!(connections_for(url, &rules, 8), 2);
     }
+}
+/// 一条任务最终该用的（目录, 连接数）。
+///
+/// 把两处分词合成**一个出口**：以后加"按规则改文件名"这类字段时，
+/// 只要改这里和 [`Rule`]，不会散落到 `runner` 的各个分支里。
+pub fn plan_for(
+    url: &str,
+    rules: &[Rule],
+    default_dir: &str,
+    default_connections: usize,
+) -> (String, usize) {
+    (
+        dir_for(url, rules, default_dir).to_string(),
+        connections_for(url, rules, default_connections),
+    )
 }

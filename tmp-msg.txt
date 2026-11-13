@@ -1,9 +1,7 @@
-feat(rules): 下载规则引擎（0.6.0 阶段 4 第 2 项）
+feat(rules): plan_for 单出口（目录+连接数一次算完）
 
-- Rule {pattern, dir?, connections?}：URL 通配命中即改目录/连接数
-- 语义只有一条：**按顺序先命中先用**，界面顺序就是优先级（与限速窗口一致）
-- 只用 grab::matches 的 `*` 通配，不引入正则（写错会静默不命中，不值得）
-- dir_for / connections_for 空字段 = 不改，回默认
-- 用例 3 组：先命中优先生效、无命中回默认、只覆盖点名的字段
+- 把 dir_for 与 connections_for 合成一个出口，runner 以后只调这一个函数
+- 用例：命中规则与不命中两条分支各自断言
+- lib 441 → 442
 
 门禁：见输出
