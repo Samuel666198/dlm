@@ -1,14 +1,13 @@
-feat(cli): --json 覆盖下载结果与参数错误（0.6.0 阶段 0 完成）
+feat(cli): 参数错误也走 JSON 信封（0.6.0 阶段 0 收尾）
 
 实测：
   dlm --json --url file:///x
   → {"ok":false,"error":{"code":"BAD_URL","message":"参数写错了：…"}}
-  dlm --json --no-start --url https://example.com/a.zip
-  → {"ok":true,"task":{"path":".\\a.zip","status":"no_start","url":"…"}}
+  dlm --url file:///x（不带 --json）
+  → 原来的中文 stderr，一个字没变
 
-- finish() 在 --json 下输出 {ok,task:{url,path,status}}，status = done /
-  budget_reached / failed；退出码逻辑不变
-- 参数层错误走同一信封，code=BAD_URL；不带 --json 时仍是原来的中文 stderr
-- 未加自动化断言（现有 121 个集成测试对 stdout 有精确契约，改它们要单独一轮）
+- 说明：上一版把 finish() 也改成 JSON 分支，触发 11 处二进制用例的签名不匹配；
+  已回退那部分，本轮只保留"参数错误"这一处（可验证、不动 stdout 契约）
+- 下载结果的 JSON 输出需要单独一轮改 finish 的测试夹具，记在计划里
 
 门禁：见输出

@@ -57,7 +57,6 @@ fn main() -> ExitCode {
 
 /// 装配全过程。交回退出码；`Err` 只可能来自 `engine::run`（见 `main` 那段注释）。
 fn dispatch() -> Result<u8> {
-    // 参数都还没解析出来时也要能报 JSON：先扫一眼原始 argv。
     let wants_json = std::env::args_os().any(|a| a == "--json");
     let cli = match cli::parse_from(std::env::args_os()) {
         Ok(cli) => cli,
@@ -65,6 +64,7 @@ fn dispatch() -> Result<u8> {
     };
 
     // `quiet()` / `no_start()` 先读：`into_task()` 会**消费** `Cli`（**E23⑦** 交回两件东西的形状）。
+    let wants_json = cli.wants_json();
     let quiet = cli.quiet();
     let no_start = cli.no_start();
     // R19：完成后动作也是"消费 Cli 之前"取走的一格；它不进 Task/Config，也不参与续传比对。
@@ -105,7 +105,7 @@ fn dispatch() -> Result<u8> {
     }
 
     let rep = engine::run(&task, cfg)?;
-    let code = finish(&rep, &task, quiet, wants_json);
+    let code = finish(&rep, &task, quiet);
     if let Some(action) = action.as_ref() {
         if rep.ok {
             if let dlm::actions::CompletionAction::Shutdown { delay_secs } = action {
@@ -147,7 +147,7 @@ fn dispatch() -> Result<u8> {
 /// （**E20⑦** 末尾那笔具名欠账：要造那一格得让 `fs::remove_file` 以非 `NotFound` 失败）。
 /// `report::outcome` 的用例钉的是"它交回的布尔等于 `rep.ok`"，而**装配层有没有去读那个布尔**
 /// 落在判据之外。把这一格做成"输入是 `Report` 而不是布尔"的函数，手搭 `Report` 就又进得来了。
-fn finish(rep: &Report, task: &Task, quiet: bool, wants_json: bool) -> u8 {
+fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
     let (line, ok) = report::outcome(rep, task);
     // 收尾让出那一行：进度行是 `\r` 原地覆盖的，不换行就会把结果行盖在它上面。
     //
@@ -163,26 +163,7 @@ fn finish(rep: &Report, task: &Task, quiet: bool, wants_json: bool) -> u8 {
     if !quiet && task.segmentable() && !task.hls() {
         println!();
     }
-    if wants_json {
-        // 同一份结果给机器一份：一行、字段稳定、不含人类措辞。
-        let status = if ok {
-            "done"
-        } else if rep.budget_reached {
-            "budget_reached"
-        } else {
-            "failed"
-        };
-        println!(
-            "{}",
-            dlm::json_out::to_line(&dlm::json_out::ok(serde_json::json!({
-                "url": task.url,
-                "path": task.target_path().display().to_string(),
-                "status": status,
-            })))
-        );
-    } else {
-        println!("{line}");
-    }
+    println!("{line}");
     if ok {
         0
     } else if rep.budget_reached {
