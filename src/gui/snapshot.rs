@@ -140,8 +140,11 @@ pub struct TaskView {
 
 impl TaskView {
     pub(crate) fn from_task(task: &Task, out_dir: &Path) -> Self {
-        let (mut total, _) = queue::progress(out_dir, &task.name);
-        let delivered = queue::delivered(out_dir, &task.name);
+        // 0.6.0：落点目录可能被规则改过（`task.dir`），所以这里不能直接用参数里的默认目录 ——
+        // 否则界面上显示的进度与详情里的路径会对着两个不同目录说话。
+        let dir = task.dir_in(out_dir);
+        let (mut total, _) = queue::progress(dir, &task.name);
+        let delivered = queue::delivered(dir, &task.name);
         if total.is_none() && task.status == TaskStatus::Done {
             total = delivered;
         }
@@ -158,7 +161,7 @@ impl TaskView {
             id: task.id.clone(),
             url: task.url.clone(),
             name: task.name.clone(),
-            path: queue::target_path(out_dir, &task.name)
+            path: queue::target_path(dir, &task.name)
                 .to_string_lossy()
                 .to_string(),
             referer: task.referer.clone(),

@@ -9946,6 +9946,161 @@ fn gui_queue_adds_and_finishes_a_download() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 0.6.0 规则引擎：命中的规则决定文件落在**哪儿** —— 端到端一整条链
+/// （`settings.json` → `RuntimeTuning.rules` → runner 派发 → 子进程 → 落盘）。
+///
+/// 两条判据缺一不可：规则目录里真有那个文件、默认目录里**没有**它。
+/// 只看"任务 done"会漏掉这个 bug 的全部形态 —— 文件下到别处，任务照样是 done，
+/// 而 `/api/tasks` 里的 `path` 正是界面「打开文件」点下去要找的那个路径。
+#[test]
+fn gui_rules_put_the_file_where_the_rule_says() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let (srv, node_base) = harness::spawn()?;
+    let dir = harness::tmp_dir("gui-rules")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let rule_dir = dir.path().join("软件");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-rules-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+
+    // 规则住在 `queue.json` 旁边的 `settings.json` 里（GUI 启动时读的那一份）。
+    let settings = serde_json::json!({
+        "rules": [{
+            "pattern": "*/sz/*",
+            "dir": rule_dir.to_string_lossy(),
+            "connections": 2
+        }]
+    });
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::to_vec_pretty(&settings)?,
+    )?;
+
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--concurrency",
+                "1",
+                "--headless",
+                "--token",
+                token,
+            ])
+            .env("DLM_NO_SHELL_OPEN", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let add_body = serde_json::json!({
+        "url": format!("{node_base}/sz/65536"),
+        "name": "rule.bin",
+        "referer": null,
+        "start_at": null,
+    });
+    let resp = client
+        .post(format!("{gui_base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(add_body.to_string())
+        .send()?;
+    let add_reply: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(add_reply["ok"], true, "{add_reply}");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let final_task = loop {
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(
+            &client
+                .get(format!("{gui_base}/api/tasks?t={token}"))
+                .send()?
+                .text()?,
+        )?;
+        if let Some(task) = tasks.iter().find(|t| t["name"] == "rule.bin") {
+            match task["status"].as_str() {
+                Some("done") => break task.clone(),
+                Some("failed") => {
+                    panic!("规则用例的任务失败了：{task}");
+                }
+                _ => {}
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("规则用例的任务没跑完：{tasks:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // 文件在规则目录里，而且大小对。
+    let landed = rule_dir.join("rule.bin");
+    assert_eq!(
+        std::fs::metadata(&landed)
+            .context("规则目录里没有文件")?
+            .len(),
+        65536
+    );
+    // 默认目录里不许有同一个文件（它要是在那儿，说明规则只在"判重"那一步生效了）。
+    assert!(
+        !out_dir.join("rule.bin").exists(),
+        "文件不该落在默认目录：{}",
+        out_dir.join("rule.bin").display()
+    );
+    // 界面拿到的 `path` 也必须是规则目录 —— 否则「打开文件」会指向一个空位置。
+    assert_eq!(
+        std::path::Path::new(final_task["path"].as_str().context("task path")?),
+        landed,
+        "TaskView.path 要跟着任务自己的落点走"
+    );
+
+    drop(srv);
+    Ok(())
+}
+
 /// A16：真二进制的第三档退出码。首轮预算到量 ⇒ 3 且断点在；不带预算再跑 ⇒ 0 且字节完整。
 ///
 /// 预算取 512 KiB（高于首轮预读 236032 B）：低于预读时，预读本身就把额度花光，

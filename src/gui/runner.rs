@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -13,9 +12,32 @@ use std::time::Duration;
 
 use crate::actions;
 use crate::queue::{self, QueueStore, Task, TaskStatus};
+use crate::rules;
 
 use super::snapshot::{QuotaView, TaskView, quota_view, snapshot_of};
 use super::{GuiConfig, MIN_QUOTA_SLICE, RevealReply, RuntimeTuning, Ticket};
+
+/// 一条任务这次真正要用的（落点, 连接数）：**规则优先，其余回全局设置**。
+///
+/// 一个出口同时回答落点与连接数，是因为这两件事必须同源：子进程拿到的 `--out-dir`
+/// 与 `--connections`、host 预算算的条数、采样读的进度文件，任何一处走了另一条路，
+/// 就会出现"按 8 条算预算、实际开 16 条"或"进度读 D 盘、文件在 E 盘"。
+///
+/// 落点优先用任务上钉住的（入队那一刻规则命中并算好的），其次按现在的规则现算 ——
+/// 后者让"先入队、后加规则"的排队任务也吃到规则；已经钉住的则不搬家。
+fn plan_for_task(task: &Task, tuning: &RuntimeTuning) -> (std::path::PathBuf, usize) {
+    let (planned_dir, planned_connections) = rules::plan_for(
+        &task.url,
+        &tuning.rules,
+        &tuning.out_dir,
+        tuning.connections,
+    );
+    (
+        task.dir.clone().unwrap_or(planned_dir),
+        planned_connections.max(1),
+    )
+}
+
 pub(crate) fn run(
     config: GuiConfig,
     mut store: QueueStore,
@@ -107,10 +129,13 @@ fn apply(
         } => {
             // E1/E2：落点名字在**建任务这一刻**定下来（模板 + 同名处理），
             // 之后整条链路只认这一个名字。
+            // 0.6.0：落点目录同样在这一刻定 —— 规则命中就用规则的目录，
+            // 命中不到才用全局默认（再按需接类型子目录）。
+            let rule_root = rules::dir_path_for(&url, &tuning.rules, &tuning.out_dir);
             let dir = if tuning.category_dirs {
-                tuning.out_dir.join(queue::category_for(&name))
+                rule_root.join(queue::category_for(&name))
             } else {
-                tuning.out_dir.clone()
+                rule_root.clone()
             };
             let dated = crate::gui::naming::render_template(
                 &tuning.rename_template,
@@ -129,13 +154,19 @@ fn apply(
                     }
                 };
             let category = tuning.category_dirs.then(|| queue::category_for(&name));
-            match store.add(
+            // 只有规则真的改了落点才钉住它：没命中（`rule_root == out_dir`）时不钉，
+            // 保持"改设置里的保存目录 ⇒ 排队任务跟着走"的既有行为。
+            // 钉的是 rule_root 而不是 dir：分类子目录是名字前缀（`video/a.mp4`），
+            // 已经在 `name` 里了，再拼一次会变成 `D:\软件\video\video\a.mp4`。
+            let pinned = (rule_root != tuning.out_dir).then_some(rule_root);
+            match store.add_with_dir(
                 &url,
                 &name,
                 referer,
                 start_at,
                 on_complete,
                 category,
+                pinned,
                 &config.log_dir,
             ) {
                 Ok(task) => {
@@ -195,8 +226,9 @@ fn apply(
             false
         }
         Ticket::Reveal { id, mode, reply } => {
-            // 落点**只能**由队列里的任务名推出：`name` 在入队时已过 `validate_name`
-            // （不含 `/ \ :`），所以 `out_dir.join(name)` 不会越出目录。
+            // 落点**只能**由队列里的任务推出来：`name` 在入队时已过 `validate_name`
+            // （不含 `/ \ :`），所以 `dir.join(name)` 不会越出目录；目录本身来自
+            // 队列（`task.dir`）或全局默认，**不是**客户端交来的。
             // 这条路线里没有任何一格接受客户端交来的路径 —— 那是通用"打开任意文件"接口，不做。
             let Some(task) = store.find_mut(&id) else {
                 let _ = reply.send(Err("任务不存在".to_string()));
@@ -206,7 +238,7 @@ fn apply(
                 let _ = reply.send(Err("任务还没下完".to_string()));
                 return false;
             }
-            let path = queue::target_path(&tuning.out_dir, &task.name);
+            let path = queue::target_path(task.dir_in(&tuning.out_dir), &task.name);
             if !path.is_file() {
                 let _ = reply.send(Err("落点文件不在了".to_string()));
                 return false;
@@ -311,24 +343,28 @@ pub(crate) fn quota_slice(available: u64, free_slots: usize) -> Option<u64> {
 ///
 /// **E18**：`--connections` 与 `--max-speed` 曾经根本没出现在这张表里 ——
 /// 设置面板能改能存，子进程却永远跑 `DEFAULT_CONNECTIONS` 且不限速。
-/// 现在两者都从 [`RuntimeTuning`] 来，且**总是显式传**：
+/// 现在连接数来自 [`plan_for_task`]，且**总是显式传**：
 /// 不传时 `dlm` 用自己的默认值，那个默认值与设置面板显示的值是两本账。
+///
+/// 落点同理：`--out-dir` 用**这条任务自己的**目录（规则命中的那条），
+/// 不是全局 `out_dir`。之前这里收一个 `out_dir` 参数，调用方传的都是全局值，
+/// 接规则时就会变成"清点/判重按规则目录算，实际下载落在全局目录"。
 pub(crate) fn child_args(
     task: &Task,
-    out_dir: &Path,
     quota_slice: Option<u64>,
-    tuning: RuntimeTuning,
+    tuning: &RuntimeTuning,
 ) -> Vec<std::ffi::OsString> {
+    let (dir, connections) = plan_for_task(task, tuning);
     let mut args: Vec<std::ffi::OsString> = vec![
         "--url".into(),
         task.url.clone().into(),
         "--out-dir".into(),
-        out_dir.as_os_str().to_os_string(),
+        dir.as_os_str().to_os_string(),
         "--out-name".into(),
         task.name.clone().into(),
         "--quiet".into(),
         "--connections".into(),
-        tuning.connections.max(1).to_string().into(),
+        connections.to_string().into(),
     ];
     // 限速 0 = 不限，那正是 `dlm` 的默认；传 0 与不传等价，但显式传能让
     // "设置里的 0"与"忘了传"在 argv 上区分开，排查时省一轮。
@@ -419,15 +455,22 @@ fn tick(
 ) -> bool {
     let mut changed = false;
     // 1) 采样：按覆盖量增量记配额。先采再 reap，子进程退出前最后一截也算得到。
-    let running: Vec<(String, String)> = store
+    // 0.6.0：每个任务从**自己的**落点读进度（规则可能把它指到别的盘）。
+    let running: Vec<(String, String, std::path::PathBuf)> = store
         .tasks()
         .iter()
         .filter(|t| children.contains_key(&t.id))
-        .map(|t| (t.id.clone(), t.name.clone()))
+        .map(|t| {
+            (
+                t.id.clone(),
+                t.name.clone(),
+                t.dir_in(&tuning.out_dir).to_path_buf(),
+            )
+        })
         .collect();
     let mut charged = false;
-    for (id, name) in running {
-        let now = store.delivered(&tuning.out_dir, &name).unwrap_or(0);
+    for (id, name, dir) in running {
+        let now = store.delivered(&dir, &name).unwrap_or(0);
         let previous = last_delivered.insert(id.clone(), now).unwrap_or(now);
         if now > previous {
             charged |= store.quota_charge(now - previous);
@@ -463,7 +506,7 @@ fn tick(
                     task.status = TaskStatus::Done;
                     if tuning.scan_after_done {
                         crate::gui::scan::spawn_scan(
-                            &queue::target_path(&tuning.out_dir, &task.name),
+                            &queue::target_path(task.dir_in(&tuning.out_dir), &task.name),
                             &task.log,
                         );
                     }
@@ -520,8 +563,9 @@ fn tick(
 
     // 4) 派发。
     while children.len() < config.concurrency {
-        // E18：连接数从设置来，不再是编译期常量。
-        let want = connections_per_task(tuning);
+        // E18：连接数从设置（或命中规则）来，不再是编译期常量。
+        // 0.6.0：`want` 按**候选任务自己的**规则算 —— `plan_for_task` 与
+        // `child_args` 是同一个出口，所以 host 预算与实际开的条数不会分成两本账。
         let next = store
             .tasks()
             .iter()
@@ -531,10 +575,11 @@ fn tick(
                     && t.hold_until.is_none_or(|s| s <= now)
                     // 按 host 的连接预算（勘误 E4）：同 host 上已占用的 + 这一单
                     // 要用的超过上限，就跳过它去看下一个（可能是别的 host）。
-                    && gate.allows(&t.url, want)
+                    && gate.allows(&t.url, plan_for_task(t, tuning).1)
             })
             .cloned();
         let Some(task) = next else { break };
+        let (task_dir, want) = plan_for_task(&task, tuning);
         let quota_slice = if let Some(quota) = store.quota() {
             if quota.window_started_at == 0 {
                 changed |= store.quota_start(now);
@@ -581,15 +626,10 @@ fn tick(
                 continue;
             }
         };
-        let baseline = store.delivered(&tuning.out_dir, &task.name).unwrap_or(0);
+        let baseline = store.delivered(&task_dir, &task.name).unwrap_or(0);
         let mut command = Command::new(&config.dlm_exe);
         command
-            .args(child_args(
-                &task,
-                &tuning.out_dir,
-                quota_slice,
-                tuning.clone(),
-            ))
+            .args(child_args(&task, quota_slice, tuning))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
@@ -626,25 +666,16 @@ fn tick(
     changed
 }
 
-/// 一个任务会开几条连接。
-///
-/// **E18 之前**这里返回 `consts::DEFAULT_CONNECTIONS`（写死 8），因为队列不透传
-/// `--connections`。现在从 [`RuntimeTuning`] 取，设置面板改了立刻生效。
-///
-/// 这个数必须与 `child_args` 传给子进程的 `--connections` **是同一个值** ——
-/// 否则 host 预算按 8 算、实际开 16 条，每 host 上限就形同虚设。
-/// 两处都读同一个 `tuning.connections`，这条一致性由构造方式保证，不需要再对账。
-fn connections_per_task(tuning: &RuntimeTuning) -> usize {
-    tuning.connections.max(1)
-}
-
 /// 给 `gui::tests` 用的只读投影。
 ///
-/// 存在的唯一理由：E18 的用例要断言「argv 里的 `--connections` 与 host 预算
-/// 用的是同一个值」。把 `connections_per_task` 直接 `pub(crate)` 也能测，
-/// 但那会让这个内部函数在整个 crate 里可见 —— 加一层命名明确的测试口，
+/// 存在的唯一理由：用例要断言「argv 里的 `--connections` / `--out-dir` 与
+/// host 预算、进度采样用的是同一个值」。把 `plan_for_task` 直接 `pub(crate)`
+/// 也能测，但那会让这个内部函数在整个 crate 里可见 —— 加一层命名明确的测试口，
 /// 以后有人想在生产代码里调它会先看到 `_for_test` 三个字。
 #[cfg(test)]
-pub(crate) fn connections_per_task_for_test(tuning: &RuntimeTuning) -> usize {
-    connections_per_task(tuning)
+pub(crate) fn plan_for_task_for_test(
+    task: &Task,
+    tuning: &RuntimeTuning,
+) -> (std::path::PathBuf, usize) {
+    plan_for_task(task, tuning)
 }

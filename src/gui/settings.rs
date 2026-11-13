@@ -51,6 +51,12 @@ pub struct Settings {
     pub rename_template: String,
     /// 同名冲突：uto（默认，加 (1)）/ skip / overwrite。
     pub on_duplicate: String,
+    /// 下载规则：URL 命中就按规则改落点 / 连接数，按顺序**先命中先用**。
+    ///
+    /// 只在这里存，界面编辑归阶段 4；手改 `settings.json` 与将来界面上改的是同一份数据，
+    /// `runner` 每次派发都现读 `RuntimeTuning.rules`，所以存盘后重启即生效。
+    #[serde(default)]
+    pub rules: Vec<crate::rules::Rule>,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -89,6 +95,7 @@ impl Default for Settings {
             scan_after_done: false,
             rename_template: String::new(),
             on_duplicate: "auto".to_string(),
+            rules: Vec::new(),
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,
@@ -195,6 +202,7 @@ mod tests {
         assert!(s.watch_clipboard);
         assert_eq!(s.per_host_connections, 8, "没写的字段用默认");
         assert!(s.close_to_tray, "没写的字段用默认");
+        assert!(s.rules.is_empty(), "老文件没有 rules ⇒ 空表，不是读挂");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -237,6 +245,32 @@ mod tests {
         assert!(!back.close_to_tray);
         assert_eq!(back.on_complete, "open");
         assert!(!back.auto_check_update, "更新检查开关也要落盘、要读回来");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 规则和别的设置一样能存盘、能读回来：它住在 `settings.json` 里，
+    /// 不是编译期常量 —— 否则「加一条规则」要重新编译。
+    #[test]
+    fn rules_roundtrip_through_the_settings_file() {
+        let dir = std::env::temp_dir().join(format!("dlm-settings-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let s = Settings {
+            rules: vec![crate::rules::Rule {
+                pattern: "*/releases/*".into(),
+                dir: Some("D:\\软件".into()),
+                connections: Some(2),
+            }],
+            ..Default::default()
+        };
+        s.save(&dir).unwrap();
+
+        let back = Settings::load(&dir);
+        assert_eq!(back.rules.len(), 1);
+        assert_eq!(back.rules[0].pattern, "*/releases/*");
+        assert_eq!(back.rules[0].dir.as_deref(), Some("D:\\软件"));
+        assert_eq!(back.rules[0].connections, Some(2));
         let _ = std::fs::remove_dir_all(dir);
     }
 

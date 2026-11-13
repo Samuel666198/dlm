@@ -6,6 +6,8 @@
 //! 匹配只用 `grab::matches`（只有 `*`），不引入正则：用户写 `*/releases/*` 就够用，
 //! 正则的代价是写错时不报错、只是永远不命中。
 
+use std::path::{Path, PathBuf};
+
 use crate::grab;
 use serde::{Deserialize, Serialize};
 
@@ -28,10 +30,25 @@ pub fn match_rule<'a>(url: &str, rules: &'a [Rule]) -> Option<&'a Rule> {
 }
 
 /// 命中后实际该用的目录：规则优先，否则回默认。
-pub fn dir_for<'a>(url: &str, rules: &'a [Rule], default_dir: &'a str) -> &'a str {
-    match_rule(url, rules)
-        .and_then(|r| r.dir.as_deref())
-        .unwrap_or(default_dir)
+///
+/// 规则目录的两种写法都认，但**只有绝对路径原样用**：
+/// - `D:\软件` ⇒ 就是这个目录；
+/// - `视频` ⇒ 接到默认目录下面（`out_dir\视频`）。
+///
+/// 相对路径**不按进程当前目录解析**：GUI 的 cwd 没人说得清，按 cwd 拼出来的落点
+/// 用户找不到（与 `settings::parse_out_dir_input` 拒绝相对路径同一个理由）。
+pub fn dir_path_for(url: &str, rules: &[Rule], default_dir: &Path) -> PathBuf {
+    match match_rule(url, rules).and_then(|r| r.dir.as_deref()) {
+        Some(dir) => {
+            let path = Path::new(dir);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                default_dir.join(path)
+            }
+        }
+        None => default_dir.to_path_buf(),
+    }
 }
 
 /// 命中后实际该用的连接数：规则优先，否则回默认。
@@ -41,21 +58,26 @@ pub fn connections_for(url: &str, rules: &[Rule], default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// 一条任务最终该用的（目录, 连接数）。
+/// 一条任务最终该用的（落点, 连接数）。
 ///
 /// 把两处分词合成**一个出口**：以后加"按规则改文件名"这类字段时，
 /// 只要改这里和 [`Rule`]，不会散落到 `runner` 的各个分支里。
+///
+/// 落点给的是 `PathBuf` 而不是 `String`：调用方（`runner`）拿它去 `join` 文件名、
+/// 去判重、去 `--out-dir` 传子进程 —— 每一步都要 `Path`，
+/// 留成字符串只会换来一串 `PathBuf::from`。
 pub fn plan_for(
     url: &str,
     rules: &[Rule],
-    default_dir: &str,
+    default_dir: &Path,
     default_connections: usize,
-) -> (String, usize) {
+) -> (PathBuf, usize) {
     (
-        dir_for(url, rules, default_dir).to_string(),
+        dir_path_for(url, rules, default_dir),
         connections_for(url, rules, default_connections),
     )
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +97,10 @@ mod tests {
             rule("*.zip", Some("D:\\压缩包"), None),
         ];
         let url = "https://x.example/releases/a.zip";
-        assert_eq!(dir_for(url, &rules, "D:\\Downloads"), "D:\\软件");
+        assert_eq!(
+            dir_path_for(url, &rules, Path::new("D:\\Downloads")),
+            PathBuf::from("D:\\软件")
+        );
         assert_eq!(connections_for(url, &rules, 4), 8, "第一条的连接数生效");
     }
 
@@ -83,8 +108,8 @@ mod tests {
     fn no_match_falls_back_to_defaults() {
         let rules = vec![rule("*.mp4", Some("D:\\视频"), Some(16))];
         assert_eq!(
-            dir_for("https://x/a.zip", &rules, "D:\\Downloads"),
-            "D:\\Downloads"
+            dir_path_for("https://x/a.zip", &rules, Path::new("D:\\Downloads")),
+            PathBuf::from("D:\\Downloads")
         );
         assert_eq!(connections_for("https://x/a.zip", &rules, 4), 4);
         assert!(match_rule("https://x/a.zip", &[]).is_none());
@@ -96,21 +121,47 @@ mod tests {
         let (dir, conn) = plan_for(
             "https://x.example/releases/a.zip",
             &rules,
-            "D:\\Downloads",
+            Path::new("D:\\Downloads"),
             4,
         );
-        assert_eq!(dir, "D:\\软件");
+        assert_eq!(dir, PathBuf::from("D:\\软件"));
         assert_eq!(conn, 8);
 
-        let (dir, conn) = plan_for("https://x.example/other/a.zip", &rules, "D:\\Downloads", 4);
-        assert_eq!((dir.as_str(), conn), ("D:\\Downloads", 4));
+        let (dir, conn) = plan_for(
+            "https://x.example/other/a.zip",
+            &rules,
+            Path::new("D:\\Downloads"),
+            4,
+        );
+        assert_eq!((dir, conn), (PathBuf::from("D:\\Downloads"), 4));
     }
 
     #[test]
     fn a_rule_with_empty_fields_only_overrides_what_it_names() {
         let rules = vec![rule("*github.com*", None, Some(2))];
         let url = "https://github.com/a/b.zip";
-        assert_eq!(dir_for(url, &rules, "D:\\Downloads"), "D:\\Downloads");
+        assert_eq!(
+            dir_path_for(url, &rules, Path::new("D:\\Downloads")),
+            PathBuf::from("D:\\Downloads")
+        );
         assert_eq!(connections_for(url, &rules, 8), 2);
+    }
+
+    /// 规则里的相对目录**接到默认落点下面**，不按 cwd 解析：
+    /// 否则同一条规则在 CLI（cwd = 某处）与 GUI（cwd 没人管）会落到两个目录。
+    #[test]
+    fn a_relative_rule_dir_hangs_under_the_default_dir() {
+        let rules = vec![rule("*/releases/*", Some("视频"), None)];
+        let url = "https://x.example/releases/a.mp4";
+        assert_eq!(
+            dir_path_for(url, &rules, Path::new("D:\\Downloads")),
+            PathBuf::from("D:\\Downloads").join("视频")
+        );
+        // 绝对路径不受默认目录影响。
+        let abs = vec![rule("*/releases/*", Some("E:\\影音"), None)];
+        assert_eq!(
+            dir_path_for(url, &abs, Path::new("D:\\Downloads")),
+            PathBuf::from("E:\\影音")
+        );
     }
 }

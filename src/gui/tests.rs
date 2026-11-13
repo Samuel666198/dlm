@@ -224,6 +224,7 @@ fn task_view_carries_the_retry_attempt_count() {
         name: "a.bin".into(),
         referer: None,
         status: TaskStatus::Queued,
+        dir: None,
         pid: None,
         exit_code: Some(1),
         log: "a.log".into(),
@@ -249,6 +250,7 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
         name: "a.bin".into(),
         referer: Some("https://example.com/".into()),
         status: TaskStatus::Queued,
+        dir: None,
         pid: None,
         exit_code: None,
         log: "a.log".into(),
@@ -261,7 +263,7 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
         total_len: None,
         delivered: None,
     };
-    let plain: Vec<String> = child_args(&task, Path::new("D:/dl"), None, RuntimeTuning::default())
+    let plain: Vec<String> = child_args(&task, None, &RuntimeTuning::default())
         .into_iter()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
@@ -274,15 +276,10 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
     assert!(!plain.iter().any(|s| s == "--max-bytes"));
 
     task.on_complete = Some("open".into());
-    let with_action: Vec<String> = child_args(
-        &task,
-        Path::new("D:/dl"),
-        Some(4096),
-        RuntimeTuning::default(),
-    )
-    .into_iter()
-    .map(|s| s.to_string_lossy().to_string())
-    .collect();
+    let with_action: Vec<String> = child_args(&task, Some(4096), &RuntimeTuning::default())
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
     assert!(
         with_action
             .windows(2)
@@ -309,6 +306,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         name: "a.bin".into(),
         referer: None,
         status: TaskStatus::Queued,
+        dir: None,
         pid: None,
         exit_code: None,
         log: "a.log".into(),
@@ -322,8 +320,8 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         delivered: None,
     };
 
-    let argv = |tuning: RuntimeTuning| -> Vec<String> {
-        child_args(&task, Path::new("D:/dl"), None, tuning)
+    let argv = |tuning: &RuntimeTuning| -> Vec<String> {
+        child_args(&task, None, tuning)
             .into_iter()
             .map(|s| s.to_string_lossy().to_string())
             .collect()
@@ -341,8 +339,9 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         scan_after_done: false,
         rename_template: String::new(),
         on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
+        rules: Vec::new(),
     };
-    let got = argv(tuning);
+    let got = argv(&tuning);
     assert!(
         got.windows(2)
             .any(|w| w[0] == "--connections" && w[1] == "16"),
@@ -355,7 +354,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
     );
 
     // 不限速（0）⇒ 不传 `--max-speed`：传 0 与不传等价，但少一个参数更干净。
-    let unlimited = argv(RuntimeTuning {
+    let unlimited = argv(&RuntimeTuning {
         connections: 4,
         max_speed_kib: 0,
         speed_windows: Vec::new(),
@@ -366,6 +365,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         scan_after_done: false,
         rename_template: String::new(),
         on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
+        rules: Vec::new(),
     });
     assert!(
         !unlimited.iter().any(|s| s == "--max-speed"),
@@ -378,7 +378,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
     );
 
     // 手改 JSON 把 connections 写成 0 ⇒ 夹到 1，不能让 `dlm` 报参数错误。
-    let clamped = argv(RuntimeTuning {
+    let clamped = argv(&RuntimeTuning {
         connections: 0,
         max_speed_kib: 0,
         speed_windows: Vec::new(),
@@ -389,6 +389,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         scan_after_done: false,
         rename_template: String::new(),
         on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
+        rules: Vec::new(),
     });
     assert!(
         clamped
@@ -427,6 +428,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         name: "a.bin".into(),
         referer: None,
         status: TaskStatus::Queued,
+        dir: None,
         pid: None,
         exit_code: None,
         log: "a.log".into(),
@@ -439,7 +441,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         total_len: None,
         delivered: None,
     };
-    let argv: Vec<String> = child_args(&task, Path::new("D:/dl"), None, tuning.clone())
+    let argv: Vec<String> = child_args(&task, None, &tuning)
         .into_iter()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
@@ -448,10 +450,133 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         .find(|w| w[0] == "--connections")
         .map(|w| w[1].clone())
         .expect("必须传 --connections");
+    let planned_connections = super::runner::plan_for_task_for_test(&task, &tuning).1;
     assert_eq!(
         from_argv,
-        super::runner::connections_per_task_for_test(&tuning).to_string(),
+        planned_connections.to_string(),
         "argv 里的连接数与 host 预算算的是不是同一个值"
+    );
+}
+
+/// **0.6.0 规则引擎接进 runner**：命中的规则要同时改落点与连接数。
+///
+/// 这条用例钉的是"落到哪个目录"这件事的第一段：规则算出来的目录必须真的出现在
+/// 子进程的 `--out-dir` 上。少了它，规则会变成"设置里能写、下载不认"的空壳 ——
+/// 与 E18 那次（连接数能存能改、argv 里没有）是同一类错误。
+#[test]
+fn rules_override_the_child_out_dir_and_connections() {
+    let task = Task {
+        id: "1".into(),
+        url: "https://x.example/releases/a.zip".into(),
+        name: "a.zip".into(),
+        referer: None,
+        status: TaskStatus::Queued,
+        dir: None,
+        pid: None,
+        exit_code: None,
+        log: "a.log".into(),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+    };
+    let tuning = RuntimeTuning {
+        out_dir: std::path::PathBuf::from("D:/dl"),
+        rules: vec![crate::rules::Rule {
+            pattern: "*/releases/*".into(),
+            dir: Some("E:/软件".into()),
+            connections: Some(2),
+        }],
+        ..RuntimeTuning::default()
+    };
+
+    let argv: Vec<String> = child_args(&task, None, &tuning)
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--out-dir" && w[1] == "E:/软件"),
+        "规则命中的落点要进 --out-dir，实际 argv：{argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--connections" && w[1] == "2"),
+        "规则的连接数要进 --connections，实际 argv：{argv:?}"
+    );
+
+    // 没命中的 URL 仍走全局设置：规则不能变成"所有任务都套第一条"。
+    let other = Task {
+        url: "https://x.example/other/a.zip".into(),
+        ..task.clone()
+    };
+    let other_argv: Vec<String> = child_args(&other, None, &tuning)
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        other_argv
+            .windows(2)
+            .any(|w| w[0] == "--out-dir" && w[1] == "D:/dl"),
+        "没命中就走全局落点，实际 argv：{other_argv:?}"
+    );
+    assert!(
+        other_argv
+            .windows(2)
+            .any(|w| w[0] == "--connections" && w[1] == "8"),
+        "没命中就用设置的连接数，实际 argv：{other_argv:?}"
+    );
+}
+
+/// 入队时钉住的落点优先于"现在的规则"：先入队、后改规则不该把排队任务搬家 ——
+/// 搬了就等于进度、断点、打开文件全对着另一个路径。
+#[test]
+fn a_pinned_dir_outranks_a_later_rule() {
+    let task = Task {
+        id: "1".into(),
+        url: "https://x.example/releases/a.zip".into(),
+        name: "a.zip".into(),
+        referer: None,
+        status: TaskStatus::Queued,
+        dir: Some(std::path::PathBuf::from("F:/旧规则")),
+        pid: None,
+        exit_code: None,
+        log: "a.log".into(),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+    };
+    let tuning = RuntimeTuning {
+        out_dir: std::path::PathBuf::from("D:/dl"),
+        rules: vec![crate::rules::Rule {
+            pattern: "*/releases/*".into(),
+            dir: Some("E:/新规则".into()),
+            connections: None,
+        }],
+        ..RuntimeTuning::default()
+    };
+
+    let (dir, connections) = super::runner::plan_for_task_for_test(&task, &tuning);
+    assert_eq!(dir, std::path::PathBuf::from("F:/旧规则"), "钉住的落点优先");
+    assert_eq!(connections, 8, "连接数没有钉住的理由：每次派发现算");
+
+    let argv: Vec<String> = child_args(&task, None, &tuning)
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--out-dir" && w[1] == "F:/旧规则"),
+        "argv 也要按钉住的落点，实际：{argv:?}"
     );
 }
 
@@ -670,6 +795,7 @@ fn task_view_named(name: &str, status: TaskStatus) -> TaskView {
         name: name.to_string(),
         referer: None,
         status,
+        dir: None,
         pid: None,
         exit_code: None,
         log: "a.log".into(),

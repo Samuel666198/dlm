@@ -180,6 +180,11 @@ pub(crate) struct RuntimeTuning {
     /// 新任务是否按类型分子目录。命令行 `--category-dirs` 只做「开」
     /// （它没法表达"关掉设置里的勾"），所以与设置是**或**关系。
     pub category_dirs: bool,
+    /// 下载规则（已按界面顺序排好）：派发时 `rules::plan_for` 拿它定落点与连接数。
+    ///
+    /// 放在这里而不是留在 `Settings` 里，理由与其它字段一样：runner 只该看见
+    /// 「影响子进程的那几项」，界面偏好在 UI 线程。
+    pub rules: Vec<crate::rules::Rule>,
 }
 
 impl RuntimeTuning {
@@ -226,6 +231,7 @@ impl RuntimeTuning {
             scan_after_done: s.scan_after_done,
             rename_template: s.rename_template.clone(),
             on_duplicate: naming::OnDuplicate::parse(&s.on_duplicate),
+            rules: s.rules.clone(),
         }
     }
 }

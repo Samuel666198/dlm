@@ -58,8 +58,25 @@ pub struct Task {
     /// 只有重新入队（新任务）才从 0 起算 —— 否则手动点一次就能无限绕过上限。
     #[serde(default)]
     pub attempts: u32,
+    /// 落点目录。`None` = 用全局默认（`RuntimeTuning.out_dir`）。
+    ///
+    /// **只在规则改过落点时才有值**（0.6.0 规则引擎）。存进队列而不是每次现算，因为：
+    /// - 落点是"这个任务的文件在哪"，改名/打开/断点续传都靠它，不能在下载中途换；
+    /// - 先入队、后改规则时，已经排队/暂停的任务不该被搬家（那会让进度对着两个文件说话）。
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
     pub total_len: Option<u64>,
     pub delivered: Option<u64>,
+}
+
+impl Task {
+    /// 这个任务真正的落点目录：自己钉住的优先，否则回全局默认。
+    ///
+    /// 所有"取任务落点"的代码都必须经过这里 —— 直接拿 `tuning.out_dir` 会让
+    /// 规则命中的任务在进度、打开文件、完成后扫描三处对着**另一个**目录说话。
+    pub fn dir_in<'a>(&'a self, default: &'a Path) -> &'a Path {
+        self.dir.as_deref().unwrap_or(default)
+    }
 }
 
 /// 自动重试的退避秒数（P1）。`attempts` 是**已经重试过的轮数**（0 = 还没重试过）。
@@ -308,6 +325,34 @@ impl QueueStore {
         category: Option<&str>,
         log_dir: &Path,
     ) -> Result<Task> {
+        self.add_with_dir(
+            url,
+            name,
+            referer,
+            start_at,
+            on_complete,
+            category,
+            None,
+            log_dir,
+        )
+    }
+
+    /// 同 [`Self::add`]，但可以**把落点钉住**（规则引擎命中时用）。
+    ///
+    /// `dir: None` = 跟全局默认走（`add` 就是这样）；`Some` 是"这个任务的文件就在这儿"，
+    /// 之后改设置里的保存目录也不会把它搬走。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_with_dir(
+        &mut self,
+        url: &str,
+        name: &str,
+        referer: Option<String>,
+        start_at: Option<u64>,
+        on_complete: Option<String>,
+        category: Option<&str>,
+        dir: Option<PathBuf>,
+        log_dir: &Path,
+    ) -> Result<Task> {
         let lower = url.to_ascii_lowercase();
         if !(lower.starts_with("http://") || lower.starts_with("https://")) {
             bail!("只接受 http/https URL");
@@ -344,6 +389,7 @@ impl QueueStore {
             hold_until: None,
             on_complete,
             attempts: 0,
+            dir,
             total_len: None,
             delivered: None,
         };
@@ -618,6 +664,51 @@ mod tests {
         assert_eq!(loaded.tasks().len(), 1);
         assert!(loaded.tasks()[0].hold_until.is_none());
         assert!(loaded.tasks()[0].on_complete.is_none());
+        assert!(
+            loaded.tasks()[0].dir.is_none(),
+            "老队列没有 dir 字段 ⇒ 跟全局默认，不读挂"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// 规则改了落点的任务：落点钉在任务上，存盘读回还是同一个 ——
+    /// 否则重启一次，进度、打开文件、完成后扫描就会对着另一个目录说话。
+    #[test]
+    fn a_pinned_dir_is_kept_and_survives_a_roundtrip() {
+        let (dir, mut store) = temp_queue("pinned-dir");
+        let pinned = store
+            .add_with_dir(
+                "https://example.com/a.bin",
+                "a.bin",
+                None,
+                None,
+                None,
+                None,
+                Some(PathBuf::from("E:\\软件")),
+                &dir,
+            )
+            .unwrap();
+        assert_eq!(pinned.dir_in(&dir), Path::new("E:\\软件"));
+        store.save().unwrap();
+        let loaded = QueueStore::load(dir.join("queue.json")).unwrap();
+        assert_eq!(
+            loaded.find(&pinned.id).unwrap().dir_in(&dir),
+            Path::new("E:\\软件")
+        );
+
+        // 没钉的照旧跟默认走：`dir_in` 只是"有则用，无则回默认"。
+        let plain = store
+            .add(
+                "https://example.com/b.bin",
+                "b.bin",
+                None,
+                None,
+                None,
+                None,
+                &dir,
+            )
+            .unwrap();
+        assert_eq!(plain.dir_in(Path::new("D:\\dl")), Path::new("D:\\dl"));
         let _ = fs::remove_dir_all(dir);
     }
 
