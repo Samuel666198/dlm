@@ -1,11 +1,11 @@
 {
-  "release": "0.3.1",
+  "notes": "0.5.0：限速计划、代理支持、托盘提示；站点抓取、DASH 识别、浏览器下载接管",
   "core": "0.1.0",
-  "extension": "0.2.14",
-  "url": "https://github.com/Samuel666198/dlm/releases/download/v0.3.1/dlm-0.3.1-win-x64.zip",
-  "sha256": "014919c21c48222e02410db7973054e41638320867cebe4d1e409054d5c551c0",
-  "size": 11609536,
-  "notes": "0.3.1：关窗更聪明——有任务在跑才收托盘，空闲直接退出，托盘不可用绝不隐藏；扩展 0.2.14",
+  "sha256": "cf5a9e7a24b55772d144a9adae6d4b10026518a42a5118a5103ea04f877add15",
+  "url": "https://github.com/Samuel666198/dlm/releases/download/v0.5.0/dlm-0.5.0-win-x64.zip",
+  "size": 11674363,
+  "extension": "0.2.16",
+  "published_at": "2026-11-13T12:15:52Z",
   "min_core": "0.1.0",
-  "published_at": "2026-11-13T10:50:03Z"
+  "release": "0.5.0"
 }
