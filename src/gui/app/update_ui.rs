@@ -164,20 +164,22 @@ impl App {
                 }
 
                 ui.add_space(8.0);
-                // 桌面端：这次会不会换三个 exe。
+                // 核心版本只在**真的会变**时才说。
+                //
+                // 以前这里无条件写「桌面端 0.1.0（不变）」，用户看到的是
+                // "0.3.1 → 0.5.0" 旁边挂着个 0.1.0，只会以为版本号乱了 ——
+                // 那个数是 crate 版本（引擎），跟发行版不是一回事，不变就不该出镜。
                 let core_target = view.core.clone().unwrap_or_default();
-                let core_line = if core_target.is_empty() {
-                    format!("桌面端 {}", view.core_current)
-                } else if core_target == view.core_current {
-                    format!("桌面端 {}（不变）", view.core_current)
-                } else {
-                    format!("桌面端 {} → {core_target}", view.core_current)
-                };
-                ui.label(
-                    egui::RichText::new(core_line)
+                if !core_target.is_empty() && core_target != view.core_current {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "引擎 {} → {}",
+                            view.core_current, core_target
+                        ))
                         .size(11.5)
                         .color(theme::INK_2),
-                );
+                    );
+                }
 
                 // 扩展：不上商店，所以永远要用户手动重载。
                 // 三个版本号（清单 / 磁盘 / 浏览器里跑的）的关系，就是这段话的全部信息量。
