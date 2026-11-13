@@ -77,6 +77,23 @@ impl Default for Settings {
     }
 }
 
+/// 「默认保存目录」输入框的解析：留空 = 用兜底（`--out-dir` / 下载文件夹）。
+///
+/// 为什么不接受相对路径：这个值会被 `queue::target_path` 直接拼到文件名前面，
+/// 相对路径的基准是"进程当前目录"—— GUI 的当前目录是哪里没人说得清，
+/// 于是下载会落到一个用户找不到的地方。要绝对路径才让"我设了它"有意义。
+pub fn parse_out_dir_input(raw: &str) -> Result<Option<PathBuf>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("要写绝对路径，例如 D:\\Downloads".to_string());
+    }
+    Ok(Some(path))
+}
+
 impl Settings {
     /// 从 `queue.json` 同目录读。文件不存在或读不懂都用默认值 ——
     /// 设置坏了不该让程序起不来。

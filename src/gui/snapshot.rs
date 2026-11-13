@@ -115,6 +115,11 @@ pub struct TaskView {
     pub id: String,
     pub url: String,
     pub name: String,
+    /// 落点的绝对路径。
+    ///
+    /// 详情抽屉要显示它、也要拿它去「打开文件 / 打开文件夹」。**由队列自己算**
+    /// （`queue::target_path`），不接受客户端交来的路径 —— 否则就成了"打开任意文件"接口。
+    pub path: String,
     pub referer: Option<String>,
     pub status: String,
     pub pid: Option<u32>,
@@ -153,6 +158,9 @@ impl TaskView {
             id: task.id.clone(),
             url: task.url.clone(),
             name: task.name.clone(),
+            path: queue::target_path(out_dir, &task.name)
+                .to_string_lossy()
+                .to_string(),
             referer: task.referer.clone(),
             status: task.status.as_str().to_string(),
             pid: task.pid,

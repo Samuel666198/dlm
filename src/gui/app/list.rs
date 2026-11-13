@@ -102,8 +102,9 @@ impl App {
             12.0,
         );
         draw_progress(ui, progress_rect, task);
-        text_right(ui, speed_rect, &speed_text(task), theme::INK_2, 12.0);
-        text_right(ui, eta_rect, &eta_text(task), theme::INK_3, 12.0);
+        let speed = self.speed_of(&task.id);
+        text_right(ui, speed_rect, &speed_text(task, speed), theme::INK_2, 12.0);
+        text_right(ui, eta_rect, &eta_text(task, speed), theme::INK_3, 12.0);
         draw_status(ui, status_rect, task);
 
         if response.clicked() {
@@ -348,21 +349,71 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// 速度：`TaskView` 目前没有速率字段，先显示"—"。
+/// 速度：**只看采样器给的速率**，采样器没给出数就显示「—」。
 ///
-/// 速率与 ETA 需要 runner 侧按 `last_delivered` 的两次采样推算（勘误 E11 旁注），
-/// 那是步骤 3 的收尾项；在字段到位前不编造数字。
-fn speed_text(_task: &TaskView) -> String {
-    "—".to_string()
+/// 三条判据（对应 `rate::Rates` 的测试）：
+/// - 没在跑（queued / paused / done / failed）⇒「—」；暂停显示 0 B/s 会像"在跑但没数据"
+/// - 第一次采样（只有一个点）⇒「—」：一个点算不出斜率，不许编
+/// - 有速率就按真实数值格式化，包括 0（那是"跑着但这一瞬没进展"，是真话）
+pub fn speed_text(task: &TaskView, speed: Option<f64>) -> String {
+    if task.status != "running" {
+        return "—".to_string();
+    }
+    match speed {
+        Some(v) => fmt_speed(v),
+        None => "—".to_string(),
+    }
 }
 
-fn eta_text(task: &TaskView) -> String {
+/// 剩余时间：用 `(总量 - 已交付) / 速率` 算，速率未知或总量未知时老实显示「—」。
+pub fn eta_text(task: &TaskView, speed: Option<f64>) -> String {
     match task.status.as_str() {
-        "done" => "—".to_string(),
-        "paused" => "已暂停".to_string(),
-        "failed" => "—".to_string(),
-        _ if task.hold_until.is_some() => "等待".to_string(),
-        _ => "—".to_string(),
+        "done" => return "—".to_string(),
+        "paused" => return "已暂停".to_string(),
+        "failed" => return "—".to_string(),
+        _ if task.hold_until.is_some() => return "等待".to_string(),
+        _ => {}
+    }
+    let (Some(total), Some(done)) = (task.total_len, task.delivered) else {
+        return "—".to_string();
+    };
+    let Some(rate) = speed.filter(|v| *v > 1.0) else {
+        return "—".to_string();
+    };
+    if total <= done {
+        return "—".to_string();
+    }
+    fmt_eta(((total - done) as f64 / rate).ceil() as u64)
+}
+
+/// 字节/秒 → 人读的字符串（`1.2 MiB/s` / `837 KiB/s` / `12 B/s`）。
+pub fn fmt_speed(bytes_per_s: f64) -> String {
+    if !bytes_per_s.is_finite() || bytes_per_s < 0.0 {
+        return "—".to_string();
+    }
+    format!("{}/s", fmt_bytes(bytes_per_s.round() as u64))
+}
+
+/// 秒数 → 人读的剩余时间。一小时以上带小时，一分钟以上带分。
+pub fn fmt_eta(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} 秒"),
+        60..=3599 => {
+            let (m, s) = (secs / 60, secs % 60);
+            if s == 0 {
+                format!("{m} 分")
+            } else {
+                format!("{m} 分 {s} 秒")
+            }
+        }
+        _ => {
+            let (h, m) = (secs / 3600, (secs % 3600) / 60);
+            if m == 0 {
+                format!("{h} 小时")
+            } else {
+                format!("{h} 小时 {m} 分")
+            }
+        }
     }
 }
 

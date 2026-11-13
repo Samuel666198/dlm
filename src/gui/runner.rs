@@ -40,7 +40,7 @@ pub(crate) fn run(
                 // `ApplyRuntime` 不碰队列，所以它不走 `apply`（那条路返回"队列变没变"）。
                 // 换 tuning 与 gate 都在这儿做，且**立刻生效**：下一轮 `tick` 派发时就用新值。
                 if let Ticket::ApplyRuntime(next) = &ticket {
-                    tuning = *next;
+                    tuning = next.clone();
                     gate.set_per_host(next.per_host);
                     changed = true;
                 } else {
@@ -51,6 +51,7 @@ pub(crate) fn run(
                         &mut reserved,
                         &mut last_delivered,
                         &config,
+                        &tuning.out_dir,
                     );
                 }
             }
@@ -69,13 +70,13 @@ pub(crate) fn run(
             &mut last_delivered,
             &mut gate,
             &config,
-            tuning,
+            &tuning,
         );
         if changed {
             let _ = store.save();
         }
         if let Ok(mut guard) = snapshot.lock() {
-            *guard = snapshot_of(&store, &config.out_dir);
+            *guard = snapshot_of(&store, &tuning.out_dir);
         }
         if let Ok(mut guard) = quota_snapshot.lock() {
             *guard = quota_view(&store, queue::now_secs());
@@ -90,6 +91,7 @@ fn apply(
     reserved: &mut HashMap<String, u64>,
     last_delivered: &mut HashMap<String, u64>,
     config: &GuiConfig,
+    out_dir: &Path,
 ) -> bool {
     match ticket {
         // 在 `run` 里就地处理（要动 `tuning` 与 `gate`，两者都不在这条路的参数里）。
@@ -181,7 +183,7 @@ fn apply(
                 let _ = reply.send(Err("任务还没下完".to_string()));
                 return false;
             }
-            let path = queue::target_path(&config.out_dir, &task.name);
+            let path = queue::target_path(out_dir, &task.name);
             if !path.is_file() {
                 let _ = reply.send(Err("落点文件不在了".to_string()));
                 return false;
@@ -388,7 +390,7 @@ fn tick(
     last_delivered: &mut HashMap<String, u64>,
     gate: &mut HostGate,
     config: &GuiConfig,
-    tuning: RuntimeTuning,
+    tuning: &RuntimeTuning,
 ) -> bool {
     let mut changed = false;
     // 1) 采样：按覆盖量增量记配额。先采再 reap，子进程退出前最后一截也算得到。
@@ -400,7 +402,7 @@ fn tick(
         .collect();
     let mut charged = false;
     for (id, name) in running {
-        let now = store.delivered(&config.out_dir, &name).unwrap_or(0);
+        let now = store.delivered(&tuning.out_dir, &name).unwrap_or(0);
         let previous = last_delivered.insert(id.clone(), now).unwrap_or(now);
         if now > previous {
             charged |= store.quota_charge(now - previous);
@@ -546,10 +548,15 @@ fn tick(
                 continue;
             }
         };
-        let baseline = store.delivered(&config.out_dir, &task.name).unwrap_or(0);
+        let baseline = store.delivered(&tuning.out_dir, &task.name).unwrap_or(0);
         let mut command = Command::new(&config.dlm_exe);
         command
-            .args(child_args(&task, &config.out_dir, quota_slice, tuning))
+            .args(child_args(
+                &task,
+                &tuning.out_dir,
+                quota_slice,
+                tuning.clone(),
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
@@ -594,7 +601,7 @@ fn tick(
 /// 这个数必须与 `child_args` 传给子进程的 `--connections` **是同一个值** ——
 /// 否则 host 预算按 8 算、实际开 16 条，每 host 上限就形同虚设。
 /// 两处都读同一个 `tuning.connections`，这条一致性由构造方式保证，不需要再对账。
-fn connections_per_task(tuning: RuntimeTuning) -> usize {
+fn connections_per_task(tuning: &RuntimeTuning) -> usize {
     tuning.connections.max(1)
 }
 
@@ -605,6 +612,6 @@ fn connections_per_task(tuning: RuntimeTuning) -> usize {
 /// 但那会让这个内部函数在整个 crate 里可见 —— 加一层命名明确的测试口，
 /// 以后有人想在生产代码里调它会先看到 `_for_test` 三个字。
 #[cfg(test)]
-pub(crate) fn connections_per_task_for_test(tuning: RuntimeTuning) -> usize {
+pub(crate) fn connections_per_task_for_test(tuning: &RuntimeTuning) -> usize {
     connections_per_task(tuning)
 }

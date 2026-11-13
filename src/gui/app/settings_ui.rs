@@ -51,7 +51,16 @@ impl App {
         }
 
         if save {
+            let parsed_dir = crate::gui::settings::parse_out_dir_input(&self.out_dir_text);
             if self.draft.on_complete_ok() {
+                let dir = match parsed_dir {
+                    Ok(dir) => dir,
+                    Err(msg) => {
+                        self.settings_error = Some(format!("保存目录：{msg}"));
+                        return;
+                    }
+                };
+                self.draft.out_dir = dir;
                 match self.draft.save(&self.settings_dir) {
                     Ok(()) => {
                         self.settings = self.draft.clone();
@@ -59,8 +68,9 @@ impl App {
                         self.apply_settings_runtime();
                         // E18：连接数 / 限速 / 每 host 上限也立刻生效。
                         // 不发这一条的话，用户改完得重启程序 —— 设置界面等于在说谎。
-                        self.send(Ticket::ApplyRuntime(RuntimeTuning::from_settings(
+                        self.send(Ticket::ApplyRuntime(RuntimeTuning::from_settings_with(
                             &self.settings,
+                            &self.default_out_dir,
                         )));
                         self.settings_error = None;
                         open = false;
@@ -75,6 +85,12 @@ impl App {
         }
         if cancel {
             self.draft = self.settings.clone();
+            self.out_dir_text = self
+                .draft
+                .out_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
             self.settings_error = None;
             open = false;
         }
@@ -101,6 +117,22 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.draft.max_speed_kib).range(0..=1024 * 100));
             ui.label(
                 egui::RichText::new("0 = 不限")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+        });
+
+        row(ui, "默认保存目录", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.out_dir_text)
+                    .hint_text("留空 = 下载文件夹")
+                    .desired_width(280.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(96.0);
+            ui.label(
+                egui::RichText::new("只影响之后新建的任务；保存后立刻生效，不用重启")
                     .size(10.5)
                     .color(theme::INK_3),
             );

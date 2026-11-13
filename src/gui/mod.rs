@@ -147,7 +147,7 @@ pub(crate) enum Ticket {
 ///
 /// 单独成一个结构而不是直接传 `Settings`：`Settings` 里还有界面偏好与剪贴板开关，
 /// 那些归 UI 线程；runner 拿着它们只会诱导后来的人从错误的地方读状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeTuning {
     /// 每个任务交给 `dlm --connections` 的连接数。
     pub connections: usize,
@@ -155,16 +155,37 @@ pub(crate) struct RuntimeTuning {
     pub max_speed_kib: u64,
     /// 队列层的每 host 连接预算。
     pub per_host: usize,
+    /// 新任务的落点目录。
+    ///
+    /// **设置里改了立刻生效**（走 `Ticket::ApplyRuntime`），所以它必须住在这里 ——
+    /// 以前 runner 只读启动时那份 `config.out_dir`，用户在设置里改了目录要重启才生效，
+    /// 那等于设置界面在说谎。
+    ///
+    /// 优先级：`settings.out_dir`（用户显式设的）> `--out-dir`（命令行 / 测试夹具）。
+    /// 反过来会打断测试与便携用法：`--out-dir` 是"这次跑在哪里"的硬指定。
+    pub out_dir: std::path::PathBuf,
 }
 
 impl RuntimeTuning {
     /// 从设置投影。**夹住下界 1**：`--connections 0` 是参数错误，
     /// 而 `DragValue` 的下界是 1，正常路径不会出现 0；这里兜住手改 JSON 的情况。
+    ///
+    /// 落点没设时退回「下载文件夹」（`Settings::effective_out_dir`）；
+    /// 真正的启动路径用 [`Self::from_settings_with`] 把 `--out-dir` 传进来。
     pub fn from_settings(s: &settings::Settings) -> Self {
+        Self::from_settings_with(s, &s.effective_out_dir())
+    }
+
+    /// 同 [`Self::from_settings`]，但落点的兜底由调用方给（`--out-dir`）。
+    pub fn from_settings_with(s: &settings::Settings, fallback_out_dir: &std::path::Path) -> Self {
         Self {
             connections: s.connections.max(1),
             max_speed_kib: s.max_speed_kib,
             per_host: s.per_host_connections,
+            out_dir: s
+                .out_dir
+                .clone()
+                .unwrap_or_else(|| fallback_out_dir.to_path_buf()),
         }
     }
 
@@ -263,7 +284,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
     // UI 与 runner 共享同一份快照句柄：runner 写，UI 读。
     // E18：运行时参数从设置投影。以前这里是 `let per_host = 8usize;`，
     // 连接数与限速则压根没往下传 —— 设置面板改了不生效。
-    let tuning = RuntimeTuning::from_settings(&settings);
+    let tuning = RuntimeTuning::from_settings_with(&settings, &config.out_dir);
     let ui_snapshot = Arc::clone(&snapshot);
     let ui_quota = Arc::clone(&quota_snapshot);
     let ui_update = Arc::clone(&update_snapshot);
@@ -360,8 +381,11 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 ui_quota,
                 ui_update,
                 ui_tx,
-                settings_dir,
-                config.update_url.clone(),
+                app::AppWiring {
+                    settings_dir,
+                    default_out_dir: config.out_dir.clone(),
+                    update_url: config.update_url.clone(),
+                },
                 ui_local,
             );
             // `--autostart` 纯托盘：等 20 帧（≈330ms）窗口稳定后再藏起来。

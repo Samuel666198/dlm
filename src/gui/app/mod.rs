@@ -25,8 +25,11 @@ use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 
 pub mod clipboard_hint;
 pub mod dialog;
+pub mod drawer;
 pub mod fonts;
 pub mod list;
+/// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
+mod rate;
 pub mod settings_ui;
 pub mod sidebar;
 pub mod status;
@@ -66,6 +69,12 @@ pub struct App {
 
     /// 当前选中的任务 id（详情抽屉）。
     pub(super) selected: Option<String>,
+    /// 速率采样：每个任务上一轮的 `delivered` 与时刻。
+    pub(super) rates: rate::Rates,
+    /// 抽屉里那段日志尾巴的缓存：`(任务 id, updated_at, 文本)`。
+    ///
+    /// 为什么缓存：每帧读一次日志文件会把磁盘读穿，而日志只在任务有进展时才变。
+    pub(super) drawer_log: Option<(String, u64, String)>,
     /// 筛选键：`None` = 全部；否则是状态键或分类键。
     pub(super) filter: Option<String>,
     /// 新建任务弹窗是否打开。
@@ -91,6 +100,13 @@ pub struct App {
     pub(super) draft: crate::gui::settings::Settings,
     /// 设置文件所在目录（`queue.json` 同级）。
     pub(super) settings_dir: std::path::PathBuf,
+    /// 落点的兜底目录（`--out-dir`，缺省是下载文件夹）。
+    ///
+    /// 设置里的「默认保存目录」优先；用户没设时才用它 —— 于是测试与便携用法
+    /// （`--out-dir` 指到临时目录）不会因为一份空设置就被改到 Downloads。
+    pub(super) default_out_dir: std::path::PathBuf,
+    /// 设置面板里「默认保存目录」的输入框内容（保存时才解析）。
+    pub(super) out_dir_text: String,
     /// 保存失败的提示。
     pub(super) settings_error: Option<String>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
@@ -108,17 +124,41 @@ pub struct App {
     pub(super) clipboard_dismissed: Option<String>,
 }
 
+/// `App` 启动时要的那几样"外部世界"的输入。
+///
+/// 单独打包而不是继续往 `App::new` 上加参数：构造函数已经 8 个参数了，
+/// 再多一个就得 `#[allow(clippy::too_many_arguments)]`，而参数多于 7 个本身就是
+/// "这里该有个结构体"的信号。以后加路径类配置往这里放。
+pub(crate) struct AppWiring {
+    /// 设置文件所在目录（`queue.json` 同级）。
+    pub settings_dir: std::path::PathBuf,
+    /// 落点兜底（`--out-dir`）。
+    pub default_out_dir: std::path::PathBuf,
+    /// 更新清单地址；`None` = `--no-update-check`。
+    pub update_url: Option<String>,
+}
+
 impl App {
     pub(crate) fn new(
         snapshot: SnapshotSlot,
         quota: QuotaSlot,
         update: UpdateSlot,
         tx: Sender<Ticket>,
-        settings_dir: std::path::PathBuf,
-        update_url: Option<String>,
+        wiring: AppWiring,
         local: crate::updater::LocalState,
     ) -> Self {
+        let AppWiring {
+            settings_dir,
+            default_out_dir,
+            update_url,
+        } = wiring;
         let settings = crate::gui::settings::Settings::load(&settings_dir);
+        // 输入框初值：设置里有就写出来，没有就留空（留空 = 用兜底目录）。
+        let settings_out_dir_text = settings
+            .out_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
         // 设置里开了剪贴板监视就在启动时起来（默认关，见 settings.rs）。
         let clipboard = if settings.watch_clipboard {
             crate::gui::clipboard::spawn()
@@ -136,6 +176,8 @@ impl App {
             local,
             update_install_error: None,
             selected: None,
+            rates: rate::Rates::default(),
+            drawer_log: None,
             filter: None,
             adding: false,
             add_form: dialog::AddForm::default(),
@@ -148,6 +190,8 @@ impl App {
             settings: settings.clone(),
             draft: settings,
             settings_dir,
+            default_out_dir,
+            out_dir_text: settings_out_dir_text,
             settings_error: None,
             start_hidden: 0,
             clipboard_hit: None,
@@ -171,6 +215,29 @@ impl App {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+
+    /// 每帧采一次样：把这一帧的 `delivered` 交给采样器。
+    ///
+    /// 放在帧首、只读一次快照：列表与状态栏都从 `rates` 取，不各自再读一遍。
+    pub(super) fn sample_rates(&mut self) {
+        let now = std::time::Instant::now();
+        let tasks = self.tasks();
+        for t in &tasks {
+            self.rates
+                .observe(&t.id, t.delivered.unwrap_or(0), t.status == "running", now);
+        }
+        self.rates.retain(tasks.iter().map(|t| t.id.clone()));
+    }
+
+    /// 某个任务当前速率（字节/秒）。没在跑、或还没采到两个点时为 `None`。
+    pub(super) fn speed_of(&self, id: &str) -> Option<f64> {
+        self.rates.speed(id)
+    }
+
+    /// 在跑任务的总速率（字节/秒）。
+    pub(super) fn total_speed(&self) -> f64 {
+        self.rates.total()
     }
 
     /// 处理托盘动作。
@@ -244,6 +311,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // 速率采样要在画之前做：这一帧画出来的数字与它同一时刻。
+        self.sample_rates();
+
         // `--autostart`：等窗口稳定后藏起来。
         //
         // 实测：`ViewportBuilder::with_visible(false)` 与首帧的 `Visible(false)`
@@ -305,6 +375,11 @@ impl eframe::App for App {
             .exact_size(theme::SIDEBAR_W)
             .resizable(false)
             .show(ui, |ui| self.sidebar(ui));
+
+        // 详情抽屉：右边，只有选中任务时才占位（没选中就完全不出现在布局里）。
+        if self.selected.is_some() {
+            self.drawer(ui);
+        }
 
         egui::CentralPanel::default().show(ui, |ui| self.list(ui));
 

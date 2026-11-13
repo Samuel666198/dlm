@@ -4,6 +4,8 @@ use super::*;
 
 use std::io::Read;
 
+use eframe::egui;
+
 // 测试跨多个子模块，逐个引入。
 use super::http::{find_bytes, split_target};
 use super::runner::{FinishVerdict, child_args, finish_verdict, quota_slice, retry_decision};
@@ -332,6 +334,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 16,
         max_speed_kib: 2048,
         per_host: 16,
+        out_dir: std::path::PathBuf::new(),
     };
     let got = argv(tuning);
     assert!(
@@ -350,6 +353,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 4,
         max_speed_kib: 0,
         per_host: 8,
+        out_dir: std::path::PathBuf::new(),
     });
     assert!(
         !unlimited.iter().any(|s| s == "--max-speed"),
@@ -366,6 +370,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 0,
         max_speed_kib: 0,
         per_host: 8,
+        out_dir: std::path::PathBuf::new(),
     });
     assert!(
         clamped
@@ -414,7 +419,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         total_len: None,
         delivered: None,
     };
-    let argv: Vec<String> = child_args(&task, Path::new("D:/dl"), None, tuning)
+    let argv: Vec<String> = child_args(&task, Path::new("D:/dl"), None, tuning.clone())
         .into_iter()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
@@ -425,7 +430,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         .expect("必须传 --connections");
     assert_eq!(
         from_argv,
-        super::runner::connections_per_task_for_test(tuning).to_string(),
+        super::runner::connections_per_task_for_test(&tuning).to_string(),
         "argv 里的连接数与 host 预算算的是不是同一个值"
     );
 }
@@ -634,4 +639,164 @@ fn endpoint_file_contains_the_port_and_token() {
     assert_eq!(value["pid"], 7);
     assert_eq!(value["started_at"], 9);
     let _ = fs::remove_dir_all(dir);
+}
+
+// ---------------------------------------------------------------- 速度 / 剩余 / 抽屉（本轮）
+
+fn task_view_named(name: &str, status: TaskStatus) -> TaskView {
+    let task = Task {
+        id: name.to_string(),
+        url: "https://example.com/a.bin".into(),
+        name: name.to_string(),
+        referer: None,
+        status,
+        pid: None,
+        exit_code: None,
+        log: "a.log".into(),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+    };
+    TaskView::from_task(&task, std::path::Path::new("D:/dl"))
+}
+
+/// `fmt_speed` 只负责把字节数翻译成人话：K/M 的进位、以及 0 也要有话说。
+#[test]
+fn fmt_speed_reads_like_a_rate() {
+    assert_eq!(super::app::list::fmt_speed(0.0), "0 B/s");
+    assert_eq!(super::app::list::fmt_speed(900.0), "900 B/s");
+    assert_eq!(super::app::list::fmt_speed(1024.0), "1.0 KiB/s");
+    assert_eq!(
+        super::app::list::fmt_speed(1.5 * 1024.0 * 1024.0),
+        "1.5 MiB/s"
+    );
+    assert_eq!(
+        super::app::list::fmt_speed(f64::INFINITY),
+        "—",
+        "算坏了就别硬显示一个数"
+    );
+}
+
+/// 剩余时间的量级：秒 / 分 / 小时。60 秒不许显示成「1 分 0 秒」。
+#[test]
+fn fmt_eta_picks_a_readable_unit() {
+    assert_eq!(super::app::list::fmt_eta(45), "45 秒");
+    assert_eq!(super::app::list::fmt_eta(60), "1 分");
+    assert_eq!(super::app::list::fmt_eta(90), "1 分 30 秒");
+    assert_eq!(super::app::list::fmt_eta(3600), "1 小时");
+    assert_eq!(super::app::list::fmt_eta(3900), "1 小时 5 分");
+}
+
+/// 速度列的三条判据：没在跑 ⇒「—」；跑着但还没采到两个点 ⇒「—」；有速率 ⇒ 真数字。
+#[test]
+fn speed_text_refuses_to_invent_a_number() {
+    use super::app::list::speed_text;
+    let running = task_view_named("a.bin", TaskStatus::Running);
+    assert_eq!(speed_text(&running, None), "—", "一个点算不出斜率，不许编");
+    assert_eq!(speed_text(&running, Some(1536.0)), "1.5 KiB/s");
+
+    let paused = task_view_named("a.bin", TaskStatus::Paused);
+    assert_eq!(
+        speed_text(&paused, Some(1536.0)),
+        "—",
+        "暂停还显示速度就是界面在说谎"
+    );
+}
+
+/// 剩余时间要有速率才敢算；算不出来就老实说「—」。
+#[test]
+fn eta_text_needs_both_a_rate_and_a_total() {
+    use super::app::list::eta_text;
+    let mut view = task_view_named("a.bin", TaskStatus::Running);
+    view.total_len = Some(1000);
+    view.delivered = Some(400);
+
+    assert_eq!(eta_text(&view, None), "—", "没速率不算剩余");
+    assert_eq!(eta_text(&view, Some(100.0)), "6 秒", "(1000-400)/100");
+
+    let done = task_view_named("a.bin", TaskStatus::Done);
+    assert_eq!(eta_text(&done, Some(100.0)), "—");
+
+    let mut waiting = task_view_named("a.bin", TaskStatus::Queued);
+    waiting.hold_until = Some(1);
+    assert_eq!(eta_text(&waiting, Some(100.0)), "等待");
+}
+
+/// 抽屉必须**真的能画**：跑一帧 egui，不 panic、不偷偷返回"用户点了按钮"。
+///
+/// 这条存在的理由：抽屉是纯 UI，肉眼不点就看不出画崩了；而它一旦 panic，
+/// 用户是点一下任务整个窗口就没了。
+#[test]
+fn the_drawer_renders_a_task_without_panicking() {
+    use super::app::drawer::{DrawerActions, drawer_body};
+    let view = task_view_named("a.bin", TaskStatus::Running);
+    let ctx = egui::Context::default();
+    let mut got: Option<DrawerActions> = None;
+    // egui 0.37 的入口是 `run_ui(RawInput, |ui|)`：直接给一个根 `Ui`，
+    // 与 eframe 0.37 的 `App::ui(&mut Ui)` 是同一个形状。
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        got = Some(drawer_body(ui, &view, Some(1024.0), "line 1\nline 2"));
+    });
+    // 没有真实渲染后端，字体图集的 delta 没人消费；不 clear 会在 Drop 时 panic
+    // （epaint 的 "Dropped TexturesDelta with 1 unapplied deltas"）。
+    output.textures_delta.clear();
+    assert_eq!(
+        got,
+        Some(DrawerActions::default()),
+        "只是画一帧，不该产生任何动作"
+    );
+}
+
+/// 日志尾巴只留最后 N 行：抽屉里显示整份日志会把面板撑爆。
+#[test]
+fn the_log_tail_keeps_only_the_last_lines() {
+    use super::app::drawer::read_log_tail;
+    let mut path = std::env::temp_dir();
+    path.push(format!("dlm-drawer-log-{}.txt", std::process::id()));
+    std::fs::write(&path, "1\n2\n3\n4\n5\n").unwrap();
+    assert_eq!(read_log_tail(&path, 2), "4\n5");
+    assert_eq!(read_log_tail(&path, 99), "1\n2\n3\n4\n5");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(read_log_tail(&path, 5), "", "读不到就是空串，不许 panic");
+}
+
+/// 「默认保存目录」的解析：留空 = 用兜底；相对路径必须拒（它会按"进程当前目录"落地，
+/// 用户根本找不到文件）。
+#[test]
+fn out_dir_input_is_optional_but_must_be_absolute() {
+    use crate::gui::settings::parse_out_dir_input;
+    assert_eq!(parse_out_dir_input("").unwrap(), None);
+    assert_eq!(parse_out_dir_input("   ").unwrap(), None);
+    assert_eq!(
+        parse_out_dir_input("  D:\\Downloads  ").unwrap(),
+        Some(std::path::PathBuf::from("D:\\Downloads"))
+    );
+    assert!(
+        parse_out_dir_input("Downloads").is_err(),
+        "相对路径不许通过：落点会跟着进程当前目录跑"
+    );
+}
+
+/// 落点优先级：设置里的 > `--out-dir` 的兜底。反了就会把测试和便携用法指到 Downloads。
+#[test]
+fn the_settings_out_dir_wins_over_the_cli_fallback() {
+    use crate::gui::RuntimeTuning;
+    let mut s = crate::gui::settings::Settings::default();
+    let fallback = std::path::Path::new("E:/tmp/dlm-fallback");
+
+    let tuning = RuntimeTuning::from_settings_with(&s, fallback);
+    assert_eq!(tuning.out_dir, fallback, "没设就用兜底");
+
+    s.out_dir = Some(std::path::PathBuf::from("D:\\dl"));
+    let tuning = RuntimeTuning::from_settings_with(&s, fallback);
+    assert_eq!(
+        tuning.out_dir,
+        std::path::PathBuf::from("D:\\dl"),
+        "用户显式设了就以它为准"
+    );
 }

@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         Ok(config) => config,
         Err(err) => {
             eprintln!("dlm-gui: {err:#}");
-            report_fatal(&format!("{err:#}"), headless);
+            report_fatal(&format!("{err:#}"), headless, false);
             return ExitCode::from(2);
         }
     };
@@ -35,20 +35,26 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("dlm-gui: {err:#}");
-            report_fatal(&format!("{err:#}"), headless);
+            report_fatal(&format!("{err:#}"), headless, true);
             ExitCode::FAILURE
         }
     }
 }
 
-/// 起不来的时候**必须让人看见**。
+/// 起不来的时候**必须让人看见** —— 但只在"人真的在等这个窗口"时。
 ///
 /// 这个 exe 是 `windows` 子系统（为了不弹黑终端），于是没有控制台可以 `eprintln!` 给人看：
 /// 双击以后失败，用户只会看到「什么也没发生」。所以 GUI 模式下补一个消息框。
 ///
-/// `headless` 时不弹（集成测试都用 `--headless`，弹框会把用例挂死），只留 stderr。
-fn report_fatal(message: &str, headless: bool) {
-    if headless {
+/// ## 什么时候**不**弹（这三条都是踩出来的）
+///
+/// - `--headless`：集成测试全都这么起，弹框会把用例挂死。
+/// - **参数写错**（`usage == false`，退出码 2）：那是"你命令行写错了"，话属于 stderr。
+///   更要紧的是自动化：`gui_quota_windows_are_validated` 这类用例会**故意**传坏参数，
+///   一弹框就在用户屏幕上连弹三个「dlm 启动失败」，还把测试卡住（2026-11-13 真实发生）。
+/// - `DLM_NO_POPUP` 置上：给门禁/脚本一个总开关，不依赖每个用例都记得传 `--headless`。
+fn report_fatal(message: &str, headless: bool, usage: bool) {
+    if headless || usage || std::env::var_os("DLM_NO_POPUP").is_some() {
         return;
     }
     #[cfg(windows)]

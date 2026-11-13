@@ -54,6 +54,8 @@ $env:DLM_NO_UPDATE_CHECK = '1'
 # 「位置不可用 … 不可用」对话框 —— 每跑一次门禁就在桌面上留一个（2026-11-12 实测）。
 # 回执里的程序名/参数仍按真实计划断言，只是 `spawned` 说 false。
 $env:DLM_NO_SHELL_OPEN = '1'
+# 别让 GUI 的「启动失败」消息框弹到用户桌面上（自动化里没人点它）。
+$env:DLM_NO_POPUP = '1'
 
 function Invoke-Gate {
     param(

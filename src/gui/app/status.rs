@@ -30,6 +30,18 @@ impl App {
                 );
             }
 
+            // 总速度：所有在跑任务的速率之和。没有在跑、或还没采到两个点时是 0，就不显示 ——
+            // 挂一个「0 B/s」比不显示更容易让人以为卡住了。
+            let total = self.total_speed();
+            if total >= 1.0 {
+                ui.label(
+                    egui::RichText::new(format!("· {}", crate::gui::app::list::fmt_speed(total)))
+                        .size(11.5)
+                        .monospace()
+                        .color(theme::INK_2),
+                );
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(14.0);
                 ui.label(
