@@ -342,6 +342,50 @@ fn skip_reason(link: &str, start_host: &str, rules: &GrabRules) -> String {
     "命中排除规则".into()
 }
 
+/// 抓取执行层：拉一个页面，**只收 HTML 文本**，并限制大小。
+///
+/// 三条边界：
+/// - `Content-Type` 不是 `text/*` / `application/xhtml+xml` 就不当页面（避免把 zip 读进内存）
+/// - 超过 `max_bytes` 直接报错，不截断 —— 半个页面的链接清单比没有更误导
+/// - 只发 GET，不带 Cookie：抓取是**匿名浏览**，不碰用户的登录态
+pub fn fetch_text(
+    url: &str,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .user_agent("dlm-grab/0.1")
+        .build()
+        .map_err(|e| format!("建客户端失败：{e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("请求失败：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let ctype = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !(ctype.starts_with("text/") || ctype.contains("xhtml")) {
+        return Err(format!("不是网页（Content-Type: {ctype}）"));
+    }
+    if let Some(len) = resp.content_length()
+        && len as usize > max_bytes
+    {
+        return Err(format!("页面太大（{len} 字节，上限 {max_bytes}）"));
+    }
+    let body = resp.text().map_err(|e| format!("读响应失败：{e}"))?;
+    if body.len() > max_bytes {
+        return Err(format!("页面太大（超过 {max_bytes} 字节）"));
+    }
+    Ok(body)
+}
+
 /// 页面主机的取法（抓取时用来判同域）。
 pub fn host_of(url: &str) -> Option<String> {
     split_url(url).map(|(_, host, _)| host)
@@ -500,6 +544,50 @@ mod tests {
         assert_eq!(classify("https://a/"), Kind::Page);
     }
 
+    /// 起一个只回一次的极简 HTTP 服务，返回 (url, JoinHandle)。
+    fn serve_once(
+        ctype: &'static str,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    #[test]
+    fn fetch_text_takes_html_and_refuses_binary() {
+        let (url, h) = serve_once("text/html; charset=utf-8", "<a href=\"/a.zip\">a</a>");
+        let body = fetch_text(&url, 1 << 20, std::time::Duration::from_secs(5));
+        h.join().expect("server");
+        let body = body.expect("html 应该拿到");
+        assert!(body.contains("a.zip"));
+        assert_eq!(extract_links(&body, &url), vec![format!("{}a.zip", url)]);
+
+        let (url2, h2) = serve_once("application/zip", "PK\x03\x04");
+        let got = fetch_text(&url2, 1 << 20, std::time::Duration::from_secs(5));
+        h2.join().expect("server");
+        assert!(got.is_err(), "二进制不该当成页面读进内存");
+    }
+
+    #[test]
+    fn fetch_text_refuses_a_page_over_the_byte_cap() {
+        let (url, h) = serve_once("text/html", "<html>0123456789</html>");
+        let got = fetch_text(&url, 8, std::time::Duration::from_secs(5));
+        h.join().expect("server");
+        assert!(got.is_err(), "超过上限必须报错，不能截断后当完整页面");
+    }
     #[test]
     fn host_of_rejects_non_http() {
         assert_eq!(host_of("https://a.example/x").as_deref(), Some("a.example"));
