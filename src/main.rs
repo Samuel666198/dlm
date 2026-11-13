@@ -63,6 +63,7 @@ fn dispatch() -> Result<u8> {
     };
 
     // `quiet()` / `no_start()` 先读：`into_task()` 会**消费** `Cli`（**E23⑦** 交回两件东西的形状）。
+    let wants_json = cli.wants_json();
     let quiet = cli.quiet();
     let no_start = cli.no_start();
     // R19：完成后动作也是"消费 Cli 之前"取走的一格；它不进 Task/Config，也不参与续传比对。
@@ -78,7 +79,19 @@ fn dispatch() -> Result<u8> {
         // 所以"一个字节都不许多打"只能靠**不进 `run`** 来保证 —— 那发用例断的正是
         // "对端一条请求都没看到、目标文件没被创建"。摘要里口令这个话题整个不出现
         // （**E23⑥/E24③**），所以这里打的必须是 `report::summary`，不是 `{:?}`。
-        println!("{}", report::summary(&task));
+        if wants_json {
+            // 一行一条：脚本/Agent 直接解析，不用去啃人类摘要。
+            println!(
+                "{}",
+                dlm::json_out::to_line(&dlm::json_out::ok(serde_json::json!({
+                    "url": task.url,
+                    "path": task.target_path().display().to_string(),
+                    "status": "no_start",
+                })))
+            );
+        } else {
+            println!("{}", report::summary(&task));
+        }
         return Ok(0);
     }
 

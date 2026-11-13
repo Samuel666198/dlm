@@ -1,7 +1,11 @@
-feat(cli): 新增 --json 开关（0.6.0 阶段 0）
+feat(cli): --json 接到 --no-start 输出（0.6.0 阶段 0）
 
-- `dlm --json` 接受并带 wants_json() 访问器；与 --quiet 可共存（后者只管进度行）
-- 本步只打通参数层与访问器；输出接线下一步做（避免半成品打乱现有 stdout 契约）
-- lib 435 全绿（cli 36 项通过）
+实测：
+  dlm --json --no-start --url https://example.com/a.zip
+  → {"ok":true,"task":{"path":".\\a.zip","status":"no_start","url":"https://example.com/a.zip"}}
+  不带 --json 时仍是原来的中文摘要（未改旧契约）
+
+- 一行一条、可直接被 serde_json 解析
+- 其余路径（真实下载的 finish / 错误）下一步接，避免一次动到 121 个集成断言
 
 门禁：见输出
