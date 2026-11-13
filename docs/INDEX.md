@@ -13,7 +13,7 @@
 | 门禁 | `fmt 0` · `--lib 374/0` · `--bins 4/0` · `--test integration 121/0` · `clippy 0` · 扩展静态检查（统一走根目录 `gates.ps1`，它设 `DLM_NO_UPDATE_CHECK=1` 保证离线） |
 | 产品面 | 内核 + CLI + **原生窗口/托盘 GUI** + Native Messaging 扩展（右键/页内悬浮球/媒体与文件嗅探/HLS 直链） |
 | 最新进展 | `2026-11-12 更新功能 1-5 全部完成`（清单新格式 + 提示 UI + ping 双向版本号 + `dlm-updater.exe` + 扩展落地）· `2026-11-12 默认分支重设与首个 Release` |
-| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,437,323 B，`sha256=97d3025429b2d8cf86d7fdb438e8ad3acf2c52febd3fd5ac6a1e33f06adcd4a6`；扩展 **0.2.12**。已同步到 `%LOCALAPPDATA%` |
+| 交付物 | `target/package/dlm-0.1.0-win-x64.zip`，9,437,323 B，`sha256=97d3025429b2d8cf86d7fdb438e8ad3acf2c52febd3fd5ac6a1e33f06adcd4a6`；扩展 **0.2.13**。已同步到 `%LOCALAPPDATA%` |
 | 下一步 | **发 `v0.1.1`** 验自我更新全链路（要用户点头）；速度/剩余两列、详情抽屉、保存目录与分类目录**已完成**（`evidence/2026-11-13-界面补完.md`）；下一轮待定 |
 | 另一批任务 | 详情抽屉 + 统一目录 + 速度/剩余两列：[`evidence/2026-11-12-详情抽屉与统一目录梳理.md`](evidence/2026-11-12-详情抽屉与统一目录梳理.md) |
 | 已修 | **E16**（继续入口）· **E17**（粘贴）· **E18**（设置透传）· **E19**（剪贴板提示）· 直连重投落点（A 方案）—— 见 [`evidence/2026-11-12-四项修复记录.md`](evidence/2026-11-12-四项修复记录.md) |

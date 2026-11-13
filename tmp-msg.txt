@@ -1,0 +1,11 @@
+release: 0.2.0 —— F3 快速添加收尾，全套计划完成
+
+- basket.rs：快速添加窗口（粘贴多行链接，一行一个；空行/#注释/重复/非 http(s) 自动过滤）
+  计划里的"拖拽篮"改成粘贴：egui 收不到浏览器拖出的 URL（text/uri-list 不给窗口）
+- gui::RELEASE 0.1.3 → 0.2.0；扩展 0.2.13
+- 产物（本地，未发布）：
+  dlm-0.2.0-win-x64-setup.exe 6,969,772 B sha256 c8aec8ca…5670
+  dlm-0.2.0-win-x64.zip 11,605,269 B sha256 a00f627f…11e4
+- 文档：计划逐项标注完成；交接与 INDEX 同步（lib 403 / 扩展 0.2.13）
+
+门禁：fmt / lib 403 / bins 4 / integration 121 / clippy / extension 全绿

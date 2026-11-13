@@ -23,6 +23,7 @@ use eframe::egui;
 use crate::gui::Ticket;
 use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 
+pub mod basket;
 pub mod clipboard_hint;
 pub mod dialog;
 pub mod drawer;
@@ -72,6 +73,10 @@ pub struct App {
     pub(super) selected: Option<String>,
     /// 搜索框内容（名字 / URL，大小写不敏感）。
     pub(super) search: String,
+    /// 快速添加窗口是否打开（F3）。
+    pub(super) basket_open: bool,
+    /// 快速添加窗口里的多行文本。
+    pub(super) basket_text: String,
     /// 下一帧是否把焦点给搜索框（Ctrl+F）。
     pub(super) focus_search: bool,
     /// 速率采样：每个任务上一轮的 `delivered` 与时刻。
@@ -190,6 +195,8 @@ impl App {
             drawer_log: None,
             filter: None,
             search: String::new(),
+            basket_open: false,
+            basket_text: String::new(),
             focus_search: false,
             adding: false,
             add_form: dialog::AddForm::default(),
@@ -327,6 +334,7 @@ impl eframe::App for App {
         // 速率采样要在画之前做：这一帧画出来的数字与它同一时刻。
         self.sample_rates();
         self.handle_shortcuts(&ctx);
+        self.basket(ui);
 
         // `--autostart`：等窗口稳定后藏起来。
         //

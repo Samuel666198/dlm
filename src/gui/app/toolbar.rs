@@ -115,6 +115,10 @@ impl App {
                 self.focus_search = false;
             }
             ui.add_space(6.0);
+            if tool_button(ui, Icon::Plus, "快速添加", false, false).clicked() {
+                self.basket_open = true;
+            }
+            ui.add_space(6.0);
             if tool_button(ui, Icon::Gear, "设置", true, false).clicked() {
                 self.settings_open = true;
                 self.draft = self.settings.clone();
