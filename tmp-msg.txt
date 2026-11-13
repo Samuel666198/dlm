@@ -1,9 +1,0 @@
-feat(gui): 完成后扫描 E3（Windows Defender，失败只记日志）
-
-- scan.rs：找 MpCmdRun.exe（平台目录取最高版本 + 老式固定路径）、拼扫描参数、
-  摘一句人话；找不到就记一行跳过，任务仍是 Done
-- 扫描放独立线程，不阻塞 runner；-DisableRemediation 只报不删（删不删归用户）
-- Settings.scan_after_done（默认关）→ RuntimeTuning → runner 在 Done 分支触发
-- 设置面板加「完成后扫描」勾选；用例 4 条（参数/摘要/表头跳过），lib 390 → 396
-
-门禁：fmt / lib 396 / bins 4 / integration 121 / clippy / extension 全绿
