@@ -7,6 +7,7 @@ pub mod grab;
 pub mod gui;
 pub mod hls;
 pub mod host;
+pub mod json_out;
 pub mod native;
 pub mod probe;
 pub mod proxy;
