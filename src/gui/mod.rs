@@ -55,7 +55,7 @@ const MIN_QUOTA_SLICE: u64 = PROBE_READ_BYTES;
 ///
 /// **发版时这个常量要跟着改**，否则刚装上的新版本会认为自己还是旧的，
 /// 每启动一次就提示一次「有更新」。
-pub const RELEASE: &str = "0.3.0";
+pub const RELEASE: &str = "0.3.1";
 
 /// 默认更新清单地址。
 ///
