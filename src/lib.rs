@@ -15,6 +15,7 @@ pub mod queue;
 pub mod rate;
 pub mod report;
 pub mod resume;
+pub mod rules;
 pub mod scheduler;
 pub mod state;
 pub mod store;
