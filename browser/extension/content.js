@@ -446,6 +446,12 @@ function togglePanel() {
 }
 
 function sendDownload(url, kind, fromPage) {
+  // DASH 只识别不下载：点它只解释，不发任务，也不偷偷改成普通下载。
+  if (kind === "dash") {
+    state.finished.unshift({ name: fileName(url), ok: false, code: null, message: "DASH 需音视频合并，dlm 暂不支持" });
+    render();
+    return;
+  }
   chrome.runtime.sendMessage(
     { op: "page-download", url, referer: location.href, hls: kind === "hls" },
     (reply) => {
@@ -613,7 +619,7 @@ function renderLinks() {
   box.replaceChildren();
   for (const item of state.items) {
     const row = el("div", "link");
-    row.appendChild(el("span", "chip" + (item.kind === "hls" ? " hls" : ""), item.kind === "hls" ? "HLS" : "文件"));
+    row.appendChild(el("span", "chip" + (item.kind === "hls" ? " hls" : ""), item.kind === "hls" ? "HLS" : item.kind === "dash" ? "DASH" : "文件"));
     const info = el("div", "linkinfo");
     const url = el("span", "url", fileName(item.url));
     url.title = item.url;
@@ -752,7 +758,8 @@ function mergeItems(a, b) {
   for (const item of [...(a || []), ...(b || [])]) {
     if (!item || !item.url || seen.has(item.url)) continue;
     seen.add(item.url);
-    out.push({ url: item.url, kind: item.kind === "hls" ? "hls" : "file" });
+    const kind = item.kind === "hls" || item.kind === "dash" ? item.kind : "file";
+    out.push({ url: item.url, kind });
     if (out.length >= 40) break;
   }
   return out;

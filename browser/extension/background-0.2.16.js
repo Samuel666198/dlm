@@ -43,7 +43,7 @@ function mediaKind(details) {
     return null;
   }
   if (path.endsWith(".m3u8")) return "hls";
-  if (path.endsWith(".mpd")) return null; // DASH 需要音视频合并，B3b 不列
+  if (path.endsWith(".mpd")) return "dash"; // 只识别：DASH 要音视频合并，dlm 不做
   if ([".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".ts", ".mov"].some((ext) => path.endsWith(ext))) {
     return "file";
   }
@@ -55,7 +55,8 @@ function addMedia(tabId, url, kind) {
   if (tabId == null || tabId < 0 || !/^https?:\/\//i.test(url || "")) return false;
   const list = mediaByTab.get(tabId) || [];
   if (list.some((item) => item.url === url)) return false;
-  list.push({ url, kind: kind === "hls" ? "hls" : "file", at: Date.now() });
+  const keep = kind === "hls" || kind === "dash" ? kind : "file";
+  list.push({ url, kind: keep, at: Date.now() });
   while (list.length > 40) list.shift();
   mediaByTab.set(tabId, list);
   return true;
