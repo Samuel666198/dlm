@@ -122,6 +122,47 @@ impl App {
                     .color(theme::INK_3),
             );
         });
+        // 限速计划：每行一条 `22:00-06:00=512`，命中窗口时覆盖上面那条全局限速。
+        // 现在生效多少直接算给你看 —— 否则用户得盯着表猜"此刻到底限没限"。
+        row(ui, "限速计划", |ui| {
+            let mut remove = None;
+            for (i, w) in self.draft.speed_windows.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(w)
+                            .hint_text("22:00-06:00=512")
+                            .desired_width(170.0),
+                    );
+                    if ui.small_button("×").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if ui.small_button("+ 一条").clicked() {
+                self.draft.speed_windows.push(String::new());
+            }
+            let now = crate::gui::speed_schedule::local_minute_of_day();
+            let parsed: Vec<_> = self
+                .draft
+                .speed_windows
+                .iter()
+                .filter_map(|w| crate::gui::speed_schedule::SpeedWindow::parse(w).ok())
+                .collect();
+            let eff =
+                crate::gui::speed_schedule::rate_at(now, &parsed, self.draft.max_speed_kib as u32);
+            ui.label(
+                egui::RichText::new(if eff == 0 {
+                    "此刻：不限速".to_string()
+                } else {
+                    format!("此刻：{eff} KiB/s")
+                })
+                .size(10.5)
+                .color(theme::INK_3),
+            );
+            if let Some(i) = remove {
+                self.draft.speed_windows.remove(i);
+            }
+        });
 
         row(ui, "重命名模板", |ui| {
             ui.add(
