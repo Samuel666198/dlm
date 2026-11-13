@@ -335,6 +335,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         max_speed_kib: 2048,
         per_host: 16,
         out_dir: std::path::PathBuf::new(),
+        category_dirs: false,
     };
     let got = argv(tuning);
     assert!(
@@ -354,6 +355,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         max_speed_kib: 0,
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
+        category_dirs: false,
     });
     assert!(
         !unlimited.iter().any(|s| s == "--max-speed"),
@@ -371,6 +373,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         max_speed_kib: 0,
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
+        category_dirs: false,
     });
     assert!(
         clamped
@@ -789,11 +792,11 @@ fn the_settings_out_dir_wins_over_the_cli_fallback() {
     let mut s = crate::gui::settings::Settings::default();
     let fallback = std::path::Path::new("E:/tmp/dlm-fallback");
 
-    let tuning = RuntimeTuning::from_settings_with(&s, fallback);
+    let tuning = RuntimeTuning::from_settings_with(&s, fallback, false);
     assert_eq!(tuning.out_dir, fallback, "没设就用兜底");
 
     s.out_dir = Some(std::path::PathBuf::from("D:\\dl"));
-    let tuning = RuntimeTuning::from_settings_with(&s, fallback);
+    let tuning = RuntimeTuning::from_settings_with(&s, fallback, false);
     assert_eq!(
         tuning.out_dir,
         std::path::PathBuf::from("D:\\dl"),

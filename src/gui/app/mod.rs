@@ -105,6 +105,8 @@ pub struct App {
     /// 设置里的「默认保存目录」优先；用户没设时才用它 —— 于是测试与便携用法
     /// （`--out-dir` 指到临时目录）不会因为一份空设置就被改到 Downloads。
     pub(super) default_out_dir: std::path::PathBuf,
+    /// 命令行 --category-dirs（与设置里的勾是或关系）。
+    pub(super) default_category_dirs: bool,
     /// 设置面板里「默认保存目录」的输入框内容（保存时才解析）。
     pub(super) out_dir_text: String,
     /// 保存失败的提示。
@@ -134,6 +136,8 @@ pub(crate) struct AppWiring {
     pub settings_dir: std::path::PathBuf,
     /// 落点兜底（`--out-dir`）。
     pub default_out_dir: std::path::PathBuf,
+    /// 命令行给了 `--category-dirs` 就强制开（设置里的勾管不到它）。
+    pub default_category_dirs: bool,
     /// 更新清单地址；`None` = `--no-update-check`。
     pub update_url: Option<String>,
 }
@@ -150,6 +154,7 @@ impl App {
         let AppWiring {
             settings_dir,
             default_out_dir,
+            default_category_dirs: wiring_category_dirs,
             update_url,
         } = wiring;
         let settings = crate::gui::settings::Settings::load(&settings_dir);
@@ -191,6 +196,7 @@ impl App {
             draft: settings,
             settings_dir,
             default_out_dir,
+            default_category_dirs: wiring_category_dirs,
             out_dir_text: settings_out_dir_text,
             settings_error: None,
             start_hidden: 0,

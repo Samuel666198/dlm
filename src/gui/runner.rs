@@ -51,7 +51,7 @@ pub(crate) fn run(
                         &mut reserved,
                         &mut last_delivered,
                         &config,
-                        &tuning.out_dir,
+                        &tuning,
                     );
                 }
             }
@@ -91,7 +91,7 @@ fn apply(
     reserved: &mut HashMap<String, u64>,
     last_delivered: &mut HashMap<String, u64>,
     config: &GuiConfig,
-    out_dir: &Path,
+    tuning: &RuntimeTuning,
 ) -> bool {
     match ticket {
         // 在 `run` 里就地处理（要动 `tuning` 与 `gate`，两者都不在这条路的参数里）。
@@ -105,7 +105,7 @@ fn apply(
             on_complete,
             reply,
         } => {
-            let category = config.category_dirs.then(|| queue::category_for(&name));
+            let category = tuning.category_dirs.then(|| queue::category_for(&name));
             match store.add(
                 &url,
                 &name,
@@ -183,7 +183,7 @@ fn apply(
                 let _ = reply.send(Err("任务还没下完".to_string()));
                 return false;
             }
-            let path = queue::target_path(out_dir, &task.name);
+            let path = queue::target_path(&tuning.out_dir, &task.name);
             if !path.is_file() {
                 let _ = reply.send(Err("落点文件不在了".to_string()));
                 return false;

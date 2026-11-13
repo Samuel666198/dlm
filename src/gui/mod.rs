@@ -164,6 +164,9 @@ pub(crate) struct RuntimeTuning {
     /// 优先级：`settings.out_dir`（用户显式设的）> `--out-dir`（命令行 / 测试夹具）。
     /// 反过来会打断测试与便携用法：`--out-dir` 是"这次跑在哪里"的硬指定。
     pub out_dir: std::path::PathBuf,
+    /// 新任务是否按类型分子目录。命令行 `--category-dirs` 只做「开」
+    /// （它没法表达"关掉设置里的勾"），所以与设置是**或**关系。
+    pub category_dirs: bool,
 }
 
 impl RuntimeTuning {
@@ -173,11 +176,15 @@ impl RuntimeTuning {
     /// 落点没设时退回「下载文件夹」（`Settings::effective_out_dir`）；
     /// 真正的启动路径用 [`Self::from_settings_with`] 把 `--out-dir` 传进来。
     pub fn from_settings(s: &settings::Settings) -> Self {
-        Self::from_settings_with(s, &s.effective_out_dir())
+        Self::from_settings_with(s, &s.effective_out_dir(), false)
     }
 
-    /// 同 [`Self::from_settings`]，但落点的兜底由调用方给（`--out-dir`）。
-    pub fn from_settings_with(s: &settings::Settings, fallback_out_dir: &std::path::Path) -> Self {
+    /// 同 [`Self::from_settings`]，但落点兜底与命令行的分类开关由调用方给。
+    pub fn from_settings_with(
+        s: &settings::Settings,
+        fallback_out_dir: &std::path::Path,
+        cli_category_dirs: bool,
+    ) -> Self {
         Self {
             connections: s.connections.max(1),
             max_speed_kib: s.max_speed_kib,
@@ -186,6 +193,7 @@ impl RuntimeTuning {
                 .out_dir
                 .clone()
                 .unwrap_or_else(|| fallback_out_dir.to_path_buf()),
+            category_dirs: s.category_dirs || cli_category_dirs,
         }
     }
 
@@ -284,7 +292,8 @@ pub fn run(config: GuiConfig) -> Result<()> {
     // UI 与 runner 共享同一份快照句柄：runner 写，UI 读。
     // E18：运行时参数从设置投影。以前这里是 `let per_host = 8usize;`，
     // 连接数与限速则压根没往下传 —— 设置面板改了不生效。
-    let tuning = RuntimeTuning::from_settings_with(&settings, &config.out_dir);
+    let tuning =
+        RuntimeTuning::from_settings_with(&settings, &config.out_dir, config.category_dirs);
     let ui_snapshot = Arc::clone(&snapshot);
     let ui_quota = Arc::clone(&quota_snapshot);
     let ui_update = Arc::clone(&update_snapshot);
@@ -384,6 +393,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 app::AppWiring {
                     settings_dir,
                     default_out_dir: config.out_dir.clone(),
+                    default_category_dirs: config.category_dirs,
                     update_url: config.update_url.clone(),
                 },
                 ui_local,

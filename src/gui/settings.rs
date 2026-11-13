@@ -34,6 +34,11 @@ pub struct Settings {
     pub out_dir: Option<PathBuf>,
     /// 全局限速（KiB/s）。0 = 不限。
     pub max_speed_kib: u64,
+    /// 按类型分子目录（视频 / 音频 / 压缩包…），规则见 `queue::category_for`。
+    ///
+    /// 落点从 `out_dir/名字` 变成 `out_dir/视频/名字`。**只影响新任务**：
+    /// 已有任务不改落点，否则进度统计会对着两个文件说话。
+    pub category_dirs: bool,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -66,6 +71,7 @@ impl Default for Settings {
             per_host_connections: 8,
             out_dir: None,
             max_speed_kib: 0,
+            category_dirs: false,
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,

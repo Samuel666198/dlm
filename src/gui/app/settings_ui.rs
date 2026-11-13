@@ -71,6 +71,7 @@ impl App {
                         self.send(Ticket::ApplyRuntime(RuntimeTuning::from_settings_with(
                             &self.settings,
                             &self.default_out_dir,
+                            self.default_category_dirs,
                         )));
                         self.settings_error = None;
                         open = false;
@@ -117,6 +118,15 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.draft.max_speed_kib).range(0..=1024 * 100));
             ui.label(
                 egui::RichText::new("0 = 不限")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+        });
+
+        row(ui, "按类型分目录", |ui| {
+            ui.checkbox(&mut self.draft.category_dirs, "");
+            ui.label(
+                egui::RichText::new("视频 / 音频 / 压缩包各进一个子目录；只影响新任务")
                     .size(10.5)
                     .color(theme::INK_3),
             );
