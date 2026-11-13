@@ -123,6 +123,26 @@ pub fn global() -> Option<&'static str> {
     GLOBAL.get().and_then(|v| v.as_deref())
 }
 
+/// 用给定代理串发一次最小请求，验证"这条路通不通"。
+///
+/// 只在用户点「测试」时调用；超时给短一点（默认 5 秒），失败信息里只出现脱敏地址。
+pub fn probe_via(text: &str, target: &str, timeout: std::time::Duration) -> Result<String, String> {
+    let spec = parse_proxy(text)?;
+    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+    if let Some(spec) = &spec {
+        builder = builder.proxy(reqwest::Proxy::all(spec.to_url()).map_err(|e| e.to_string())?);
+    }
+    let client = builder.build().map_err(|e| format!("建客户端失败：{e}"))?;
+    let resp = client.get(target).send().map_err(|e| {
+        let where_ = spec
+            .as_ref()
+            .map(|s| s.redacted())
+            .unwrap_or_else(|| "直连".into());
+        format!("经 {where_} 请求失败：{e}")
+    })?;
+    Ok(format!("HTTP {}", resp.status().as_u16()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

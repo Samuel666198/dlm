@@ -90,6 +90,8 @@ pub struct App {
     pub(super) grab_checked: Vec<bool>,
     pub(super) grab_error: Option<String>,
     pub(super) grab_rx: Option<std::sync::mpsc::Receiver<Result<crate::grab::GrabPlan, String>>>,
+    /// 代理「测试」的结果（只在设置页显示）。
+    pub(super) proxy_test: Option<String>,
     /// 下一帧是否把焦点给搜索框（Ctrl+F）。
     pub(super) focus_search: bool,
     /// 速率采样：每个任务上一轮的 `delivered` 与时刻。
@@ -223,6 +225,7 @@ impl App {
             grab_checked: Vec::new(),
             grab_error: None,
             grab_rx: None,
+            proxy_test: None,
             focus_search: false,
             adding: false,
             add_form: dialog::AddForm::default(),

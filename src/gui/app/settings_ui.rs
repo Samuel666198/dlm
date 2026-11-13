@@ -137,6 +137,23 @@ impl App {
                     .size(10.5)
                     .color(theme::INK_3),
             );
+            if ui.small_button("测试").clicked() {
+                self.proxy_test = Some(
+                    crate::proxy::probe_via(
+                        &self.draft.proxy,
+                        "https://www.gstatic.com/generate_204",
+                        std::time::Duration::from_secs(5),
+                    )
+                    .unwrap_or_else(|e| e),
+                );
+            }
+            if let Some(msg) = &self.proxy_test {
+                ui.label(
+                    egui::RichText::new(msg.clone())
+                        .size(10.5)
+                        .color(theme::INK_3),
+                );
+            }
             match crate::proxy::parse_proxy(&self.draft.proxy) {
                 Ok(None) => {}
                 Ok(Some(spec)) => {
