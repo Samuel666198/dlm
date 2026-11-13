@@ -3,6 +3,7 @@ pub mod cli;
 pub mod consts;
 pub mod engine;
 pub mod fetch;
+pub mod grab;
 pub mod gui;
 pub mod hls;
 pub mod host;
