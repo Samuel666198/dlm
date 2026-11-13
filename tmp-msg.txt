@@ -1,8 +1,0 @@
-feat(host): download 回执带 request_id（0.3.0 第 1 步）
-
-- downloads 接管必须先确认"任务已建立"再取消浏览器下载，而原来的 accepted 没有请求标识，
-  多个下载并发时无法对应。现在两条 accepted（queue/direct）都原样回显 request_id
-- 测试：带 request_id 的 download 请求，回执必须带回同一个值
-- 未带 request_id 的老调用方行为不变（回 null）
-
-门禁：见输出
