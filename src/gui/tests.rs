@@ -336,6 +336,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         per_host: 16,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
+        scan_after_done: false,
     };
     let got = argv(tuning);
     assert!(
@@ -356,6 +357,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
+        scan_after_done: false,
     });
     assert!(
         !unlimited.iter().any(|s| s == "--max-speed"),
@@ -374,6 +376,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
+        scan_after_done: false,
     });
     assert!(
         clamped

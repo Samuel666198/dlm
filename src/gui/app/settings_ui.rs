@@ -169,6 +169,15 @@ impl App {
             );
         });
 
+        row(ui, "完成后扫描", |ui| {
+            ui.checkbox(&mut self.draft.scan_after_done, "");
+            ui.label(
+                egui::RichText::new("用 Windows Defender 扫一遍；失败只记日志，不影响任务")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+        });
+
         ui.add_space(10.0);
         section(ui, "界面");
 

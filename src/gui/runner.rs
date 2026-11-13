@@ -434,7 +434,15 @@ fn tick(
                 config.retry_backoff,
             );
             match verdict {
-                FinishVerdict::Done => task.status = TaskStatus::Done,
+                FinishVerdict::Done => {
+                    task.status = TaskStatus::Done;
+                    if tuning.scan_after_done {
+                        crate::gui::scan::spawn_scan(
+                            &queue::target_path(&tuning.out_dir, &task.name),
+                            &task.log,
+                        );
+                    }
+                }
                 // 码 3 走配额等待，不是重试：`attempts` 不动，否则配额轮会吃掉重试额度。
                 FinishVerdict::QuotaWait => task.status = TaskStatus::Queued,
                 FinishVerdict::Retry { backoff } => {

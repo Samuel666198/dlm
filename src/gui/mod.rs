@@ -12,6 +12,7 @@ pub mod clipboard;
 pub mod host_budget;
 pub mod http;
 pub mod runner;
+pub mod scan;
 pub mod settings;
 pub mod snapshot;
 
@@ -164,6 +165,8 @@ pub(crate) struct RuntimeTuning {
     /// 优先级：`settings.out_dir`（用户显式设的）> `--out-dir`（命令行 / 测试夹具）。
     /// 反过来会打断测试与便携用法：`--out-dir` 是"这次跑在哪里"的硬指定。
     pub out_dir: std::path::PathBuf,
+    /// 完成后是否调 Windows Defender 扫一遍（失败只记日志，不影响任务成败）。
+    pub scan_after_done: bool,
     /// 新任务是否按类型分子目录。命令行 `--category-dirs` 只做「开」
     /// （它没法表达"关掉设置里的勾"），所以与设置是**或**关系。
     pub category_dirs: bool,
@@ -194,6 +197,7 @@ impl RuntimeTuning {
                 .clone()
                 .unwrap_or_else(|| fallback_out_dir.to_path_buf()),
             category_dirs: s.category_dirs || cli_category_dirs,
+            scan_after_done: s.scan_after_done,
         }
     }
 

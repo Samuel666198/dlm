@@ -39,6 +39,8 @@ pub struct Settings {
     /// 落点从 `out_dir/名字` 变成 `out_dir/视频/名字`。**只影响新任务**：
     /// 已有任务不改落点，否则进度统计会对着两个文件说话。
     pub category_dirs: bool,
+    /// 完成后用 Windows Defender 扫一遍（默认关：扫描要占资源）。
+    pub scan_after_done: bool,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -72,6 +74,7 @@ impl Default for Settings {
             out_dir: None,
             max_speed_kib: 0,
             category_dirs: false,
+            scan_after_done: false,
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,

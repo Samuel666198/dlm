@@ -1,9 +1,9 @@
-feat(gui): 快捷键 F2（Ctrl+N / Ctrl+F / Del / Space）
+feat(gui): 完成后扫描 E3（Windows Defender，失败只记日志）
 
-- shortcuts.rs：shortcut_for 纯函数把"按了什么 + 有没有焦点 + 有没有选中"映射成动作，
-  4 条用例钉边界（lib 390 → 394）
-- 输入框有焦点时 Del/Space 一律不认（否则在搜索框里删字会删任务）
-- 没选中时 Del/Space 不做事（不能"随手空格"删掉列表第一行）
-- Ctrl+F 置标记，工具条画搜索框那一帧抢焦点（egui 的焦点要先有控件）
+- scan.rs：找 MpCmdRun.exe（平台目录取最高版本 + 老式固定路径）、拼扫描参数、
+  摘一句人话；找不到就记一行跳过，任务仍是 Done
+- 扫描放独立线程，不阻塞 runner；-DisableRemediation 只报不删（删不删归用户）
+- Settings.scan_after_done（默认关）→ RuntimeTuning → runner 在 Done 分支触发
+- 设置面板加「完成后扫描」勾选；用例 4 条（参数/摘要/表头跳过），lib 390 → 396
 
-门禁：fmt / lib 394 / bins 4 / integration 121 / clippy / extension 全绿
+门禁：fmt / lib 396 / bins 4 / integration 121 / clippy / extension 全绿
