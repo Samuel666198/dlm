@@ -386,6 +386,81 @@ pub fn fetch_text(
     Ok(body)
 }
 
+/// 抓取上限：页数、每页字节、单次等待。
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_pages: usize,
+    pub max_bytes: usize,
+    pub timeout: std::time::Duration,
+    /// 两次请求之间的停顿 —— 对目标站点最基本的礼貌。
+    pub delay: std::time::Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_pages: 20,
+            max_bytes: 2 * 1024 * 1024,
+            timeout: std::time::Duration::from_secs(15),
+            delay: std::time::Duration::from_millis(300),
+        }
+    }
+}
+
+/// 真正去抓：从起始页开始 BFS，直到页数上限或深度用尽。
+///
+/// 与 [`plan`] 的分工：`plan` 只算"给我这些页面能挑出什么"，`scan` 负责"去把页面拿回来"。
+/// 抓不到某一页不算失败 —— 记进 `skipped` 继续走，站点上一个 404 不该让整次抓取白跑。
+pub fn scan(start: &str, rules: &GrabRules, limits: Limits) -> GrabPlan {
+    let Some(start_host) = host_of(start) else {
+        let mut out = GrabPlan::default();
+        out.skipped
+            .push((start.to_string(), "起始地址不是 http(s)".into()));
+        return out;
+    };
+    let mut pages: Vec<(String, String)> = Vec::new();
+    let mut queue: std::collections::VecDeque<(String, u8)> = std::collections::VecDeque::new();
+    queue.push_back((start.to_string(), 1));
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    visited.insert(start.to_string());
+
+    while let Some((url, level)) = queue.pop_front() {
+        if pages.len() >= limits.max_pages {
+            break;
+        }
+        if !pages.is_empty() && !limits.delay.is_zero() {
+            std::thread::sleep(limits.delay);
+        }
+        match fetch_text(&url, limits.max_bytes, limits.timeout) {
+            Ok(html) => {
+                for link in extract_links(&html, &url) {
+                    if !keep(&link, &start_host, rules) {
+                        continue;
+                    }
+                    if classify(&link) == Kind::Page
+                        && level < rules.depth
+                        && visited.insert(link.clone())
+                        && queue.len() + pages.len() < limits.max_pages * 4
+                    {
+                        queue.push_back((link, level + 1));
+                    }
+                }
+                pages.push((url, html));
+            }
+            Err(reason) => {
+                // 起始页失败 = 整次抓取失败；子页面失败只记一笔。
+                if pages.is_empty() && url == start {
+                    let mut out = GrabPlan::default();
+                    out.skipped.push((url, reason));
+                    return out;
+                }
+                // 子页面拉不到不影响已拿到的清单
+            }
+        }
+    }
+    plan(start, &pages, rules)
+}
+
 /// 页面主机的取法（抓取时用来判同域）。
 pub fn host_of(url: &str) -> Option<String> {
     split_url(url).map(|(_, host, _)| host)
@@ -587,6 +662,86 @@ mod tests {
         let got = fetch_text(&url, 8, std::time::Duration::from_secs(5));
         h.join().expect("server");
         assert!(got.is_err(), "超过上限必须报错，不能截断后当完整页面");
+    }
+    /// 起一个能回多页的极简服务：`routes` 是 (路径, Content-Type, body)。
+    fn serve_pages(routes: &'static [(&'static str, &'static str, &'static str)]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for _ in 0..routes.len() {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .split('?')
+                    .next()
+                    .unwrap_or("/")
+                    .to_string();
+                let (ctype, body) = routes
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, c, b)| (*c, *b))
+                    .unwrap_or(("text/html", "not found"));
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[test]
+    fn scan_walks_pages_and_collects_files() {
+        let base = serve_pages(&[
+            (
+                "/",
+                "text/html",
+                r#"<a href="/p2.html">2</a><a href="/a.zip">a</a>"#,
+            ),
+            ("/p2.html", "text/html", r#"<a href="/b.rar">b</a>"#),
+        ]);
+        let limits = Limits {
+            max_pages: 5,
+            max_bytes: 65536,
+            timeout: std::time::Duration::from_secs(5),
+            delay: std::time::Duration::ZERO,
+        };
+        let rules = GrabRules {
+            depth: 2,
+            ..GrabRules::default()
+        };
+        let got = scan(&base, &rules, limits);
+        assert!(
+            got.files.iter().any(|u| u.ends_with("a.zip")),
+            "{:?}",
+            got.files
+        );
+        assert!(
+            got.files.iter().any(|u| u.ends_with("b.rar")),
+            "{:?}",
+            got.files
+        );
+    }
+
+    #[test]
+    fn a_dead_start_page_is_reported_and_yields_nothing() {
+        let limits = Limits {
+            delay: std::time::Duration::ZERO,
+            timeout: std::time::Duration::from_millis(300),
+            ..Limits::default()
+        };
+        let got = scan("http://127.0.0.1:1/", &GrabRules::default(), limits);
+        assert!(got.files.is_empty());
+        assert!(!got.skipped.is_empty(), "起始页失败必须有原因");
     }
     #[test]
     fn host_of_rejects_non_http() {
