@@ -803,3 +803,18 @@ fn the_settings_out_dir_wins_over_the_cli_fallback() {
         "用户显式设了就以它为准"
     );
 }
+
+/// 搜索：名字与 URL 都参与、大小写不敏感；空串（含全空白）全通过。
+#[test]
+fn search_matches_names_and_urls_case_insensitively() {
+    use super::app::list::matches_search;
+    let mut view = task_view_named("Movie.TS", TaskStatus::Running);
+    view.url = "https://Example.COM/a/B.zip".into();
+
+    assert!(matches_search(&view, ""), "空串 = 不过滤");
+    assert!(matches_search(&view, "   "), "全空白也不算关键词");
+    assert!(matches_search(&view, "movie"), "名字要大小写不敏感");
+    assert!(matches_search(&view, "example.com"), "URL 也要参与");
+    assert!(matches_search(&view, "b.zip"), "URL 的路径部分也要能搜到");
+    assert!(!matches_search(&view, "nope"), "不匹配就是不匹配");
+}

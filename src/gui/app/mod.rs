@@ -69,6 +69,8 @@ pub struct App {
 
     /// 当前选中的任务 id（详情抽屉）。
     pub(super) selected: Option<String>,
+    /// 搜索框内容（名字 / URL，大小写不敏感）。
+    pub(super) search: String,
     /// 速率采样：每个任务上一轮的 `delivered` 与时刻。
     pub(super) rates: rate::Rates,
     /// 抽屉里那段日志尾巴的缓存：`(任务 id, updated_at, 文本)`。
@@ -184,6 +186,7 @@ impl App {
             rates: rate::Rates::default(),
             drawer_log: None,
             filter: None,
+            search: String::new(),
             adding: false,
             add_form: dialog::AddForm::default(),
             quitting: false,

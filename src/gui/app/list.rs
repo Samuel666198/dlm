@@ -237,8 +237,11 @@ impl App {
         });
     }
 
-    /// 筛选：状态键与分类键共用一个字段，先按状态再按分类判断。
+    /// 筛选：状态键与分类键共用一个字段，先按状态再按分类判断；搜索是**与**关系。
     fn visible(&self, task: &TaskView) -> bool {
+        if !matches_search(task, &self.search) {
+            return false;
+        }
         match self.filter.as_deref() {
             None => true,
             Some(key) => match key {
@@ -251,6 +254,16 @@ impl App {
             },
         }
     }
+}
+
+/// 搜索匹配：名字和 URL 都参与，大小写不敏感；空串（或全空白）全部通过。
+pub(crate) fn matches_search(task: &TaskView, needle: &str) -> bool {
+    let n = needle.trim();
+    if n.is_empty() {
+        return true;
+    }
+    let n = n.to_lowercase();
+    task.name.to_lowercase().contains(&n) || task.url.to_lowercase().contains(&n)
 }
 
 // ---------------------------------------------------------------- 绘制辅助
