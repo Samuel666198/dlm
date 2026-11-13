@@ -1,13 +1,13 @@
-feat(cli): 参数错误也走 JSON 信封（0.6.0 阶段 0 收尾）
+feat(cli): --json 覆盖下载结果与运行失败（0.6.0 阶段 0 完成）
 
-实测：
-  dlm --json --url file:///x
-  → {"ok":false,"error":{"code":"BAD_URL","message":"参数写错了：…"}}
-  dlm --url file:///x（不带 --json）
-  → 原来的中文 stderr，一个字没变
+实测（本地 http 服务，真下载）：
+  成功 → {"ok":true,"task":{"path":"…\\tiny.bin","status":"done","url":"…"}}
+  连接失败 → {"ok":false,"error":{"code":"INTERNAL","message":"试探请求发不出去…"}}
+  参数错误 → {"ok":false,"error":{"code":"BAD_URL","message":"参数写错了…"}}
 
-- 说明：上一版把 finish() 也改成 JSON 分支，触发 11 处二进制用例的签名不匹配；
-  已回退那部分，本轮只保留"参数错误"这一处（可验证、不动 stdout 契约）
-- 下载结果的 JSON 输出需要单独一轮改 finish 的测试夹具，记在计划里
+- finish_json 独立于 finish：不动原有摘要/换行/测试夹具（上一轮就是混在一起才炸的）
+- --json 同时关掉进度行（tick 写 stdout 会污染 JSON）
+- 退出码仍由同一套 exit_code(rep, ok) 决定，与人类路径一致
+- 不带 --json 的全部旧行为未改
 
 门禁：见输出

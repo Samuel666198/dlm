@@ -49,7 +49,19 @@ fn main() -> ExitCode {
             // "跑完但没下完"是另一支（`Ok(Report{ok:false})`），它的话由 `report::outcome` 打在 stdout。
             // 措辞里那三个字是分档的依据之一，也是用例钉住的措辞（`ok = false` 那一支不会有它）。
             // 走 stderr：`--quiet` 关的是进度行，不关错误（**E24①**）。
-            eprintln!("dlm 跑不起来：{err:#}");
+            if std::env::args_os().any(|a| a == "--json") {
+                // 跑不起来的失败也要有机器可读的一份，否则 Agent 只能看中文。
+                println!(
+                    "{}",
+                    dlm::json_out::to_line(&dlm::json_out::err(
+                        dlm::json_out::Code::Internal,
+                        format!("{err:#}"),
+                        None,
+                    ))
+                );
+            } else {
+                eprintln!("dlm 跑不起来：{err:#}");
+            }
             DOWNLOAD_FAILED
         }
     })
@@ -96,7 +108,8 @@ fn dispatch() -> Result<u8> {
         return Ok(0);
     }
 
-    if !quiet {
+    // `--json` 也要安静：进度行会写进 stdout，混进 JSON 就没法解析了。
+    if !quiet && !wants_json {
         // **E24①**：静默那一支**根本不挂** sink。落点选在"装配"而不是"闭包里判断"，
         // 因为"这一趟要不要有进度源"本来就是装配期的决定；挂在闭包里会留一条永远走不到、
         // 因而红不了的分支。顺带照住 **E21⑧**：`--data-file` 那一条路引擎一发 tick 都不交，
@@ -105,7 +118,11 @@ fn dispatch() -> Result<u8> {
     }
 
     let rep = engine::run(&task, cfg)?;
-    let code = finish(&rep, &task, quiet);
+    let code = if wants_json {
+        finish_json(&rep, &task)
+    } else {
+        finish(&rep, &task, quiet)
+    };
     if let Some(action) = action.as_ref() {
         if rep.ok {
             if let dlm::actions::CompletionAction::Shutdown { delay_secs } = action {
@@ -164,6 +181,11 @@ fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
         println!();
     }
     println!("{line}");
+    exit_code(rep, ok)
+}
+
+/// 退出码只由 `outcome` 的布尔与预算标记决定（**E20⑦**）。
+fn exit_code(rep: &Report, ok: bool) -> u8 {
     if ok {
         0
     } else if rep.budget_reached {
@@ -171,6 +193,30 @@ fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
     } else {
         DOWNLOAD_FAILED
     }
+}
+
+/// `--json` 的收尾：同一份结果压成一行，退出码与人类路径完全一致。
+///
+/// 刻意**不**复用 [`finish`]：那条路要打印人类摘要、还要在进度行后让位换行，
+/// 两者混在一条函数里就会像上一轮那样把测试夹具的签名一起拖下水。
+fn finish_json(rep: &Report, task: &Task) -> u8 {
+    let (_, ok) = report::outcome(rep, task);
+    let status = if ok {
+        "done"
+    } else if rep.budget_reached {
+        "budget_reached"
+    } else {
+        "failed"
+    };
+    println!(
+        "{}",
+        dlm::json_out::to_line(&dlm::json_out::ok(serde_json::json!({
+            "url": task.url,
+            "path": task.target_path().display().to_string(),
+            "status": status,
+        })))
+    );
+    exit_code(rep, ok)
 }
 
 /// 参数层那一支的统一收尾（**E24②**："两档"不覆盖这一层）。
