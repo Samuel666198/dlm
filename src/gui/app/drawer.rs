@@ -42,7 +42,14 @@ pub(crate) struct DrawerActions {
 }
 
 impl App {
-    /// 画抽屉。没有选中、或选中的任务已经不在快照里，就什么都不画（面板也不占位）。
+    /// 画详情**悬浮窗**。没有选中、或选中的任务已经不在快照里，就什么都不画。
+    ///
+    /// ## 为什么是悬浮窗而不是右侧面板
+    ///
+    /// 第一版做成了 `Panel::right`，实测在 1120pt 宽的窗口里被挤成 ~180pt：
+    /// 面板拿到的宽度不够，里面的行就横向溢出、文字飘到面板外面去（截图见交接文档）。
+    /// 悬浮窗不吃主布局的宽度，用户可以拖动、缩放、关掉，窄窗口下也不会把列表挤扁 ——
+    /// 而且它天然"浮在内容之上"，和"点一行看详情"的心智一致。
     pub(super) fn drawer(&mut self, ui: &mut egui::Ui) {
         let Some(task) = self.drawer_task() else {
             return;
@@ -50,15 +57,32 @@ impl App {
         let speed = self.speed_of(&task.id);
         let log_tail = self.drawer_log_tail(&task);
 
-        let actions = egui::Panel::right("drawer")
-            .exact_size(theme::DRAWER_W)
-            .resizable(false)
-            .show(ui, |ui| drawer_body(ui, &task, speed, &log_tail))
-            .inner;
+        let mut open = true;
+        // 标题固定：egui 用标题派生窗口 id，标题里带任务名的话换一个任务窗口就跳回默认位置。
+        // 任务名在窗体内第一行显示。
+        let shown = egui::Window::new("任务详情")
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(theme::DRAWER_W)
+            .min_width(340.0)
+            .max_width(560.0)
+            .default_height(460.0)
+            .anchor(
+                egui::Align2::RIGHT_TOP,
+                egui::vec2(-16.0, theme::TOOLBAR_H + 12.0),
+            )
+            .show(ui.ctx(), |ui| drawer_body(ui, &task, speed, &log_tail));
+        let actions = match shown {
+            // `Window::show` 的 inner 是 Option：折叠时是 None。
+            Some(r) => r.inner.unwrap_or_default(),
+            None => DrawerActions::default(),
+        };
 
-        if actions.close {
+        if !open || actions.close {
             self.selected = None;
             self.drawer_log = None;
+            return;
         }
         if actions.copy_url {
             ui.ctx().copy_text(task.url.clone());
