@@ -1054,3 +1054,54 @@ render();
 refreshMedia();
 setInterval(refreshMedia, 1500);
 chrome.runtime.sendMessage({ op: "wake" }, () => void chrome.runtime.lastError);
+
+// ---------------------------------------------------------------- A2 / A3
+// Alt+点击链接 → 交给 dlm（不抢普通点击）。站点黑名单来自扩展设置（options.html），
+// 命中就完全不介入：既不 preventDefault，也不发消息。
+(() => {
+  if (window.__dlmAltClickInstalled) return;
+  window.__dlmAltClickInstalled = true;
+  const KEY = "siteBlock";
+  let blocked = [];
+  try {
+    chrome.storage.local.get([KEY], (got) => {
+      blocked = Array.isArray(got && got[KEY]) ? got[KEY] : [];
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes[KEY]) {
+        blocked = Array.isArray(changes[KEY].newValue) ? changes[KEY].newValue : [];
+      }
+    });
+  } catch (err) {
+    // 扩展被重载后旧内容脚本会失去上下文：这里静默即可，页面功能不受影响。
+  }
+  const isBlocked = (url) => {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return blocked.some((rule) => host === rule || host.endsWith("." + rule));
+    } catch (err) {
+      return false;
+    }
+  };
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (!e.altKey || !e.isTrusted || e.defaultPrevented) return;
+      const link = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+      if (!link) return;
+      const href = link.href || "";
+      if (!/^https?:/i.test(href) || isBlocked(href)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        chrome.runtime.sendMessage(
+          { op: "page-download", url: href, referer: location.href },
+          () => void chrome.runtime.lastError,
+        );
+      } catch (err) {
+        // 同上：上下文失效就什么都不做
+      }
+    },
+    true,
+  );
+})();

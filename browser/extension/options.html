@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>dlm 扩展设置</title>
+<style>
+  body { font: 13px/1.6 "Segoe UI", sans-serif; margin: 24px; color: #2b2b2b; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  p.hint { color: #777; margin: 0 0 16px; }
+  textarea { width: 420px; height: 160px; font: 12px/1.5 Consolas, monospace; padding: 8px; }
+  button { margin-top: 10px; padding: 5px 14px; }
+  #saved { color: #2e7d32; margin-left: 10px; }
+</style>
+</head>
+<body>
+  <h1>站点规则（A3）</h1>
+  <p class="hint">一行一个域名。命中这些站点时，<b>Alt+点击</b>与「下载本页所有链接」都不会交给 dlm。</p>
+  <textarea id="block" spellcheck="false" placeholder="example.com&#10;video.example.net"></textarea>
+  <div><button id="save">保存</button><span id="saved"></span></div>
+  <script src="options.js"></script>
+</body>
+</html>

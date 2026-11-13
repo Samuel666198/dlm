@@ -232,6 +232,11 @@ function installMenu() {
       title: "Download with dlm",
       contexts: ["link", "image", "video", "audio"],
     });
+    chrome.contextMenus.create({
+      id: "dlm-page-links",
+      title: "下载本页所有链接 (dlm)",
+      contexts: ["page"],
+    });
   });
 }
 
@@ -307,7 +312,51 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   sendResponse({ ok: true });
 });
+// A3：读站点黑名单（options.html 维护）。命中就不接手，安静退出。
+function isBlocked(url, cb) {
+  chrome.storage.local.get(["siteBlock"], (got) => {
+    const rules = Array.isArray(got && got.siteBlock) ? got.siteBlock : [];
+    let host = "";
+    try { host = new URL(url).hostname.toLowerCase(); } catch (err) { host = ""; }
+    cb(rules.some((r) => host === r || host.endsWith("." + r)));
+  });
+}
+
+// A1：下载本页所有链接（同站、http(s)、去重、最多 50 条，避免一次灌爆队列）
+function downloadPageLinks(tab) {
+  if (!tab || tab.id == null) return;
+  const pageUrl = tab.url || "";
+  isBlocked(pageUrl, (blocked) => {
+    if (blocked) return;
+    chrome.scripting.executeScript(
+      { target: { tabId: tab.id }, func: () => Array.from(document.links, (a) => a.href) },
+      (results) => {
+        const all = (results && results[0] && results[0].result) || [];
+        let pageHost = "";
+        try { pageHost = new URL(pageUrl).hostname; } catch (err) { pageHost = ""; }
+        const seen = new Set();
+        const picked = [];
+        for (const href of all) {
+          if (!/^https?:\/\//i.test(href)) continue;
+          let host = "";
+          try { host = new URL(href).hostname; } catch (err) { continue; }
+          if (host !== pageHost) continue;
+          if (seen.has(href)) continue;
+          seen.add(href);
+          picked.push(href);
+          if (picked.length >= 50) break;
+        }
+        for (const href of picked) submitPage(href, pageUrl, /\.m3u8(?:$|[?#])/i.test(href), tab.id);
+      },
+    );
+  });
+}
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "dlm-page-links") {
+    downloadPageLinks(tab);
+    return;
+  }
   if (info.menuItemId !== "dlm-download") return;
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
