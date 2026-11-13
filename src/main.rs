@@ -57,13 +57,14 @@ fn main() -> ExitCode {
 
 /// 装配全过程。交回退出码；`Err` 只可能来自 `engine::run`（见 `main` 那段注释）。
 fn dispatch() -> Result<u8> {
+    // 参数都还没解析出来时也要能报 JSON：先扫一眼原始 argv。
+    let wants_json = std::env::args_os().any(|a| a == "--json");
     let cli = match cli::parse_from(std::env::args_os()) {
         Ok(cli) => cli,
-        Err(err) => return Ok(parameter_error(&err)),
+        Err(err) => return Ok(parameter_error(&err, wants_json)),
     };
 
     // `quiet()` / `no_start()` 先读：`into_task()` 会**消费** `Cli`（**E23⑦** 交回两件东西的形状）。
-    let wants_json = cli.wants_json();
     let quiet = cli.quiet();
     let no_start = cli.no_start();
     // R19：完成后动作也是"消费 Cli 之前"取走的一格；它不进 Task/Config，也不参与续传比对。
@@ -71,7 +72,7 @@ fn dispatch() -> Result<u8> {
     let mut cfg = cli.into_config();
     let task = match cli.into_task() {
         Ok(task) => task,
-        Err(err) => return Ok(parameter_error(&err)),
+        Err(err) => return Ok(parameter_error(&err, wants_json)),
     };
 
     if no_start {
@@ -104,7 +105,7 @@ fn dispatch() -> Result<u8> {
     }
 
     let rep = engine::run(&task, cfg)?;
-    let code = finish(&rep, &task, quiet);
+    let code = finish(&rep, &task, quiet, wants_json);
     if let Some(action) = action.as_ref() {
         if rep.ok {
             if let dlm::actions::CompletionAction::Shutdown { delay_secs } = action {
@@ -146,7 +147,7 @@ fn dispatch() -> Result<u8> {
 /// （**E20⑦** 末尾那笔具名欠账：要造那一格得让 `fs::remove_file` 以非 `NotFound` 失败）。
 /// `report::outcome` 的用例钉的是"它交回的布尔等于 `rep.ok`"，而**装配层有没有去读那个布尔**
 /// 落在判据之外。把这一格做成"输入是 `Report` 而不是布尔"的函数，手搭 `Report` 就又进得来了。
-fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
+fn finish(rep: &Report, task: &Task, quiet: bool, wants_json: bool) -> u8 {
     let (line, ok) = report::outcome(rep, task);
     // 收尾让出那一行：进度行是 `\r` 原地覆盖的，不换行就会把结果行盖在它上面。
     //
@@ -162,7 +163,26 @@ fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
     if !quiet && task.segmentable() && !task.hls() {
         println!();
     }
-    println!("{line}");
+    if wants_json {
+        // 同一份结果给机器一份：一行、字段稳定、不含人类措辞。
+        let status = if ok {
+            "done"
+        } else if rep.budget_reached {
+            "budget_reached"
+        } else {
+            "failed"
+        };
+        println!(
+            "{}",
+            dlm::json_out::to_line(&dlm::json_out::ok(serde_json::json!({
+                "url": task.url,
+                "path": task.target_path().display().to_string(),
+                "status": status,
+            })))
+        );
+    } else {
+        println!("{line}");
+    }
     if ok {
         0
     } else if rep.budget_reached {
@@ -178,11 +198,23 @@ fn finish(rep: &Report, task: &Task, quiet: bool) -> u8 {
 /// `downcast_ref` 拿不回类型就说明那不是 clap，而是 `check_boundaries`（**E23⑤**）或
 /// `Task::validate`（`http://` + 口令那一支，**E3**）写的那句话 ⇒ 原样打到 stderr，
 /// 码取与 clap 同值的 2（两个来源不给两种码）。
-fn parameter_error(err: &anyhow::Error) -> u8 {
+fn parameter_error(err: &anyhow::Error, wants_json: bool) -> u8 {
     if let Some(clap_err) = err.downcast_ref::<clap::Error>() {
         clap_err.exit();
     }
-    eprintln!("{err:#}");
+    if wants_json {
+        // 参数层也走同一种信封：Agent 只看 code 就能分支，不用解析中文。
+        println!(
+            "{}",
+            dlm::json_out::to_line(&dlm::json_out::err(
+                dlm::json_out::Code::BadUrl,
+                format!("{err:#}"),
+                None,
+            ))
+        );
+    } else {
+        eprintln!("{err:#}");
+    }
     BAD_ARGS
 }
 
@@ -321,8 +353,12 @@ mod tests {
         // **E24②**：参数层不在 E20⑦ 那两档里。这里能钉的只有"我们自己写的那句话"那一支
         // （clap 那一支由 `clap::Error::exit()` 自己收尾，它是 `-> !`，进程内测不了）。
         let boundary = anyhow::anyhow!("参数写错了：--connections 至少 1（给了 0）");
-        assert_eq!(parameter_error(&boundary), BAD_ARGS);
+        assert_eq!(parameter_error(&boundary, false), BAD_ARGS);
         assert_ne!(BAD_ARGS, DOWNLOAD_FAILED, "两档不许撞在同一个数上");
-        assert_ne!(parameter_error(&boundary), 0, "参数层的失败绝不能是 0");
+        assert_ne!(
+            parameter_error(&boundary, false),
+            0,
+            "参数层的失败绝不能是 0"
+        );
     }
 }

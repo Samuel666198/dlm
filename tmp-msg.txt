@@ -1,11 +1,14 @@
-feat(cli): --json 接到 --no-start 输出（0.6.0 阶段 0）
+feat(cli): --json 覆盖下载结果与参数错误（0.6.0 阶段 0 完成）
 
 实测：
+  dlm --json --url file:///x
+  → {"ok":false,"error":{"code":"BAD_URL","message":"参数写错了：…"}}
   dlm --json --no-start --url https://example.com/a.zip
-  → {"ok":true,"task":{"path":".\\a.zip","status":"no_start","url":"https://example.com/a.zip"}}
-  不带 --json 时仍是原来的中文摘要（未改旧契约）
+  → {"ok":true,"task":{"path":".\\a.zip","status":"no_start","url":"…"}}
 
-- 一行一条、可直接被 serde_json 解析
-- 其余路径（真实下载的 finish / 错误）下一步接，避免一次动到 121 个集成断言
+- finish() 在 --json 下输出 {ok,task:{url,path,status}}，status = done /
+  budget_reached / failed；退出码逻辑不变
+- 参数层错误走同一信封，code=BAD_URL；不带 --json 时仍是原来的中文 stderr
+- 未加自动化断言（现有 121 个集成测试对 stdout 有精确契约，改它们要单独一轮）
 
 门禁：见输出
