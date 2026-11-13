@@ -104,11 +104,16 @@ impl App {
             separator(ui);
             ui.add_space(6.0);
 
-            ui.add(
+            let search = ui.add(
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text("搜索名字或链接")
                     .desired_width(180.0),
             );
+            // Ctrl+F 只是置个标记，真正抢焦点要等控件画出来这一帧。
+            if self.focus_search {
+                search.request_focus();
+                self.focus_search = false;
+            }
             ui.add_space(6.0);
             if tool_button(ui, Icon::Gear, "设置", true, false).clicked() {
                 self.settings_open = true;

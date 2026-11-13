@@ -31,6 +31,7 @@ pub mod list;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
 pub mod settings_ui;
+pub mod shortcuts;
 pub mod sidebar;
 pub mod status;
 pub mod theme;
@@ -71,6 +72,8 @@ pub struct App {
     pub(super) selected: Option<String>,
     /// 搜索框内容（名字 / URL，大小写不敏感）。
     pub(super) search: String,
+    /// 下一帧是否把焦点给搜索框（Ctrl+F）。
+    pub(super) focus_search: bool,
     /// 速率采样：每个任务上一轮的 `delivered` 与时刻。
     pub(super) rates: rate::Rates,
     /// 抽屉里那段日志尾巴的缓存：`(任务 id, updated_at, 文本)`。
@@ -187,6 +190,7 @@ impl App {
             drawer_log: None,
             filter: None,
             search: String::new(),
+            focus_search: false,
             adding: false,
             add_form: dialog::AddForm::default(),
             quitting: false,
@@ -322,6 +326,7 @@ impl eframe::App for App {
 
         // 速率采样要在画之前做：这一帧画出来的数字与它同一时刻。
         self.sample_rates();
+        self.handle_shortcuts(&ctx);
 
         // `--autostart`：等窗口稳定后藏起来。
         //

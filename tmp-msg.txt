@@ -1,8 +1,9 @@
-feat(gui): 0.2.0 计划落地第一步——任务搜索（F1）
+feat(gui): 快捷键 F2（Ctrl+N / Ctrl+F / Del / Space）
 
-- docs/plans/2026-11-13-0.2.0-计划.md：A（浏览器接管）/E（文件后处理）/F（界面）三组拆解、
-  顺序、每项判据、门禁与风险；明确不做视频站点解析
-- 工具条加搜索框：名字与 URL 都参与、大小写不敏感、空串全通过；与状态/分类筛选是「与」关系
-- matches_search 纯函数 + 用例（lib 389 → 390）
+- shortcuts.rs：shortcut_for 纯函数把"按了什么 + 有没有焦点 + 有没有选中"映射成动作，
+  4 条用例钉边界（lib 390 → 394）
+- 输入框有焦点时 Del/Space 一律不认（否则在搜索框里删字会删任务）
+- 没选中时 Del/Space 不做事（不能"随手空格"删掉列表第一行）
+- Ctrl+F 置标记，工具条画搜索框那一帧抢焦点（egui 的焦点要先有控件）
 
-门禁：fmt / lib 390 / bins 4 / integration 121 / clippy / extension 全绿
+门禁：fmt / lib 394 / bins 4 / integration 121 / clippy / extension 全绿
