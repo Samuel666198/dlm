@@ -1,11 +1,10 @@
-feat(proxy): 代理接进设置、子进程与抓取（0.5.0 ②完成）
+feat(tray): 收进托盘时给提示（0.5.0 ③）
 
-- Settings.proxy（空 = 直连，serde default 兼容旧配置）
-- RuntimeTuning.proxy 已解析；runner 给每个 dlm 子进程注入 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
-  —— 下载侧有十几处 client，这是唯一不会漏的路
-- GUI 自己的抓取 client 也按全局代理构造（proxy::set_global 在启动时从设置读一次）
-- 设置页「代理」一行：实时显示「生效：scheme://host:port」（脱敏，不含凭据），
-  写错标红但不阻止保存
-- 用例：解析 5 组；lib 431 全绿
+- tray::hint_downloading() 把 tooltip 换成「dlm 仍在下载 — 双击图标恢复窗口」，
+  hint_idle() 恢复默认；should_notify() 做 60 秒节流（含时钟回拨保护）
+- 只在真的隐藏成功后调用，反复点 X 不会反复刷
+- 诚实说明：tray-icon 0.21 不暴露 Shell_NotifyIcon 需要的 hwnd/uID，真正的
+  NIF_INFO 气泡做不了 —— 那条路要自己注册托盘图标，记为 0.6.0 选项
+- 用例：节流（60 秒内不重复、到点触发、时钟回拨不 panic）
 
 门禁：见输出

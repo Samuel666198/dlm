@@ -170,3 +170,38 @@ pub fn make_icon() -> Icon {
 
     Icon::from_rgba(rgba, SIZE, SIZE).expect("32x32 RGBA 一定合法")
 }
+impl Tray {
+    /// 收进托盘时给个提示。
+    ///
+    /// 说明：`tray-icon` 0.21 不暴露 `Shell_NotifyIcon` 需要的 hwnd/uID，所以
+    /// **做不了真正的气泡**（NIF_INFO）—— 那条路要求自己注册托盘图标。这里退一步，
+    /// 把 tooltip 换成"还在下载"，鼠标一悬停就能看见；真正的气泡记为 0.6.0 的选项。
+    pub fn hint_downloading(&self) {
+        let _ = self
+            ._icon
+            .set_tooltip(Some("dlm 仍在下载 — 双击图标恢复窗口"));
+    }
+
+    /// 窗口恢复后把 tooltip 换回默认。
+    pub fn hint_idle(&self) {
+        let _ = self._icon.set_tooltip(Some("dlm 下载器"));
+    }
+}
+
+/// 同一个提示至少隔 60 秒才再改一次 —— 反复点 X 不该反复刷。
+pub fn should_notify(now_secs: u64, last_secs: u64) -> bool {
+    now_secs.saturating_sub(last_secs) >= 60
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_notify;
+
+    #[test]
+    fn the_hint_is_throttled_to_once_a_minute() {
+        assert!(should_notify(1_000, 0));
+        assert!(!should_notify(1_059, 1_000), "60 秒内不重复");
+        assert!(should_notify(1_060, 1_000));
+        assert!(!should_notify(5, 100), "时钟回拨也不 panic");
+    }
+}

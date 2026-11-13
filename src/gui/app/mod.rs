@@ -113,6 +113,8 @@ pub struct App {
     pub window_visible: bool,
     /// 托盘句柄。None = 建不起来（无托盘环境），此时关窗即退出。
     pub tray: Option<tray::Tray>,
+    /// 上次改托盘 tooltip 的 Unix 秒（用于节流）。
+    pub tray_hint_at: u64,
     /// 剪贴板监视线程句柄。`None` = 没在跑。
     pub(super) clipboard: Option<crate::gui::clipboard::Watcher>,
     /// 设置面板是否打开。
@@ -228,6 +230,7 @@ impl App {
             close_to_tray: true,
             window_visible: true,
             tray: tray::Tray::new(),
+            tray_hint_at: 0,
             clipboard,
             settings_open: false,
             settings: settings.clone(),
@@ -389,6 +392,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.window_visible = false;
+            self.hint_hidden_to_tray();
             return;
         }
 
@@ -507,6 +511,19 @@ fn hide_window() {
 fn hide_window() {}
 
 impl App {
+    /// 收进托盘后的提示：一分钟内最多改一次 tooltip，避免反复点 X 反复刷。
+    fn hint_hidden_to_tray(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if tray::should_notify(now, self.tray_hint_at) {
+            if let Some(tray) = &self.tray {
+                tray.hint_downloading();
+            }
+            self.tray_hint_at = now;
+        }
+    }
     /// 点 X 时该藏进托盘还是真的退出。
     ///
     /// 抽成纯判定是为了能直接测：这三种组合以前混在 UI 分支里，
