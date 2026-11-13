@@ -353,12 +353,17 @@ impl eframe::App for App {
         // 托盘动作（勘误 E6/E3）：在主线程 poll，不另起消息泵。
         self.drain_tray(&ctx);
 
-        // 关窗收进托盘（勘误 E6）：先看用户是不是真想退出。
-        if ctx.input(|i| i.viewport().close_requested()) && self.close_to_tray && !self.quitting {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.window_visible = false;
-            return;
+        // 关窗策略（2026-11-13 改）：
+        // - 有任务在跑/排队 → 收进托盘。误点 X 不该把正在下的活停掉。
+        // - 全空闲 → 真的退出。用户点 X 通常就是"我要关掉它"。
+        // - 托盘没建起来 → 绝不隐藏，否则窗口藏了却没有任何入口找回来。
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            if self.hide_instead_of_quit() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
+                return;
+            }
         }
 
         // 帧率策略：有任务在跑就保持流畅（runner 500ms 换一次快照，60fps 能及时反映），
@@ -474,3 +479,24 @@ fn hide_window() {
 
 #[cfg(not(windows))]
 fn hide_window() {}
+
+impl App {
+    /// 点 X 时该藏进托盘还是真的退出。
+    ///
+    /// 抽成纯判定是为了能直接测：这三种组合以前混在 UI 分支里，
+    /// 出问题时只能靠人手点窗口复现（"关了却关不掉"就是这么来的）。
+    pub(crate) fn hide_instead_of_quit(&self) -> bool {
+        hide_on_close(
+            self.close_to_tray,
+            self.tray.is_some(),
+            self.tasks()
+                .iter()
+                .any(|t| t.status == "running" || t.status == "queued"),
+        )
+    }
+}
+
+/// 纯判定：`close_to_tray` 开关 + 托盘是否可用 + 是否还有活。
+pub(crate) fn hide_on_close(close_to_tray: bool, tray_available: bool, busy: bool) -> bool {
+    close_to_tray && tray_available && busy
+}

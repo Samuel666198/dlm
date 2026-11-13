@@ -827,3 +827,23 @@ fn search_matches_names_and_urls_case_insensitively() {
     assert!(matches_search(&view, "b.zip"), "URL 的路径部分也要能搜到");
     assert!(!matches_search(&view, "nope"), "不匹配就是不匹配");
 }
+
+/// 关窗判定：只有「有活 + 能回到窗口」才藏进托盘。
+#[test]
+fn closing_hides_only_when_there_is_work_and_a_tray_to_come_back_from() {
+    use super::app::hide_on_close;
+
+    assert!(
+        !hide_on_close(true, false, true),
+        "托盘没建起来就绝不能藏 —— 窗口一藏就再也没有入口找回来"
+    );
+    assert!(
+        !hide_on_close(true, true, false),
+        "全空闲时点 X 应该真的退出"
+    );
+    assert!(hide_on_close(true, true, true), "有任务在跑才收进托盘");
+    assert!(
+        !hide_on_close(false, true, true),
+        "用户关掉「收进托盘」就照做"
+    );
+}
