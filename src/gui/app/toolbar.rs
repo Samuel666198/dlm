@@ -43,15 +43,18 @@ impl App {
                 .as_ref()
                 .is_some_and(|t| t.status == "running" || t.status == "queued");
 
-            if tool_button(ui, Icon::Play, "继续", can_resume, false).clicked()
-                && let Some(id) = self.selected.clone()
-            {
-                self.send(Ticket::Resume(id));
-            }
-            if tool_button(ui, Icon::Pause, "暂停", can_pause, false).clicked()
-                && let Some(id) = self.selected.clone()
-            {
-                self.send(Ticket::Pause(id));
+            // 0.6.0：没有选中时这两颗按钮不出现（以前是常年灰着占位置）。
+            if task_actions_visible(self.selected.is_some()) {
+                if tool_button(ui, Icon::Play, "继续", can_resume, false).clicked()
+                    && let Some(id) = self.selected.clone()
+                {
+                    self.send(Ticket::Resume(id));
+                }
+                if tool_button(ui, Icon::Pause, "暂停", can_pause, false).clicked()
+                    && let Some(id) = self.selected.clone()
+                {
+                    self.send(Ticket::Pause(id));
+                }
             }
 
             ui.add_space(6.0);
@@ -321,4 +324,22 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, r: egui::Rect, color: egui::Co
 fn separator(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 26.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::LINE);
+}
+/// 任务级动作（继续 / 暂停 / 删除）该不该出现在工具栏上。
+///
+/// 只由"有没有选中"决定：没有选中时它们本来就点不动，留着只是噪音。
+/// 抽成函数是为了让这条规矩能被测试钉住，而不是埋在界面代码里。
+pub(crate) fn task_actions_visible(has_selection: bool) -> bool {
+    has_selection
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_actions_visible;
+
+    #[test]
+    fn task_actions_appear_only_with_a_selection() {
+        assert!(!task_actions_visible(false), "没选中时不该出现任务动作");
+        assert!(task_actions_visible(true));
+    }
 }

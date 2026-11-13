@@ -1,13 +1,8 @@
-feat(cli): --json 覆盖下载结果与运行失败（0.6.0 阶段 0 完成）
+feat(gui): 任务动作只在选中时出现（0.6.0 阶段 1 第一刀）
 
-实测（本地 http 服务，真下载）：
-  成功 → {"ok":true,"task":{"path":"…\\tiny.bin","status":"done","url":"…"}}
-  连接失败 → {"ok":false,"error":{"code":"INTERNAL","message":"试探请求发不出去…"}}
-  参数错误 → {"ok":false,"error":{"code":"BAD_URL","message":"参数写错了…"}}
-
-- finish_json 独立于 finish：不动原有摘要/换行/测试夹具（上一轮就是混在一起才炸的）
-- --json 同时关掉进度行（tick 写 stdout 会污染 JSON）
-- 退出码仍由同一套 exit_code(rep, ok) 决定，与人类路径一致
-- 不带 --json 的全部旧行为未改
+- 工具栏「继续 / 暂停」在没有选中任务时不再渲染（以前是常年灰着占位置）
+- 判断抽成 task_actions_visible(has_selection) 纯函数，带测试
+- 布局与配色未动，现有快捷键/选中逻辑不受影响
+- lib 435 → 436
 
 门禁：见输出
