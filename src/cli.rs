@@ -329,6 +329,9 @@ pub struct Cli {
     quiet: bool,
     #[arg(long, help = "只打印任务摘要后退出，不发送任何请求")]
     no_start: bool,
+    /// 一行一条 JSON，给脚本与 Agent 用；与 `--quiet` 可共存（后者只管进度行）。
+    #[arg(long, help = "输出一行一条 JSON（给脚本与 Agent 用）")]
+    json: bool,
     #[arg(
         long,
         help = "把 URL 当作 HLS 播放列表，顺序下载分片并合并（不做 DASH/DRM/嗅探）"
@@ -392,6 +395,10 @@ impl Cli {
     /// `--quiet` / `/n`。**住在 `Cli` 而不是 `Task.flags`**（**E20③**）：spec §5 的位义只定义了
     /// bit0/bit1/bit2，把静默塞进 flags 会改变断点文件里那份 `flags` 的**比对语义** ——
     /// "只是不想看进度行"就变成"请求变了，从头下"。
+    pub fn wants_json(&self) -> bool {
+        self.json
+    }
+
     pub fn quiet(&self) -> bool {
         self.quiet
     }

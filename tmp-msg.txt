@@ -1,10 +1,7 @@
-feat(json): --json 输出层与错误码枚举（0.6.0 阶段 0 第一批）
+feat(cli): 新增 --json 开关（0.6.0 阶段 0）
 
-- json_out：成功 `{"ok":true,"task":{…}}`；失败 `{"ok":false,"error":{code,message,detail}}`
-- 错误码固定 9 个（BAD_URL/NO_SUCH_DIR/DISK_FULL/DUPLICATE/APPROVAL_EXPIRED/
-  APPROVAL_MISMATCH/NOT_FOUND/BUSY/INTERNAL），只增不改
-- to_line() 保证一行一条，序列化失败也退化成合法 JSON（不吐半截）
-- 用例 3 组：成功不含 error 字段、失败不含 task 字段、错误码唯一且全大写
-- 下一步：把 --json 接到 CLI 主流程
+- `dlm --json` 接受并带 wants_json() 访问器；与 --quiet 可共存（后者只管进度行）
+- 本步只打通参数层与访问器；输出接线下一步做（避免半成品打乱现有 stdout 契约）
+- lib 435 全绿（cli 36 项通过）
 
 门禁：见输出
