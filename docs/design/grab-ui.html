@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dlm · 站点抓取（可交互原型）</title>
+<style>
+  :root{
+    --bg:#FAFAF9; --side:#F5F6F3; --card:#FFFFFF;
+    --ink:#111827; --ink2:#374151; --ink3:#6B7280; --ink4:#9CA3AF;
+    --line:#E5E7EB; --line2:#F1F2EE;
+    --green:#16A34A; --green-soft:#E7F6EC; --green-ink:#15803D;
+    --orange:#F97316; --orange-soft:#FFF1E6; --orange-ink:#C2410C;
+    --red:#DC2626; --red-soft:#FEF2F2;
+    --r:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:13px/1.55 "Segoe UI",Inter,system-ui,-apple-system,sans-serif;
+       display:flex;flex-direction:column}
+
+  /* 标题栏 */
+  .titlebar{height:36px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
+            padding:0 14px;background:var(--side);border-bottom:1px solid var(--line);
+            font-size:12px;color:var(--ink3)}
+  .titlebar b{color:var(--ink);font-weight:600}
+  .winbtns{display:flex;gap:14px;color:var(--ink4)}
+
+  /* 主体：左表单 + 右结果？不 —— 抓取是线性的，用上下结构更顺 */
+  main{flex:1;min-height:0;display:flex;flex-direction:column}
+  .pad{padding:16px 20px}
+
+  .head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  h1{margin:0 0 2px;font-size:16px;letter-spacing:-.01em}
+  .sub{margin:0;font-size:11.5px;color:var(--ink4)}
+  .tabs{display:flex;gap:2px;background:var(--line2);padding:2px;border-radius:8px}
+  .tab{padding:4px 12px;border-radius:6px;font-size:12px;color:var(--ink3);cursor:pointer}
+  .tab.on{background:#fff;color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+
+  /* 表单区 */
+  .form{margin-top:14px;border:1px solid var(--line);border-radius:var(--r);background:var(--card);
+        padding:14px 16px}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .row + .row{margin-top:10px}
+  .lab{font-size:11.5px;color:var(--ink3);min-width:46px}
+  .input{height:32px;border:1px solid var(--line);border-radius:8px;padding:0 10px;
+         font:inherit;color:var(--ink);background:#fff;outline:none}
+  .input:focus{border-color:var(--green);box-shadow:0 0 0 3px var(--green-soft)}
+  .input.url{flex:1;min-width:300px;font-family:ui-monospace,"Cascadia Code",monospace;font-size:12.5px}
+  .input.num{width:58px;text-align:center}
+  .input.sm{width:150px;font-size:12px}
+  .btn{height:32px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:#fff;
+       color:var(--ink2);font:inherit;cursor:pointer;transition:background .12s}
+  .btn:hover{background:var(--line2)}
+  .btn.primary{background:var(--orange);border-color:var(--orange);color:#fff;font-weight:600}
+  .btn.primary:hover{filter:brightness(.96)}
+  .btn.green{background:var(--green);border-color:var(--green);color:#fff;font-weight:600}
+  .btn.green:hover{filter:brightness(.96)}
+  .btn.sm{height:27px;padding:0 10px;font-size:12px}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2);cursor:pointer}
+  .cb{width:15px;height:15px;accent-color:var(--green);cursor:pointer}
+  .sep{width:1px;height:18px;background:var(--line);margin:0 2px}
+
+  .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;
+        background:var(--line2);color:var(--ink3);font-size:11.5px;cursor:pointer;border:1px solid transparent}
+  .chip:hover{border-color:var(--line)}
+  .chip.on{background:var(--green-soft);color:var(--green-ink);font-weight:600;border-color:#CDEBD8}
+  .chip.add{border:1px dashed var(--line);background:transparent}
+
+  /* 进度条 */
+  .progress{display:none;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid var(--line);
+            background:#FCFDFB;font-size:11.5px;color:var(--ink3)}
+  .progress.on{display:flex}
+  .track{flex:1;height:5px;border-radius:3px;background:var(--line2);overflow:hidden}
+  .track i{display:block;height:100%;width:0;background:var(--green);transition:width .25s linear}
+  .dotpulse{width:7px;height:7px;border-radius:50%;background:var(--green);animation:p 1s infinite}
+  @keyframes p{0%,100%{opacity:.35}50%{opacity:1}}
+
+  /* 结果表格 */
+  .results{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 20px 0}
+  .bar{display:flex;align-items:center;gap:10px;padding:10px 0;font-size:11.5px;color:var(--ink3)}
+  .bar b{color:var(--ink)}
+  .tablewrap{flex:1;min-height:0;overflow:auto;border:1px solid var(--line);border-radius:var(--r);background:#fff}
+  table{width:100%;border-collapse:collapse}
+  thead th{position:sticky;top:0;background:var(--side);z-index:1;font-weight:500;font-size:11px;
+           color:var(--ink4);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  td{padding:10px;border-bottom:1px solid var(--line2);font-size:12.5px;vertical-align:middle}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover td{background:#FCFDFB}
+  tbody tr.pick td{background:#FBFEFC}
+  .name{font-weight:600;display:block}
+  .host{font-size:11px;color:var(--ink4)}
+  .tag{font-size:10.5px;padding:2px 7px;border-radius:6px;background:var(--line2);color:var(--ink3)}
+  .tag.vid{background:var(--orange-soft);color:var(--orange-ink)}
+  .tag.zip{background:var(--green-soft);color:var(--green-ink)}
+  .tag.dup{background:var(--line2);color:var(--ink4)}
+
+  /* 跳过区 */
+  .skipped{margin:10px 20px 0;border:1px solid var(--line);border-radius:var(--r);background:#fff;overflow:hidden}
+  .skipped summary{padding:9px 12px;font-size:11.5px;color:var(--ink3);cursor:pointer;background:var(--side);
+                   display:flex;justify-content:space-between;list-style:none}
+  .skipped summary::-webkit-details-marker{display:none}
+  .skipped .it{display:flex;justify-content:space-between;gap:14px;padding:7px 12px;
+               font-size:11.5px;color:var(--ink3);border-top:1px solid var(--line2)}
+  .why{color:#B45309;white-space:nowrap}
+
+  /* 底栏 */
+  footer{flex:0 0 auto;display:flex;align-items:center;gap:12px;padding:12px 20px;margin-top:12px;
+         border-top:1px solid var(--line);background:var(--side)}
+  .sum{font-size:12px;color:var(--ink3)}
+  .sum b{color:var(--ink)}
+  .spacer{flex:1}
+
+  /* 空态 */
+  .empty{display:none;flex:1;align-items:center;justify-content:center;flex-direction:column;
+         gap:6px;color:var(--ink4);font-size:12.5px}
+  .empty.on{display:flex}
+  .empty .ic{font-size:26px;opacity:.5}
+  .tip{margin:0 20px;padding:10px 12px;border:1px dashed var(--line);border-radius:var(--r);
+       font-size:11.5px;color:var(--ink4);background:#fff}
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <span><b>dlm</b> · 站点抓取</span>
+  <span class="winbtns">— ▢ ✕</span>
+</div>
+
+<main>
+  <div class="pad">
+    <div class="head">
+      <div>
+        <h1>扫描站点，挑出要下的文件</h1>
+        <p class="sub">扫描只读页面、只出清单；勾选之后才会建任务。</p>
+      </div>
+      <div class="tabs">
+        <div class="tab on">本次扫描</div>
+        <div class="tab">历史</div>
+      </div>
+    </div>
+
+    <div class="form">
+      <div class="row">
+        <span class="lab">起始页</span>
+        <input id="url" class="input url" value="https://example.com/downloads/" spellcheck="false">
+        <button id="scan" class="btn primary">扫描</button>
+        <button id="stop" class="btn" disabled>停止</button>
+      </div>
+
+      <div class="row">
+        <span class="lab">范围</span>
+        <span class="lab" style="min-width:auto">深度</span>
+        <input class="input num" value="2">
+        <label class="check"><input type="checkbox" class="cb" checked> 只抓同站</label>
+        <span class="sep"></span>
+        <span class="lab" style="min-width:auto">包含</span>
+        <input class="input sm" value="*.zip, *.7z">
+        <span class="lab" style="min-width:auto">排除</span>
+        <input class="input sm" style="width:120px" value="*sample*">
+      </div>
+
+      <div class="row">
+        <span class="lab">模板</span>
+        <div class="chips">
+          <span class="chip on">素材站 · 深 2 · 只同站</span>
+          <span class="chip">软件发布页</span>
+          <span class="chip">视频分集</span>
+          <span class="chip add">+ 存为模板</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="progress" class="progress">
+    <span class="dotpulse"></span>
+    <span id="ptext">正在抓第 1 页…</span>
+    <div class="track"><i id="pbar"></i></div>
+    <span id="pfound">找到 0 个 · 跳过 0 条</span>
+  </div>
+
+  <div class="results">
+    <div class="bar">
+      <span>找到 <b id="total">0</b> 个文件 · 已选 <b id="picked">0</b> 个</span>
+      <span class="spacer"></span>
+      <span>按名称 <span style="color:var(--ink4)">▾</span></span>
+    </div>
+
+    <div id="tablewrap" class="tablewrap" style="display:none">
+      <table>
+        <thead><tr>
+          <th style="width:34px"><input id="all" type="checkbox" class="cb"></th>
+          <th>文件名</th>
+          <th style="width:78px">类型</th>
+          <th style="width:96px">来自</th>
+          <th style="width:84px">大小</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="empty" class="empty on">
+      <div class="ic">⌕</div>
+      <div>还没有扫描结果 — 填好上面的地址，点「扫描」</div>
+    </div>
+  </div>
+
+  <details class="skipped" id="skipped" style="display:none">
+    <summary><span>被跳过 <b id="skipn">0</b> 条（只读）</span><span>展开 ▾</span></summary>
+    <div id="skiplist"></div>
+  </details>
+
+  <p class="tip" id="tip">提示：抓取会先读 <code>robots.txt</code>，命中 Disallow 的路径不会发请求；两次请求之间默认间隔 300 ms。</p>
+
+  <footer>
+    <span class="sum">已选 <b id="picked2">0</b> 个 · 合计 <b id="size">0 MB</b></span>
+    <span class="spacer"></span>
+    <button class="btn sm" id="selall">全选</button>
+    <button class="btn sm" id="selnone">全不选</button>
+    <button class="btn green" id="enqueue" disabled>加入队列（0）</button>
+  </footer>
+</main>
+
+<script>
+const DATA = [
+  { name:"pack-01.zip", host:"/downloads/2026/", type:"zip", from:"第 1 页", size:240, mb:240 },
+  { name:"demo-trailer.mp4", host:"/media/", type:"vid", from:"第 2 页", size:86, mb:86 },
+  { name:"tools-0.9.2.zip", host:"/release/", type:"zip", from:"第 2 页", size:12, mb:12 },
+  { name:"pack-01.zip?mirror=1", host:"/downloads/2026/ · 与 pack-01.zip 同源", type:"dup", from:"第 3 页", size:240, mb:0, dup:true }
+];
+const SKIP = [
+  ["https://other.example/x.zip", "不同站点"],
+  ["https://example.com/private/a.zip", "robots.txt 禁止"],
+  ["https://example.com/downloads/sample-pack.zip", "命中排除 *sample*"],
+  ["https://example.com/login", "不是文件"],
+  ["https://example.com/downloads/pack-01.zip", "重复"]
+];
+
+const $ = id => document.getElementById(id);
+let picked = new Set();
+
+function render(){
+  const tb = $("tbody"); tb.innerHTML = "";
+  DATA.forEach((d,i)=>{
+    const tr = document.createElement("tr");
+    if (picked.has(i)) tr.className = "pick";
+    const tagCls = d.type === "zip" ? "tag zip" : d.type === "vid" ? "tag vid" : "tag dup";
+    const tagTxt = d.type === "zip" ? "压缩包" : d.type === "vid" ? "视频" : "已去重";
+    tr.innerHTML = `
+      <td><input type="checkbox" class="cb rowcb" data-i="${i}" ${picked.has(i)?"checked":""} ${d.dup?"disabled":""}></td>
+      <td><span class="name">${d.name}</span><span class="host">${d.host}</span></td>
+      <td><span class="${tagCls}">${tagTxt}</span></td>
+      <td>${d.from}</td>
+      <td>${d.size} MB</td>`;
+    tb.appendChild(tr);
+  });
+  tb.querySelectorAll(".rowcb").forEach(cb=>{
+    cb.addEventListener("change", e=>{
+      const i = +e.target.dataset.i;
+      e.target.checked ? picked.add(i) : picked.delete(i);
+      update();
+    });
+  });
+  update();
+}
+
+function update(){
+  const n = picked.size;
+  let mb = 0; picked.forEach(i => mb += DATA[i].mb);
+  $("picked").textContent = n;
+  $("picked2").textContent = n;
+  $("size").textContent = mb >= 1024 ? (mb/1024).toFixed(1)+" GB" : mb+" MB";
+  $("enqueue").textContent = `加入队列（${n}）`;
+  $("enqueue").disabled = n === 0;
+  $("all").checked = n === DATA.filter(d=>!d.dup).length;
+}
+
+function fillSkips(){
+  $("skiplist").innerHTML = SKIP.map(([u,w])=>`<div class="it"><span>${u}</span><span class="why">${w}</span></div>`).join("");
+  $("skipn").textContent = SKIP.length;
+  $("skipped").style.display = "block";
+}
+
+$("scan").addEventListener("click", ()=>{
+  picked = new Set();
+  $("empty").classList.remove("on");
+  $("tablewrap").style.display = "none";
+  $("skipped").style.display = "none";
+  $("progress").classList.add("on");
+  $("scan").disabled = true; $("stop").disabled = false;
+  const steps = [
+    ["正在抓第 1 页…", 18, 2, 1],
+    ["正在抓第 2 页…", 46, 7, 3],
+    ["正在抓第 3 页…", 74, 11, 5],
+    ["整理清单…", 96, 12, 5]
+  ];
+  let i = 0;
+  const tick = setInterval(()=>{
+    if (i >= steps.length){
+      clearInterval(tick);
+      $("progress").classList.remove("on");
+      $("scan").disabled = false; $("stop").disabled = true;
+      $("tablewrap").style.display = "block";
+      $("total").textContent = DATA.length;
+      render(); fillSkips();
+      return;
+    }
+    const [t,p,f,s] = steps[i++];
+    $("ptext").textContent = t;
+    $("pbar").style.width = p + "%";
+    $("pfound").textContent = `找到 ${f} 个 · 跳过 ${s} 条`;
+  }, 700);
+});
+
+$("stop").addEventListener("click", ()=>{
+  $("progress").classList.remove("on");
+  $("scan").disabled = false; $("stop").disabled = true;
+  $("empty").classList.add("on");
+});
+
+$("all").addEventListener("change", e=>{
+  picked = new Set();
+  if (e.target.checked) DATA.forEach((d,i)=>{ if(!d.dup) picked.add(i); });
+  render();
+});
+$("selall").addEventListener("click", ()=>{ DATA.forEach((d,i)=>{ if(!d.dup) picked.add(i); }); render(); });
+$("selnone").addEventListener("click", ()=>{ picked = new Set(); render(); });
+$("enqueue").addEventListener("click", ()=>{
+  const n = picked.size;
+  $("enqueue").textContent = `已加入 ${n} 个 ✓`;
+  setTimeout(()=>update(), 1200);
+});
+</script>
+</body>
+</html>
