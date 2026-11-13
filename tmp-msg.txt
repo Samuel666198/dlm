@@ -1,11 +1,10 @@
-release: 0.2.0 —— F3 快速添加收尾，全套计划完成
+chore(release): 0.2.1 —— 清掉旧扩展 SW、安装器补 InstallDelete
 
-- basket.rs：快速添加窗口（粘贴多行链接，一行一个；空行/#注释/重复/非 http(s) 自动过滤）
-  计划里的"拖拽篮"改成粘贴：egui 收不到浏览器拖出的 URL（text/uri-list 不给窗口）
-- gui::RELEASE 0.1.3 → 0.2.0；扩展 0.2.13
-- 产物（本地，未发布）：
-  dlm-0.2.0-win-x64-setup.exe 6,969,772 B sha256 c8aec8ca…5670
-  dlm-0.2.0-win-x64.zip 11,605,269 B sha256 a00f627f…11e4
-- 文档：计划逐项标注完成；交接与 INDEX 同步（lib 403 / 扩展 0.2.13）
+- installer.iss 加 [InstallDelete]：{localappdata}\dlm\extension\background-*.js
+  （带版本号的 SW 文件名不会被覆盖，升级后旧文件一直留着）
+- 机器清理（本机，已获用户同意）：删除 %LOCALAPPDATA%\dlm\bin 旧副本（0.1.1，11-12）、
+  删除 extension\background-0.2.12.js；开始菜单/桌面快捷方式本来已指向 E:\Tool\dlm\bin，无需改
+- 版本 0.2.0 → 0.2.1；产物 dlm-0.2.1-win-x64-setup.exe 6,969,499 B
+  sha256 927c45fd…c899；zip 11,605,269 B sha256 ccd852cd…dd11
 
-门禁：fmt / lib 403 / bins 4 / integration 121 / clippy / extension 全绿
+门禁：见本次输出（fmt/lib/bins/integration/clippy/extension）

@@ -1,4 +1,4 @@
-; dlm 的 Windows 安装包（Inno Setup 6）。
+﻿; dlm 的 Windows 安装包（Inno Setup 6）。
 ;
 ; 由 packaging\build-installer.ps1 调用，不手敲：
 ;   ISCC.exe /DAppVersion=0.1.1 /DSourceDir=<暂存目录> /DOutDir=<输出目录> installer.iss
@@ -73,6 +73,10 @@ Name: "chinese"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："; Flags: unchecked
 Name: "autostart"; Description: "开机自动启动（托盘常驻）"; GroupDescription: "附加任务："; Flags: unchecked
+
+[InstallDelete]
+; 旧版的 service worker 文件名带版本号，升级时不会被覆盖，必须显式清掉
+Type: files; Name: "{localappdata}\dlm\extension\background-*.js"
 
 [Files]
 Source: "{#SourceDir}\dlm.exe"; DestDir: "{app}"; Flags: ignoreversion
