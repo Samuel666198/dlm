@@ -1,0 +1,9 @@
+release: 0.5.0 —— 限速计划 / 代理支持 / 托盘提示
+
+- gui::RELEASE 0.3.2 → 0.5.0；扩展 0.2.16
+- 产物：dlm-0.5.0-win-x64-setup.exe 7,011,764 B sha256 b1facbbe…4472
+        dlm-0.5.0-win-x64.zip 11,674,363 B sha256 cf5a9e7a…dd15
+- 已发布 v0.5.0：两资产匿名 HEAD 均 200；main:latest.json 已指向 0.5.0
+- 更新链路自 0.5.0 起可测：装 0.3.1 的机器应能收到 0.5.0
+
+门禁：见前次全量（fmt/lib 432/bins 4/integration 121/clippy/extension）
