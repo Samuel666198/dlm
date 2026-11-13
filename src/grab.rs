@@ -233,6 +233,115 @@ pub fn keep(url: &str, page_host: &str, rules: &GrabRules) -> bool {
     true
 }
 
+/// 一条链接被判成什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// 看起来是要下的文件。
+    File,
+    /// 还是页面，可以继续往里走（受深度限制）。
+    Page,
+}
+
+/// 抓取清单：**只列不下载**。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GrabPlan {
+    pub files: Vec<String>,
+    pub pages: Vec<String>,
+    /// 被丢掉的原因，给人看的：`(url, reason)`
+    pub skipped: Vec<(String, String)>,
+}
+
+/// 常见可下载扩展名。判"是文件"用它，判"是页面"用 `Page` 兜底。
+const FILE_EXTS: &[&str] = &[
+    "zip", "7z", "rar", "gz", "tar", "iso", "exe", "msi", "dmg", "pkg", "apk", "pdf", "epub",
+    "mp4", "mkv", "avi", "mov", "webm", "flac", "mp3", "wav", "m3u8", "mpd", "bin", "img",
+];
+
+/// 按扩展名判定这条链接像文件还是像页面。
+pub fn classify(url: &str) -> Kind {
+    let path = path_of(url).unwrap_or_default();
+    let last = path.rsplit('/').next().unwrap_or("");
+    let ext = last.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext {
+        Some(ext) if FILE_EXTS.contains(&ext.as_str()) => Kind::File,
+        _ => Kind::Page,
+    }
+}
+
+/// 从"已经抓到的页面"里生成清单（不联网、不建任务）。
+///
+/// `pages` 是 `(页面 URL, HTML)` 的快照；深度按 BFS 层数算，1 = 只看起始页。
+/// 同一链接只出现一次；被规则拒掉的进 `skipped`，并带上人话原因。
+pub fn plan(start: &str, pages: &[(String, String)], rules: &GrabRules) -> GrabPlan {
+    let mut out = GrabPlan::default();
+    let Some(start_host) = host_of(start) else {
+        out.skipped
+            .push((start.to_string(), "起始地址不是 http(s)".into()));
+        return out;
+    };
+    let mut seen_files: BTreeSet<String> = BTreeSet::new();
+    let mut seen_pages: BTreeSet<String> = BTreeSet::new();
+    seen_pages.insert(start.to_string());
+
+    // depth=1 只看起始页；每多一层就再往里一圈
+    let mut frontier: Vec<(String, String)> = pages
+        .iter()
+        .filter(|(url, _)| url == start)
+        .cloned()
+        .collect();
+    if frontier.is_empty() {
+        if let Some((url, html)) = pages.first() {
+            frontier.push((url.clone(), html.clone()));
+        }
+    }
+
+    for level in 1..=rules.depth.max(1) {
+        let mut next: Vec<(String, String)> = Vec::new();
+        for (page_url, html) in &frontier {
+            for link in extract_links(html, page_url) {
+                if !keep(&link, &start_host, rules) {
+                    let reason = skip_reason(&link, &start_host, rules);
+                    if !out.skipped.iter().any(|(u, _)| u == &link) {
+                        out.skipped.push((link, reason));
+                    }
+                    continue;
+                }
+                match classify(&link) {
+                    Kind::File => {
+                        if seen_files.insert(link.clone()) {
+                            out.files.push(link);
+                        }
+                    }
+                    Kind::Page => {
+                        if level < rules.depth && seen_pages.insert(link.clone()) {
+                            out.pages.push(link.clone());
+                            if let Some((u, h)) = pages.iter().find(|(u, _)| u == &link) {
+                                next.push((u.clone(), h.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        frontier = next;
+        if frontier.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+fn skip_reason(link: &str, start_host: &str, rules: &GrabRules) -> String {
+    let host = host_of(link).unwrap_or_default();
+    if rules.same_host && !host.eq_ignore_ascii_case(start_host) {
+        return format!("不同站点（{host}）");
+    }
+    if !rules.include.is_empty() && !rules.include.iter().any(|p| matches(p, link)) {
+        return "不匹配任何包含规则".into();
+    }
+    "命中排除规则".into()
+}
+
 /// 页面主机的取法（抓取时用来判同域）。
 pub fn host_of(url: &str) -> Option<String> {
     split_url(url).map(|(_, host, _)| host)
@@ -326,6 +435,69 @@ mod tests {
             !keep("https://a.example/sample.zip", "a.example", &rules),
             "排除优先"
         );
+    }
+
+    #[test]
+    fn plan_lists_files_and_pages_without_downloading_anything() {
+        let start = "https://a.example/dir/";
+        let pages = vec![
+            (
+                start.to_string(),
+                r#"<a href="/f/1.zip">1</a><a href="/f/2.mp4">2</a><a href="more.html">more</a>
+                   <a href="https://b.example/x.zip">off</a><a href="/f/1.zip">dup</a>"#
+                    .to_string(),
+            ),
+            (
+                "https://a.example/dir/more.html".to_string(),
+                r#"<a href="/f/3.rar">3</a>"#.to_string(),
+            ),
+        ];
+        let rules = GrabRules {
+            depth: 2,
+            ..GrabRules::default()
+        };
+        let got = plan(start, &pages, &rules);
+
+        assert_eq!(
+            got.files,
+            vec![
+                "https://a.example/f/1.zip".to_string(),
+                "https://a.example/f/2.mp4".to_string(),
+                "https://a.example/f/3.rar".to_string(),
+            ],
+            "去重、跨层收文件"
+        );
+        assert_eq!(
+            got.pages,
+            vec!["https://a.example/dir/more.html".to_string()]
+        );
+        assert!(
+            got.skipped
+                .iter()
+                .any(|(u, r)| u.contains("b.example") && r.contains("不同站点")),
+            "跨站要点名原因：{:?}",
+            got.skipped
+        );
+    }
+
+    #[test]
+    fn depth_one_never_walks_into_sub_pages() {
+        let start = "https://a.example/";
+        let pages = vec![(
+            start.to_string(),
+            r#"<a href="p.html">p</a><a href="x.zip">x</a>"#.to_string(),
+        )];
+        let got = plan(start, &pages, &GrabRules::default());
+        assert!(got.pages.is_empty(), "depth=1 不该把子页面排进清单");
+        assert_eq!(got.files, vec!["https://a.example/x.zip".to_string()]);
+    }
+
+    #[test]
+    fn classify_uses_the_extension_and_defaults_to_page() {
+        assert_eq!(classify("https://a/x.ZIP"), Kind::File);
+        assert_eq!(classify("https://a/x.tar.gz"), Kind::File);
+        assert_eq!(classify("https://a/page.html"), Kind::Page);
+        assert_eq!(classify("https://a/"), Kind::Page);
     }
 
     #[test]
