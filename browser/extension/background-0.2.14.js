@@ -380,6 +380,7 @@ function loadTakeoverCfg() {
         enabled: !!saved.enabled,
         whitelist: Array.isArray(saved.whitelist) ? saved.whitelist : [],
         minBytes: Number(saved.minBytes) || 0,
+        mimeWhitelist: Array.isArray(saved.mimeWhitelist) ? saved.mimeWhitelist : [],
         blocklist: Array.isArray(got && got.siteBlock) ? got.siteBlock : [],
       };
     });

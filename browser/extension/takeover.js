@@ -26,6 +26,31 @@
     return allow.map((e) => String(e).toLowerCase().replace(/^\./, "")).includes(ext);
   }
 
+  // 响应头给的 MIME 往往比扩展名更可信（尤其"无扩展名的附件"）。
+  // 只认一组明确的"这就是个文件"的类型；application/octet-stream 太泛，不认。
+  const DEFAULT_MIME = [
+    "application/zip", "application/x-7z-compressed", "application/x-rar-compressed",
+    "application/x-tar", "application/gzip", "application/x-iso9660-image",
+    "application/vnd.android.package-archive", "application/x-msdownload",
+    "application/x-msi", "application/pdf", "application/epub+zip",
+    "application/octet-stream+dlm",
+  ];
+
+  function mimeAllowed(mime, list) {
+    const m = String(mime || "").toLowerCase().split(";")[0].trim();
+    if (!m) return false;
+    const allow = Array.isArray(list) && list.length ? list : DEFAULT_MIME;
+    if (allow.map((x) => String(x).toLowerCase()).includes(m)) return true;
+    // 音视频按大类放行：它们几乎一定是"文件"而不是页面
+    return /^(video|audio)\//.test(m);
+  }
+
+  function fileNameOf(path) {
+    const s = String(path || "");
+    const cut = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+    return cut >= 0 ? s.slice(cut + 1) : s;
+  }
+
   function siteAllowed(url, blocklist) {
     if (!Array.isArray(blocklist) || !blocklist.length) return true;
     let host = "";
@@ -43,7 +68,9 @@
     if (item.state && item.state !== "in_progress") return { take: false, reason: "state" };
     if ((item.bytesReceived || 0) > 0) return { take: false, reason: "already-started" };
     const name = item.filename || item.finalUrl || item.url || "";
-    if (!extAllowed(name, cfg.whitelist)) return { take: false, reason: "ext" };
+    if (!extAllowed(name, cfg.whitelist) && !mimeAllowed(item.mime, cfg.mimeWhitelist)) {
+      return { take: false, reason: "ext" };
+    }
     if (!siteAllowed(item.finalUrl || item.url, cfg.blocklist)) {
       return { take: false, reason: "site" };
     }
@@ -53,7 +80,7 @@
     return { take: true, reason: "ok" };
   }
 
-  const api = { DEFAULT_WHITELIST, extOf, extAllowed, siteAllowed, shouldTakeover };
+  const api = { DEFAULT_WHITELIST, DEFAULT_MIME, extOf, extAllowed, mimeAllowed, fileNameOf, siteAllowed, shouldTakeover };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.dlmTakeover = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
