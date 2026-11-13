@@ -1,0 +1,10 @@
+feat(gui): 重命名模板 E1 + 同名处理 E2
+
+- naming.rs：{name} {ext} {date} {n} 四个变量、未知变量原样保留；
+  {date} 用 UTC（跨时区/夏令时会让同一文件在不同机器得到不同名字）
+- 同名策略 auto（默认，加 (1)）/ skip（不建任务）/ overwrite；taken_in 同时看
+  目标文件与引擎的 .part 中间文件，避免"以为没占其实在下"
+- 建任务那一刻定名字，之后整条链路只认一个名字
+- 设置面板加「重命名模板」「同名文件」两项；用例 6 条，lib 396 → 401
+
+门禁：fmt / lib 401 / bins 4 / integration 121 / clippy / extension 全绿

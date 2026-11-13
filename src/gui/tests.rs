@@ -337,6 +337,8 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
         scan_after_done: false,
+        rename_template: String::new(),
+        on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
     };
     let got = argv(tuning);
     assert!(
@@ -358,6 +360,8 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
         scan_after_done: false,
+        rename_template: String::new(),
+        on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
     });
     assert!(
         !unlimited.iter().any(|s| s == "--max-speed"),
@@ -377,6 +381,8 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
         scan_after_done: false,
+        rename_template: String::new(),
+        on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
     });
     assert!(
         clamped

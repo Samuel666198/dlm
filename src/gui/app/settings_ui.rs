@@ -123,6 +123,26 @@ impl App {
             );
         });
 
+        row(ui, "重命名模板", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.draft.rename_template)
+                    .hint_text("留空 = 原名；可用 {name} {ext} {date} {n}")
+                    .desired_width(280.0),
+            );
+        });
+        row(ui, "同名文件", |ui| {
+            egui::ComboBox::from_id_salt("on-dup")
+                .selected_text(match self.draft.on_duplicate.as_str() {
+                    "skip" => "跳过",
+                    "overwrite" => "覆盖",
+                    _ => "自动加编号",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.draft.on_duplicate, "auto".into(), "自动加编号");
+                    ui.selectable_value(&mut self.draft.on_duplicate, "skip".into(), "跳过");
+                    ui.selectable_value(&mut self.draft.on_duplicate, "overwrite".into(), "覆盖");
+                });
+        });
         row(ui, "按类型分目录", |ui| {
             ui.checkbox(&mut self.draft.category_dirs, "");
             ui.label(

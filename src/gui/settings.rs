@@ -41,6 +41,10 @@ pub struct Settings {
     pub category_dirs: bool,
     /// 完成后用 Windows Defender 扫一遍（默认关：扫描要占资源）。
     pub scan_after_done: bool,
+    /// 重命名模板：{name} {ext} {date} {n}；空 = 原名。
+    pub rename_template: String,
+    /// 同名冲突：uto（默认，加 (1)）/ skip / overwrite。
+    pub on_duplicate: String,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -75,6 +79,8 @@ impl Default for Settings {
             max_speed_kib: 0,
             category_dirs: false,
             scan_after_done: false,
+            rename_template: String::new(),
+            on_duplicate: "auto".to_string(),
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,

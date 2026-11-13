@@ -105,6 +105,29 @@ fn apply(
             on_complete,
             reply,
         } => {
+            // E1/E2：落点名字在**建任务这一刻**定下来（模板 + 同名处理），
+            // 之后整条链路只认这一个名字。
+            let dir = if tuning.category_dirs {
+                tuning.out_dir.join(queue::category_for(&name))
+            } else {
+                tuning.out_dir.clone()
+            };
+            let dated = crate::gui::naming::render_template(
+                &tuning.rename_template,
+                &name,
+                &crate::gui::naming::date_string(queue::now_secs()),
+                None,
+            );
+            let name =
+                match crate::gui::naming::resolve_duplicate(&dated, tuning.on_duplicate, |c| {
+                    crate::gui::naming::taken_in(&dir, c)
+                }) {
+                    Ok(name) => name,
+                    Err(reason) => {
+                        let _ = reply.send(Err(reason));
+                        return false;
+                    }
+                };
             let category = tuning.category_dirs.then(|| queue::category_for(&name));
             match store.add(
                 &url,
