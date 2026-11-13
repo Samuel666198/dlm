@@ -67,6 +67,10 @@
     if (!item) return { take: false, reason: "no-item" };
     if (item.state && item.state !== "in_progress") return { take: false, reason: "state" };
     if ((item.bytesReceived || 0) > 0) return { take: false, reason: "already-started" };
+    const raw = String(item.finalUrl || item.url || "");
+    // 浏览器把数据留在内存/页面上，没有可交给下载器的 URL —— 说清原因，别让用户猜。
+    if (/^blob:/i.test(raw)) return { take: false, reason: "blob" };
+    if (/^data:/i.test(raw)) return { take: false, reason: "data" };
     const name = item.filename || item.finalUrl || item.url || "";
     if (!extAllowed(name, cfg.whitelist) && !mimeAllowed(item.mime, cfg.mimeWhitelist)) {
       return { take: false, reason: "ext" };

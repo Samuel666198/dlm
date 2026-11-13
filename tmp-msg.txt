@@ -1,0 +1,9 @@
+feat(ext): 接管"为什么没接"可见（E1/E2）+ 0.4.0 计划
+
+- takeover.js：blob:/data: 明确返回原因（数据在页面内存里，没有可交出的 URL）
+- background：未接管时把 {ok:false, reason, at} 写入 lastTakeover，选项页可见
+- options：新增「最近一次接管」，把原因翻成人话（含 no-ack：宿主 2 秒没回执）
+- 扩展 0.2.14 → 0.2.15（SW 同步改名）；gui::RELEASE 0.3.1 → 0.3.2
+- docs/plans/2026-11-13-0.4.0-计划.md：C1→E1/E2→A→B→D 五阶段，含判据与回退
+
+门禁：fmt / lib 404 / bins 4 / integration 121 / clippy / extension 全绿
