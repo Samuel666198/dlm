@@ -424,9 +424,19 @@ pub fn scan(start: &str, rules: &GrabRules, limits: Limits) -> GrabPlan {
     let mut visited: BTreeSet<String> = BTreeSet::new();
     visited.insert(start.to_string());
 
+    // robots 只读一次；读不到就当没有限制（抓的是公开页面，不因 404 就罢工）
+    let mut skipped_by_robots: Vec<String> = Vec::new();
+    let robots = origin_of(start)
+        .and_then(|o| fetch_text(&format!("{o}/robots.txt"), 256 * 1024, limits.timeout).ok())
+        .unwrap_or_default();
+
     while let Some((url, level)) = queue.pop_front() {
         if pages.len() >= limits.max_pages {
             break;
+        }
+        if !robots_allows(&robots, &path_of(&url).unwrap_or_else(|| "/".into())) {
+            skipped_by_robots.push(url.clone());
+            continue;
         }
         if !pages.is_empty() && !limits.delay.is_zero() {
             std::thread::sleep(limits.delay);
@@ -458,7 +468,59 @@ pub fn scan(start: &str, rules: &GrabRules, limits: Limits) -> GrabPlan {
             }
         }
     }
-    plan(start, &pages, rules)
+    let mut out = plan(start, &pages, rules);
+    for url in skipped_by_robots {
+        out.skipped.push((url, "robots.txt 禁止".into()));
+    }
+    out
+}
+
+/// `robots.txt` 的最小判定：只看 `User-agent: *` 段落里的 `Disallow`。
+///
+/// 刻意只做"最小"：
+/// - 不认 `Allow` 的优先级（`Allow` 优先规则各站实现不一，宁可少抓）
+/// - 不认 `Crawl-delay`（我们自己的 `delay` 已经够慢）
+/// - 认不出的一律当"允许"，因为抓取本来就是公开页面
+pub fn robots_allows(robots: &str, path: &str) -> bool {
+    let mut in_star = false;
+    let mut matched_any_agent = false;
+    for raw in robots.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "user-agent" => {
+                in_star = value == "*";
+                if in_star {
+                    matched_any_agent = true;
+                }
+            }
+            "disallow" if in_star => {
+                if value.is_empty() {
+                    continue; // 空 Disallow = 全允许
+                }
+                let prefix = value.trim_end_matches('*');
+                if path.starts_with(prefix) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    let _ = matched_any_agent;
+    true
+}
+
+/// `scheme://host` —— robots 的位置。
+pub fn origin_of(url: &str) -> Option<String> {
+    let (scheme, host, _) = split_url(url)?;
+    Some(format!("{scheme}://{host}"))
 }
 
 /// 页面主机的取法（抓取时用来判同域）。
@@ -669,7 +731,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
-            for _ in 0..routes.len() {
+            for _ in 0..(routes.len() + 4) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     break;
                 };
@@ -742,6 +804,27 @@ mod tests {
         let got = scan("http://127.0.0.1:1/", &GrabRules::default(), limits);
         assert!(got.files.is_empty());
         assert!(!got.skipped.is_empty(), "起始页失败必须有原因");
+    }
+    #[test]
+    fn robots_disallow_blocks_that_path_only() {
+        let robots = "User-agent: *\nDisallow: /private/\nDisallow: /tmp\n\nUser-agent: Googlebot\nDisallow: /\n";
+        assert!(!robots_allows(robots, "/private/x.zip"));
+        assert!(!robots_allows(robots, "/tmpfile"));
+        assert!(robots_allows(robots, "/public/x.zip"));
+        assert!(robots_allows("", "/anything"), "没有 robots = 全允许");
+        assert!(
+            robots_allows("User-agent: *\nDisallow:\n", "/x"),
+            "空 Disallow = 全允许"
+        );
+    }
+
+    #[test]
+    fn origin_is_scheme_and_host_only() {
+        assert_eq!(
+            origin_of("https://a.example/dir/x.html").as_deref(),
+            Some("https://a.example")
+        );
+        assert!(origin_of("ftp://a/x").is_none());
     }
     #[test]
     fn host_of_rejects_non_http() {

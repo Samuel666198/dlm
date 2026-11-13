@@ -1,8 +1,9 @@
-feat(grab): BFS 抓取执行（scan + Limits）
+feat(grab): robots.txt 最小判定并接进 scan
 
-- scan()：从起始页 BFS 到页数上限/深度用尽；两请求之间 sleep(delay) 做最基本的礼貌；
-  子页面失败只跳过不影响已有清单，起始页失败才整体报错并给原因
-- Limits：max_pages / max_bytes / timeout / delay，默认 20 页、2 MiB、15s、300ms
-- 用例 2 组：本地两页服务能跨层收文件；死地址返回原因且不产出（lib 415 → 417）
+- robots_allows()：只看 User-agent:* 段落的 Disallow 前缀；不认 Allow 优先级与 Crawl-delay
+  （宁可少抓）；空 Disallow = 全允许；读不到 robots 当没有限制
+- scan() 每次抓取前读一次 {origin}/robots.txt（256 KiB 上限），命中 Disallow 的页面进
+  skipped 清单并注明原因，不再请求
+- origin_of() 新增；用例：Disallow 前缀匹配、空/无 robots、origin 解析（lib 417 → 419）
 
 门禁：见输出
