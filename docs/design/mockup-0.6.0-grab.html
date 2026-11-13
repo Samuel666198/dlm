@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dlm · 站点抓取窗口 + 命令面板（沿用现有配色）</title>
+<style>
+  /* 配色沿用现有客户端：浅底 + 绿色进度 + 橙色主按钮，不换色系 */
+  :root{
+    --bg:#FAFAF9; --side:#F5F6F3; --card:#FFFFFF;
+    --ink:#111827; --ink2:#374151; --ink3:#6B7280; --ink4:#9CA3AF;
+    --line:#E5E7EB; --line2:#F1F2EE;
+    --green:#16A34A; --green-soft:#E7F6EC;
+    --orange:#F97316; --orange-soft:#FFF1E6;
+    --red:#DC2626; --red-soft:#FEF2F2;
+    --r:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#EDEFEA;font:13px/1.5 "Segoe UI",Inter,system-ui,sans-serif;color:var(--ink)}
+  .wrap{display:flex;gap:22px;padding:22px;flex-wrap:wrap;align-items:flex-start}
+  .win{width:760px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+       box-shadow:0 10px 28px rgba(17,24,39,.10);overflow:hidden}
+  .titlebar{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;
+            background:var(--side);border-bottom:1px solid var(--line);font-size:12px;color:var(--ink3)}
+  .winbody{padding:14px 16px}
+  h2{margin:0 0 2px;font-size:15px}
+  .hint{margin:0 0 12px;font-size:11.5px;color:var(--ink4)}
+
+  .row{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+  .lab{font-size:11.5px;color:var(--ink3);min-width:44px}
+  .input{height:30px;border:1px solid var(--line);border-radius:8px;padding:0 10px;font:inherit;background:#fff;color:var(--ink)}
+  .input.url{flex:1;min-width:320px}
+  .input.num{width:56px;text-align:center}
+  .btn{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:#fff;
+       color:var(--ink2);font:inherit;cursor:pointer}
+  .btn:hover{background:var(--line2)}
+  .btn.primary{background:var(--orange);border-color:var(--orange);color:#fff;font-weight:600}
+  .btn.primary:hover{filter:brightness(.96)}
+  .btn.green{background:var(--green);border-color:var(--green);color:#fff;font-weight:600}
+  .btn.sm{height:26px;padding:0 9px;font-size:12px}
+  .chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;
+        background:var(--line2);color:var(--ink3);font-size:11.5px;cursor:pointer}
+  .chip.on{background:var(--green-soft);color:#15803D;font-weight:600}
+  .kbd{font:11px/1 ui-monospace,monospace;border:1px solid var(--line);border-radius:5px;
+       padding:3px 5px;color:var(--ink3);background:var(--side)}
+
+  .progressline{display:flex;align-items:center;gap:10px;margin:12px 0 8px;font-size:11.5px;color:var(--ink3)}
+  .track{flex:1;height:5px;border-radius:3px;background:var(--line2);overflow:hidden}
+  .track i{display:block;height:100%;background:var(--green);width:42%}
+
+  table{width:100%;border-collapse:collapse;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th{font-weight:500;font-size:11px;color:var(--ink4);text-align:left;padding:8px 10px;
+     background:var(--side);border-bottom:1px solid var(--line)}
+  td{padding:9px 10px;border-bottom:1px solid var(--line2);font-size:12.5px;vertical-align:middle}
+  tr:last-child td{border-bottom:0}
+  tr:hover td{background:#FCFDFB}
+  .name{font-weight:600}
+  .host{font-size:11px;color:var(--ink4)}
+  .tag{font-size:10.5px;padding:2px 7px;border-radius:6px;background:var(--line2);color:var(--ink3)}
+  .tag.vid{background:var(--orange-soft);color:#C2410C}
+  .tag.zip{background:var(--green-soft);color:#15803D}
+  .cb{width:15px;height:15px;accent-color:var(--green)}
+
+  .skipped{border:1px solid var(--line);border-radius:10px;margin-top:10px;overflow:hidden}
+  .skipped header{padding:8px 10px;background:var(--side);border-bottom:1px solid var(--line);
+                  font-size:11.5px;color:var(--ink3);display:flex;justify-content:space-between}
+  .skipped .it{display:flex;justify-content:space-between;gap:12px;padding:7px 10px;
+               font-size:11.5px;color:var(--ink3);border-bottom:1px solid var(--line2)}
+  .skipped .it:last-child{border-bottom:0}
+  .why{color:#B45309}
+  .foot{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--line);background:var(--side)}
+  .foot .spacer{flex:1}
+
+  /* 命令面板：命令用英文，中文只做解释 */
+  .palette{width:560px;background:#fff;border:1px solid var(--line);border-radius:12px;
+           box-shadow:0 18px 40px rgba(17,24,39,.22);overflow:hidden}
+  .palette .top{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .palette input{flex:1;border:0;outline:none;font:15px/1.2 inherit;color:var(--ink)}
+  .cmd{display:grid;grid-template-columns:190px 1fr auto;gap:12px;align-items:center;
+       padding:8px 14px;font-size:12.5px}
+  .cmd.sel{background:var(--green-soft)}
+  .cmd code{font:12.5px/1.4 ui-monospace,monospace;color:#0F172A}
+  .cmd span{color:var(--ink3)}
+  .cmd small{color:var(--ink4);font-size:11px}
+  .cap{font-size:12px;color:var(--ink2);margin:6px 0 0 4px;max-width:760px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ================= 站点抓取窗口 ================= -->
+  <div>
+    <div class="win">
+      <div class="titlebar"><span>站点抓取</span><span>— ▢ ✕</span></div>
+      <div class="winbody">
+        <h2>扫描站点，挑出要下的文件</h2>
+        <p class="hint">扫描只读页面、只出清单；勾选之后才会建任务。</p>
+
+        <div class="row">
+          <span class="lab">起始页</span>
+          <input class="input url" value="https://example.com/downloads/">
+          <button class="btn primary">扫描</button>
+          <button class="btn">停止</button>
+        </div>
+
+        <div class="row">
+          <span class="lab">范围</span>
+          <span class="lab" style="min-width:auto">深度</span>
+          <input class="input num" value="2">
+          <label style="font-size:12px;color:var(--ink2)"><input type="checkbox" class="cb" checked> 只抓同站</label>
+          <span class="lab" style="min-width:auto;margin-left:8px">包含</span>
+          <input class="input" style="width:150px" value="*.zip, *.7z">
+          <span class="lab" style="min-width:auto">排除</span>
+          <input class="input" style="width:120px" value="*sample*">
+        </div>
+
+        <div class="row">
+          <span class="lab">模板</span>
+          <span class="chip on">素材站 · 深 2 · 只同站</span>
+          <span class="chip">软件发布页</span>
+          <span class="chip">+ 存为模板</span>
+        </div>
+
+        <div class="progressline">
+          <span>已抓 3 / 20 页</span>
+          <div class="track"><i></i></div>
+          <span>找到 12 个文件 · 跳过 5 条 · 1.2 秒前更新</span>
+        </div>
+
+        <table>
+          <thead><tr>
+            <th style="width:32px"><input type="checkbox" class="cb" checked></th>
+            <th>文件名</th><th style="width:70px">类型</th><th style="width:90px">来自</th><th style="width:80px">大小</th>
+          </tr></thead>
+          <tbody>
+            <tr><td><input type="checkbox" class="cb" checked></td>
+                <td><div class="name">pack-01.zip</div><div class="host">/downloads/2026/</div></td>
+                <td><span class="tag zip">压缩包</span></td><td>第 1 页</td><td>240 MB</td></tr>
+            <tr><td><input type="checkbox" class="cb" checked></td>
+                <td><div class="name">demo-trailer.mp4</div><div class="host">/media/</div></td>
+                <td><span class="tag vid">视频</span></td><td>第 2 页</td><td>86 MB</td></tr>
+            <tr><td><input type="checkbox" class="cb" checked></td>
+                <td><div class="name">tools-0.9.2.zip</div><div class="host">/release/</div></td>
+                <td><span class="tag zip">压缩包</span></td><td>第 2 页</td><td>12 MB</td></tr>
+            <tr><td><input type="checkbox" class="cb"></td>
+                <td><div class="name">pack-01.zip?mirror=1</div><div class="host">/downloads/2026/ · 与 pack-01.zip 同源</div></td>
+                <td><span class="tag">已去重</span></td><td>第 3 页</td><td>240 MB</td></tr>
+          </tbody>
+        </table>
+
+        <div class="skipped">
+          <header><span>被跳过 5 条（只读）</span><span>收起 ▴</span></header>
+          <div class="it"><span>https://other.example/x.zip</span><span class="why">不同站点</span></div>
+          <div class="it"><span>https://example.com/private/a.zip</span><span class="why">robots.txt 禁止</span></div>
+          <div class="it"><span>/downloads/sample-pack.zip</span><span class="why">命中排除 *sample*</span></div>
+        </div>
+      </div>
+      <div class="foot">
+        <span style="font-size:12px;color:var(--ink3)">已选 3 个 · 合计 338 MB</span>
+        <span class="spacer"></span>
+        <button class="btn sm">全选</button>
+        <button class="btn sm">全不选</button>
+        <button class="btn green">加入队列（3）</button>
+      </div>
+    </div>
+    <p class="cap"><b>站点抓取</b>：一行一个决策 —— 抓哪里、抓多深、收哪些、模板复用；清单里每行带来源页与类型，跳过项单独折叠并给原因。</p>
+  </div>
+
+  <!-- ================= 命令面板 ================= -->
+  <div>
+    <div class="palette">
+      <div class="top"><span style="color:var(--ink4)">›</span>
+        <input placeholder="speed 512 / pause all / grab example.com">
+        <span class="kbd">Esc</span></div>
+      <div class="cmd sel"><code>speed 512</code><span>把全局限速设为 512 KiB/s</span><small>立即生效</small></div>
+      <div class="cmd"><code>grab example.com</code><span>对站点发起抓取扫描</span><small>打开窗口</small></div>
+      <div class="cmd"><code>pause all</code><span>暂停全部任务</span><small>3 个在跑</small></div>
+      <div class="cmd"><code>settings proxy</code><span>跳到设置 · 代理</span><small>跳转</small></div>
+    </div>
+    <p class="cap"><b>命令面板</b>：命令本身用英文（<code>speed</code> / <code>grab</code> / <code>pause</code> / <code>settings</code>），中文只出现在右侧解释里 —— 和代码习惯一致，也不占命令词长度。</p>
+  </div>
+
+</div>
+</body>
+</html>
