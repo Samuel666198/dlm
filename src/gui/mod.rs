@@ -158,6 +158,8 @@ pub(crate) struct RuntimeTuning {
     pub max_speed_kib: u64,
     /// 限速计划（已解析）。派发前用 `max_speed_now()` 取"此刻该用多少"。
     pub speed_windows: Vec<speed_schedule::SpeedWindow>,
+    /// 代理（None = 直连）。子进程通过环境变量拿到它。
+    pub proxy: Option<crate::proxy::ProxySpec>,
     /// 队列层的每 host 连接预算。
     pub per_host: usize,
     /// 新任务的落点目录。
@@ -214,6 +216,7 @@ impl RuntimeTuning {
                 .iter()
                 .filter_map(|w| speed_schedule::SpeedWindow::parse(w).ok())
                 .collect(),
+            proxy: crate::proxy::parse_proxy(&s.proxy).ok().flatten(),
             per_host: s.per_host_connections,
             out_dir: s
                 .out_dir
@@ -282,6 +285,13 @@ pub fn run(config: GuiConfig) -> Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
     let settings = settings::Settings::load(&settings_dir);
+    // GUI 自己的抓取/探测走这里；子进程另由 runner 注入环境变量。
+    crate::proxy::set_global(
+        crate::proxy::parse_proxy(&settings.proxy)
+            .ok()
+            .flatten()
+            .map(|p| p.to_url()),
+    );
     // 本机现状（发行版版本 + 磁盘扩展版本）：既决定「要不要更新」，也决定界面怎么说。
     let local = updater::local_state(&settings_dir, &default_extension_dir());
     // 门禁/集成测试统一离线：`gates.ps1` 会设 `DLM_NO_UPDATE_CHECK=1`，

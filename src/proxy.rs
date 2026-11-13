@@ -96,6 +96,33 @@ pub fn parse_proxy(text: &str) -> Result<Option<ProxySpec>, String> {
     }))
 }
 
+/// 给子进程用的环境变量（reqwest 认这三个）。
+///
+/// 为什么走环境变量而不是改每个 client：真正的下载跑在 `dlm.exe` 子进程里，
+/// 那一侧有十几处建 client 的地方；让 reqwest 自己读环境是唯一不会漏的路。
+pub fn env_pairs(spec: Option<&ProxySpec>) -> Vec<(String, String)> {
+    let Some(spec) = spec else {
+        return Vec::new();
+    };
+    let url = spec.to_url();
+    vec![
+        ("HTTP_PROXY".to_string(), url.clone()),
+        ("HTTPS_PROXY".to_string(), url.clone()),
+        ("ALL_PROXY".to_string(), url),
+    ]
+}
+
+static GLOBAL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// GUI 进程自己的抓取/探测用（子进程走环境变量）。
+pub fn set_global(url: Option<String>) {
+    let _ = GLOBAL.set(url);
+}
+
+pub fn global() -> Option<&'static str> {
+    GLOBAL.get().and_then(|v| v.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

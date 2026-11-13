@@ -1,9 +1,11 @@
-feat(proxy): 代理解析（0.5.0 ②第 1 步）
+feat(proxy): 代理接进设置、子进程与抓取（0.5.0 ②完成）
 
-- parse_proxy：空串 = 直连（合法，不是错误）；只认 http / socks5（socks5h 同义）
-- 缺端口、空主机、端口 0/越界、带路径、带空格一律报错 —— 不猜默认端口
-- 凭据保留在内存里供建 client；redacted() 是唯一可进日志/界面的形态（不含用户名与密码）
-- 用例 5 组（空值、三种写法、七种坏形状、凭据与脱敏、只有用户名）
+- Settings.proxy（空 = 直连，serde default 兼容旧配置）
+- RuntimeTuning.proxy 已解析；runner 给每个 dlm 子进程注入 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
+  —— 下载侧有十几处 client，这是唯一不会漏的路
+- GUI 自己的抓取 client 也按全局代理构造（proxy::set_global 在启动时从设置读一次）
+- 设置页「代理」一行：实时显示「生效：scheme://host:port」（脱敏，不含凭据），
+  写错标红但不阻止保存
+- 用例：解析 5 组；lib 431 全绿
 
-下一步：接进 probe/fetch/抓取的 client 构造 + 设置页与测试连接。
 门禁：见输出

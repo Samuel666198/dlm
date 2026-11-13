@@ -334,6 +334,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 16,
         max_speed_kib: 2048,
         speed_windows: Vec::new(),
+        proxy: None,
         per_host: 16,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
@@ -358,6 +359,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 4,
         max_speed_kib: 0,
         speed_windows: Vec::new(),
+        proxy: None,
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
@@ -380,6 +382,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 0,
         max_speed_kib: 0,
         speed_windows: Vec::new(),
+        proxy: None,
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
         category_dirs: false,
@@ -406,6 +409,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         connections: 12,
         max_speed_kib: 512,
         speed_windows: Vec::new(),
+        proxy: String::new(),
         per_host_connections: 24,
         ..Default::default()
     };

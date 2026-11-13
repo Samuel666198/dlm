@@ -353,11 +353,14 @@ pub fn fetch_text(
     max_bytes: usize,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(timeout)
-        .user_agent("dlm-grab/0.1")
-        .build()
-        .map_err(|e| format!("建客户端失败：{e}"))?;
+        .user_agent("dlm-grab/0.1");
+    if let Some(proxy) = crate::proxy::global() {
+        builder =
+            builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("代理不可用：{e}"))?);
+    }
+    let client = builder.build().map_err(|e| format!("建客户端失败：{e}"))?;
     let resp = client
         .get(url)
         .send()

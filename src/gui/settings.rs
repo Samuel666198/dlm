@@ -37,6 +37,9 @@ pub struct Settings {
     /// 限速计划：`22:00-06:00=512` 这样的行；命中窗口时覆盖上面的全局限速。
     #[serde(default)]
     pub speed_windows: Vec<String>,
+    /// 代理：`http://host:port` / `socks5://host:port`；空 = 直连。
+    #[serde(default)]
+    pub proxy: String,
     /// 按类型分子目录（视频 / 音频 / 压缩包…），规则见 `queue::category_for`。
     ///
     /// 落点从 `out_dir/名字` 变成 `out_dir/视频/名字`。**只影响新任务**：
@@ -81,6 +84,7 @@ impl Default for Settings {
             out_dir: None,
             max_speed_kib: 0,
             speed_windows: Vec::new(),
+            proxy: String::new(),
             category_dirs: false,
             scan_after_done: false,
             rename_template: String::new(),

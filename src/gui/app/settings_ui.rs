@@ -124,6 +124,37 @@ impl App {
         });
         // 限速计划：每行一条 `22:00-06:00=512`，命中窗口时覆盖上面那条全局限速。
         // 现在生效多少直接算给你看 —— 否则用户得盯着表猜"此刻到底限没限"。
+        // 代理：留空就是直连。写错时当场标红，但不阻止保存 —— 保存后仍可改回来，
+        // 而"整份设置因为一行代理写错就存不下去"是更糟的体验。
+        row(ui, "代理", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.draft.proxy)
+                    .hint_text("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")
+                    .desired_width(260.0),
+            );
+            ui.label(
+                egui::RichText::new("空 = 直连")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+            match crate::proxy::parse_proxy(&self.draft.proxy) {
+                Ok(None) => {}
+                Ok(Some(spec)) => {
+                    ui.label(
+                        egui::RichText::new(format!("生效：{}", spec.redacted()))
+                            .size(10.5)
+                            .color(theme::INK_3),
+                    );
+                }
+                Err(err) => {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(0xc6, 0x28, 0x28)),
+                    );
+                }
+            }
+        });
         row(ui, "限速计划", |ui| {
             let mut remove = None;
             for (i, w) in self.draft.speed_windows.iter_mut().enumerate() {
