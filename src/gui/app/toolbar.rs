@@ -82,7 +82,9 @@ impl App {
             }
 
             let has_selected = self.selected.is_some();
-            if tool_button(ui, Icon::Trash, "删除", has_selected, false).clicked()
+            // 删除也只在选中时出现：破坏性动作不该在没有对象时占着位置。
+            if task_actions_visible(has_selected)
+                && tool_button(ui, Icon::Trash, "删除", true, false).clicked()
                 && let Some(id) = self.selected.clone()
             {
                 self.send(Ticket::Remove(id));
