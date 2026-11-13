@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dlm · 界面方案 A（紧凑工作台）</title>
+<style>
+  :root{
+    --primary:#0F172A; --secondary:#334155; --accent:#0369A1;
+    --bg:#F8FAFC; --fg:#020617; --card:#FFFFFF; --muted:#E8ECF1;
+    --muted-fg:#475569; --border:#E2E8F0; --danger:#DC2626;
+    --r:10px; --sp:8px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#e9edf2;font:13px/1.5 Inter,"Segoe UI",system-ui,sans-serif;color:var(--fg)}
+  .wrap{display:flex;gap:24px;padding:24px;flex-wrap:wrap;align-items:flex-start}
+  .win{width:1000px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);
+       box-shadow:0 8px 24px rgba(15,23,42,.12);overflow:hidden}
+  .titlebar{height:34px;display:flex;align-items:center;justify-content:space-between;
+            padding:0 12px;background:#fbfcfe;border-bottom:1px solid var(--border);font-size:12px;color:var(--muted-fg)}
+  .dots{display:flex;gap:8px}
+  .dot{width:10px;height:10px;border-radius:50%;background:#d8dee8}
+  /* 第一层：只有四个东西 */
+  .topbar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border)}
+  .btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:8px;
+       border:1px solid var(--border);background:#fff;color:var(--secondary);font:inherit;cursor:pointer}
+  .btn:hover{background:#f1f5f9}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .btn.primary:hover{background:#075985}
+  .btn.ghost{border-color:transparent;background:transparent}
+  .search{flex:1;display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;
+          border:1px solid var(--border);border-radius:8px;background:#fff;color:#94a3b8}
+  .kbd{margin-left:auto;font:11px/1 ui-monospace,monospace;border:1px solid var(--border);
+       border-radius:5px;padding:3px 5px;color:var(--muted-fg);background:#f8fafc}
+  /* 第二层：只在选中时出现 */
+  .ctxbar{display:flex;align-items:center;gap:8px;padding:7px 12px;background:#f0f7ff;
+          border-bottom:1px solid #cfe4f7;font-size:12px;color:#075985}
+  .ctxbar .btn{height:26px;padding:0 10px;font-size:12px}
+  .body{display:flex;min-height:420px}
+  .side{width:168px;border-right:1px solid var(--border);padding:10px 8px;background:#fcfdfe}
+  .side h4{margin:10px 8px 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8}
+  .nav{display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:7px;color:var(--secondary);cursor:pointer}
+  .nav:hover{background:#f1f5f9}
+  .nav.on{background:#e0f2fe;color:#075985;font-weight:600}
+  .count{font-size:11px;color:#94a3b8}
+  table{width:100%;border-collapse:collapse}
+  th{font-weight:500;font-size:11.5px;color:#94a3b8;text-align:left;padding:9px 12px;border-bottom:1px solid var(--border)}
+  td{padding:10px 12px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+  tr:hover td{background:#f8fafc}
+  .name{font-weight:600;color:var(--fg)}
+  .host{font-size:11px;color:#94a3b8}
+  .bar{height:6px;border-radius:3px;background:var(--muted);overflow:hidden;width:120px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  .chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px}
+  .chip.ok{background:#dcfce7;color:#166534}
+  .chip.run{background:#e0f2fe;color:#075985}
+  .spark{width:64px;height:18px}
+  .statusbar{display:flex;align-items:center;gap:14px;padding:7px 12px;border-top:1px solid var(--border);
+             background:#fbfcfe;font-size:11.5px;color:var(--muted-fg)}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;background:#f1f5f9}
+  /* 设置页：左分类 + 右分组 */
+  .settings{display:flex;min-height:440px}
+  .settings .side{width:180px}
+  .panel{flex:1;padding:16px 18px}
+  .panel h3{margin:0 0 4px;font-size:14px}
+  .panel .hint{margin:0 0 14px;font-size:11.5px;color:#94a3b8}
+  .group{border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden}
+  .group > header{padding:9px 12px;background:#f8fafc;border-bottom:1px solid var(--border);
+                  font-size:12px;font-weight:600;color:var(--secondary)}
+  .field{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 12px;border-bottom:1px solid #f1f5f9}
+  .field:last-child{border-bottom:0}
+  .field .lab{font-size:12.5px}
+  .field .sub{font-size:11px;color:#94a3b8}
+  .input{height:28px;border:1px solid var(--border);border-radius:7px;padding:0 8px;font:inherit;width:220px;background:#fff}
+  .switch{width:36px;height:20px;border-radius:999px;background:#cbd5e1;position:relative}
+  .switch.on{background:var(--accent)}
+  .switch i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
+  .switch.on i{left:18px}
+  /* 命令面板 */
+  .palette{width:520px;background:#fff;border:1px solid var(--border);border-radius:12px;
+           box-shadow:0 18px 40px rgba(15,23,42,.25);overflow:hidden}
+  .palette input{width:100%;border:0;border-bottom:1px solid var(--border);padding:14px 16px;font:15px/1.2 inherit;outline:none}
+  .item{display:flex;justify-content:space-between;padding:9px 16px;font-size:12.5px;color:var(--secondary)}
+  .item.sel{background:#e0f2fe;color:#075985}
+  .item small{color:#94a3b8}
+  .cap{font-size:12px;color:#475569;margin:6px 0 0 4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ============ 主界面 ============ -->
+  <div>
+    <div class="win">
+      <div class="titlebar"><span>dlm</span><div class="dots"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div></div>
+
+      <div class="topbar">
+        <button class="btn primary">＋ 新建 <span style="opacity:.8">▾</span></button>
+        <div class="search">🔍 搜索名字、链接或站点 <span class="kbd">Ctrl K</span></div>
+        <button class="btn ghost">⚙</button>
+        <button class="btn ghost">⋯</button>
+      </div>
+
+      <div class="ctxbar">
+        <span>已选 <b>2</b> 项</span>
+        <button class="btn">▸ 继续</button>
+        <button class="btn">⏸ 暂停</button>
+        <button class="btn" style="color:var(--danger);border-color:#fecaca">删除</button>
+        <span style="margin-left:auto;color:#64748b">Esc 取消选择</span>
+      </div>
+
+      <div class="body">
+        <div class="side">
+          <h4>任务</h4>
+          <div class="nav on"><span>全部任务</span><span class="count">12</span></div>
+          <div class="nav"><span>正在下载</span><span class="count">3</span></div>
+          <div class="nav"><span>已完成</span><span class="count">8</span></div>
+          <div class="nav"><span>失败</span><span class="count">1</span></div>
+          <h4>分类</h4>
+          <div class="nav"><span>视频</span><span class="count">4</span></div>
+          <div class="nav"><span>压缩包</span><span class="count">5</span></div>
+          <div class="nav"><span>程序</span><span class="count">2</span></div>
+          <div class="nav"><span>其它</span><span class="count">1</span></div>
+        </div>
+        <div style="flex:1">
+          <table>
+            <thead><tr><th style="width:34%">文件名</th><th>大小</th><th>进度</th><th>速度</th><th>剩余</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr><td><div class="name">ubuntu-24.04.iso</div><div class="host">releases.ubuntu.com</div></td>
+                  <td>6.1 GB</td><td><div class="bar"><i style="width:62%"></i></div></td>
+                  <td>18.4 MB/s <svg class="spark" viewBox="0 0 64 18"><polyline fill="none" stroke="#0369A1" stroke-width="1.5" points="0,14 8,10 16,12 24,6 32,8 40,4 48,6 56,3 64,5"/></svg></td>
+                  <td>2 分 12 秒</td><td><span class="chip run">下载中</span></td></tr>
+              <tr><td><div class="name">dlm-0.5.0-win-x64.zip</div><div class="host">github.com</div></td>
+                  <td>11.7 MB</td><td><div class="bar"><i style="width:100%"></i></div></td>
+                  <td>—</td><td>—</td><td><span class="chip ok">已完成</span></td></tr>
+              <tr><td><div class="name">素材包-03.7z</div><div class="host">cdn.example.net</div></td>
+                  <td>?</td><td><div class="bar"><i style="width:28%"></i></div></td>
+                  <td>1.2 MB/s <svg class="spark" viewBox="0 0 64 18"><polyline fill="none" stroke="#DC2626" stroke-width="1.5" points="0,6 8,7 16,6 24,8 32,14 40,15 48,14 56,15 64,14"/></svg></td>
+                  <td>4 分 30 秒</td><td><span class="chip run">下载中</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="statusbar">
+        <span class="pill">● 3 个在跑</span>
+        <span>合计 21.6 MB/s</span>
+        <span class="pill" style="cursor:pointer">限速 不限 ▾</span>
+        <span style="margin-left:auto">v0.5.0</span>
+      </div>
+    </div>
+    <p class="cap">主界面：顶层只留「新建 / 搜索 / 设置 / 更多」；暂停·删除只在选中时出现；破坏性动作收进 ⋯。</p>
+  </div>
+
+  <!-- ============ 设置页 ============ -->
+  <div>
+    <div class="win">
+      <div class="titlebar"><span>dlm · 设置</span><div class="dots"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div></div>
+      <div class="topbar">
+        <div class="search">🔍 搜索设置项 <span class="kbd">Ctrl K</span></div>
+        <button class="btn ghost">×</button>
+      </div>
+      <div class="settings">
+        <div class="side">
+          <div class="nav on"><span>下载</span></div>
+          <div class="nav"><span>连接与速度</span></div>
+          <div class="nav"><span>限速计划</span></div>
+          <div class="nav"><span>代理</span></div>
+          <div class="nav"><span>抓取</span></div>
+          <div class="nav"><span>界面</span></div>
+          <div class="nav"><span>高级</span></div>
+        </div>
+        <div class="panel">
+          <h3>下载</h3>
+          <p class="hint">只显示这一组；其余设置按左侧分类折叠，不再一屏堆 30 行。</p>
+
+          <div class="group">
+            <header>存放位置</header>
+            <div class="field">
+              <div><div class="lab">默认目录</div><div class="sub">新任务的落点</div></div>
+              <div style="display:flex;gap:8px"><input class="input" value="D:\Downloads"><button class="btn">选择…</button></div>
+            </div>
+            <div class="field">
+              <div><div class="lab">按类型分子目录</div><div class="sub">视频 / 压缩包 / 程序…</div></div>
+              <div class="switch on"><i></i></div>
+            </div>
+          </div>
+
+          <div class="group">
+            <header>同名与命名</header>
+            <div class="field">
+              <div><div class="lab">同名冲突</div><div class="sub">已存在同名文件时</div></div>
+              <input class="input" value="自动改名 (1)">
+            </div>
+            <div class="field">
+              <div><div class="lab">重命名模板</div><div class="sub">{name} {ext} {date} {n}</div></div>
+              <input class="input" value="">
+            </div>
+          </div>
+
+          <div class="group">
+            <header>完成后</header>
+            <div class="field"><div><div class="lab">Defender 扫描</div><div class="sub">默认关，扫描占资源</div></div><div class="switch"><i></i></div></div>
+            <div class="field"><div><div class="lab">完成后动作</div><div class="sub">打开 / 运行 / 关机</div></div><input class="input" value="打开文件"></div>
+          </div>
+        </div>
+      </div>
+      <div class="statusbar"><span>改动即时生效（除标注"重启后生效"的项）</span><span style="margin-left:auto">恢复默认</span></div>
+    </div>
+    <p class="cap">设置页：左侧分类 + 右侧分组卡片；顶部全设置搜索；每行「标题 + 一句解释 + 控件」三列对齐。</p>
+  </div>
+
+  <!-- ============ 命令面板 ============ -->
+  <div>
+    <div class="palette">
+      <input placeholder="输入命令：限速 512 / 暂停全部 / 抓 example.com / 设置">
+      <div class="item sel"><span>限速 512 KiB/s</span><small>应用</small></div>
+      <div class="item"><span>抓取站点 example.com</span><small>打开扫描</small></div>
+      <div class="item"><span>暂停全部任务</span><small>3 个在跑</small></div>
+      <div class="item"><span>打开设置 · 代理</span><small>跳转</small></div>
+    </div>
+    <p class="cap">命令面板 <b>Ctrl K</b>：键盘完成一切，IDM 没有。</p>
+  </div>
+
+</div>
+</body>
+</html>
