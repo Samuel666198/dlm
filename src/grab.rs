@@ -203,12 +203,11 @@ fn match_core(pat: &str, text: &str) -> bool {
         };
         cursor += found + part.len();
     }
-    if !pat.ends_with('*') {
-        if let Some(last) = rest.last() {
-            if !text.ends_with(last) {
-                return false;
-            }
-        }
+    if !pat.ends_with('*')
+        && let Some(last) = rest.last()
+        && !text.ends_with(last)
+    {
+        return false;
     }
     true
 }
