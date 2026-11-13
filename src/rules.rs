@@ -41,6 +41,21 @@ pub fn connections_for(url: &str, rules: &[Rule], default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// 一条任务最终该用的（目录, 连接数）。
+///
+/// 把两处分词合成**一个出口**：以后加"按规则改文件名"这类字段时，
+/// 只要改这里和 [`Rule`]，不会散落到 `runner` 的各个分支里。
+pub fn plan_for(
+    url: &str,
+    rules: &[Rule],
+    default_dir: &str,
+    default_connections: usize,
+) -> (String, usize) {
+    (
+        dir_for(url, rules, default_dir).to_string(),
+        connections_for(url, rules, default_connections),
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,19 +113,4 @@ mod tests {
         assert_eq!(dir_for(url, &rules, "D:\\Downloads"), "D:\\Downloads");
         assert_eq!(connections_for(url, &rules, 8), 2);
     }
-}
-/// 一条任务最终该用的（目录, 连接数）。
-///
-/// 把两处分词合成**一个出口**：以后加"按规则改文件名"这类字段时，
-/// 只要改这里和 [`Rule`]，不会散落到 `runner` 的各个分支里。
-pub fn plan_for(
-    url: &str,
-    rules: &[Rule],
-    default_dir: &str,
-    default_connections: usize,
-) -> (String, usize) {
-    (
-        dir_for(url, rules, default_dir).to_string(),
-        connections_for(url, rules, default_connections),
-    )
 }

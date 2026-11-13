@@ -1,7 +1,0 @@
-feat(rules): plan_for 单出口（目录+连接数一次算完）
-
-- 把 dir_for 与 connections_for 合成一个出口，runner 以后只调这一个函数
-- 用例：命中规则与不命中两条分支各自断言
-- lib 441 → 442
-
-门禁：见输出
