@@ -45,7 +45,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(14.0);
                 ui.label(
-                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                    egui::RichText::new(format!("v{}", crate::gui::RELEASE))
                         .size(11.5)
                         .monospace()
                         .color(theme::INK_3),

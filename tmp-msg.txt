@@ -1,0 +1,9 @@
+chore(release): 0.1.2 —— 版本号跟上本轮改动，并打新安装包
+
+- gui::RELEASE 0.1.1 → 0.1.2（内核仍是 0.1.0，两套号按设计分开）
+- 状态栏版本号改用 gui::RELEASE：原来显示 Cargo 的内核版本 0.1.0，
+  和更新面板里的发行版对不上 —— 用户看到的应该是发行版
+- 产物（本地，未发布）：dlm-0.1.2-win-x64-setup.exe 6,934,457 B
+  sha256 d8bc311b…6dea；dlm-0.1.2-win-x64.zip 11,546,067 B sha256 c0e62200…7da0
+
+门禁：fmt / lib 389 / bins 4 / integration 121 / clippy / extension 全绿
