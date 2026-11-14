@@ -5,6 +5,11 @@
 把大文件切成多段并行下载，支持断点续传、限速、配额、完成后动作；
 浏览器里右键或点悬浮球就能把下载交给它，桌面窗口统一看进度。
 
+**当前发布版：0.6.0** ——
+[下载](https://github.com/Samuel666198/dlm/releases/latest) ·
+[更新清单](https://raw.githubusercontent.com/Samuel666198/dlm/main/latest.json)
+（内核 `0.1.0` / 扩展 `0.2.16`）
+
 ```
 cargo build --release --bins
 target/release/dlm.exe --url https://example.com/big.iso --out-dir D:/dl
