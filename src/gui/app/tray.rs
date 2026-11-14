@@ -29,6 +29,14 @@ pub enum TrayAction {
     Quit,
 }
 
+/// 门禁/单元用例里别建托盘（`DLM_NO_TRAY`）。
+///
+/// 与 `DLM_NO_SHELL_OPEN` / `DLM_NO_POPUP` 同一类约定：自动化里不许往用户桌面上
+/// 扔东西。`gates.ps1` 统一置上，用例不用各自加参数。
+pub fn suppressed() -> bool {
+    std::env::var_os("DLM_NO_TRAY").is_some()
+}
+
 /// 持有托盘句柄。丢掉它图标就消失，所以必须活到进程结束。
 pub struct Tray {
     _icon: TrayIcon,
@@ -37,7 +45,14 @@ pub struct Tray {
 
 impl Tray {
     /// 建托盘。必须在主线程调用（Windows 要求创建线程有消息泵）。
+    ///
+    /// 门禁与单元用例里直接返回 `None`（`DLM_NO_TRAY`，见 [`suppressed`]）：
+    /// 那儿的 `App` 建在 cargo 测试线程上，没有消息泵，图标却会真的出现在用户
+    /// 任务栏上 —— 跑一次门禁就在桌面上留一枚点了没反应的图标。
     pub fn new() -> Option<Self> {
+        if suppressed() {
+            return None;
+        }
         let menu = Menu::new();
 
         let show = MenuItem::new("显示窗口", true, None);

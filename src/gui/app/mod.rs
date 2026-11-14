@@ -25,10 +25,12 @@ use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 
 pub mod basket;
 pub mod clipboard_hint;
+pub mod context_bar;
 pub mod dialog;
 pub mod drawer;
 pub mod fonts;
 pub mod grab_ui;
+pub mod icons;
 pub mod list;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
@@ -151,6 +153,15 @@ pub struct App {
     pub(super) clipboard_hit: Option<crate::gui::clipboard::Hit>,
     /// 用户忽略过的链接：同一条不再提示。
     pub(super) clipboard_dismissed: Option<String>,
+
+    /// 「删除全部已完成」还等着二次确认时，这里是**那一刻**要删的条数。
+    ///
+    /// `Some` 就是"确认框开着"。真正的 id 列表在点确认时重算（见 `confirm_delete_all_dialog`）：
+    /// 等着确认的这几秒里任务可能又完成或被别处删掉，拿旧快照删会删错。
+    pub(super) confirm_delete_all: Option<usize>,
+    /// 限速菜单里"自定义"那一格的当前值（KiB/s）。与应用过的限速分开存，
+    /// 否则拖一下数字就等于改设置。
+    pub(super) speed_custom_kib: u64,
 }
 
 /// `App` 启动时要的那几样"外部世界"的输入。
@@ -197,6 +208,8 @@ impl App {
         } else {
             None
         };
+        // 限速菜单「自定义」的初值 = 当前生效的限速（`settings` 随后会被移进结构体）。
+        let speed_custom_kib = settings.max_speed_kib;
         Self {
             snapshot,
             quota,
@@ -246,6 +259,8 @@ impl App {
             start_hidden: 0,
             clipboard_hit: None,
             clipboard_dismissed: None,
+            confirm_delete_all: None,
+            speed_custom_kib,
         }
     }
 
@@ -355,10 +370,60 @@ impl App {
     pub(super) fn send(&self, ticket: Ticket) {
         let _ = self.tx.send(ticket);
     }
+
+    /// 当前选中的任务（按 id 从快照里取）。
+    pub(super) fn selected_task(&self) -> Option<TaskView> {
+        let id = self.selected.as_ref()?;
+        self.tasks().iter().find(|t| &t.id == id).cloned()
+    }
+
+    /// 有没有全屏/居中层的框开着。
+    ///
+    /// Esc 的归属靠它决定：有框时 Esc 关框，没框时才取消选择（见 `shortcuts::shortcut_for`）。
+    pub(super) fn overlay_open(&self) -> bool {
+        self.adding
+            || self.settings_open
+            || self.basket_open
+            || self.grab_open
+            || self.update_open
+            || self.confirm_delete_all.is_some()
+    }
+
+    /// 改限速（KiB/s，0 = 不限）：存盘 + 立刻作用于下一轮派发。
+    ///
+    /// 三件事必须一起做，少一件都是"界面在说谎"：
+    /// 1. 写进 `settings` 并落盘 —— 否则重启就回到旧值；
+    /// 2. 同步 `draft` —— 否则下次打开设置面板会显示旧值，用户以为没生效；
+    /// 3. 发 `ApplyRuntime` —— 否则要重启才生效（E18 那次的老毛病）。
+    pub(super) fn set_speed_limit(&mut self, kib: u64) {
+        self.settings.max_speed_kib = kib;
+        self.draft.max_speed_kib = kib;
+        if let Err(err) = self.settings.save(&self.settings_dir) {
+            self.settings_error = Some(format!("限速保存失败：{err:#}"));
+        }
+        self.send(Ticket::ApplyRuntime(
+            crate::gui::RuntimeTuning::from_settings_with(
+                &self.settings,
+                &self.default_out_dir,
+                self.default_category_dirs,
+            ),
+        ));
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_frame(ui);
+    }
+}
+
+impl App {
+    /// 一帧的全部界面。
+    ///
+    /// 从 [`eframe::App::ui`] 里抽出来只为一个理由：`eframe::Frame` 在测试里造不出来，
+    /// 而"整帧画一遍不 panic"是这一层唯一能自动化的硬检查 —— 工具条的自绘按钮、
+    /// 上下文动作条、状态栏的限速菜单都只在这条路上被走到。
+    pub(super) fn ui_frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
         // 速率采样要在画之前做：这一帧画出来的数字与它同一时刻。
@@ -424,6 +489,14 @@ impl eframe::App for App {
                 .show(ui, |ui| self.clipboard_hint_bar(ui));
         }
 
+        // 0.6.0：上下文动作条。**只有选中任务时才占一行** —— 没选中时这里
+        // 连高度都不占，列表就多一行可见空间（这正是"动作收进上下文"的好处）。
+        if context_bar::task_actions_visible(self.selected.is_some()) {
+            egui::Panel::top("context-bar")
+                .exact_size(theme::CONTEXT_BAR_H)
+                .show(ui, |ui| self.context_bar(ui));
+        }
+
         // 更新：把手动检查的结果收进槽里（非阻塞）。
         self.drain_update(&ctx);
 
@@ -451,6 +524,9 @@ impl eframe::App for App {
         }
         if self.update_open {
             self.update_panel(&ctx);
+        }
+        if self.confirm_delete_all.is_some() {
+            self.confirm_delete_all_dialog(&ctx);
         }
     }
 }

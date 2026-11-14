@@ -1,4 +1,4 @@
-﻿# dlm gates: run every check with one command.
+# dlm gates: run every check with one command.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1 -SkipIntegration
@@ -56,6 +56,9 @@ $env:DLM_NO_UPDATE_CHECK = '1'
 $env:DLM_NO_SHELL_OPEN = '1'
 # 别让 GUI 的「启动失败」消息框弹到用户桌面上（自动化里没人点它）。
 $env:DLM_NO_POPUP = '1'
+# 单元用例会真的建一个 `App`（整帧渲染用例）。`App::new` 要建托盘图标，而测试线程
+# 没有消息泵：图标会留在任务栏上，点了没反应。建托盘这一支在门禁里直接跳过。
+$env:DLM_NO_TRAY = '1'
 
 function Invoke-Gate {
     param(

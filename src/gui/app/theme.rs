@@ -14,6 +14,8 @@ use eframe::egui::Color32;
 pub const TITLEBAR_H: f32 = 34.0;
 /// 工具条高度。
 pub const TOOLBAR_H: f32 = 50.0;
+/// 上下文动作条高度（只在选中任务时占位）。
+pub const CONTEXT_BAR_H: f32 = 38.0;
 /// 状态栏高度。
 pub const STATUS_H: f32 = 32.0;
 /// E19：剪贴板提示条高度。只在有命中时占位，所以这个数只影响那一条。

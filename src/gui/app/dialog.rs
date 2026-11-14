@@ -141,3 +141,70 @@ fn infer_name(url: &str) -> String {
         last.to_string()
     }
 }
+
+/// 「删除全部已完成」的二次确认框。
+///
+/// 为什么不直接删：这是**一条命令删掉一批文件记录**的破坏性动作，而工具条上的
+/// `⋯` 就在设置按钮旁边 —— 手滑一下就能点到。确认框里点「删除」才真的发票。
+///
+/// 确认时**重算一遍**要删的 id：等着确认的这几秒里可能又有任务下完了、
+/// 也可能有任务被别的路径删掉了。拿打开那一刻的快照去删会删错东西。
+impl App {
+    pub(super) fn confirm_delete_all_dialog(&mut self, ctx: &egui::Context) {
+        let Some(count) = self.confirm_delete_all else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+
+        egui::Window::new("删除全部已完成的任务？")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("{count} 个已完成的任务会从列表里移除。"))
+                        .size(12.5),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("已经下载到磁盘的文件不会被删除，只是不再列在队列里。")
+                        .size(11.5)
+                        .color(theme::INK_3),
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("删除").color(theme::BAD),
+                        ))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+
+        if confirm {
+            let ids = crate::gui::app::toolbar::delete_all_targets(&self.tasks());
+            for id in ids {
+                self.send(Ticket::Remove(id));
+            }
+            self.selected = None;
+            self.drawer_log = None;
+            self.confirm_delete_all = None;
+        }
+        if cancel {
+            self.confirm_delete_all = None;
+        }
+    }
+}

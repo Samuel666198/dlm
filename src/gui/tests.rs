@@ -981,3 +981,80 @@ fn closing_hides_only_when_there_is_work_and_a_tray_to_come_back_from() {
         "用户关掉「收进托盘」就照做"
     );
 }
+
+/// **整帧渲染**（0.6.0 阶段 1）：工具条的自绘按钮与 `⋯` 菜单、上下文动作条、
+/// 状态栏的限速胶囊，全都只在"真的画一帧"时才被走到。
+///
+/// 这条用例存在的理由：这些东西一旦 panic，用户是**打开窗口就没了**；而它们
+/// 又都是自绘的（不画字符，改用 `Painter` 画线 —— 字符会变成方框），
+/// 光看代码看不出有没有画歪或算错矩形。判据只有一条：这一帧跑得完、且选中状态
+/// 真的让动作条出现了。
+///
+/// 托盘在门禁里不建（`DLM_NO_TRAY=1`，见 `tray::suppressed`）：测试线程没有消息泵。
+#[test]
+fn a_whole_frame_renders_with_and_without_a_selection() {
+    use std::sync::mpsc::channel;
+    use std::sync::{Arc, Mutex};
+
+    let dir = std::env::temp_dir().join(format!("dlm-frame-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let view = task_view_named("a.bin", TaskStatus::Running);
+    let snapshot: super::app::SnapshotSlot = Arc::new(Mutex::new(vec![view]));
+    let quota: super::app::QuotaSlot = Arc::new(Mutex::new(None));
+    let update: super::app::UpdateSlot =
+        Arc::new(Mutex::new(super::snapshot::UpdateView::disabled()));
+    let (tx, _rx) = channel();
+    let mut app = super::app::App::new(
+        snapshot,
+        quota,
+        update,
+        tx,
+        super::app::AppWiring {
+            settings_dir: dir.clone(),
+            default_out_dir: dir.join("dl"),
+            default_category_dirs: false,
+            update_url: None,
+        },
+        crate::updater::LocalState {
+            release: "0.0.0".to_string(),
+            extension: None,
+        },
+    );
+
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1120.0, 700.0),
+        )),
+        ..Default::default()
+    };
+
+    // 1) 没选中：动作条不该占位（整帧照样要画得完）。
+    assert_eq!(app.selected, None);
+    let mut output = ctx.run_ui(input.clone(), |ui| app.ui_frame(ui));
+    let shapes_without_selection = output.shapes.len();
+    output.textures_delta.clear();
+
+    // 2) 选中一条：动作条出现，整帧仍然画得完。
+    //
+    //    这一格的判据是"真的画了东西"：动作条是自绘的（一条浅蓝底 + 三颗描边按钮），
+    //    选中后帧里的图元必然变多。这不是版面断言（egui 不给外面的代码看面板矩形），
+    //    但它能挡住"条件写了、内容没画"这种一半实现。
+    app.selected = Some("a.bin".to_string());
+    assert!(super::app::context_bar::task_actions_visible(
+        app.selected.is_some()
+    ));
+    let mut output = ctx.run_ui(input, |ui| app.ui_frame(ui));
+    assert!(
+        output.shapes.len() > shapes_without_selection,
+        "选中后动作条该多画出图元：选中 {} 个 vs 没选中 {} 个",
+        output.shapes.len(),
+        shapes_without_selection
+    );
+    output.textures_delta.clear();
+
+    let _ = fs::remove_dir_all(dir);
+}
