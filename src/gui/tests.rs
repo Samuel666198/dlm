@@ -1208,6 +1208,34 @@ fn a_whole_frame_renders_with_and_without_a_selection() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// **命令面板画得完**（0.6.0 阶段 4-3）。
+///
+/// 三种状态各一帧：空查询（全表）、有命中、没命中。命令表本身的对账在
+/// `palette::tests` 里，这里只管"画的时候不 panic、且选中下标不会越界"。
+#[test]
+fn the_command_palette_renders_in_all_three_states() {
+    let (mut app, dir) = test_app("palette", vec![task_view_named("a.bin", TaskStatus::Done)]);
+    let ctx = egui::Context::default();
+
+    app.palette_open = true;
+    app.palette_take_focus = true;
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+
+    app.palette_query = "设置".into();
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+
+    // 没命中时下标要夹回 0，不能停在上一轮的位置上 —— 否则回车会执行"看不见的那条"。
+    app.palette_query = "绝对没有这条命令".into();
+    app.palette_sel = 5;
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    assert_eq!(app.palette_sel, 0, "命中为空时选中下标必须归零");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// **设置面板每一页都画得完**（0.6.0 阶段 2）。
 ///
 /// 七个分类 + 搜索态各渲染一帧。这条替代不了人眼，但它挡的是这类大改版最容易伤到

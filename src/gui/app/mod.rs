@@ -32,6 +32,7 @@ pub mod fonts;
 pub mod grab_ui;
 pub mod icons;
 pub mod list;
+pub mod palette;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
 pub mod settings_spec;
@@ -151,6 +152,13 @@ pub struct App {
     pub(super) settings_category: settings_spec::Category,
     /// Agent 接入页刚复制了什么（`cli` / `mcp`），只用来显示一行"已复制"。
     pub(super) agent_copied: Option<String>,
+    /// 命令面板（`Ctrl K`）是否打开。
+    pub(super) palette_open: bool,
+    pub(super) palette_query: String,
+    /// 当前高亮第几条（在筛选结果里的下标）。
+    pub(super) palette_sel: usize,
+    /// 面板刚打开：下一帧把焦点给输入框。
+    pub(super) palette_take_focus: bool,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
@@ -272,6 +280,10 @@ impl App {
             settings_search: String::new(),
             settings_category: settings_spec::Category::Download,
             agent_copied: None,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_sel: 0,
+            palette_take_focus: false,
             start_hidden: 0,
             clipboard_hit: None,
             clipboard_dismissed: None,
@@ -402,7 +414,59 @@ impl App {
             || self.basket_open
             || self.grab_open
             || self.update_open
+            || self.palette_open
             || self.confirm_delete_all.is_some()
+    }
+
+    /// 执行一条命令面板里的命令（id 来自 `palette::COMMANDS`）。
+    ///
+    /// 分发集中在这里，而不是让每条命令自带闭包：命令表的文字是数据，动作是代码，
+    /// 混在一起会让"加一条命令"变成"加一段闭包"，而闭包没法在测试里对账。
+    pub(super) fn run_command(&mut self, id: &str, ctx: &egui::Context) {
+        match id {
+            "search" => self.focus_search = true,
+            "new" => {
+                self.adding = true;
+                self.add_form.focused = false;
+            }
+            "paste" => self.basket_open = true,
+            "grab" => self.grab_open = true,
+            "pause-all" => {
+                let ids = toolbar::pause_all_targets(&self.tasks());
+                for id in ids {
+                    self.send(crate::gui::Ticket::Pause(id));
+                }
+            }
+            "delete-done" => {
+                // 与 `⋯` → 删除全部同一套：先问，确认时才重算要删的 id。
+                self.confirm_delete_all = Some(toolbar::delete_all_targets(&self.tasks()).len());
+            }
+            "settings" => {
+                self.settings_open = true;
+                self.draft = self.settings.clone();
+                self.settings_error = None;
+            }
+            "open-out-dir" => {
+                // 与「打开文件」走同一个闸门：门禁与自动化里弹资源管理器会把测试机的
+                // 桌面弄脏（而且没人关）。
+                let dir = self.settings.effective_out_dir();
+                let plan = crate::actions::reveal_plan(crate::actions::RevealMode::Open, &dir);
+                if crate::actions::shell_suppressed() {
+                    eprintln!(
+                        "dlm-gui: 打开目录被抑制（{}）：{}",
+                        crate::actions::NO_SHELL_ENV,
+                        dir.display()
+                    );
+                } else if let Err(err) = crate::actions::execute(&plan) {
+                    self.settings_error = Some(format!("打开目录失败：{err:#}"));
+                }
+            }
+            "check-update" => {
+                self.update_open = true;
+                self.check_update_now(ctx);
+            }
+            other => eprintln!("dlm-gui: 未知命令 id {other}"),
+        }
     }
 
     /// 改限速（KiB/s，0 = 不限）：存盘 + 立刻作用于下一轮派发。
@@ -543,6 +607,10 @@ impl App {
         }
         if self.confirm_delete_all.is_some() {
             self.confirm_delete_all_dialog(&ctx);
+        }
+        // 命令面板盖在最上面：它是"临时打断"，别的框开着时也能叫出来。
+        if let Some(id) = self.palette(&ctx) {
+            self.run_command(id, &ctx);
         }
     }
 }

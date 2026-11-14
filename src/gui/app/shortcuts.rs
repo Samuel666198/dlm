@@ -18,7 +18,9 @@ use super::App;
 pub(crate) enum Shortcut {
     /// `Ctrl+N`：新建任务。
     NewTask,
-    /// `Ctrl+K`（与旧版 `Ctrl+F`）：聚焦搜索框。
+    /// `Ctrl+K`：打开命令面板（面板第一项就是「搜索任务」，见 `palette` 模块）。
+    OpenPalette,
+    /// `Ctrl+F`：直接聚焦搜索框（老习惯，继续认）。
     FocusSearch,
     /// `Ctrl+,`（与 `Ctrl+Alt+S`）：打开设置。前者是浏览器/编辑器的通用键位，
     /// 后者是 JetBrains 一系的习惯 —— 两个都认，老用户不必改手。
@@ -64,8 +66,12 @@ pub(crate) fn shortcut_for(
     if keys.ctrl && keys.n {
         return Some(Shortcut::NewTask);
     }
-    // 0.6.0 起主键位是 Ctrl K（设计稿），Ctrl F 继续认 —— 老用户的手不必改。
-    if keys.ctrl && (keys.k || keys.f) {
+    // 0.6.0 起 `Ctrl K` 打开命令面板（设计稿：面板是升级过的搜索，第一项就是搜索），
+    // `Ctrl F` 继续直接聚焦搜索框 —— 老用户的手不必改。
+    if keys.ctrl && keys.k {
+        return Some(Shortcut::OpenPalette);
+    }
+    if keys.ctrl && keys.f {
         return Some(Shortcut::FocusSearch);
     }
     if keys.ctrl && keys.comma {
@@ -114,6 +120,12 @@ impl App {
                 self.add_form.focused = false;
             }
             Some(Shortcut::FocusSearch) => self.focus_search = true,
+            Some(Shortcut::OpenPalette) => {
+                self.palette_open = true;
+                self.palette_query.clear();
+                self.palette_sel = 0;
+                self.palette_take_focus = true;
+            }
             Some(Shortcut::OpenSettings) => {
                 self.settings_open = true;
                 self.draft = self.settings.clone();
@@ -179,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_and_the_old_ctrl_f_both_focus_search() {
+    fn ctrl_k_opens_the_palette_and_ctrl_f_still_focuses_search() {
         let ctrl_k = Keys {
             ctrl: true,
             k: true,
@@ -187,8 +199,8 @@ mod tests {
         };
         assert_eq!(
             shortcut_for(ctrl_k, true, false, false),
-            Some(Shortcut::FocusSearch),
-            "Ctrl K 是设计稿的主键位，且输入框里有焦点也要认"
+            Some(Shortcut::OpenPalette),
+            "Ctrl K 是设计稿的主键位（0.6.0 起它打开命令面板），输入框里有焦点也要认"
         );
         assert_eq!(
             shortcut_for(keys(true, false, true, false, false), true, false, false),
