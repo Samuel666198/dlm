@@ -86,6 +86,17 @@ fn section_label(ui: &mut egui::Ui, text: &str) {
     );
 }
 
+/// 扩展名分类的显示名（`queue::category_for` 的返回值 → 中文）。
+///
+/// 侧栏与抓取清单都用它：同一个键在两处显示成两个名字，用户会以为是两回事。
+pub(crate) fn category_label(key: &str) -> &'static str {
+    CATEGORIES
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, label)| *label)
+        .unwrap_or("其它")
+}
+
 /// 一行导航项。返回 `true` 表示被点了。
 fn nav_item(ui: &mut egui::Ui, label: &str, count: usize, active: bool) -> bool {
     let (rect, response) =

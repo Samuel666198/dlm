@@ -71,6 +71,7 @@ pub(crate) enum SettingKey {
     TrayHint,
     TrayHintShown,
     Rules,
+    GrabTemplates,
     AutoCheckUpdate,
     WatchClipboard,
 }
@@ -275,6 +276,14 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "下载规则",
         "URL 规则",
         "命中规则就改落点或连接数；按顺序先命中先用（暂只支持改 settings.json）",
+    ),
+    spec(
+        SettingKey::GrabTemplates,
+        "grab_templates",
+        Category::Advanced,
+        "站点抓取",
+        "抓取模板",
+        "按站点记的深度与通配；在抓取窗口里「存为模板」就会记到这里",
     ),
     spec(
         SettingKey::AutoCheckUpdate,

@@ -1018,6 +1018,53 @@ fn every_symbol_we_put_in_the_ui_has_a_glyph() {
     }
 }
 
+/// **抓取窗口画得完**（0.6.0 阶段 3）。
+///
+/// 清单是一张 `Grid` + `ScrollArea`：列数、勾选数组、跳过折叠都容易写错一格就 panic。
+/// 这里塞一份"有本体 / 有镜像 / 有跳过"的清单画一帧 —— 正好是三条分支都要走到的那份。
+#[test]
+fn the_grab_window_renders_a_plan_with_duplicates_and_skips() {
+    use crate::grab::{GrabFile, GrabPlan};
+
+    let (mut app, dir) = test_app("grab-window", Vec::new());
+    let plan = GrabPlan {
+        files: vec![
+            GrabFile {
+                url: "https://a.example/f/1.zip".into(),
+                from: "起始页".into(),
+                duplicate: false,
+            },
+            GrabFile {
+                url: "https://a.example/f/1.zip?v=2".into(),
+                from: "/more.html".into(),
+                duplicate: true,
+            },
+        ],
+        pages: vec!["https://a.example/more.html".into()],
+        skipped: vec![(
+            "https://b.example/x.zip".into(),
+            "不同站点（b.example）".into(),
+        )],
+    };
+    app.grab_open = true;
+    app.grab_url = "https://a.example/".into();
+    app.grab_checked = vec![true, false];
+    app.grab_plan = Some(plan);
+
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+
+    // 空清单 + 扫描中也要能画（这时候分支完全不同）。
+    app.grab_plan = None;
+    app.grab_busy = true;
+    app.grab_started = Some(std::time::Instant::now());
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// 造一个只连着空队列的 `App`，给"整帧渲染"类用例用。
 ///
 /// 托盘在门禁里不建（`DLM_NO_TRAY=1`，见 `tray::suppressed`）：测试线程没有消息泵，

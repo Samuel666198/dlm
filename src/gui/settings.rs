@@ -62,6 +62,9 @@ pub struct Settings {
     /// 开了之后 Agent 拿到的是一张待确认票据，得回对话里问一句、人点头才真下
     /// （0.6.0 阶段 5 的票据规则）。关掉就是"Agent 想下就下"。
     pub agent_confirm: bool,
+    /// 站点抓取模板：**按站点记**（同一站下次打开就是上次那套深度与通配）。
+    #[serde(default)]
+    pub grab_templates: Vec<crate::grab::Template>,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -102,6 +105,7 @@ impl Default for Settings {
             on_duplicate: "auto".to_string(),
             rules: Vec::new(),
             agent_confirm: true,
+            grab_templates: Vec::new(),
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,
@@ -277,6 +281,33 @@ mod tests {
         assert_eq!(back.rules[0].pattern, "*/releases/*");
         assert_eq!(back.rules[0].dir.as_deref(), Some("D:\\软件"));
         assert_eq!(back.rules[0].connections, Some(2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn grab_templates_roundtrip_through_the_settings_file() {
+        let dir = std::env::temp_dir().join(format!("dlm-settings-grab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rules = crate::grab::GrabRules {
+            same_host: true,
+            depth: 2,
+            include: vec!["*.zip".into()],
+            exclude: vec!["*sample*".into()],
+        };
+        let mut s = Settings::default();
+        crate::grab::upsert_template(
+            &mut s.grab_templates,
+            crate::grab::Template::capture("https://a.example/dl/", "素材站", &rules)
+                .expect("host 可解析"),
+        );
+        s.save(&dir).unwrap();
+
+        let back = Settings::load(&dir);
+        assert_eq!(back.grab_templates.len(), 1);
+        assert_eq!(back.grab_templates[0].host, "a.example");
+        assert_eq!(back.grab_templates[0].rules(), rules, "模板要能还原规则");
         let _ = std::fs::remove_dir_all(dir);
     }
 

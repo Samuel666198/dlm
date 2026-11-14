@@ -92,7 +92,11 @@ pub struct App {
     pub(super) grab_plan: Option<crate::grab::GrabPlan>,
     pub(super) grab_checked: Vec<bool>,
     pub(super) grab_error: Option<String>,
-    pub(super) grab_rx: Option<std::sync::mpsc::Receiver<Result<crate::grab::GrabPlan, String>>>,
+    pub(super) grab_rx: Option<std::sync::mpsc::Receiver<crate::grab::GrabPlan>>,
+    /// 这一轮扫描开始的时刻。「扫描中 12s」靠它 —— 给不出百分比，就给已用时。
+    pub(super) grab_started: Option<std::time::Instant>,
+    /// 「存为模板」时用的名字。
+    pub(super) grab_template_name: String,
     /// 代理「测试」的结果（只在设置页显示）。
     pub(super) proxy_test: Option<String>,
     /// 下一帧是否把焦点给搜索框（Ctrl+F）。
@@ -245,6 +249,8 @@ impl App {
             grab_checked: Vec::new(),
             grab_error: None,
             grab_rx: None,
+            grab_started: None,
+            grab_template_name: String::new(),
             proxy_test: None,
             focus_search: false,
             adding: false,

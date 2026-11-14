@@ -242,13 +242,47 @@ pub enum Kind {
     Page,
 }
 
+/// 清单里的一条文件。
+///
+/// 比裸 URL 多两样东西，都是为了界面（0.6.0 阶段 3 的清单列）：
+/// - `from`：它是从哪个页面找到的 —— 同一个文件名出现在两页里时，人要知道看的是哪一条；
+/// - `duplicate`：**同一份文件**的第二个地址（镜像、带 `?mirror=` 的变体）。
+///   以前这种直接丢掉，用户看到"少了一条"却不知道为什么；现在留在清单里标「已去重」，
+///   且不许勾选（勾了就是下两份一样的）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrabFile {
+    pub url: String,
+    pub from: String,
+    pub duplicate: bool,
+}
+
+/// 「是不是同一份文件」的判据：去掉查询串与片段之后的地址。
+///
+/// 为什么敢这么判：抓取只按扩展名认文件，`?v=2`、`?mirror=a` 这类查询串不改变落盘内容；
+/// 而**同一路径不同站点**是不同 URL（host 在 key 里），不会被误并。
+pub fn logical_key(url: &str) -> String {
+    url.split(['?', '#']).next().unwrap_or(url).to_string()
+}
+
 /// 抓取清单：**只列不下载**。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GrabPlan {
-    pub files: Vec<String>,
+    pub files: Vec<GrabFile>,
     pub pages: Vec<String>,
     /// 被丢掉的原因，给人看的：`(url, reason)`
     pub skipped: Vec<(String, String)>,
+}
+
+impl GrabPlan {
+    /// 清单里的地址（按顺序）。测试与入队都用它，不必各自 `.map(|f| &f.url)`。
+    pub fn urls(&self) -> Vec<&str> {
+        self.files.iter().map(|f| f.url.as_str()).collect()
+    }
+
+    /// 可勾选条数（去掉已去重的）。
+    pub fn selectable(&self) -> usize {
+        self.files.iter().filter(|f| !f.duplicate).count()
+    }
 }
 
 /// 常见可下载扩展名。判"是文件"用它，判"是页面"用 `Page` 兜底。
@@ -280,6 +314,8 @@ pub fn plan(start: &str, pages: &[(String, String)], rules: &GrabRules) -> GrabP
         return out;
     };
     let mut seen_files: BTreeSet<String> = BTreeSet::new();
+    // 「同一份文件」的判据与「同一个地址」分开记（见下面那段的注释）。
+    let mut seen_keys: BTreeSet<String> = BTreeSet::new();
     let mut seen_pages: BTreeSet<String> = BTreeSet::new();
     seen_pages.insert(start.to_string());
 
@@ -298,6 +334,12 @@ pub fn plan(start: &str, pages: &[(String, String)], rules: &GrabRules) -> GrabP
     for level in 1..=rules.depth.max(1) {
         let mut next: Vec<(String, String)> = Vec::new();
         for (page_url, html) in &frontier {
+            // 「来自」给人看的是短标签：起始页 / 那条子页面的路径。
+            let from = if page_url == start {
+                "起始页".to_string()
+            } else {
+                path_of(page_url).unwrap_or_else(|| page_url.clone())
+            };
             for link in extract_links(html, page_url) {
                 if !keep(&link, &start_host, rules) {
                     let reason = skip_reason(&link, &start_host, rules);
@@ -308,9 +350,26 @@ pub fn plan(start: &str, pages: &[(String, String)], rules: &GrabRules) -> GrabP
                 }
                 match classify(&link) {
                     Kind::File => {
-                        if seen_files.insert(link.clone()) {
-                            out.files.push(link);
+                        // 两条判定，别混起来：
+                        // - **同一个地址**（同一页里出现两遍）⇒ 直接不收：它不是"另一个来源"，
+                        //   列出来只是噪音；
+                        // - **同一份文件的另一个地址**（镜像、`?v=2`）⇒ 收进清单但标「已去重」，
+                        //   因为用户可能就想换一个更快的那条。
+                        if seen_files.contains(&link) {
+                            continue;
                         }
+                        let duplicate = {
+                            let key = logical_key(&link);
+                            let dup = seen_keys.contains(&key);
+                            seen_keys.insert(key);
+                            dup
+                        };
+                        seen_files.insert(link.clone());
+                        out.files.push(GrabFile {
+                            url: link.clone(),
+                            from: from.clone(),
+                            duplicate,
+                        });
                     }
                     Kind::Page => {
                         if level < rules.depth && seen_pages.insert(link.clone()) {
@@ -643,11 +702,11 @@ mod tests {
         let got = plan(start, &pages, &rules);
 
         assert_eq!(
-            got.files,
+            got.urls(),
             vec![
-                "https://a.example/f/1.zip".to_string(),
-                "https://a.example/f/2.mp4".to_string(),
-                "https://a.example/f/3.rar".to_string(),
+                "https://a.example/f/1.zip",
+                "https://a.example/f/2.mp4",
+                "https://a.example/f/3.rar",
             ],
             "去重、跨层收文件"
         );
@@ -664,6 +723,68 @@ mod tests {
         );
     }
 
+    /// 清单里"来自"与"已去重"两条新信息（0.6.0 阶段 3 的清单列）。
+    ///
+    /// 判据分得很清楚：同一个地址出现两遍只是噪音（不收）；同一份文件的
+    /// **另一个地址**（镜像 / 带 ?v=2）要收进来标「已去重」，因为用户可能想换更快的那条。
+    #[test]
+    fn a_mirror_address_is_kept_and_marked_instead_of_vanishing() {
+        let start = "https://a.example/dir/";
+        let pages = vec![(
+            start.to_string(),
+            r#"<a href="/f/1.zip">1</a>
+               <a href="/f/1.zip?v=2">mirror</a>
+               <a href="/f/1.zip">same again</a>"#
+                .to_string(),
+        )];
+        let got = plan(start, &pages, &GrabRules::default());
+
+        assert_eq!(
+            got.urls(),
+            vec!["https://a.example/f/1.zip", "https://a.example/f/1.zip?v=2"],
+            "同地址的第二遍不收，镜像地址要收"
+        );
+        assert!(!got.files[0].duplicate, "第一条是本体");
+        assert!(got.files[1].duplicate, "第二条标已去重");
+        assert_eq!(got.selectable(), 1, "已去重的不算可勾选");
+        assert_eq!(got.files[0].from, "起始页", "起始页上找到的标起始页");
+    }
+
+    /// 子页面里找到的文件，「来自」要写那一页的路径 —— 否则同名的两条分不清出处。
+    #[test]
+    fn files_from_a_sub_page_name_that_page() {
+        let start = "https://a.example/";
+        let pages = vec![
+            (
+                start.to_string(),
+                r#"<a href="more.html">more</a>"#.to_string(),
+            ),
+            (
+                "https://a.example/more.html".to_string(),
+                r#"<a href="/f/x.zip">x</a>"#.to_string(),
+            ),
+        ];
+        let got = plan(
+            start,
+            &pages,
+            &GrabRules {
+                depth: 2,
+                ..GrabRules::default()
+            },
+        );
+        assert_eq!(got.files[0].from, "/more.html");
+    }
+
+    #[test]
+    fn a_logical_key_ignores_query_and_fragment_but_not_host() {
+        assert_eq!(logical_key("https://a/x.zip?v=2#frag"), "https://a/x.zip");
+        assert_ne!(
+            logical_key("https://a/x.zip"),
+            logical_key("https://b/x.zip"),
+            "不同站点不是同一份文件"
+        );
+    }
+
     #[test]
     fn depth_one_never_walks_into_sub_pages() {
         let start = "https://a.example/";
@@ -673,7 +794,7 @@ mod tests {
         )];
         let got = plan(start, &pages, &GrabRules::default());
         assert!(got.pages.is_empty(), "depth=1 不该把子页面排进清单");
-        assert_eq!(got.files, vec!["https://a.example/x.zip".to_string()]);
+        assert_eq!(got.urls(), vec!["https://a.example/x.zip"]);
     }
 
     #[test]
@@ -786,12 +907,12 @@ mod tests {
         };
         let got = scan(&base, &rules, limits);
         assert!(
-            got.files.iter().any(|u| u.ends_with("a.zip")),
+            got.files.iter().any(|f| f.url.ends_with("a.zip")),
             "{:?}",
             got.files
         );
         assert!(
-            got.files.iter().any(|u| u.ends_with("b.rar")),
+            got.files.iter().any(|f| f.url.ends_with("b.rar")),
             "{:?}",
             got.files
         );
