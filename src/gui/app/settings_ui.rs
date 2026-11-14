@@ -251,6 +251,8 @@ impl App {
     }
 
     /// 一行设置：标题 + 一句解释（左）｜控件（右）。
+    ///
+    /// 规则那一项例外：它的编辑器要整行宽（见 [`Self::rules_editor`]）。
     fn render_row(&mut self, ui: &mut egui::Ui, spec: &'static SettingSpec) {
         egui::Frame::new()
             .fill(theme::SURFACE)
@@ -279,8 +281,85 @@ impl App {
                         }
                     });
                 });
+                if spec.key == SettingKey::Rules {
+                    ui.add_space(6.0);
+                    self.rules_editor(ui);
+                }
             });
         ui.add_space(4.0);
+    }
+
+    /// 规则编辑器：一行一条，**顺序就是优先级**，所以给「上移 / 下移」而不是编号。
+    ///
+    /// 每条三个字段：URL 通配、落点目录（留空 = 用默认）、连接数（勾上才覆盖）。
+    fn rules_editor(&mut self, ui: &mut egui::Ui) {
+        let mut remove: Option<usize> = None;
+        let mut move_it: Option<(usize, bool)> = None;
+
+        for (i, rule) in self.draft.rules.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut rule.pattern)
+                        .hint_text("*/releases/*")
+                        .desired_width(170.0),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(rule_dir_mut(rule))
+                        .hint_text("留空 = 默认目录")
+                        .desired_width(150.0),
+                );
+
+                // 连接数是 `Option<usize>`：勾上才覆盖全局设置。用 `0` 当"没设"会在
+                // 界面与语义上都跟"真的要 0 条"混起来（虽然 0 条不合法）。
+                let mut override_conn = rule.connections.is_some();
+                if ui.checkbox(&mut override_conn, "连接数").changed() {
+                    rule.connections = override_conn.then_some(4);
+                }
+                if let Some(conn) = rule.connections.as_mut() {
+                    ui.add(egui::DragValue::new(conn).range(1..=32));
+                }
+
+                if ui.small_button("上移").clicked() {
+                    move_it = Some((i, true));
+                }
+                if ui.small_button("下移").clicked() {
+                    move_it = Some((i, false));
+                }
+                if ui.small_button("删除").clicked() {
+                    remove = Some(i);
+                }
+
+                if let Err(err) = crate::rules::validate_rule(rule) {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(0xc6, 0x28, 0x28)),
+                    );
+                }
+            });
+        }
+
+        ui.horizontal(|ui| {
+            if ui.small_button("+ 一条规则").clicked() {
+                self.draft.rules.push(crate::rules::Rule {
+                    pattern: String::new(),
+                    dir: None,
+                    connections: None,
+                });
+            }
+            ui.label(
+                egui::RichText::new("按顺序先命中先用；留空的字段不改那项")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+        });
+
+        if let Some(i) = remove {
+            self.draft.rules.remove(i);
+        }
+        if let Some((i, up)) = move_it {
+            crate::rules::move_rule(&mut self.draft.rules, i, up);
+        }
     }
 
     /// 一个设置项画成什么控件。**穷举 `match`**：加了键不画就编译不过。
@@ -462,10 +541,10 @@ impl App {
                 ui.checkbox(&mut self.draft.watch_clipboard, "");
             }
             SettingKey::Rules => {
-                // 规则还没有界面（0.6.0 阶段 4 的界面部分没排上）。这里只报数，
-                // 但不假装能改 —— 界面说谎比功能缺席更糟。
+                // 规则编辑器是**整行宽**的（见 `render_row` 里的特判）：一条规则要同时编辑
+                // 通配、目录、连接数，塞进右边那 300pt 的控件区会挤成一团。
                 ui.label(
-                    egui::RichText::new(format!("已配置 {} 条", self.draft.rules.len()))
+                    egui::RichText::new(format!("{} 条", self.draft.rules.len()))
                         .size(11.0)
                         .monospace()
                         .color(theme::INK_2),
@@ -546,6 +625,14 @@ impl App {
         }
         ui.add_space(8.0);
     }
+}
+
+/// 规则那一行的目录输入框：`Option<String>` 里取出一个可编辑的 `&mut String`。
+///
+/// 清空之后留下的是 `Some("")`，`rules::dir_path_for` 把空白当"没写"（回默认目录），
+/// 所以这里不需要在失焦时把 `Some("")` 收拾回 `None`。
+fn rule_dir_mut(rule: &mut crate::rules::Rule) -> &mut String {
+    rule.dir.get_or_insert_with(String::new)
 }
 
 /// CLI 那一行：照着改就能用。占位符用尖括号，免得被误抄成真路径。

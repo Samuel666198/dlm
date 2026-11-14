@@ -39,15 +39,16 @@ pub fn match_rule<'a>(url: &str, rules: &'a [Rule]) -> Option<&'a Rule> {
 /// 用户找不到（与 `settings::parse_out_dir_input` 拒绝相对路径同一个理由）。
 pub fn dir_path_for(url: &str, rules: &[Rule], default_dir: &Path) -> PathBuf {
     match match_rule(url, rules).and_then(|r| r.dir.as_deref()) {
-        Some(dir) => {
-            let path = Path::new(dir);
+        // 空白当没写：界面里把目录清空会留下 `Some("")`，那是"清掉了"而不是"落到当前目录"。
+        Some(dir) if !dir.trim().is_empty() => {
+            let path = Path::new(dir.trim());
             if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 default_dir.join(path)
             }
         }
-        None => default_dir.to_path_buf(),
+        _ => default_dir.to_path_buf(),
     }
 }
 
@@ -76,6 +77,42 @@ pub fn plan_for(
         dir_path_for(url, rules, default_dir),
         connections_for(url, rules, default_connections),
     )
+}
+
+/// 界面上「上移 / 下移」一格。返回有没有真的动过。
+///
+/// 顺序就是优先级（先命中先用），所以"排在前面的规则赢"这件事必须能被用户改 ——
+/// 而改顺序只能靠挪，不能靠改数字：数字会撞、会留空，挪不会。
+///
+/// 越界（已经在头/尾）返回 `false`，界面据此把按钮置灰。
+pub fn move_rule(rules: &mut [Rule], index: usize, up: bool) -> bool {
+    if index >= rules.len() {
+        return false;
+    }
+    let target = if up {
+        if index == 0 {
+            return false;
+        }
+        index - 1
+    } else {
+        if index + 1 >= rules.len() {
+            return false;
+        }
+        index + 1
+    };
+    rules.swap(index, target);
+    true
+}
+
+/// 一条规则能不能用：通配不能是空的。
+///
+/// 空通配在匹配里永远为假（`grab::matches` 对空串直接 `false`），
+/// 所以它不是"匹配一切"而是"什么都不匹配" —— 留在表里只会让人以为规则生效了。
+pub fn validate_rule(rule: &Rule) -> Result<(), String> {
+    if rule.pattern.trim().is_empty() {
+        return Err("通配不能为空".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -163,5 +200,39 @@ mod tests {
             dir_path_for(url, &abs, Path::new("D:\\Downloads")),
             PathBuf::from("E:\\影音")
         );
+    }
+
+    /// 挪一格就是改优先级：挪完，命中的必须是挪上来的那条。
+    #[test]
+    fn moving_a_rule_changes_which_one_wins() {
+        let mut rules = vec![
+            rule("*.zip", Some("D:\\压缩包"), None),
+            rule("*/releases/*", Some("D:\\软件"), None),
+        ];
+        let url = "https://x.example/releases/a.zip";
+        // 先命中 *.zip。
+        assert_eq!(
+            dir_path_for(url, &rules, Path::new("D:\\dl")),
+            PathBuf::from("D:\\压缩包")
+        );
+
+        assert!(move_rule(&mut rules, 1, true), "第二条上移");
+        assert_eq!(rules[0].pattern, "*/releases/*");
+        assert_eq!(
+            dir_path_for(url, &rules, Path::new("D:\\dl")),
+            PathBuf::from("D:\\软件"),
+            "挪上去的规则现在赢"
+        );
+
+        // 到头/到尾不动，且返回 false（界面据此把按钮置灰）。
+        assert!(!move_rule(&mut rules, 0, true), "已经在第一条");
+        assert!(!move_rule(&mut rules, 1, false), "已经在最后一条");
+        assert!(!move_rule(&mut rules, 9, true), "下标越界不许 panic");
+    }
+
+    #[test]
+    fn an_empty_pattern_is_rejected_because_it_matches_nothing() {
+        assert!(validate_rule(&rule(" ", None, None)).is_err());
+        assert!(validate_rule(&rule("*/x/*", None, None)).is_ok());
     }
 }
