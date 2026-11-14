@@ -64,29 +64,16 @@ impl App {
         };
         let log_tail = self.drawer_log_tail(&task);
 
-        let mut open = true;
-        // 标题固定：egui 用标题派生窗口 id，标题里带任务名的话换一个任务窗口就跳回默认位置。
-        // 任务名在窗体内第一行显示。
-        let shown = egui::Window::new("任务详情")
-            .open(&mut open)
-            .resizable(true)
-            .collapsible(false)
-            .default_width(theme::DRAWER_W)
-            .min_width(340.0)
-            .max_width(560.0)
-            .default_height(460.0)
-            .anchor(
-                egui::Align2::RIGHT_TOP,
-                egui::vec2(-16.0, theme::TOOLBAR_H + 12.0),
-            )
-            .show(ui.ctx(), |ui| drawer_body(ui, &task, &diag, &log_tail));
-        let actions = match shown {
-            // `Window::show` 的 inner 是 Option：折叠时是 None。
-            Some(r) => r.inner.unwrap_or_default(),
-            None => DrawerActions::default(),
-        };
+        // **右栏而不是浮窗**（0.7.0）。浮窗会挡住列表，窄窗口下还会被窗口边缘裁掉 ——
+        // 用户截图里那半个被切掉的详情就是它。改成固定宽度的右栏后，主区让位，
+        // 列表列宽随之收窄，但没有任何东西被盖住。
+        let actions = egui::Panel::right("drawer")
+            .exact_size(theme::DRAWER_W)
+            .resizable(false)
+            .show(ui, |ui| drawer_body(ui, &task, &diag, &log_tail))
+            .inner;
 
-        if !open || actions.close {
+        if actions.close {
             self.selected = None;
             self.drawer_log = None;
             return;
@@ -207,10 +194,18 @@ pub(crate) fn drawer_body(
                     .color(theme::INK_3),
             );
         });
-        // 关闭入口只有标题栏那一个 `×`（窗口自带的）。0.6.0 在这里又画了一个，
-        // 于是详情斜上方并排两个 ×，都是关同一个东西 —— 用户第一眼就问"哪个才是关"。
+        // **只有一个关闭入口**。0.6.0 是浮窗：标题栏自带一个 ×，这里又画一个，
+        // 并排两个 × 都关同一个东西。改成右栏之后没有标题栏了，就由这里提供唯一那个。
+        // 用 `×`（U+00D7）而不是 `✕`（U+2715）：后者在 Microsoft YaHei 里没有字形。
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.add_space(12.0);
+            ui.add_space(10.0);
+            if ui
+                .add(egui::Button::new(egui::RichText::new("×").size(15.0)).frame(false))
+                .on_hover_text("关闭详情")
+                .clicked()
+            {
+                actions.close = true;
+            }
         });
     });
     ui.add_space(10.0);

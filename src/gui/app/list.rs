@@ -15,6 +15,76 @@ const COL_STATUS: f32 = 88.0;
 const GAP: f32 = 12.0;
 const PAD: f32 = 16.0;
 
+/// 进度条至少这么宽才有信息量（再窄就只剩一条线）。
+const COL_PROGRESS_MIN: f32 = 64.0;
+/// 文件名列的最小可读宽度。
+const NAME_MIN: f32 = 150.0;
+
+/// 一行的列矩形。
+///
+/// **行与表头共用这一份排布**：两边各算一次，迟早会错位 —— 0.7.0 把详情改成右栏之后，
+/// 列表可用宽度少了 330pt，行与表头的算法只要有一处没跟上，进度条就会压到文件名上。
+///
+/// 放不下时**先从右边丢掉「剩余」「速度」两列**：这两列多数时候显示 `—`，
+/// 而文件名与进度每行都要看。
+struct Columns {
+    name: egui::Rect,
+    size: egui::Rect,
+    progress: egui::Rect,
+    speed: Option<egui::Rect>,
+    eta: Option<egui::Rect>,
+    status: egui::Rect,
+}
+
+/// 按可用宽度排出这一行的各列位置。
+fn columns(rect: egui::Rect) -> Columns {
+    let inner = rect.width() - PAD * 2.0;
+    // 满编需要的宽度：五列 + 五个间隔 + 文件名最小宽。
+    let full = COL_SIZE + COL_PROGRESS + COL_SPEED + COL_ETA + COL_STATUS + GAP * 5.0 + NAME_MIN;
+    // 只留「大小 + 进度(最小) + 状态」时需要的宽度。
+    let lean = COL_SIZE + COL_PROGRESS_MIN + COL_STATUS + GAP * 3.0 + NAME_MIN;
+    let show_eta = inner >= full;
+    let show_speed = inner >= full - COL_ETA - GAP;
+
+    let mut right = rect.right() - PAD;
+    let mut col = |w: f32| -> egui::Rect {
+        let r = egui::Rect::from_min_max(
+            egui::pos2(right - w, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        );
+        right -= w + GAP;
+        r
+    };
+
+    let status = col(COL_STATUS);
+    let eta = if show_eta { Some(col(COL_ETA)) } else { None };
+    let speed = if show_speed {
+        Some(col(COL_SPEED))
+    } else {
+        None
+    };
+    // 进度条吃掉能给的宽度，但不超设计值、不低于最小值。
+    let progress_w = if show_speed {
+        COL_PROGRESS
+    } else {
+        (inner - lean + COL_PROGRESS_MIN).clamp(COL_PROGRESS_MIN, COL_PROGRESS)
+    };
+    let progress = col(progress_w);
+    let size = col(COL_SIZE);
+    let name = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + PAD, rect.top()),
+        egui::pos2(right, rect.bottom()),
+    );
+    Columns {
+        name,
+        size,
+        progress,
+        speed,
+        eta,
+        status,
+    }
+}
+
 impl App {
     pub(super) fn list(&mut self, ui: &mut egui::Ui) {
         let all = self.tasks();
@@ -72,26 +142,11 @@ impl App {
             theme::LINE_SOFT,
         );
 
-        // 从右往左排定宽列，剩下的给文件名。
-        let mut right = rect.right() - PAD;
-        let mut col = |w: f32| -> egui::Rect {
-            let r = egui::Rect::from_min_max(
-                egui::pos2(right - w, rect.top()),
-                egui::pos2(right, rect.bottom()),
-            );
-            right -= w + GAP;
-            r
-        };
-
-        let status_rect = col(COL_STATUS);
-        let eta_rect = col(COL_ETA);
-        let speed_rect = col(COL_SPEED);
-        let progress_rect = col(COL_PROGRESS);
-        let size_rect = col(COL_SIZE);
-        let name_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + PAD, rect.top()),
-            egui::pos2(right, rect.bottom()),
-        );
+        let cols = columns(rect);
+        let name_rect = cols.name;
+        let size_rect = cols.size;
+        let progress_rect = cols.progress;
+        let status_rect = cols.status;
 
         self.draw_name(ui, name_rect, task);
         text_right(
@@ -103,8 +158,12 @@ impl App {
         );
         draw_progress(ui, progress_rect, task);
         let speed = self.speed_of(&task.id);
-        text_right(ui, speed_rect, &speed_text(task, speed), theme::INK_2, 12.0);
-        text_right(ui, eta_rect, &eta_text(task, speed), theme::INK_3, 12.0);
+        if let Some(speed_rect) = cols.speed {
+            text_right(ui, speed_rect, &speed_text(task, speed), theme::INK_2, 12.0);
+        }
+        if let Some(eta_rect) = cols.eta {
+            text_right(ui, eta_rect, &eta_text(task, speed), theme::INK_3, 12.0);
+        }
         draw_status(ui, status_rect, task);
 
         if response.clicked() {
@@ -149,24 +208,11 @@ impl App {
             theme::LINE,
         );
 
-        let mut right = rect.right() - PAD;
-        let mut col = |w: f32| -> egui::Rect {
-            let r = egui::Rect::from_min_max(
-                egui::pos2(right - w, rect.top()),
-                egui::pos2(right, rect.bottom()),
-            );
-            right -= w + GAP;
-            r
-        };
-        let status_rect = col(COL_STATUS);
-        let eta_rect = col(COL_ETA);
-        let speed_rect = col(COL_SPEED);
-        let progress_rect = col(COL_PROGRESS);
-        let size_rect = col(COL_SIZE);
-        let name_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + PAD, rect.top()),
-            egui::pos2(right, rect.bottom()),
-        );
+        let cols = columns(rect);
+        let name_rect = cols.name;
+        let size_rect = cols.size;
+        let progress_rect = cols.progress;
+        let status_rect = cols.status;
 
         let font = egui::FontId::proportional(10.5);
         let ink = theme::INK_3;
@@ -191,20 +237,24 @@ impl App {
             font.clone(),
             ink,
         );
-        painter.text(
-            speed_rect.right_center(),
-            egui::Align2::RIGHT_CENTER,
-            "速度",
-            font.clone(),
-            ink,
-        );
-        painter.text(
-            eta_rect.right_center(),
-            egui::Align2::RIGHT_CENTER,
-            "剩余",
-            font.clone(),
-            ink,
-        );
+        if let Some(speed_rect) = cols.speed {
+            painter.text(
+                speed_rect.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                "速度",
+                font.clone(),
+                ink,
+            );
+        }
+        if let Some(eta_rect) = cols.eta {
+            painter.text(
+                eta_rect.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                "剩余",
+                font.clone(),
+                ink,
+            );
+        }
         painter.text(
             status_rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -445,4 +495,64 @@ fn elide(s: &str, max: usize) -> String {
     }
     let kept: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+#[cfg(test)]
+mod tests {
+    use super::columns;
+    use eframe::egui;
+
+    /// **列不许重叠**（0.7.0 详情改成右栏之后踩到的就是这个）。
+    ///
+    /// 宽窗口下五列齐备、彼此不压；窄窗口下先丢掉「剩余」「速度」，
+    /// 文件名仍不少于 `NAME_MIN` —— 而不是让进度条骑到文件名上。
+    #[test]
+    fn columns_never_overlap_and_drop_the_least_useful_when_narrow() {
+        let probe = |w: f32| {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, 44.0));
+            columns(rect)
+        };
+
+        // 宽：五列齐备，且从左到右严格递增、互不重叠。
+        let wide = probe(1100.0);
+        assert!(
+            wide.speed.is_some() && wide.eta.is_some(),
+            "1100 宽时应当五列齐备"
+        );
+        // 列是**从右往左**排出来的，所以按从右到左的顺序检查：每列的左边界
+        // 必须不小于前一个（更靠右的）列的右边界。
+        let right_to_left = [
+            Some(wide.status),
+            wide.eta,
+            wide.speed,
+            Some(wide.progress),
+            Some(wide.size),
+            Some(wide.name),
+        ];
+        let mut prev_left = f32::INFINITY;
+        for r in right_to_left.into_iter().flatten() {
+            assert!(
+                r.right() <= prev_left + 0.01,
+                "列重叠了：右边界 {} > 前一列左边界 {prev_left}",
+                r.right()
+            );
+            prev_left = r.left();
+        }
+
+        // 窄（右栏打开、窗口不大）：丢掉「剩余」，其余各列仍不重叠。
+        let narrow = probe(560.0);
+        assert!(narrow.eta.is_none(), "560 宽时「剩余」应当先被丢掉");
+        assert!(
+            narrow.name.width() >= 150.0 - 0.5,
+            "文件名列被压到 {} 宽，低于可读下限",
+            narrow.name.width()
+        );
+        assert!(
+            narrow.name.right() <= narrow.size.left() + 0.01,
+            "文件名与大小列重叠"
+        );
+        assert!(
+            narrow.size.right() <= narrow.progress.left() + 0.01,
+            "大小压到进度上"
+        );
+    }
 }
