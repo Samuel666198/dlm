@@ -618,16 +618,6 @@ impl App {
             .show(ui, |ui| self.sidebar(ui));
 
         // 详情抽屉：右边，只有选中任务时才占位（没选中就完全不出现在布局里）。
-        // **只为出证据用**：`DLM_DEBUG_SELECT_FIRST=1` 让首帧自动选中第一条任务，
-        // 好在无人值守的截图里看到右栏详情（物理点击在 headless 策略下被禁，
-        // 而本项目没开 accesskit，行本身不在无障碍树里，没有别的入口能让它被选中）。
-        // 正常情况下这个环境变量不存在，行为与不写这段完全一致。
-        if self.selected.is_none()
-            && std::env::var_os("DLM_DEBUG_SELECT_FIRST").is_some()
-            && let Some(first) = self.tasks().first()
-        {
-            self.selected = Some(first.id.clone());
-        }
         if self.selected.is_some() {
             self.drawer(ui);
         }

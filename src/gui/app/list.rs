@@ -166,6 +166,21 @@ impl App {
         }
         draw_status(ui, status_rect, task);
 
+        // 告诉无障碍树"这一行是个可点的项"。**画出来的控件默认不在树里** ——
+        // 不写这一句，读屏软件读不到列表，UI 自动化也点不到任何一行
+        // （0.7.0 出证据时卡在这：headless 禁物理点击，而树里没有行）。
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::Role::Button,
+                true,
+                format!(
+                    "{} · {} · {}",
+                    task.name,
+                    task.status,
+                    fmt_bytes_opt(task.total_len)
+                ),
+            )
+        });
         if response.clicked() {
             self.selected = Some(task.id.clone());
         }

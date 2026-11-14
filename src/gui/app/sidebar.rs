@@ -215,6 +215,14 @@ fn entry_row(
     if !tip.is_empty() {
         response.clone().on_hover_text(tip);
     }
+    // 同样是"画出来的控件默认不在无障碍树里"：不报身份，读屏与自动化都找不到它。
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            if label.is_empty() { tip } else { label },
+        )
+    });
     response.clicked()
 }
 
@@ -297,5 +305,8 @@ fn nav_item(
             .on_hover_text(format!("{label}（{count}）"));
     }
 
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{label}（{count}）"))
+    });
     response.clicked()
 }
