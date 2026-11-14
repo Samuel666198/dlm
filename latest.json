@@ -1,11 +1,11 @@
 {
-  "notes": "0.5.0：限速计划、代理支持、托盘提示；站点抓取、DASH 识别、浏览器下载接管",
-  "core": "0.1.0",
-  "sha256": "cf5a9e7a24b55772d144a9adae6d4b10026518a42a5118a5103ea04f877add15",
-  "url": "https://github.com/Samuel666198/dlm/releases/download/v0.5.0/dlm-0.5.0-win-x64.zip",
-  "size": 11674363,
-  "extension": "0.2.16",
-  "published_at": "2026-11-13T12:15:52Z",
-  "min_core": "0.1.0",
-  "release": "0.5.0"
+    "release":  "0.6.0",
+    "core":  "0.1.0",
+    "extension":  "0.2.16",
+    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.6.0/dlm-0.6.0-win-x64.zip",
+    "sha256":  "f86c21b2e68125b88f878055f06065694895b33c974560382a29ffff82765a00",
+    "size":  11805452,
+    "notes":  "界面按设计稿重做：主界面、设置页、站点抓取窗口；新增夜间批次、命令面板、卡顿诊断；Agent 接入闭环（MCP 桥 dlm-mcp 单独下载）。",
+    "min_core":  "0.1.0",
+    "published_at":  "2026-11-14T07:55:02Z"
 }
