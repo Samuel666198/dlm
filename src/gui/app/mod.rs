@@ -121,6 +121,8 @@ pub struct App {
     pub quitting: bool,
     /// 关闭窗口时收进托盘而不是退出（设置项，默认 true）。
     pub close_to_tray: bool,
+    /// 侧栏是否收起成图标条（设置项，默认不收起）。
+    pub(super) sidebar_collapsed: bool,
     /// 窗口当前是否可见。托盘「显示窗口」把它置 true。
     pub window_visible: bool,
     /// 托盘句柄。None = 建不起来（无托盘环境），此时关窗即退出。
@@ -274,6 +276,7 @@ impl App {
             add_form: dialog::AddForm::default(),
             quitting: false,
             close_to_tray: true,
+            sidebar_collapsed: settings.sidebar_collapsed,
             window_visible: true,
             tray: tray::Tray::new(),
             tray_hint_at: 0,
@@ -602,8 +605,15 @@ impl App {
             .exact_size(theme::STATUS_H)
             .show(ui, |ui| self.status_bar(ui));
 
+        // 收起时只留一条图标（52pt）。宽度**必须**跟着状态变，否则收起后只剩一条窄内容
+        // 贴在左边、右边留一大块空白 —— 那看起来像布局坏了。
+        let sidebar_w = if self.sidebar_collapsed {
+            theme::SIDEBAR_MINI_W
+        } else {
+            theme::SIDEBAR_W
+        };
         egui::Panel::left("sidebar")
-            .exact_size(theme::SIDEBAR_W)
+            .exact_size(sidebar_w)
             .resizable(false)
             .show(ui, |ui| self.sidebar(ui));
 

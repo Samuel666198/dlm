@@ -540,6 +540,13 @@ impl App {
             SettingKey::CloseToTray => {
                 ui.checkbox(&mut self.draft.close_to_tray, "");
             }
+            SettingKey::SidebarCollapsed => {
+                // 勾上之后**立刻**反映到界面：这类"看得见"的开关如果还要点保存才生效，
+                // 用户会以为没生效而反复点。
+                if ui.checkbox(&mut self.draft.sidebar_collapsed, "").changed() {
+                    self.sidebar_collapsed = self.draft.sidebar_collapsed;
+                }
+            }
             SettingKey::TrayHint => {
                 ui.checkbox(&mut self.draft.tray_hint, "");
             }

@@ -80,6 +80,9 @@ pub struct Settings {
     // ---- 界面 ----
     /// 关闭窗口时收进托盘。
     pub close_to_tray: bool,
+    /// 侧栏是否收起（只留图标条）。0.7.0 起可切换，状态记忆在这里。
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
     /// 收进托盘时提示一次。
     pub tray_hint: bool,
     /// 是否已经提示过（避免每次都说）。与 `tray_hint` 分开，语义才清楚。
@@ -114,6 +117,7 @@ impl Default for Settings {
             on_complete: String::new(),
             autostart: false,
             close_to_tray: true,
+            sidebar_collapsed: false,
             tray_hint: true,
             tray_hint_shown: false,
             auto_check_update: true,

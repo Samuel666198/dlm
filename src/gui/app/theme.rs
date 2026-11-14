@@ -22,6 +22,11 @@ pub const STATUS_H: f32 = 32.0;
 pub const CLIPBOARD_HINT_H: f32 = 32.0;
 /// 左侧分类栏宽度（D6：保留）。
 pub const SIDEBAR_W: f32 = 212.0;
+
+/// 侧栏收起后的宽度：只留一条图标。
+///
+/// 52 = 16（图标）+ 两侧各 18 的留白。再窄就点不准，再宽就白占地方。
+pub const SIDEBAR_MINI_W: f32 = 52.0;
 /// 详情抽屉宽度。
 pub const DRAWER_W: f32 = 372.0;
 /// 任务行高度。
