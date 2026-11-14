@@ -134,6 +134,12 @@ pub struct AgentGate {
 /// - 2：`/api/agent/add` + `/api/agent/ticket` + 票据确认（0.6.0）
 pub const AGENT_API: u32 = 2;
 
+/// 界面里可读的程序名：**英文全称**，不出现缩写。
+///
+/// 缩写 \dlm\ 只留在文件名与命令上（\dlm.exe\ / \dlm --url\），那是路径不是品牌。
+/// 顶栏、窗口标题、托盘提示三处共用这一个常量，免得将来各写一个说法。
+pub const APP_NAME: &str = "Download Manager";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Endpoint {
     pub port: u16,
@@ -466,7 +472,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size(theme::WINDOW_DEFAULT)
             .with_min_inner_size(theme::WINDOW_MIN)
-            .with_title("dlm")
+            .with_title(APP_NAME)
             .with_icon(window_icon())
             // `--autostart` 纯托盘：开机时没人看屏幕，只保证队列在跑（P3）。
             .with_visible(!config.autostart),

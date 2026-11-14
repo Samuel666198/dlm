@@ -27,17 +27,17 @@ use crate::gui::snapshot::TaskView;
 ///
 /// 这个数没有别的用处，就是给搜索框算"还能占多宽"。写成常量而不是散在算式里，
 /// 是因为漏一项的后果是「按钮被挤出窗口」—— 不报错、不 panic，只是用不了。
-const RIGHT_SIDE_W: f32 = 46.0 /* Ctrl K */ + 56.0 * 2.0 /* 两个工具按钮 */ + 22.0 /* 间距 */;
+const RIGHT_SIDE_W: f32 = 56.0 * 2.0 /* 两个工具按钮 */ + 22.0 /* 间距 */;
+
+/// 搜索框的最大宽度。
+///
+/// 占满整条会让人以为它是万能输入框 —— 它只搜任务名与链接。两轮试过：340 显得局促，
+/// 560 才是"够用但不压人"的位置。`Ctrl K` 提示内嵌在框内右端，不另占宽度。
+const SEARCH_MAX_W: f32 = 560.0;
 
 /// 工具条上能点出来的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolbarAction {
-    /// 新建 → 单链接。
-    NewSingle,
-    /// 新建 → 批量粘贴。
-    NewPaste,
-    /// 新建 → 站点抓取。
-    NewGrab,
     /// ⋯ → 全部暂停。
     PauseAll,
     /// ⋯ → 删除全部（已完成）。**这只是"请求确认"**，见 [`delete_all_step`]。
@@ -94,55 +94,18 @@ impl App {
         let mut action: Option<ToolbarAction> = None;
 
         ui.horizontal_centered(|ui| {
-            ui.add_space(10.0);
+            ui.add_space(12.0);
 
-            // ＋ 新建 ▾：主按钮，三个入口收在一个下拉里。
-            let new_btn = new_task_button(ui);
-            egui::Popup::menu(&new_btn).show(|ui| {
-                ui.set_min_width(168.0);
-                if ui.button("单链接…").clicked() {
-                    action = Some(ToolbarAction::NewSingle);
-                    ui.close();
-                }
-                if ui.button("批量粘贴…").clicked() {
-                    action = Some(ToolbarAction::NewPaste);
-                    ui.close();
-                }
-                if ui.button("站点抓取…").clicked() {
-                    action = Some(ToolbarAction::NewGrab);
-                    ui.close();
-                }
-            });
+            // 品牌位取代了 0.6.0 的「＋新建 ▾」大按钮：入口已经在左栏平铺，
+            // 顶栏再放一个橙色大按钮既是重复，又把视线从内容上抢走。
+            brand_block(ui);
+            ui.add_space(26.0);
 
-            ui.add_space(10.0);
-
-            // 搜索占满中间：**必须先把右侧固定宽度的东西扣掉**再问 `available_width`，
-            // 否则最后两颗按钮会被挤出窗口右缘 —— 第一版就是这么丢的 `⋯`
-            // （截图实测：1684pt 宽的窗口里只剩「设置」，更多按钮整个落在窗口外）。
-            let search_w = (ui.available_width() - RIGHT_SIDE_W).max(120.0);
-            let search = ui.add_sized(
-                [search_w, 28.0],
-                egui::TextEdit::singleline(&mut self.search).hint_text("搜索名字、链接或站点"),
-            );
-            // Ctrl K 只是置个标记，真正抢焦点要等控件画出来这一帧。
-            if self.focus_search {
-                search.request_focus();
-                self.focus_search = false;
-            }
-            ui.add_space(4.0);
-            // 快捷键提示：点它也能聚焦，省得记不住键位还要去翻文档。
-            let kbd = ui.add(
-                egui::Label::new(
-                    egui::RichText::new("Ctrl K")
-                        .size(10.5)
-                        .monospace()
-                        .color(theme::INK_3),
-                )
-                .sense(egui::Sense::click()),
-            );
-            if kbd.on_hover_text("聚焦搜索框").clicked() {
-                self.focus_search = true;
-            }
+            // 搜索框：**先扣掉右侧固定宽度的东西**再问 `available_width`，否则最后两颗
+            // 按钮会被挤出窗口右缘（0.6.0 第一版就是这么丢的 `⋯`，1684pt 窗口里只剩「设置」）。
+            // 宽度取 560 与可用宽度中较小者：占满整条会让人以为它是万能输入框，它只搜任务。
+            let search_w = (ui.available_width() - RIGHT_SIDE_W).clamp(160.0, SEARCH_MAX_W);
+            self.search_field(ui, search_w);
 
             ui.add_space(6.0);
             if tool_button(ui, Icon::Gear, "设置", true).clicked() {
@@ -184,12 +147,6 @@ impl App {
 
         // 出闭包再动状态：这里可以自由借 `self`。
         match action {
-            Some(ToolbarAction::NewSingle) => {
-                self.adding = true;
-                self.add_form.focused = false;
-            }
-            Some(ToolbarAction::NewPaste) => self.basket_open = true,
-            Some(ToolbarAction::NewGrab) => self.grab_open = true,
             Some(ToolbarAction::PauseAll) => {
                 for id in active_ids {
                     self.send(Ticket::Pause(id));
@@ -206,43 +163,86 @@ impl App {
     }
 }
 
-/// 「＋ 新建 ▾」主按钮：强调色实底 + 画出来的加号与下拉箭头。
+/// 品牌位：一个方块标 + **英文全称**（界面里不出现缩写 `dlm`，它只留在文件名与命令上）。
 ///
-/// 为什么不用 `ui.menu_button("＋ 新建 ▾")`：`＋` 与 `▾` 这两个字符在
-/// Microsoft YaHei 里没有字形，实测画出来是**方框**（与早年的 ▶ ❚❚ 🗑 同一个坑）。
-/// 所以按钮自己画，菜单用 [`egui::Popup::menu`] 挂在它的 response 上 ——
-/// 点击切换开合这件事 `Popup::menu` 已经处理好了。
-fn new_task_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(104.0, 28.0), egui::Sense::click());
-    let ink = egui::Color32::from_rgb(0xFF, 0xF9, 0xF4);
+/// 全称用粗体：它是这一行的"身份"，不该和搜索框的占位字一样轻。
+fn brand_block(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(180.0, 28.0), egui::Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        theme::RADIUS - 2.0,
-        if response.hovered() {
-            theme::ACCENT_INK
-        } else {
-            theme::ACCENT
-        },
+    let logo = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 12.0, rect.center().y),
+        egui::vec2(24.0, 24.0),
     );
-    let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 17.0, rect.center().y),
-        egui::vec2(11.0, 11.0),
+    painter.rect_filled(logo, 6.0, theme::ACCENT);
+    super::icons::draw_icon(
+        painter,
+        Icon::Download,
+        egui::Rect::from_center_size(logo.center(), egui::vec2(13.0, 13.0)),
+        egui::Color32::from_rgb(0xFF, 0xF9, 0xF4),
     );
-    super::icons::draw_icon(painter, Icon::Plus, icon_rect, ink);
     painter.text(
-        egui::pos2(rect.left() + 27.0, rect.center().y),
+        egui::pos2(logo.right() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
-        "新建",
-        egui::FontId::proportional(12.5),
-        ink,
+        crate::gui::APP_NAME,
+        egui::FontId::proportional(14.0),
+        theme::INK,
     );
-    let chevron = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - 13.0, rect.center().y),
-        egui::vec2(9.0, 9.0),
-    );
-    super::icons::draw_icon(painter, Icon::ChevronDown, chevron, ink);
-    response
+}
+
+impl App {
+    /// 搜索框：自己画底，输入框无边框塞进去，`Ctrl K` 提示**内嵌**在右端。
+    ///
+    /// 为什么不用 `add_sized(TextEdit)` 加一个外置快捷键标签：外置的那个像第二个按钮，
+    /// 内嵌才像"输入框的一部分"。代价是得手画底与留白。
+    fn search_field(&mut self, ui: &mut egui::Ui, width: f32) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
+        let painter = ui.painter().clone();
+        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::SURFACE_2);
+
+        let chip_w = 46.0;
+        let inner = egui::Rect::from_min_max(
+            rect.min + egui::vec2(9.0, 2.0),
+            egui::pos2(rect.right() - chip_w - 8.0, rect.bottom() - 2.0),
+        );
+        let resp = ui
+            .new_child(
+                egui::UiBuilder::new()
+                    .max_rect(inner)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            )
+            .add_sized(
+                [inner.width(), 22.0],
+                egui::TextEdit::singleline(&mut self.search)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("搜索任务、链接或站点"),
+            );
+        // Ctrl K 只是置个标记，真正抢焦点要等控件画出来这一帧。
+        if self.focus_search {
+            resp.request_focus();
+            self.focus_search = false;
+        }
+
+        let chip = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - chip_w / 2.0 - 7.0, rect.center().y),
+            egui::vec2(chip_w, 18.0),
+        );
+        painter.rect_filled(chip, 4.0, theme::SURFACE);
+        painter.text(
+            chip.center(),
+            egui::Align2::CENTER_CENTER,
+            "Ctrl K",
+            egui::FontId::monospace(9.5),
+            theme::INK_3,
+        );
+        // 点提示也能聚焦：记不住键位的人有个可点的地方。
+        if ui
+            .interact(chip, ui.scope_id().with("kbd-hint"), egui::Sense::click())
+            .on_hover_text("聚焦搜索框")
+            .clicked()
+        {
+            self.focus_search = true;
+        }
+    }
 }
 
 #[cfg(test)]

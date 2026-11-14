@@ -194,12 +194,12 @@ impl Tray {
     pub fn hint_downloading(&self) {
         let _ = self
             ._icon
-            .set_tooltip(Some("dlm 仍在下载 — 双击图标恢复窗口"));
+            .set_tooltip(Some("Download Manager 仍在下载 — 双击图标恢复窗口"));
     }
 
     /// 窗口恢复后把 tooltip 换回默认。
     pub fn hint_idle(&self) {
-        let _ = self._icon.set_tooltip(Some("dlm 下载器"));
+        let _ = self._icon.set_tooltip(Some("Download Manager"));
     }
 }
 
