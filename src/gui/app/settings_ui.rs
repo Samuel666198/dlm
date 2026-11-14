@@ -285,6 +285,10 @@ impl App {
                     ui.add_space(6.0);
                     self.rules_editor(ui);
                 }
+                if spec.key == SettingKey::NightBatch {
+                    ui.add_space(6.0);
+                    self.batch_editor(ui);
+                }
             });
         ui.add_space(4.0);
     }
@@ -476,6 +480,11 @@ impl App {
                     self.draft.speed_windows.remove(i);
                 }
             }
+            SettingKey::NightBatch => {
+                // 详细三行在 `render_row` 的整行宽区块里（见 `batch_editor`）；
+                // 这里只画那一个总开关。
+                ui.checkbox(&mut self.draft.night_batch.on, "");
+            }
             SettingKey::Proxy => {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
@@ -634,6 +643,46 @@ impl App {
             );
         }
         ui.add_space(8.0);
+    }
+
+    /// 夜间批次的三行细节：窗口、限速、跑完关机。
+    ///
+    /// 总开关关着时**置灰但可见**：让人看得见"这套东西存在、打开后会发生什么"，
+    /// 而不是打开开关才突然冒出三行。
+    fn batch_editor(&mut self, ui: &mut egui::Ui) {
+        let b = &mut self.draft.night_batch;
+        let on = b.on;
+        ui.add_enabled_ui(on, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("窗口").size(11.0).color(theme::INK_3));
+                ui.add(egui::DragValue::new(&mut b.start_hour).range(0..=23));
+                ui.label("点 到");
+                ui.add(egui::DragValue::new(&mut b.end_hour).range(0..=23));
+                ui.label("点");
+                if b.start_hour > b.end_hour {
+                    ui.label(egui::RichText::new("跨午夜").size(10.0).color(theme::INK_3));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("限速").size(11.0).color(theme::INK_3));
+                ui.add(egui::DragValue::new(&mut b.speed_kib).range(0..=1024 * 100));
+                ui.label(
+                    egui::RichText::new("KiB/s（0 = 不限速）")
+                        .size(10.5)
+                        .color(theme::INK_3),
+                );
+            });
+            ui.checkbox(&mut b.shutdown_when_done, "队列跑空后关机");
+        });
+        ui.label(
+            egui::RichText::new(if on {
+                self.draft.night_batch.summary()
+            } else {
+                "关着的时候白天也照常派发".to_string()
+            })
+            .size(10.5)
+            .color(theme::INK_3),
+        );
     }
 }
 

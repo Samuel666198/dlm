@@ -340,6 +340,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         rename_template: String::new(),
         on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
         rules: Vec::new(),
+        night_batch: crate::gui::batch::NightBatch::default(),
     };
     let got = argv(&tuning);
     assert!(
@@ -366,6 +367,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         rename_template: String::new(),
         on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
         rules: Vec::new(),
+        night_batch: crate::gui::batch::NightBatch::default(),
     });
     assert!(
         !unlimited.iter().any(|s| s == "--max-speed"),
@@ -390,6 +392,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         rename_template: String::new(),
         on_duplicate: crate::gui::naming::OnDuplicate::AutoNumber,
         rules: Vec::new(),
+        night_batch: crate::gui::batch::NightBatch::default(),
     });
     assert!(
         clamped
@@ -1063,6 +1066,59 @@ fn the_grab_window_renders_a_plan_with_duplicates_and_skips() {
     output.textures_delta.clear();
 
     let _ = fs::remove_dir_all(dir);
+}
+
+/// **夜间批次在 runner 侧的两个接线点**（0.6.0 阶段 4-1）。
+///
+/// 纯逻辑在 `batch` 模块里测过了；这里测的是"设置里那个开关真的接到了 runner 的两个出口"：
+/// 派发门（`may_dispatch_now`）与限速（`max_speed_now`）。少接一个，写进设置也不会生效，
+/// 而界面上看起来一切正常。
+#[test]
+fn the_night_batch_switch_reaches_the_dispatch_gate_and_the_speed_cap() {
+    use crate::gui::batch::NightBatch;
+    use crate::gui::speed_schedule::local_minute_of_day;
+
+    let now_hour = (local_minute_of_day() / 60) as u8;
+    let mk = |batch: NightBatch| crate::gui::settings::Settings {
+        max_speed_kib: 4096,
+        night_batch: batch,
+        ..Default::default()
+    };
+
+    // 1) 开着 + 窗口覆盖此刻（start == end 表示全天）⇒ 用批次那一档限速。
+    let tuning = RuntimeTuning::from_settings(&mk(NightBatch {
+        on: true,
+        start_hour: 9,
+        end_hour: 9,
+        speed_kib: 256,
+        shutdown_when_done: false,
+    }));
+    assert_eq!(
+        tuning.max_speed_now(),
+        256,
+        "窗口内用批次那一档，不叠加全局限速"
+    );
+    assert!(tuning.may_dispatch_now(), "全天窗口里当然可以派发");
+
+    // 2) 窗口在两小时后（1 小时长）⇒ 此刻不许派发，限速回全局。
+    let tuning = RuntimeTuning::from_settings(&mk(NightBatch {
+        on: true,
+        start_hour: (now_hour + 2) % 24,
+        end_hour: (now_hour + 3) % 24,
+        speed_kib: 256,
+        shutdown_when_done: false,
+    }));
+    assert!(!tuning.may_dispatch_now(), "窗口外不派发新任务");
+    assert_eq!(tuning.max_speed_now(), 4096, "窗口外用全局限速");
+
+    // 3) 关掉总开关 ⇒ 两道门都放开（与没有这个功能时完全一致）。
+    let tuning = RuntimeTuning::from_settings(&mk(NightBatch {
+        on: false,
+        speed_kib: 256,
+        ..NightBatch::default()
+    }));
+    assert!(tuning.may_dispatch_now());
+    assert_eq!(tuning.max_speed_now(), 4096);
 }
 
 /// 造一个只连着空队列的 `App`，给"整帧渲染"类用例用。

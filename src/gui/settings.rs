@@ -65,6 +65,9 @@ pub struct Settings {
     /// 站点抓取模板：**按站点记**（同一站下次打开就是上次那套深度与通配）。
     #[serde(default)]
     pub grab_templates: Vec<crate::grab::Template>,
+    /// 夜间批次：限速窗口 + 只在窗口内派发 + 跑完关机，合成一个开关。
+    #[serde(default)]
+    pub night_batch: crate::gui::batch::NightBatch,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -106,6 +109,7 @@ impl Default for Settings {
             rules: Vec::new(),
             agent_confirm: true,
             grab_templates: Vec::new(),
+            night_batch: crate::gui::batch::NightBatch::default(),
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,

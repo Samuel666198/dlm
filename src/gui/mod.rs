@@ -8,6 +8,7 @@
 //! 只绑 127.0.0.1；所有 HTTP 路径都要求 `?t=<token>`；队列不存 Cookie。
 
 pub mod app;
+pub mod batch;
 pub mod clipboard;
 pub mod host_budget;
 pub mod http;
@@ -185,6 +186,11 @@ pub(crate) struct RuntimeTuning {
     /// 放在这里而不是留在 `Settings` 里，理由与其它字段一样：runner 只该看见
     /// 「影响子进程的那几项」，界面偏好在 UI 线程。
     pub rules: Vec<crate::rules::Rule>,
+    /// 夜间批次（限速窗口 + 只在窗口内派发 + 跑完关机）。
+    ///
+    /// 住在这里是因为它同时管"派发门"（runner 每个 tick 都要看）和限速值 ——
+    /// 两件事都在 runner 侧，留在 `Settings` 里就会变成"改了要重启"。
+    pub night_batch: batch::NightBatch,
 }
 
 impl RuntimeTuning {
@@ -197,11 +203,22 @@ impl RuntimeTuning {
     ///
     /// 每次派发前现算 —— 后台任务跨过窗口边界时不需要重启就能换挡。
     pub fn max_speed_now(&self) -> u64 {
-        speed_schedule::rate_at(
-            speed_schedule::local_minute_of_day(),
-            &self.speed_windows,
-            self.max_speed_kib as u32,
-        ) as u64
+        let minute = speed_schedule::local_minute_of_day();
+        // 夜间批次是"总开关"：开着且此刻在窗口内就用它那一档，**不再叠加**限速计划。
+        // 两个都生效会得出一个用户解释不清的数（"我设了 2 MiB/s，怎么才 512"）。
+        if self.night_batch.on && self.night_batch.in_window(minute) {
+            return self.night_batch.speed_kib;
+        }
+        speed_schedule::rate_at(minute, &self.speed_windows, self.max_speed_kib as u32) as u64
+    }
+
+    /// 此刻能不能派发新任务（夜间批次窗口外排队等着）。
+    ///
+    /// **只拦新派发**：已经在跑的任务不掐断 —— 到点了把用户下到 90% 的任务停掉，
+    /// 那不是编排，是事故。
+    pub fn may_dispatch_now(&self) -> bool {
+        self.night_batch
+            .may_dispatch(speed_schedule::local_minute_of_day())
     }
     pub fn from_settings(s: &settings::Settings) -> Self {
         Self::from_settings_with(s, &s.effective_out_dir(), false)
@@ -232,6 +249,7 @@ impl RuntimeTuning {
             rename_template: s.rename_template.clone(),
             on_duplicate: naming::OnDuplicate::parse(&s.on_duplicate),
             rules: s.rules.clone(),
+            night_batch: s.night_batch.clone(),
         }
     }
 }

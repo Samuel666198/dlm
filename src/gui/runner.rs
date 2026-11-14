@@ -48,13 +48,19 @@ pub(crate) fn run(
 ) {
     let mut children: HashMap<String, Child> = HashMap::new();
 
-    let mut reserved: HashMap<String, u64> = HashMap::new();
-    let mut last_delivered: HashMap<String, u64> = HashMap::new();
     // E18：运行时参数由设置投影而来，`ApplyRuntime` 会就地替换。
     // 之前这里是裸的 `per_host: usize`（调用方硬编码 8），连接数与限速压根没往下传。
     let mut tuning = tuning;
-    // 跨任务的 host 连接预算（勘误 E4）：这是改 scheduler.rs 做不到的那一层。
-    let mut gate = HostGate::new(tuning.per_host);
+    // `tick` 要一起推进的那组状态（配额预读、host 预算、夜间批次进度）。
+    let mut state = RunState {
+        reserved: HashMap::new(),
+        last_delivered: HashMap::new(),
+        // 跨任务的 host 连接预算（勘误 E4）：这是改 scheduler.rs 做不到的那一层。
+        gate: HostGate::new(tuning.per_host),
+        // 夜间批次的进度：这次开着的时候到底派发过没有、关机动作发过没有。
+        // 二者都要跨 tick 记住，所以放在循环外面。
+        batch: BatchState::default(),
+    };
     loop {
         let mut changed = false;
         match rx.recv_timeout(Duration::from_millis(500)) {
@@ -63,15 +69,15 @@ pub(crate) fn run(
                 // 换 tuning 与 gate 都在这儿做，且**立刻生效**：下一轮 `tick` 派发时就用新值。
                 if let Ticket::ApplyRuntime(next) = &ticket {
                     tuning = next.clone();
-                    gate.set_per_host(next.per_host);
+                    state.gate.set_per_host(next.per_host);
                     changed = true;
                 } else {
                     changed |= apply(
                         ticket,
                         &mut store,
                         &mut children,
-                        &mut reserved,
-                        &mut last_delivered,
+                        &mut state.reserved,
+                        &mut state.last_delivered,
                         &config,
                         &tuning,
                     );
@@ -85,15 +91,7 @@ pub(crate) fn run(
                 return;
             }
         }
-        changed |= tick(
-            &mut store,
-            &mut children,
-            &mut reserved,
-            &mut last_delivered,
-            &mut gate,
-            &config,
-            &tuning,
-        );
+        changed |= tick(&mut store, &mut children, &mut state, &config, &tuning);
         if changed {
             let _ = store.save();
         }
@@ -447,9 +445,7 @@ impl HostGate {
 fn tick(
     store: &mut QueueStore,
     children: &mut HashMap<String, Child>,
-    reserved: &mut HashMap<String, u64>,
-    last_delivered: &mut HashMap<String, u64>,
-    gate: &mut HostGate,
+    state: &mut RunState,
     config: &GuiConfig,
     tuning: &RuntimeTuning,
 ) -> bool {
@@ -471,7 +467,7 @@ fn tick(
     let mut charged = false;
     for (id, name, dir) in running {
         let now = store.delivered(&dir, &name).unwrap_or(0);
-        let previous = last_delivered.insert(id.clone(), now).unwrap_or(now);
+        let previous = state.last_delivered.insert(id.clone(), now).unwrap_or(now);
         if now > previous {
             charged |= store.quota_charge(now - previous);
         }
@@ -489,10 +485,10 @@ fn tick(
     }
     for (id, code) in finished {
         children.remove(&id);
-        reserved.remove(&id);
-        last_delivered.remove(&id);
+        state.reserved.remove(&id);
+        state.last_delivered.remove(&id);
         // 任务结束，把 host 预算还回去。
-        gate.give_back(&id);
+        state.gate.give_back(&id);
         let now = queue::now_secs();
         if let Some(task) = store.find_mut(&id) {
             let verdict = finish_verdict(
@@ -536,7 +532,11 @@ fn tick(
 
     // 上一轮因预算退出、而本窗剩余仍不足一轮预读的任务：明确进入配额等待，别每 500 ms 空转。
     if let Some(quota) = store.quota() {
-        let reserved_total = reserved.values().copied().fold(0u64, u64::saturating_add);
+        let reserved_total = state
+            .reserved
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
         let available = quota
             .limit
             .saturating_sub(quota.used)
@@ -562,7 +562,11 @@ fn tick(
     }
 
     // 4) 派发。
-    while children.len() < config.concurrency {
+    //
+    //    夜间批次关着时 `may_dispatch_now()` 恒真，这段与以前完全一样；
+    //    开着且此刻在窗口外 ⇒ 一单都不派（排队的继续排队，已经在跑的照跑）。
+    let may_dispatch = tuning.may_dispatch_now();
+    while may_dispatch && children.len() < config.concurrency {
         // E18：连接数从设置（或命中规则）来，不再是编译期常量。
         // 0.6.0：`want` 按**候选任务自己的**规则算 —— `plan_for_task` 与
         // `child_args` 是同一个出口，所以 host 预算与实际开的条数不会分成两本账。
@@ -575,7 +579,7 @@ fn tick(
                     && t.hold_until.is_none_or(|s| s <= now)
                     // 按 host 的连接预算（勘误 E4）：同 host 上已占用的 + 这一单
                     // 要用的超过上限，就跳过它去看下一个（可能是别的 host）。
-                    && gate.allows(&t.url, plan_for_task(t, tuning).1)
+                    && state.gate.allows(&t.url, plan_for_task(t, tuning).1)
             })
             .cloned();
         let Some(task) = next else { break };
@@ -584,7 +588,11 @@ fn tick(
             if quota.window_started_at == 0 {
                 changed |= store.quota_start(now);
             }
-            let reserved_total = reserved.values().copied().fold(0u64, u64::saturating_add);
+            let reserved_total = state
+                .reserved
+                .values()
+                .copied()
+                .fold(0u64, u64::saturating_add);
             let available = quota
                 .limit
                 .saturating_sub(quota.used)
@@ -638,11 +646,11 @@ fn tick(
                 let pid = child.id();
                 children.insert(task.id.clone(), child);
                 // 记下这一单占了这个 host 几条，结束时按同数归还。
-                gate.take(&task.id, &task.url, want);
+                state.gate.take(&task.id, &task.url, want);
                 if let Some(slice) = quota_slice {
-                    reserved.insert(task.id.clone(), slice);
+                    state.reserved.insert(task.id.clone(), slice);
                 }
-                last_delivered.insert(task.id.clone(), baseline);
+                state.last_delivered.insert(task.id.clone(), baseline);
                 if let Some(t) = store.find_mut(&task.id) {
                     t.status = TaskStatus::Running;
                     t.pid = Some(pid);
@@ -653,8 +661,8 @@ fn tick(
             }
             Err(err) => {
                 eprintln!("dlm-gui: spawn dlm failed: {err}");
-                reserved.remove(&task.id);
-                last_delivered.remove(&task.id);
+                state.reserved.remove(&task.id);
+                state.last_delivered.remove(&task.id);
                 if let Some(t) = store.find_mut(&task.id) {
                     t.status = TaskStatus::Failed;
                     t.updated_at = now;
@@ -663,7 +671,73 @@ fn tick(
             }
         }
     }
+
+    // 5) 夜间批次：跑完关机。
+    //
+    //    `had_work` 只在真派发过一单时置位 —— 只看"队列空"会在用户刚打开开关、
+    //    队列恰好空着的时候把机器关掉。`shutdown_done` 保证一轮只发一次。
+    if !children.is_empty() {
+        state.batch.had_work = true;
+    }
+    let pending =
+        !children.is_empty() || store.tasks().iter().any(|t| t.status == TaskStatus::Queued);
+    if !state.batch.shutdown_done
+        && tuning
+            .night_batch
+            .should_shutdown(state.batch.had_work, pending)
+    {
+        state.batch.shutdown_done = true;
+        changed = true;
+        eprintln!(
+            "dlm-gui: 夜间批次跑空，关机（{} 秒后）",
+            SHUTDOWN_DELAY_SECS
+        );
+        request_shutdown(SHUTDOWN_DELAY_SECS);
+    }
+
     changed
+}
+
+/// 夜间批次关机前给的缓冲：与 `--on-complete shutdown:<秒数>` 同一条规矩，最少 60 秒。
+const SHUTDOWN_DELAY_SECS: u64 = 60;
+
+/// 关机动作走的是与「打开文件 / 启动程序」同一个闸门（`DLM_NO_SHELL_OPEN`）：
+/// 门禁和自动化里真关机会把整台机器关掉 —— 那不是测试该做的事。
+fn request_shutdown(delay_secs: u64) {
+    let plan = crate::actions::plan(
+        &crate::actions::CompletionAction::Shutdown { delay_secs },
+        std::path::Path::new(""),
+    );
+    if crate::actions::shell_suppressed() {
+        eprintln!(
+            "dlm-gui: 关机被抑制（{}），只记日志",
+            crate::actions::NO_SHELL_ENV
+        );
+        return;
+    }
+    if let Err(err) = crate::actions::execute(&plan) {
+        eprintln!("dlm-gui: 夜间批次关机失败：{err:#}");
+    }
+}
+
+/// 夜间批次在 runner 里的进度。
+#[derive(Debug, Default)]
+struct BatchState {
+    /// 这次开关开着的时候至少派发过一单。
+    had_work: bool,
+    /// 关机动作已经发过了（一轮只发一次）。
+    shutdown_done: bool,
+}
+
+/// `tick` 每一帧都要一起进的那组可变状态。
+///
+/// 收进一个结构有两个理由：它们本来就是一起推进的一组东西（配额预读、host 预算、
+/// 批次进度）；而且 `tick` 的参数表本来就到顶了 —— 再单个往下加只会变成一串 `&mut`。
+struct RunState {
+    reserved: HashMap<String, u64>,
+    last_delivered: HashMap<String, u64>,
+    gate: HostGate,
+    batch: BatchState,
 }
 
 /// 给 `gui::tests` 用的只读投影。

@@ -64,6 +64,7 @@ pub(crate) enum SettingKey {
     PerHostConnections,
     MaxSpeedKiB,
     SpeedWindows,
+    NightBatch,
     Proxy,
     AgentConfirm,
     Autostart,
@@ -208,6 +209,14 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "时段",
         "限速计划",
         "每行一条 22:00-06:00=512；命中窗口时覆盖全局限速，优先级看顺序",
+    ),
+    spec(
+        SettingKey::NightBatch,
+        "night_batch",
+        Category::SpeedPlan,
+        "夜间批次",
+        "夜间批次",
+        "一个开关串起三件事：只在夜里派发、夜里限速、跑完关机",
     ),
     // ---- 代理 ----
     spec(
