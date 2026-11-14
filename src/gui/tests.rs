@@ -889,7 +889,16 @@ fn the_drawer_renders_a_task_without_panicking() {
     // egui 0.37 的入口是 `run_ui(RawInput, |ui|)`：直接给一个根 `Ui`，
     // 与 eframe 0.37 的 `App::ui(&mut Ui)` 是同一个形状。
     let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-        got = Some(drawer_body(ui, &view, Some(1024.0), "line 1\nline 2"));
+        got = Some(drawer_body(
+            ui,
+            &view,
+            &super::app::drawer::DrawerDiag {
+                speed: Some(1024.0),
+                history: vec![512.0, 1024.0, 768.0],
+                stalled_secs: None,
+            },
+            "line 1\nline 2",
+        ));
     });
     // 没有真实渲染后端，字体图集的 delta 没人消费；不 clear 会在 Drop 时 panic
     // （epaint 的 "Dropped TexturesDelta with 1 unapplied deltas"）。

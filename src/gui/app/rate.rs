@@ -13,12 +13,25 @@
 //! - **两次采样太密就不算**：UI 是 100ms 一帧，帧间隔抖动会把噪声放大成几倍的速度。
 //! - **重试或回退（`delivered` 变小）重新起算**：不能拿「变小」当负速度。
 //! - 新样本只占 30%：水龙头式的速率（一块一块到达）不平滑的话数字会来回跳。
+//!
+//! ## 0.6.0 阶段 4-4：曲线与卡顿
+//!
+//! 这里同时留**最近若干个速率点**（抽屉里那条曲线）与**最近一次有进展的时刻**
+//! （判断"卡住多久"）。两样都放在采样层，而不是各处自己记：速率的定义只该有一份，
+//! 否则曲线、数字、卡顿判定会各说各话。
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// 两次采样至少要隔这么久才算一个有效窗口。
 pub const MIN_WINDOW: Duration = Duration::from_millis(250);
+
+/// 每个任务留多少个速率点。60 个点 ≈ 按 UI 采样节奏画出最近一分钟的走势。
+pub const HISTORY_CAP: usize = 60;
+
+/// 多久没有新字节就算"卡住"。15 秒比 HTTP 超时短得多：卡片式的站点经常
+/// 二三十秒才吐一块，15 秒既不会刷屏误报，也足够早。
+pub const STALL_AFTER: Duration = Duration::from_secs(15);
 
 /// 新样本在平滑里的权重。
 const SMOOTHING: f64 = 0.3;
@@ -33,6 +46,10 @@ struct Sample {
 pub struct Rates {
     last: HashMap<String, Sample>,
     speed: HashMap<String, f64>,
+    /// 最近若干个速率点（老的在左），画曲线用。
+    history: HashMap<String, Vec<f64>>,
+    /// 最近一次 `delivered` **变大**的时刻；判断卡顿用。
+    progress_at: HashMap<String, Instant>,
 }
 
 impl Rates {
@@ -44,14 +61,22 @@ impl Rates {
         if !running {
             self.last.remove(id);
             self.speed.remove(id);
+            // 停了就不再画曲线、也不再判卡顿：那两样都是"正在跑"的信息。
+            self.history.remove(id);
+            self.progress_at.remove(id);
             return;
         }
         let Some(prev) = self.last.get(id).copied() else {
             // 第一个点：只记下来，不产生速率。
             self.last
                 .insert(id.to_string(), Sample { at: now, delivered });
+            self.progress_at.insert(id.to_string(), now);
             return;
         };
+        if delivered > prev.delivered {
+            // 有新字节进来 ⇒ 进度是活的（卡顿计时的起点）。
+            self.progress_at.insert(id.to_string(), now);
+        }
         if delivered < prev.delivered {
             // 重试/回退：重新起算，别把负增长当速度。
             self.last
@@ -69,9 +94,36 @@ impl Rates {
             Some(&old) => old * (1.0 - SMOOTHING) + instant * SMOOTHING,
             None => instant,
         };
-        self.speed.insert(id.to_string(), smoothed.max(0.0));
+        let smoothed = smoothed.max(0.0);
+        self.speed.insert(id.to_string(), smoothed);
+        // 用 `Vec` 而不是 `VecDeque`：`VecDeque::as_slices()` 在环形回绕之后会给出**两段**，
+        // 只取 `.0` 就会少画一截（实测 60 个点只画出来 59 个）。60 个元素的 `remove(0)`
+        // 是 O(60)，这里无所谓。
+        let series = self.history.entry(id.to_string()).or_default();
+        series.push(smoothed);
+        while series.len() > HISTORY_CAP {
+            series.remove(0);
+        }
         self.last
             .insert(id.to_string(), Sample { at: now, delivered });
+    }
+
+    /// 最近若干个速率点（老的在左）。没在跑或还没采到样的是空切片。
+    pub fn history(&self, id: &str) -> &[f64] {
+        self.history
+            .get(id)
+            .map(|series| series.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 已经多久没有新字节了（只在"在跑但没进展"时给 `Some`）。
+    ///
+    /// 判据只看**有没有新字节**，不看速率大小：限速到 1 KiB/s 的任务速率很小，
+    /// 但它确实在动 —— 那种不该被标成卡住。
+    pub fn stalled(&self, id: &str, now: Instant) -> Option<Duration> {
+        let since = self.progress_at.get(id)?;
+        let idle = now.saturating_duration_since(*since);
+        (idle >= STALL_AFTER).then_some(idle)
     }
 
     /// 这个任务当前速率（字节/秒）。`None` = 还不知道（第一次采样）或没在跑。
@@ -91,6 +143,8 @@ impl Rates {
         let keep: std::collections::HashSet<String> = alive.into_iter().collect();
         self.last.retain(|id, _| keep.contains(id));
         self.speed.retain(|id, _| keep.contains(id));
+        self.history.retain(|id, _| keep.contains(id));
+        self.progress_at.retain(|id, _| keep.contains(id));
     }
 }
 
@@ -181,5 +235,46 @@ mod tests {
         r.retain(["other".to_string()]);
         assert_eq!(r.speed("a"), None);
         assert_eq!(r.total(), 0.0);
+        assert!(r.history("a").is_empty());
+    }
+
+    /// 曲线：每个有效窗口推一个点，攒满就丢最老的。**不是**越攒越长。
+    #[test]
+    fn the_history_keeps_the_newest_points_and_drops_the_oldest() {
+        let mut r = Rates::default();
+        r.observe("a", 0, true, at(0));
+        for i in 1..=(HISTORY_CAP as u64 + 5) {
+            r.observe("a", i * 1024, true, at(i * 1000));
+        }
+        let h = r.history("a");
+        assert_eq!(h.len(), HISTORY_CAP, "环满了就丢掉最老的");
+        assert!(h.iter().all(|v| *v > 0.0));
+    }
+
+    /// 卡顿只看"有没有新字节"，不看速率大小 —— 限速到 1 KiB/s 的任务在动，不算卡。
+    #[test]
+    fn stalling_is_about_new_bytes_not_about_small_speeds() {
+        let mut r = Rates::default();
+        r.observe("a", 0, true, at(0));
+        // 每秒 1 KiB，一直动
+        for i in 1..=30 {
+            r.observe("a", i * 1024, true, at(i * 1000));
+        }
+        assert_eq!(r.stalled("a", at(30_000)), None, "一直在动就不算卡住");
+
+        // 之后 20 秒没有新字节
+        r.observe("a", 30 * 1024, true, at(50_000));
+        let idle = r.stalled("a", at(50_000)).expect("该报卡住了");
+        assert!(idle >= STALL_AFTER, "卡住时长从最后一次有进展算起");
+    }
+
+    #[test]
+    fn a_paused_task_is_never_reported_as_stalled() {
+        let mut r = Rates::default();
+        r.observe("a", 0, true, at(0));
+        r.observe("a", 1024, true, at(1000));
+        r.observe("a", 1024, false, at(2000)); // 暂停
+        assert_eq!(r.stalled("a", at(60_000)), None, "暂停不是卡住");
+        assert!(r.history("a").is_empty(), "暂停之后不该还挂着曲线");
     }
 }

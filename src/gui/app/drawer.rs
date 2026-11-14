@@ -54,7 +54,14 @@ impl App {
         let Some(task) = self.drawer_task() else {
             return;
         };
-        let speed = self.speed_of(&task.id);
+        let diag = DrawerDiag {
+            speed: self.speed_of(&task.id),
+            history: self.rates.history(&task.id).to_vec(),
+            stalled_secs: self
+                .rates
+                .stalled(&task.id, std::time::Instant::now())
+                .map(|d| d.as_secs()),
+        };
         let log_tail = self.drawer_log_tail(&task);
 
         let mut open = true;
@@ -72,7 +79,7 @@ impl App {
                 egui::Align2::RIGHT_TOP,
                 egui::vec2(-16.0, theme::TOOLBAR_H + 12.0),
             )
-            .show(ui.ctx(), |ui| drawer_body(ui, &task, speed, &log_tail));
+            .show(ui.ctx(), |ui| drawer_body(ui, &task, &diag, &log_tail));
         let actions = match shown {
             // `Window::show` 的 inner 是 Option：折叠时是 None。
             Some(r) => r.inner.unwrap_or_default(),
@@ -137,11 +144,45 @@ impl App {
     }
 }
 
+/// 抽屉里要显示的诊断数据（速度 / 曲线 / 卡了多久）。
+///
+/// 打成一个结构是因为它们**必须来自同一个采样源**（`rate` 模块）：曲线、速度、卡顿
+/// 各算一次的话，界面上会出现"速度 2 MiB/s 且卡住 20s"这种自相矛盾的组合。
+pub(crate) struct DrawerDiag {
+    pub speed: Option<f64>,
+    /// 最近若干个速率点（老的在左）。
+    pub history: Vec<f64>,
+    /// 已经卡了多少秒（没过阈值为 `None`）。
+    pub stalled_secs: Option<u64>,
+}
+
+/// 画那条速度曲线：一条折线 + 一圈淡底。
+///
+/// 点少于两个时 `spark_points` 给空表 —— 那时画一条水平底线（"在跑但还没测出速度"），
+/// 而不是留一块空白让人以为界面坏了。
+fn painter_spark(ui: &egui::Ui, rect: egui::Rect, history: &[f64], stalled: bool) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, theme::SURFACE_2);
+    let color = if stalled { theme::WARN } else { theme::ACCENT };
+    let pts = super::diagnose::spark_points(history, rect.shrink(3.0));
+    if pts.len() < 2 {
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 3.0, rect.center().y),
+                egui::pos2(rect.right() - 3.0, rect.center().y),
+            ],
+            egui::Stroke::new(1.0, theme::LINE),
+        );
+        return;
+    }
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.4, color)));
+}
+
 /// 抽屉的画法。返回用户点了什么，由调用方执行。
 pub(crate) fn drawer_body(
     ui: &mut egui::Ui,
     task: &TaskView,
-    speed: Option<f64>,
+    diag: &DrawerDiag,
     log_tail: &str,
 ) -> DrawerActions {
     let mut actions = DrawerActions::default();
@@ -212,9 +253,9 @@ pub(crate) fn drawer_body(
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
-        kv(ui, "速度", &speed_text(task, speed));
+        kv(ui, "速度", &speed_text(task, diag.speed));
         ui.add_space(18.0);
-        kv(ui, "剩余", &eta_text(task, speed));
+        kv(ui, "剩余", &eta_text(task, diag.speed));
     });
 
     if task.attempts > 0 {
@@ -230,6 +271,43 @@ pub(crate) fn drawer_body(
             ui.add_space(16.0);
             kv(ui, "完成后", action);
         });
+    }
+
+    // ---- 诊断：曲线 + 两行注脚（0.6.0 阶段 4-4）----
+    //
+    // 只在"在跑"时画：暂停/完成的任务没有曲线也没有卡顿可言，
+    // 留一块空白比画一条平线更诚实。
+    if task.status == "running" {
+        let notes = super::diagnose::notes(task.attempts, diag.stalled_secs);
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new("最近速度")
+                    .size(10.5)
+                    .color(theme::INK_3),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width() - 16.0, 34.0),
+                egui::Sense::hover(),
+            );
+            painter_spark(ui, rect, &diag.history, diag.stalled_secs.is_some());
+        });
+        for note in notes {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.label(egui::RichText::new(note).size(10.5).color(
+                    if diag.stalled_secs.is_some() {
+                        theme::WARN
+                    } else {
+                        theme::INK_3
+                    },
+                ));
+            });
+        }
     }
 
     ui.add_space(12.0);

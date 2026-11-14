@@ -26,6 +26,7 @@ use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 pub mod basket;
 pub mod clipboard_hint;
 pub mod context_bar;
+pub mod diagnose;
 pub mod dialog;
 pub mod drawer;
 pub mod fonts;
