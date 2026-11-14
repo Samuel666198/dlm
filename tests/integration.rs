@@ -10903,3 +10903,154 @@ fn hls_is_refused_with_data_file_or_max_bytes() -> anyhow::Result<()> {
     assert!(listener.accept().is_err(), "参数层拒绝时不许发 HLS 请求");
     Ok(())
 }
+
+/// **Agent 下发的票据闸门**（0.6.0 阶段 5）。
+///
+/// 判据有三条，缺一条这个功能就是假的：
+/// 1. `agent_confirm` 开着时，`/api/agent/add` 只给票据，**队列里一个任务都没多**；
+/// 2. 票据状态可以用 `GET /api/agent/ticket` 查（Agent 就是靠它轮询的）；
+/// 3. 扩展走的老路 `/api/add` 不受影响 —— 挡的是 Agent，不是浏览器扩展。
+///
+/// 「允许」那一步要 GUI 线程点按钮，这里不测（见 `gui::tickets` 与 `agent_ui` 的用例）。
+#[test]
+fn gui_agent_add_waits_for_a_ticket_instead_of_enqueueing() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-agent-gate")?;
+    let queue = dir.path().join("queue.json");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-agent-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                dir.path().join("dl").to_str().context("out dir utf8")?,
+                "--log-dir",
+                dir.path().join("logs").to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                env!("CARGO_BIN_EXE_dlm"),
+                "--headless",
+                "--token",
+                token,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 1) Agent 那条路：只拿到票据。
+    let reply: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{gui_base}/api/agent/add?t={token}"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({
+                    "url": "https://example.invalid/agent.bin",
+                    "name": "agent.bin",
+                })
+                .to_string(),
+            )
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["state"], "pending_approval", "{reply}");
+    let ticket = reply["ticket"].as_str().context("要有票据 id")?.to_string();
+
+    // 2) 队列里不该多出任何任务 —— 这是"要确认"的全部意义。
+    let tasks: Vec<serde_json::Value> = serde_json::from_str(
+        &client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()?
+            .text()?,
+    )?;
+    assert!(
+        tasks.is_empty(),
+        "没点允许就不许入队，实际有 {} 个任务",
+        tasks.len()
+    );
+
+    // 3) 票据能被查（Agent 轮询的就是这个）。
+    let state: serde_json::Value = serde_json::from_str(
+        &client
+            .get(format!("{gui_base}/api/agent/ticket?t={token}&id={ticket}"))
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(state["ok"], true, "{state}");
+    assert_eq!(state["state"]["state"], "pending_approval", "{state}");
+
+    // 4) 查一张不存在的票据要给出人话，而不是空对象。
+    let missing: serde_json::Value = serde_json::from_str(
+        &client
+            .get(format!("{gui_base}/api/agent/ticket?t={token}&id=tk9999"))
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert!(
+        missing["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("票据")),
+        "{missing}"
+    );
+
+    // 5) 扩展走的老路不受影响。
+    let ext: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{gui_base}/api/add?t={token}"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({
+                    "url": "https://example.invalid/ext.bin",
+                    "name": "ext.bin",
+                })
+                .to_string(),
+            )
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(ext["ok"], true, "扩展那条路不该被 Agent 的闸门影响：{ext}");
+    assert!(ext["id"].is_string(), "{ext}");
+
+    Ok(())
+}

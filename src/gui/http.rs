@@ -25,15 +25,27 @@ use super::snapshot::{QuotaView, TaskView, UpdateView};
 /// 原来那份 719 行的 `ui.html` 已随原生 UI 上线删除（设计稿第 10 步）。
 pub const LANDING_HTML: &str = include_str!("landing.html");
 
+/// HTTP 线程要读的那几个槽。打成一包是因为它们**总是一起传**，且参数表已经到顶了。
+pub(crate) struct HttpCtx {
+    pub snapshot: Arc<Mutex<Vec<TaskView>>>,
+    pub quota: Arc<Mutex<Option<QuotaView>>>,
+    pub update: Arc<Mutex<UpdateView>>,
+    pub log_dir: PathBuf,
+    /// Agent 下发的确认闸门（见 `tickets`）。
+    pub gate: Arc<Mutex<super::AgentGate>>,
+}
+
 pub(crate) fn handle_http(
     stream: &mut TcpStream,
     token: &str,
     tx: &Sender<Ticket>,
-    snapshot: &Arc<Mutex<Vec<TaskView>>>,
-    quota_snapshot: &Arc<Mutex<Option<QuotaView>>>,
-    update_snapshot: &Arc<Mutex<UpdateView>>,
-    log_dir: &Path,
+    ctx: &HttpCtx,
 ) -> io::Result<()> {
+    let snapshot = &ctx.snapshot;
+    let quota_snapshot = &ctx.quota;
+    let update_snapshot = &ctx.update;
+    let log_dir: &Path = &ctx.log_dir;
+    let gate = &ctx.gate;
     let request = match read_request(stream) {
         Ok(req) => req,
         Err(err) => {
@@ -114,91 +126,84 @@ pub(crate) fn handle_http(
             eprintln!("dlm-gui: 扩展上报运行版本 {version}");
             respond(stream, 200, "application/json", br#"{"ok":true}"#)
         }
-        ("POST", "/api/add") => {
-            let value: Value = match serde_json::from_slice(&request.body) {
-                Ok(v) => v,
-                Err(_) => {
+        // ---- Agent 接入（0.6.0 阶段 5）----
+        //
+        // 与 `/api/add` 的区别只有一条：`agent_confirm` 开着时不直接建任务，而是挂一张
+        // 待确认票据 —— 本地控制口挡得住别的机器，挡不住本机的 Agent。
+        ("POST", "/api/agent/add") => {
+            let fields = match parse_add_fields(&request.body) {
+                Ok(f) => f,
+                Err(err) => {
                     return respond(
                         stream,
                         400,
                         "application/json",
-                        br#"{"ok":false,"error":"bad json"}"#,
+                        serde_json::to_vec(&json!({"ok": false, "error": err}))
+                            .unwrap_or_default()
+                            .as_slice(),
                     );
                 }
             };
-            let url = value
-                .get("url")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let name = value
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let referer = value
-                .get("referer")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let start_at = value.get("start_at").and_then(Value::as_u64);
-            let on_complete = value
-                .get("on_complete")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            let lower = url.to_ascii_lowercase();
-            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-                return respond(
-                    stream,
-                    200,
-                    "application/json",
-                    br#"{"ok":false,"error":"only http/https"}"#,
-                );
-            }
-            if let Err(err) = queue::validate_name(&name) {
-                let body =
-                    serde_json::to_vec(&json!({"ok": false, "error": err.to_string()})).unwrap();
+            let confirm = gate.lock().map(|g| g.confirm).unwrap_or(true);
+            if !confirm {
+                let body = send_add(tx, fields);
                 return respond(stream, 200, "application/json", &body);
             }
-            let on_complete = match on_complete {
-                Some(raw) => match queue::validate_on_complete(&raw) {
-                    Ok(action) => action,
-                    Err(err) => {
-                        let body =
-                            serde_json::to_vec(&json!({"ok": false, "error": err.to_string()}))
-                                .unwrap();
-                        return respond(stream, 200, "application/json", &body);
-                    }
-                },
-                None => None,
+            let ticket = {
+                let Ok(mut g) = gate.lock() else {
+                    return respond(
+                        stream,
+                        200,
+                        "application/json",
+                        br#"{"ok":false,"error":"gate busy"}"#,
+                    );
+                };
+                g.tickets.request(
+                    &fields.url,
+                    &fields.name,
+                    fields.referer.clone(),
+                    queue::now_secs(),
+                )
             };
-            let (reply, reply_rx) = mpsc::channel();
-            if tx
-                .send(Ticket::Add {
-                    url,
-                    name,
-                    referer,
-                    start_at,
-                    on_complete,
-                    reply,
-                })
-                .is_err()
-            {
-                return respond(
-                    stream,
-                    200,
-                    "application/json",
-                    br#"{"ok":false,"error":"queue unavailable"}"#,
-                );
-            }
-            let body = match reply_rx.recv_timeout(Duration::from_secs(2)) {
-                Ok(Ok(id)) => serde_json::to_vec(&json!({"ok": true, "id": id})).unwrap(),
-                Ok(Err(err)) => serde_json::to_vec(&json!({"ok": false, "error": err})).unwrap(),
-                Err(_) => br#"{"ok":false,"error":"queue busy"}"#.to_vec(),
+            let body = serde_json::to_vec(&json!({
+                "ok": true,
+                "state": "pending_approval",
+                "ticket": ticket,
+                "message": "已在 dlm 里请求确认：请回到对话里问一句，人点了「允许」才会真正入队",
+            }))
+            .unwrap_or_default();
+            respond(stream, 200, "application/json", &body)
+        }
+        ("GET", "/api/agent/ticket") => {
+            let id = request
+                .query
+                .iter()
+                .find(|(k, _)| k == "id")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            let state = gate.lock().ok().and_then(|g| g.tickets.state(&id).cloned());
+            let body = match state {
+                Some(state) => {
+                    serde_json::to_vec(&json!({"ok": true, "ticket": id, "state": state}))
+                        .unwrap_or_default()
+                }
+                None => serde_json::to_vec(
+                    &json!({"ok": false, "error": "没有这张票据（可能已被清理或程序重启过）"}),
+                )
+                .unwrap_or_default(),
             };
+            respond(stream, 200, "application/json", &body)
+        }
+        ("POST", "/api/add") => {
+            let fields = match parse_add_fields(&request.body) {
+                Ok(f) => f,
+                Err(err) => {
+                    let body =
+                        serde_json::to_vec(&json!({"ok": false, "error": err})).unwrap_or_default();
+                    return respond(stream, 200, "application/json", &body);
+                }
+            };
+            let body = send_add(tx, fields);
             respond(stream, 200, "application/json", &body)
         }
         ("POST", "/api/pause") | ("POST", "/api/resume") | ("POST", "/api/remove") => {
@@ -321,6 +326,87 @@ struct Request {
     path: String,
     query: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+/// `/api/add` 与 `/api/agent/add` 共用的入参。
+///
+/// 抽出来是为了让"Agent 走的那条路"和"扩展走的那条路"用**同一套解析与校验**：
+/// 两条路各写一份的话，早晚会有一条能建出另一条建不出的任务（比如绕过名字校验）。
+pub(crate) struct AddFields {
+    pub url: String,
+    pub name: String,
+    pub referer: Option<String>,
+    pub start_at: Option<u64>,
+    pub on_complete: Option<String>,
+}
+
+/// 解析并校验入参。校验规则与 `/api/add` 以前内联的那份完全一致。
+pub(crate) fn parse_add_fields(body: &[u8]) -> Result<AddFields, String> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| "bad json".to_string())?;
+    let url = value
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let referer = value
+        .get("referer")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let start_at = value.get("start_at").and_then(Value::as_u64);
+    let on_complete = value
+        .get("on_complete")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("only http/https".to_string());
+    }
+    queue::validate_name(&name).map_err(|err| err.to_string())?;
+    let on_complete = match on_complete {
+        // `validate_on_complete` 自己就返回 `Option<String>`（空/无动作 ⇒ None）。
+        Some(raw) => queue::validate_on_complete(&raw).map_err(|err| err.to_string())?,
+        None => None,
+    };
+    Ok(AddFields {
+        url,
+        name,
+        referer,
+        start_at,
+        on_complete,
+    })
+}
+
+/// 把入参交给 runner，等它的回执，拼出 `/api/add` 的响应体。
+pub(crate) fn send_add(tx: &Sender<Ticket>, fields: AddFields) -> Vec<u8> {
+    let (reply, reply_rx) = mpsc::channel();
+    if tx
+        .send(Ticket::Add {
+            url: fields.url,
+            name: fields.name,
+            referer: fields.referer,
+            start_at: fields.start_at,
+            on_complete: fields.on_complete,
+            reply,
+        })
+        .is_err()
+    {
+        return br#"{"ok":false,"error":"queue unavailable"}"#.to_vec();
+    }
+    match reply_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(id)) => serde_json::to_vec(&json!({"ok": true, "id": id})).unwrap_or_default(),
+        Ok(Err(err)) => serde_json::to_vec(&json!({"ok": false, "error": err})).unwrap_or_default(),
+        Err(_) => br#"{"ok":false,"error":"queue busy"}"#.to_vec(),
+    }
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Request> {

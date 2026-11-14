@@ -23,6 +23,7 @@ use eframe::egui;
 use crate::gui::Ticket;
 use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 
+pub mod agent_ui;
 pub mod basket;
 pub mod clipboard_hint;
 pub mod context_bar;
@@ -153,6 +154,10 @@ pub struct App {
     pub(super) settings_category: settings_spec::Category,
     /// Agent 接入页刚复制了什么（`cli` / `mcp`），只用来显示一行"已复制"。
     pub(super) agent_copied: Option<String>,
+    /// Agent 确认闸门（与 HTTP 线程共享一份）：票据在这儿生成、在这儿被点。
+    pub(super) agent_gate: std::sync::Arc<std::sync::Mutex<crate::gui::AgentGate>>,
+    /// 已批准、但还在等 runner 回执的票据 → (票据 id, 回执通道)。
+    pub(super) ticket_replies: Vec<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// 命令面板（`Ctrl K`）是否打开。
     pub(super) palette_open: bool,
     pub(super) palette_query: String,
@@ -198,6 +203,8 @@ pub(crate) struct AppWiring {
     pub default_category_dirs: bool,
     /// 更新清单地址；`None` = `--no-update-check`。
     pub update_url: Option<String>,
+    /// Agent 下发的确认闸门（与 HTTP 线程共用一份）。
+    pub agent_gate: std::sync::Arc<std::sync::Mutex<crate::gui::AgentGate>>,
 }
 
 impl App {
@@ -214,6 +221,7 @@ impl App {
             default_out_dir,
             default_category_dirs: wiring_category_dirs,
             update_url,
+            agent_gate,
         } = wiring;
         let settings = crate::gui::settings::Settings::load(&settings_dir);
         // 输入框初值：设置里有就写出来，没有就留空（留空 = 用兜底目录）。
@@ -281,6 +289,8 @@ impl App {
             settings_search: String::new(),
             settings_category: settings_spec::Category::Download,
             agent_copied: None,
+            agent_gate,
+            ticket_replies: Vec::new(),
             palette_open: false,
             palette_query: String::new(),
             palette_sel: 0,
@@ -416,6 +426,11 @@ impl App {
             || self.grab_open
             || self.update_open
             || self.palette_open
+            || self
+                .agent_gate
+                .lock()
+                .map(|g| g.tickets.has_pending())
+                .unwrap_or(false)
             || self.confirm_delete_all.is_some()
     }
 
@@ -509,6 +524,8 @@ impl App {
 
         // 速率采样要在画之前做：这一帧画出来的数字与它同一时刻。
         self.sample_rates();
+        // Agent 票据：同步开关、清过期、收回执。
+        self.sync_agent_gate();
         self.handle_shortcuts(&ctx);
         self.basket(ui);
         self.grab_window(ui);
@@ -609,6 +626,8 @@ impl App {
         if self.confirm_delete_all.is_some() {
             self.confirm_delete_all_dialog(&ctx);
         }
+        // Agent 票据：有待确认的就弹框，并顺手把 runner 的回执写回票据状态。
+        self.agent_tickets_dialog(&ctx);
         // 命令面板盖在最上面：它是"临时打断"，别的框开着时也能叫出来。
         if let Some(id) = self.palette(&ctx) {
             self.run_command(id, &ctx);

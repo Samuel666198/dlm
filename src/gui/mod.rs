@@ -18,6 +18,7 @@ pub mod scan;
 pub mod settings;
 pub mod snapshot;
 pub mod speed_schedule;
+pub mod tickets;
 
 #[cfg(test)]
 mod tests;
@@ -110,6 +111,17 @@ pub struct GuiConfig {
     /// 测试就弹十几个真窗口，无 GPU 的机器直接红掉（勘误 E2）。
     pub headless: bool,
     pub autostart: bool,
+}
+
+/// Agent 下发的确认闸门：**HTTP 线程与 UI 线程共用**。
+///
+/// 为什么要共享：`agent_confirm` 是界面上的开关（住 `Settings`），而票据要在 HTTP 线程里
+/// 生成、在 UI 线程里等人点。两边的唯一交集就是这一个结构。
+#[derive(Debug, Default)]
+pub struct AgentGate {
+    /// 是否要求人工确认（每次设置保存后同步进来）。
+    pub confirm: bool,
+    pub tickets: tickets::Tickets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +400,22 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let http_token = token.clone();
     let http_tx = tx.clone();
     let http_log_dir = config.log_dir.clone();
+    // Agent 的确认闸门：HTTP 线程按它决定"直接加"还是"挂票据"，UI 线程按它画确认框。
+    let agent_gate: Arc<Mutex<AgentGate>> = Arc::new(Mutex::new(AgentGate::default()));
+    // 闸门的初值来自设置。**这一步不能只留给 UI 线程做**：`--headless` 根本没有 UI 帧，
+    // 那样 Agent 的确认开关在 headless 下永远是关的（集成测试当场抓到过）。
+    {
+        let settings_dir = config
+            .queue
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let settings = crate::gui::settings::Settings::load(&settings_dir);
+        if let Ok(mut g) = agent_gate.lock() {
+            g.confirm = settings.agent_confirm;
+        }
+    }
+    let http_gate = Arc::clone(&agent_gate);
     std::thread::Builder::new()
         .name("dlm-gui-http".into())
         .spawn(move || {
@@ -395,10 +423,13 @@ pub fn run(config: GuiConfig) -> Result<()> {
                 http_listener,
                 http_token,
                 http_tx,
-                http_snapshot,
-                http_quota,
-                http_update,
-                http_log_dir,
+                http::HttpCtx {
+                    snapshot: http_snapshot,
+                    quota: http_quota,
+                    update: http_update,
+                    log_dir: http_log_dir,
+                    gate: http_gate,
+                },
             );
         })
         .context("启动 HTTP 线程失败")?;
@@ -414,6 +445,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
     // 非 headless：起原生窗口。主线程归 eframe 的事件循环，
     // HTTP 已经在 serve_http 线程里跑（勘误 E1）。
     let ui_tx = tx.clone();
+    let ui_gate = Arc::clone(&agent_gate);
 
     let autostart = config.autostart;
     let options = eframe::NativeOptions {
@@ -453,6 +485,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
                     default_out_dir: config.out_dir.clone(),
                     default_category_dirs: config.category_dirs,
                     update_url: config.update_url.clone(),
+                    agent_gate: ui_gate,
                 },
                 ui_local,
             );
@@ -470,33 +503,22 @@ pub fn run(config: GuiConfig) -> Result<()> {
 
 /// HTTP accept 循环。抽成独立函数，headless 与将来的窗口模式共用一份。
 #[allow(clippy::too_many_arguments)]
-fn serve_http(
-    listener: TcpListener,
-    token: String,
-    tx: Sender<Ticket>,
-    snapshot: Arc<Mutex<Vec<TaskView>>>,
-    quota_snapshot: Arc<Mutex<Option<QuotaView>>>,
-    update_snapshot: Arc<Mutex<UpdateView>>,
-    log_dir: PathBuf,
-) {
+fn serve_http(listener: TcpListener, token: String, tx: Sender<Ticket>, ctx: http::HttpCtx) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let token = token.clone();
         let tx = tx.clone();
-        let snapshot = Arc::clone(&snapshot);
-        let quota_snapshot = Arc::clone(&quota_snapshot);
-        let update_snapshot = Arc::clone(&update_snapshot);
-        let log_dir = log_dir.clone();
+        // 每个连接一份"指向同一批槽"的浅拷贝：`Arc::clone` 很便宜，
+        // 真正被共享的仍是同一份快照与同一个闸门。
+        let ctx = http::HttpCtx {
+            snapshot: Arc::clone(&ctx.snapshot),
+            quota: Arc::clone(&ctx.quota),
+            update: Arc::clone(&ctx.update),
+            log_dir: ctx.log_dir.clone(),
+            gate: Arc::clone(&ctx.gate),
+        };
         std::thread::spawn(move || {
-            let _ = http::handle_http(
-                &mut stream,
-                &token,
-                &tx,
-                &snapshot,
-                &quota_snapshot,
-                &update_snapshot,
-                &log_dir,
-            );
+            let _ = http::handle_http(&mut stream, &token, &tx, &ctx);
         });
     }
 }

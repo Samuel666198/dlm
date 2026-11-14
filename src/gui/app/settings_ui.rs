@@ -591,6 +591,11 @@ impl App {
                 .size(10.5)
                 .color(theme::INK_3),
         );
+        ui.label(
+            egui::RichText::new("dlm-mcp 自己去找 dlm-gui 写的端点文件，不用把 token 抄进配置。")
+                .size(10.5)
+                .color(theme::INK_3),
+        );
         ui.add_space(6.0);
 
         // CLI：一行命令，复制即用。
@@ -629,7 +634,7 @@ impl App {
             } else {
                 ui.add_enabled(false, egui::Button::new("复制 MCP 配置"));
                 ui.label(
-                    egui::RichText::new("没找到 dlm-mcp.exe：先装那一份再复制")
+                    egui::RichText::new("没找到 dlm-mcp.exe：先装那一份（它与 dlm-gui 同目录）")
                         .size(10.5)
                         .color(theme::INK_3),
                 );

@@ -1157,6 +1157,9 @@ fn test_app(tag: &str, tasks: Vec<TaskView>) -> (super::app::App, std::path::Pat
             default_out_dir: dir.join("dl"),
             default_category_dirs: false,
             update_url: None,
+            agent_gate: std::sync::Arc::new(
+                std::sync::Mutex::new(crate::gui::AgentGate::default()),
+            ),
         },
         crate::updater::LocalState {
             release: "0.0.0".to_string(),
