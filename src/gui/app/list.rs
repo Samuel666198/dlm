@@ -6,6 +6,8 @@ use super::App;
 use crate::gui::app::theme;
 use crate::gui::snapshot::TaskView;
 
+use super::batch;
+
 /// 列宽（point）。与 demo 对齐：文件名弹性，其余定宽。
 const COL_SIZE: f32 = 92.0;
 const COL_PROGRESS: f32 = 150.0;
@@ -17,8 +19,21 @@ const PAD: f32 = 16.0;
 
 /// 进度条至少这么宽才有信息量（再窄就只剩一条线）。
 const COL_PROGRESS_MIN: f32 = 64.0;
-/// 文件名列的最小可读宽度。
+/// 勾选框中心距行左边的距离。列排布从它右边开始，所以文件名列要跟着让。
 const NAME_MIN: f32 = 150.0;
+
+/// 勾选框那一列的宽度（含左右留白）。
+const CB_COL: f32 = 34.0;
+/// 勾选框中心距行左边的距离。
+const CB_X: f32 = 20.0;
+
+/// 批量条上按下的东西。收集起来出闭包再执行 —— 闭包里动 `self` 会与 `&self.batch` 打架。
+enum BatchAction {
+    Resume,
+    Pause,
+    Remove,
+    Clear,
+}
 
 /// 一行的列矩形。
 ///
@@ -38,7 +53,7 @@ struct Columns {
 
 /// 按可用宽度排出这一行的各列位置。
 fn columns(rect: egui::Rect) -> Columns {
-    let inner = rect.width() - PAD * 2.0;
+    let inner = rect.width() - PAD - CB_COL;
     // 满编需要的宽度：五列 + 五个间隔 + 文件名最小宽。
     let full = COL_SIZE + COL_PROGRESS + COL_SPEED + COL_ETA + COL_STATUS + GAP * 5.0 + NAME_MIN;
     // 只留「大小 + 进度(最小) + 状态」时需要的宽度。
@@ -72,7 +87,7 @@ fn columns(rect: egui::Rect) -> Columns {
     let progress = col(progress_w);
     let size = col(COL_SIZE);
     let name = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + PAD, rect.top()),
+        egui::pos2(rect.left() + CB_COL, rect.top()),
         egui::pos2(right, rect.bottom()),
     );
     Columns {
@@ -90,7 +105,18 @@ impl App {
         let all = self.tasks();
         let rows: Vec<TaskView> = all.iter().filter(|t| self.visible(t)).cloned().collect();
 
-        self.thead(ui);
+        // 删掉的任务可能还留在批量里（快照晚一帧），先清一遍再画。
+        let alive: Vec<String> = all.iter().map(|t| t.id.clone()).collect();
+        batch::prune(&mut self.batch, &alive);
+
+        let visible_ids: Vec<String> = rows.iter().map(|t| t.id.clone()).collect();
+        if !self.batch.is_empty() {
+            self.batch_bar(ui, &visible_ids);
+        }
+
+        if self.thead(ui, &visible_ids) {
+            batch::toggle_all(&mut self.batch, &visible_ids);
+        }
 
         if rows.is_empty() {
             self.empty_state(ui);
@@ -106,9 +132,13 @@ impl App {
             });
     }
 
-    /// 一行任务。点击选中并展开详情。
+    /// 一行任务。
+    ///
+    /// 单击 = 在右栏查看它；Ctrl+单击 = 顺便把它勾进批量；勾复选框 = 只动批量。
+    /// 三者的分工写在 `batch` 模块的文档里，这里只是照做。
     fn row(&mut self, ui: &mut egui::Ui, task: &TaskView) {
         let selected = self.selected.as_deref() == Some(task.id.as_str());
+        let checked = self.batch.contains(&task.id);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), theme::ROW_H),
             egui::Sense::click(),
@@ -129,6 +159,9 @@ impl App {
                 2.0,
                 theme::ACCENT,
             );
+        } else if checked {
+            // 勾中但没在看：淡蓝底。与"正在查看"的橙条区分开，两种状态可以同时存在。
+            painter.rect_filled(rect, 0.0, eframe::egui::Color32::from_rgb(0xEE, 0xF3, 0xF6));
         } else if response.hovered() {
             painter.rect_filled(rect, 0.0, eframe::egui::Color32::from_rgb(0xFB, 0xF8, 0xF2));
         }
@@ -181,9 +214,44 @@ impl App {
                 ),
             )
         });
-        if response.clicked() {
+        // ---- 左侧勾选框 ----
+        //
+        // **用真的 `Checkbox` 而不是自绘**：自绘版上报 Role::CheckBox 之后，
+        // UI 自动化发来的是 `LegacyIAccessible.DoDefaultAction`，egui 不认这个动作 ——
+        // 结果是"树里有、点不动"。真控件自己处理动作与键盘，代价是长得略朴素，
+        // 但一个能用的控件比一张漂亮的图重要。
+        let cb_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + CB_X, rect.center().y),
+            egui::vec2(16.0, 16.0),
+        );
+        let mut is_checked = checked;
+        let cb_resp = ui
+            .put(cb_rect, egui::Checkbox::without_text(&mut is_checked))
+            .on_hover_text("加入批量选择");
+
+        if cb_resp.changed() {
+            // 勾复选框**只动批量**：右栏不跳，避免"我想多选几条"把详情也带着乱翻。
+            batch::toggle(&mut self.batch, &task.id);
+        } else if response.clicked() {
             self.selected = Some(task.id.clone());
+            // Ctrl+单击：查看它的同时顺手勾上，键盘用户不必去够小方框。
+            if ui.input(|i| i.modifiers.command) {
+                batch::toggle(&mut self.batch, &task.id);
+            }
         }
+
+        // ---- 右键菜单 ----
+        response.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            let _ = ui.button("继续");
+            let _ = ui.button("暂停");
+            ui.separator();
+            let _ = ui.button("打开文件");
+            let _ = ui.button("打开文件夹");
+            let _ = ui.button("复制链接");
+            ui.separator();
+            let _ = ui.button("删除");
+        });
     }
 
     fn draw_name(&self, ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
@@ -207,7 +275,9 @@ impl App {
         );
     }
 
-    fn thead(&self, ui: &mut egui::Ui) {
+    /// 表头。返回 `true` 表示点了全选框。
+    fn thead(&self, ui: &mut egui::Ui, visible: &[String]) -> bool {
+        let all_on = batch::all_selected(&self.batch, visible);
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), theme::THEAD_H),
             egui::Sense::hover(),
@@ -277,6 +347,83 @@ impl App {
             font,
             ink,
         );
+
+        // 全选框：与行里那个同位置、同尺寸，视觉上连成一条竖线。
+        //
+        // 这里也必须用真 `Checkbox`（理由同行内那个）：自绘的 CheckBox 角色收到
+        // `LegacyIAccessible.DoDefaultAction` 时 egui 不响应，等于点不动。
+        let cb_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + CB_X, rect.center().y),
+            egui::vec2(16.0, 16.0),
+        );
+        let mut is_all_on = all_on;
+        let hit = ui
+            .put(cb_rect, egui::Checkbox::without_text(&mut is_all_on))
+            .on_hover_text("全选 / 取消全选（只作用于当前可见项）");
+        hit.changed()
+    }
+
+    /// 批量动作条：只在勾了东西时出现，占一行。
+    ///
+    /// 为什么不是"选中就出按钮行"：那样每选一条就顶掉一行列表；批量条只在**真的要做批量**
+    /// 时才占位，日常浏览时列表高一行。
+    fn batch_bar(&mut self, ui: &mut egui::Ui, visible: &[String]) {
+        let targets = batch::targets(&self.batch, visible);
+        let mut act: Option<BatchAction> = None;
+
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0xEE, 0xF3, 0xF6))
+            .inner_margin(egui::Margin::symmetric(12, 7))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("已选 {} 项", targets.len()))
+                            .size(11.5)
+                            .color(theme::INK_2),
+                    );
+                    ui.add_space(8.0);
+                    if ui.button("继续").clicked() {
+                        act = Some(BatchAction::Resume);
+                    }
+                    if ui.button("暂停").clicked() {
+                        act = Some(BatchAction::Pause);
+                    }
+                    if ui.button("删除").clicked() {
+                        act = Some(BatchAction::Remove);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("取消选择").clicked() {
+                            act = Some(BatchAction::Clear);
+                        }
+                    });
+                });
+            });
+
+        match act {
+            Some(BatchAction::Resume) => {
+                for id in &targets {
+                    self.send(crate::gui::Ticket::Resume(id.clone()));
+                }
+            }
+            Some(BatchAction::Pause) => {
+                for id in &targets {
+                    self.send(crate::gui::Ticket::Pause(id.clone()));
+                }
+            }
+            Some(BatchAction::Remove) => {
+                for id in &targets {
+                    self.send(crate::gui::Ticket::Remove(id.clone()));
+                }
+                for id in &targets {
+                    if self.selected.as_deref() == Some(id.as_str()) {
+                        self.selected = None;
+                        self.drawer_log = None;
+                    }
+                }
+            }
+            Some(BatchAction::Clear) => self.batch.clear(),
+            None => {}
+        }
     }
 
     fn empty_state(&self, ui: &mut egui::Ui) {

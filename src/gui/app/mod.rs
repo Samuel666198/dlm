@@ -25,6 +25,7 @@ use crate::gui::snapshot::{QuotaView, TaskView, UpdateView};
 
 pub mod agent_ui;
 pub mod basket;
+pub mod batch;
 pub mod clipboard_hint;
 pub mod context_bar;
 pub mod diagnose;
@@ -123,6 +124,8 @@ pub struct App {
     pub close_to_tray: bool,
     /// 侧栏是否收起成图标条（设置项，默认不收起）。
     pub(super) sidebar_collapsed: bool,
+    /// 批量操作勾中的任务（与"右栏正在查看的那一条"是两套状态，见 `batch` 模块文档）。
+    pub(super) batch: batch::Batch,
     /// 窗口当前是否可见。托盘「显示窗口」把它置 true。
     pub window_visible: bool,
     /// 托盘句柄。None = 建不起来（无托盘环境），此时关窗即退出。
@@ -277,6 +280,7 @@ impl App {
             quitting: false,
             close_to_tray: true,
             sidebar_collapsed: settings.sidebar_collapsed,
+            batch: batch::Batch::new(),
             window_visible: true,
             tray: tray::Tray::new(),
             tray_hint_at: 0,

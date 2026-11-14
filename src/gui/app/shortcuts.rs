@@ -132,6 +132,8 @@ impl App {
                 self.settings_error = None;
             }
             Some(Shortcut::ClearSelection) => {
+                // Esc 清的是"眼前这两套选中"：正在看的和批量勾的，一起清。
+                self.batch.clear();
                 self.selected = None;
                 self.drawer_log = None;
             }
