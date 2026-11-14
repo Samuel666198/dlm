@@ -128,6 +128,20 @@ pub(crate) fn handle_http(
         }
         // ---- Agent 接入（0.6.0 阶段 5）----
         //
+        // 握手：`dlm-mcp` 是单独下载的，启动第一件事就是问这一句 ——
+        // 界面太旧时它能说出"请升级 dlm"，而不是抛一句 404。
+        ("GET", "/api/agent/hello") => {
+            let confirm = gate.lock().map(|g| g.confirm).unwrap_or(true);
+            let body = serde_json::to_vec(&json!({
+                "ok": true,
+                "name": "dlm-gui",
+                "api": super::AGENT_API,
+                "confirm": confirm,
+            }))
+            .unwrap_or_default();
+            respond(stream, 200, "application/json", &body)
+        }
+        //
         // 与 `/api/add` 的区别只有一条：`agent_confirm` 开着时不直接建任务，而是挂一张
         // 待确认票据 —— 本地控制口挡得住别的机器，挡不住本机的 Agent。
         ("POST", "/api/agent/add") => {

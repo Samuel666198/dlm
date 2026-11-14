@@ -128,6 +128,7 @@ fn probe_existing_instance_says_none_for_every_stale_shape() {
         token: "tok".into(),
         pid: 999_999,
         started_at: 1,
+        api: crate::gui::AGENT_API,
     };
     fs::write(&dead, serde_json::to_vec(&endpoint).unwrap()).unwrap();
     assert!(
@@ -778,6 +779,7 @@ fn endpoint_file_contains_the_port_and_token() {
         token: "tok".into(),
         pid: 7,
         started_at: 9,
+        api: crate::gui::AGENT_API,
     };
     write_endpoint(&path, &endpoint).unwrap();
     let text = fs::read_to_string(&path).unwrap();

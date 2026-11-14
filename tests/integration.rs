@@ -10977,6 +10977,29 @@ fn gui_agent_add_waits_for_a_ticket_instead_of_enqueueing() -> anyhow::Result<()
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // 0) 握手：`dlm-mcp` 是单独下载的，它开机第一件事就是问这一句。
+    let hello: serde_json::Value = serde_json::from_str(
+        &client
+            .get(format!("{gui_base}/api/agent/hello?t={token}"))
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(hello["ok"], true, "{hello}");
+    assert_eq!(hello["name"], "dlm-gui", "{hello}");
+    assert!(
+        hello["api"].as_u64().is_some_and(|api| api >= 2),
+        "Agent 接口版本至少是 2（dlm-mcp 靠它判断该不该开工）：{hello}"
+    );
+    assert_eq!(hello["confirm"], true, "默认要求确认：{hello}");
+
+    // 端点文件里也要写着这个版本：老界面写的文件没有 `api`，
+    // `dlm-mcp` 靠"缺字段 ⇒ 0"来识别"太旧"，所以新界面必须真的写进去。
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&endpoint)?)?;
+    assert!(
+        written["api"].as_u64().is_some_and(|api| api >= 2),
+        "端点文件要带 api 版本：{written}"
+    );
+
     // 1) Agent 那条路：只拿到票据。
     let reply: serde_json::Value = serde_json::from_str(
         &client

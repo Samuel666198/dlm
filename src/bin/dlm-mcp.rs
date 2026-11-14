@@ -37,10 +37,33 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const ENDPOINT_ENV: &str = "DLM_ENDPOINT";
 
+/// 本程序需要界面支持到哪一版 Agent 协议（与 `gui::AGENT_API` 对齐）。
+///
+/// **单独下载的代价就是要认版本**：用户完全可能拿着旧界面配新 `dlm-mcp`，
+/// 或者反过来。这两件事都不会崩溃，但会静默不工作 —— 那比崩溃更糟。
+const REQUIRED_API: u32 = 2;
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Endpoint {
     port: u16,
     token: String,
+    /// 界面写进端点文件的协议版本。老界面没有这一项 ⇒ 0。
+    #[serde(default)]
+    api: u32,
+}
+
+/// 版本判定（纯函数，便于测）。
+///
+/// 只有一种情况要拦：界面**太旧**。界面比本程序新是允许的 —— 那说明用户升级了 dlm
+/// 但还没换 `dlm-mcp`，此时老工具继续能用（接口是加法演进的），只是用不上新工具。
+fn check_compat(server_api: u32) -> Result<(), String> {
+    if server_api >= REQUIRED_API {
+        return Ok(());
+    }
+    Err(format!(
+        "这个 dlm 界面还不支持 Agent 接口（它报 api={server_api}，本程序需要 {REQUIRED_API}）。\n\
+         请把 dlm 升到 0.6.0 或更新版本；`dlm-mcp` 可以单独下载，界面必须先升。"
+    ))
 }
 
 fn main() {
@@ -206,8 +229,19 @@ fn call_tool(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let endpoint = read_endpoint(explicit)?;
+    // 端点文件里就写着版本，先本地判一次，省一次往返；再问一次 hello（端点文件可能是老的）。
+    check_compat(endpoint.api)?;
     let base = format!("http://127.0.0.1:{}", endpoint.port);
     let token = endpoint.token;
+    let hello = http_call(
+        client,
+        client.get(format!("{base}/api/agent/hello?t={token}")),
+    )?;
+    let server_api = serde_json::from_str::<Value>(&hello)
+        .ok()
+        .and_then(|v| v.get("api").and_then(Value::as_u64))
+        .unwrap_or(0) as u32;
+    check_compat(server_api)?;
 
     match name {
         "dlm_add" => {
@@ -270,6 +304,12 @@ fn http_call(
         .map_err(|err| format!("连不上 dlm-gui 的控制口：{err}（它开着吗？）"))?;
     let status = resp.status();
     let text = resp.text().unwrap_or_default();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(format!(
+            "这个 dlm 界面不认识该接口（404）。多半是 dlm 版本太旧：\n\
+             `dlm-mcp` 可以单独下载，但它要求 dlm 界面支持 Agent 接口（0.6.0+）。\n{text}"
+        ));
+    }
     if !status.is_success() {
         return Err(format!("控制口返回 {status}：{text}"));
     }
@@ -344,6 +384,27 @@ mod tests {
     fn an_unknown_method_answers_with_an_error_not_a_crash() {
         let reply: Value = serde_json::from_str(&call("nope/nothing", 3)).unwrap();
         assert_eq!(reply["error"]["code"], -32601);
+    }
+
+    /// 单独下载之后最容易出的问题：新旧配错。界面太旧必须拦住并说清怎么办；
+    /// 界面更新则放行（接口是加法演进的，老工具继续能用）。
+    #[test]
+    fn an_old_gui_is_refused_with_an_actionable_message() {
+        let err = check_compat(1).unwrap_err();
+        assert!(err.contains("请把 dlm 升到"), "要告诉用户怎么办：{err}");
+        assert!(err.contains("api=1"), "要点名它报的版本：{err}");
+
+        assert!(check_compat(0).is_err(), "连 api 字段都没有的老界面也不行");
+        assert!(check_compat(REQUIRED_API).is_ok());
+        assert!(check_compat(REQUIRED_API + 1).is_ok(), "界面更新是允许的");
+    }
+
+    /// 端点文件里没有 `api` 字段（0.5.x 写的）要当成 0，而不是解析失败。
+    #[test]
+    fn an_endpoint_file_without_an_api_version_reads_as_zero() {
+        let ep: Endpoint = serde_json::from_str(r#"{"port":1,"token":"t"}"#).unwrap();
+        assert_eq!(ep.api, 0);
+        assert!(check_compat(ep.api).is_err());
     }
 
     #[test]

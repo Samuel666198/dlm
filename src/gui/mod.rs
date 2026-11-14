@@ -124,12 +124,25 @@ pub struct AgentGate {
     pub tickets: tickets::Tickets,
 }
 
+/// Agent 控制口的**协议版本**。改了 `/api/agent/*` 的形状就 +1。
+///
+/// 为什么需要一个版本号：`dlm-mcp` 是**单独下载、单独升级**的（见 README 的打包一节）。
+/// 一个 0.5 的界面 + 一个 0.6 的 `dlm-mcp` 完全可能同时存在 —— 那时 `dlm-mcp` 应该
+/// 报一句"界面太旧，请升级 dlm"，而不是让用户对着一句 404 发愣。
+///
+/// - 1：没有 Agent 接口（0.5.x 及更早）
+/// - 2：`/api/agent/add` + `/api/agent/ticket` + 票据确认（0.6.0）
+pub const AGENT_API: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Endpoint {
     pub port: u16,
     pub token: String,
     pub pid: u32,
     pub started_at: u64,
+    /// 这个实例的 Agent 协议版本（老版本写的端点文件没有这一项 ⇒ `serde(default)` 给 0）。
+    #[serde(default)]
+    pub api: u32,
 }
 
 pub(crate) enum Ticket {
@@ -381,6 +394,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
         token: token.clone(),
         pid: std::process::id(),
         started_at: queue::now_secs(),
+        api: AGENT_API,
     };
     if let Err(err) = write_endpoint(&config.endpoint, &endpoint) {
         eprintln!("警告：写端点文件失败：{err:#}（浏览器投递会回退直连）");

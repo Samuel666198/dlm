@@ -18,9 +18,15 @@ target/release/dlm.exe --url https://example.com/big.iso --out-dir D:/dl
 | 桌面窗口 | `dlm-gui.exe` | 原生窗口（eframe/egui）+ 系统托盘 + 设置页 + 任务队列。**同时是扩展的后端** |
 | 浏览器宿主 | `dlm-native-host.exe` | Native Messaging 宿主，把扩展的请求转给内核或队列 |
 | 浏览器扩展 | `browser/extension/` | 右键菜单、页内悬浮球、媒体/文件嗅探、HLS 直链 |
+| MCP 桥（**按需另装**） | `dlm-mcp.exe` | 把本地控制口包成 MCP 工具，给 Codex / Claude 之类的 Agent 用。**不在主包里**，单独下载 |
 
 界面分三层，别混淆：`dlm-gui` 的 HTTP 服务是**产品接口**（扩展依赖它），不是"旧 Web UI 的残留"。
 HTTP 只绑 `127.0.0.1`，所有路径都要 `?t=<token>`。
+
+`dlm-mcp.exe` 单独下载是刻意的：不用 Agent 的人不必为一个用不上的 exe 买单，
+而它**只通过 HTTP 跟 `dlm-gui` 说话**、不碰队列文件，所以不装它完全不影响其余功能
+（设置页「Agent 接入」里那个复制按钮会自动置灰）。代价是两边版本可能不一致 ——
+所以它启动先握一次手（`GET /api/agent/hello`），界面太旧会直接告诉你"请升级 dlm"。
 
 ## 核心能力
 
@@ -103,6 +109,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
 
 产物 `target/package/dlm-<version>-win-x64.zip`，内含三个 exe、`browser/extension`、
 `install.ps1` / `uninstall.ps1`（用户级，不需要管理员）、`START-HERE.txt`、说明文档。
+
+`dlm-mcp.exe` **不进主包**：它是第二个产物（同一个 Release 里单独一个附件，或
+`dlm-mcp-<version>-win-x64.zip`），谁要用 Agent 谁才下。它要求 `dlm-gui` 支持
+Agent 接口（`api >= 2`，即 0.6.0+），装错版本会在第一次调用时明确报出来。
 
 扩展仍需在浏览器开发者模式里"加载已解压"。详见 [`packaging/README.md`](packaging/README.md)。
 
