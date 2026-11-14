@@ -42,7 +42,9 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(760.0)
+            // **固定尺寸**：原先只固定了宽度，高度跟着内容走 —— 切分类时窗口一高一矮地跳，
+            // 眼睛每次都要重新找"保存"在哪。现在 760×520 钉死，内容在里头滚。
+            .fixed_size(egui::vec2(760.0, 520.0))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 // 顶部：搜索设置项（跨分类）。
@@ -57,6 +59,7 @@ impl App {
 
                 egui::ScrollArea::vertical()
                     .max_height(420.0)
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.settings_search.trim().is_empty() {
                             self.settings_category_body(ui);

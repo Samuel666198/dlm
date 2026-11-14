@@ -148,6 +148,8 @@ pub(crate) fn tool_button(
         egui::FontId::proportional(11.0),
         ink,
     );
+    // 画出来的按钮默认不在无障碍树里；不报身份，读屏与自动化都找不到「设置」「更多」。
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response
 }
 
@@ -210,6 +212,7 @@ pub(crate) fn action_button(
         egui::FontId::proportional(12.0),
         ink,
     );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response
 }
 
