@@ -982,31 +982,60 @@ fn closing_hides_only_when_there_is_work_and_a_tray_to_come_back_from() {
     );
 }
 
-/// **整帧渲染**（0.6.0 阶段 1）：工具条的自绘按钮与 `⋯` 菜单、上下文动作条、
-/// 状态栏的限速胶囊，全都只在"真的画一帧"时才被走到。
+/// **界面上真正会出现的符号，必须在装好的字体里有字形**。
 ///
-/// 这条用例存在的理由：这些东西一旦 panic，用户是**打开窗口就没了**；而它们
-/// 又都是自绘的（不画字符，改用 `Painter` 画线 —— 字符会变成方框），
-/// 光看代码看不出有没有画歪或算错矩形。判据只有一条：这一帧跑得完、且选中状态
-/// 真的让动作条出现了。
+/// 这台机器的 Microsoft YaHei 缺一批符号字形，缺的会画成**空心方框**。0.6.0 阶段 1~2
+/// 的截图连抓三回（`▾`、`✓`、`⋯`/`＋` 早先也踩过）。眼睛看不出是因为方框很小、
+/// 只有那几处；这条用例把它变成一次机械检查：列清楚我们打算画出去的符号，
+/// 缺一个就红，并指名道姓。
 ///
-/// 托盘在门禁里不建（`DLM_NO_TRAY=1`，见 `tray::suppressed`）：测试线程没有消息泵。
+/// 往界面里加新符号时，先把它加进这个表 —— 加得进、跑得绿，才说明字体认它。
 #[test]
-fn a_whole_frame_renders_with_and_without_a_selection() {
+fn every_symbol_we_put_in_the_ui_has_a_glyph() {
+    let ctx = egui::Context::default();
+    assert!(
+        super::app::fonts::install(&ctx),
+        "这台机器上装不到中文字体，后面的检查没意义"
+    );
+    // 字体表要等第一帧才建起来（"No fonts available until first call to Context::run()"）：
+    // 空画一帧再问，不然后面每个字都会被当成缺字形。
+    let mut warmup = ctx.run_ui(frame_input(), |_ui| {});
+    warmup.textures_delta.clear();
+    // 现役符号：省略号（截断、菜单里的「…」）、中点（已选 · / 速度分隔）、
+    // 乘号（删一条限速计划 / 关抽屉），以及中文标点。
+    //
+    // ⚠ 已知缺字形、**界面里一律不许直接用**：`▾ ✓ ✕ ⋯ ＋ ▶`。
+    // 前四个都是 0.6.0 自己的截图抓出来的（各画成一个空心方框），`▶`/`＋` 更早也踩过。
+    // 箭头与三点一律用 `icons::draw_icon` 画，其它位置换文字或 `×`。
+    let used = ['…', '·', '×', '↓', '→', '「', '」', '（', '）', '，', '：'];
+    let font = egui::FontId::proportional(12.0);
+    for ch in used {
+        assert!(
+            // `has_glyph` 要 `&mut`（缺字形时它会顺手记一笔），所以走 `fonts_mut`。
+            ctx.fonts_mut(|f| f.has_glyph(&font, ch)),
+            "字体里没有 {ch:?} 的字形 —— 界面会画成空心方框，得换成画出来的图标或别的字符"
+        );
+    }
+}
+
+/// 造一个只连着空队列的 `App`，给"整帧渲染"类用例用。
+///
+/// 托盘在门禁里不建（`DLM_NO_TRAY=1`，见 `tray::suppressed`）：测试线程没有消息泵，
+/// 图标会留在用户任务栏上且点了没反应。
+fn test_app(tag: &str, tasks: Vec<TaskView>) -> (super::app::App, std::path::PathBuf) {
     use std::sync::mpsc::channel;
     use std::sync::{Arc, Mutex};
 
-    let dir = std::env::temp_dir().join(format!("dlm-frame-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("dlm-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
-    let view = task_view_named("a.bin", TaskStatus::Running);
-    let snapshot: super::app::SnapshotSlot = Arc::new(Mutex::new(vec![view]));
+    let snapshot: super::app::SnapshotSlot = Arc::new(Mutex::new(tasks));
     let quota: super::app::QuotaSlot = Arc::new(Mutex::new(None));
     let update: super::app::UpdateSlot =
         Arc::new(Mutex::new(super::snapshot::UpdateView::disabled()));
     let (tx, _rx) = channel();
-    let mut app = super::app::App::new(
+    let app = super::app::App::new(
         snapshot,
         quota,
         update,
@@ -1022,15 +1051,32 @@ fn a_whole_frame_renders_with_and_without_a_selection() {
             extension: None,
         },
     );
+    (app, dir)
+}
 
-    let ctx = egui::Context::default();
-    let input = egui::RawInput {
+/// 1120×700 的一帧输入。窗口尺寸给死，好让面板算宽度时有个确定的分母。
+fn frame_input() -> egui::RawInput {
+    egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::pos2(0.0, 0.0),
             egui::vec2(1120.0, 700.0),
         )),
         ..Default::default()
-    };
+    }
+}
+
+/// **整帧渲染**（0.6.0 阶段 1）：工具条的自绘按钮与 `⋯` 菜单、上下文动作条、
+/// 状态栏的限速胶囊，全都只在"真的画一帧"时才被走到。
+///
+/// 这条用例存在的理由：这些东西一旦 panic，用户是**打开窗口就没了**；而它们
+/// 又都是自绘的（不画字符，改用 `Painter` 画线 —— 字符会变成方框），
+/// 光看代码看不出有没有画歪或算错矩形。判据只有一条：这一帧跑得完、且选中状态
+/// 真的让动作条出现了。
+#[test]
+fn a_whole_frame_renders_with_and_without_a_selection() {
+    let (mut app, dir) = test_app("frame", vec![task_view_named("a.bin", TaskStatus::Running)]);
+    let ctx = egui::Context::default();
+    let input = frame_input();
 
     // 1) 没选中：动作条不该占位（整帧照样要画得完）。
     assert_eq!(app.selected, None);
@@ -1054,6 +1100,54 @@ fn a_whole_frame_renders_with_and_without_a_selection() {
         output.shapes.len(),
         shapes_without_selection
     );
+    output.textures_delta.clear();
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// **设置面板每一页都画得完**（0.6.0 阶段 2）。
+///
+/// 七个分类 + 搜索态各渲染一帧。这条替代不了人眼，但它挡的是这类大改版最容易伤到
+/// 用户的那种错：某一页一打开就 panic（点一下设置，整个窗口消失）。
+/// 每条设置项走的是 `SettingKey` 的穷举 `match`，所以这一轮也等于把每个控件都画了一遍。
+#[test]
+fn every_settings_page_renders() {
+    use super::app::settings_spec::Category;
+
+    let (mut app, dir) = test_app(
+        "settings-pages",
+        vec![task_view_named("a.bin", TaskStatus::Done)],
+    );
+    let ctx = egui::Context::default();
+    app.settings_open = true;
+
+    for category in Category::ALL {
+        app.settings_category = *category;
+        let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+        output.textures_delta.clear();
+    }
+
+    // 搜索态：跨分类的命中列表。
+    app.settings_search = "连接".to_string();
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    assert!(
+        !super::app::settings_spec::search(&app.settings_search).is_empty(),
+        "搜索『连接』必须有命中，否则这一段什么都没画"
+    );
+
+    // 搜不到时也要有话说，不能一片空白。
+    app.settings_search = "绝对不会命中的关键词".to_string();
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    assert!(super::app::settings_spec::search(&app.settings_search).is_empty());
+
+    // Agent 接入页：CLI 复制一直可用、MCP 复制看有没有装 dlm-mcp。
+    // 画得完就是这条用例的判据（上面每次 run_ui 都是），这里只补一句为什么单列它：
+    // 那一页有 `ui.ctx().copy_text(...)` 与置灰分支，是本面板里唯一带副作用的页。
+    app.settings_search.clear();
+    app.settings_category = Category::Agent;
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
     output.textures_delta.clear();
 
     let _ = fs::remove_dir_all(dir);

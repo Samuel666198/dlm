@@ -57,6 +57,11 @@ pub struct Settings {
     /// `runner` 每次派发都现读 `RuntimeTuning.rules`，所以存盘后重启即生效。
     #[serde(default)]
     pub rules: Vec<crate::rules::Rule>,
+    /// Agent（MCP / CLI）下发下载前是否要先问人。**默认开**。
+    ///
+    /// 开了之后 Agent 拿到的是一张待确认票据，得回对话里问一句、人点头才真下
+    /// （0.6.0 阶段 5 的票据规则）。关掉就是"Agent 想下就下"。
+    pub agent_confirm: bool,
 
     // ---- 行为 ----
     /// 监视剪贴板里的下载链接。**默认关**（隐私，见设计稿第八节）。
@@ -96,6 +101,7 @@ impl Default for Settings {
             rename_template: String::new(),
             on_duplicate: "auto".to_string(),
             rules: Vec::new(),
+            agent_confirm: true,
             watch_clipboard: false,
             on_complete: String::new(),
             autostart: false,

@@ -136,10 +136,12 @@ impl App {
         egui::Popup::menu(&pill).show(|ui| {
             ui.set_min_width(180.0);
             for &preset in SPEED_PRESETS {
+                // 标记当前档位用**文字**，不用 `✓`：那个字符在这台机器的字体里是空心方框
+                // （截图实测，和 `▾` 同一个坑）。
                 let text = if preset == now {
-                    format!("✓ {}", speed_limit_label(preset))
+                    format!("{}（当前）", speed_limit_label(preset))
                 } else {
-                    // 用全角空格占位而不是三个半角空格：中文行高下两者对不齐。
+                    // 全角空格占位，让数字列对齐。
                     format!("　{}", speed_limit_label(preset))
                 };
                 if ui.button(text).clicked() {

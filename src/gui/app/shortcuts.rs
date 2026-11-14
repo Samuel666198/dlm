@@ -20,6 +20,9 @@ pub(crate) enum Shortcut {
     NewTask,
     /// `Ctrl+K`（与旧版 `Ctrl+F`）：聚焦搜索框。
     FocusSearch,
+    /// `Ctrl+,`（与 `Ctrl+Alt+S`）：打开设置。前者是浏览器/编辑器的通用键位，
+    /// 后者是 JetBrains 一系的习惯 —— 两个都认，老用户不必改手。
+    OpenSettings,
     /// `Del`：删除选中的任务。
     DeleteSelected,
     /// `Space`：暂停 / 继续选中的任务。
@@ -32,9 +35,12 @@ pub(crate) enum Shortcut {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Keys {
     pub ctrl: bool,
+    pub alt: bool,
     pub n: bool,
     pub f: bool,
     pub k: bool,
+    pub s: bool,
+    pub comma: bool,
     pub delete: bool,
     pub space: bool,
     pub escape: bool,
@@ -62,6 +68,14 @@ pub(crate) fn shortcut_for(
     if keys.ctrl && (keys.k || keys.f) {
         return Some(Shortcut::FocusSearch);
     }
+    if keys.ctrl && keys.comma {
+        return Some(Shortcut::OpenSettings);
+    }
+    // `Ctrl+Alt+S`：同一个动作的第二个键位（JetBrains 习惯）。带 Alt 才认，
+    // 免得和"Ctrl+S 保存"这类将来要加的键冲突。
+    if keys.ctrl && keys.alt && keys.s {
+        return Some(Shortcut::OpenSettings);
+    }
     if typing {
         return None;
     }
@@ -83,9 +97,12 @@ impl App {
         let typing = ctx.memory(|m| m.focused().is_some());
         let keys = ctx.input(|i| Keys {
             ctrl: i.modifiers.command,
+            alt: i.modifiers.alt,
             n: i.key_pressed(egui::Key::N),
             f: i.key_pressed(egui::Key::F),
             k: i.key_pressed(egui::Key::K),
+            s: i.key_pressed(egui::Key::S),
+            comma: i.key_pressed(egui::Key::Comma),
             delete: i.key_pressed(egui::Key::Delete),
             space: i.key_pressed(egui::Key::Space),
             escape: i.key_pressed(egui::Key::Escape),
@@ -97,6 +114,11 @@ impl App {
                 self.add_form.focused = false;
             }
             Some(Shortcut::FocusSearch) => self.focus_search = true,
+            Some(Shortcut::OpenSettings) => {
+                self.settings_open = true;
+                self.draft = self.settings.clone();
+                self.settings_error = None;
+            }
             Some(Shortcut::ClearSelection) => {
                 self.selected = None;
                 self.drawer_log = None;
@@ -208,6 +230,42 @@ mod tests {
             shortcut_for(keys(false, false, false, false, true), false, true, false),
             Some(Shortcut::TogglePause)
         );
+    }
+
+    #[test]
+    fn ctrl_comma_opens_settings_from_anywhere() {
+        let ctrl_comma = Keys {
+            ctrl: true,
+            comma: true,
+            ..Keys::default()
+        };
+        assert_eq!(
+            shortcut_for(ctrl_comma, false, false, false),
+            Some(Shortcut::OpenSettings)
+        );
+        assert_eq!(
+            shortcut_for(ctrl_comma, true, true, false),
+            Some(Shortcut::OpenSettings),
+            "输入框里有焦点也要能按（Ctrl 组合键一律不受影响）"
+        );
+
+        // 第二个键位：Ctrl+Alt+S（JetBrains 习惯）。少了 Alt 不算，免得占掉将来的 Ctrl+S。
+        let ctrl_alt_s = Keys {
+            ctrl: true,
+            alt: true,
+            s: true,
+            ..Keys::default()
+        };
+        assert_eq!(
+            shortcut_for(ctrl_alt_s, false, false, false),
+            Some(Shortcut::OpenSettings)
+        );
+        let ctrl_s = Keys {
+            ctrl: true,
+            s: true,
+            ..Keys::default()
+        };
+        assert_eq!(shortcut_for(ctrl_s, false, false, false), None);
     }
 
     /// Esc 取消选择有三个前提：有选中、不在打字、没有弹窗先接着。

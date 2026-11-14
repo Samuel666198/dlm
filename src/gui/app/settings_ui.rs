@@ -1,14 +1,36 @@
-//! 设置面板。
+//! 设置面板（0.6.0 阶段 2 改版）。
 //!
-//! 分组照设计稿第八节：下载 / 行为 / 界面。每项都直接读写 `Settings`，
-//! 点「保存」才落盘 —— 中途关掉不留半截配置。
+//! ## 形状
+//!
+//! 左侧七个分类、右侧分组卡片、顶部一个搜索框；每行三列：**标题 + 一句解释 + 控件**。
+//! 分类与每行的文字全部来自 [`settings_spec`]，面板只负责"把某一项画成控件"。
+//!
+//! ## 为什么控件是个穷举 `match`
+//!
+//! [`SettingKey`] 的每个变体都必须在这里有一条渲染分支；加了设置项却没画控件，
+//! **编译**就红。判据要求的"每个设置项都有归属分类、无其它兜底"因此不是靠人盯，
+//! 而是靠编译器 + `settings_spec` 里的两条机械用例。
+//!
+//! ## 保存语义没变
+//!
+//! 仍是草稿模式：改的是 `self.draft`，点保存才落盘并 `ApplyRuntime`。
+//! 中途关掉不留半截配置。
+//!
+//! ## Agent 接入
+//!
+//! 那一页有一半是"复制命令"：CLI 一行、MCP 配置一段。**没有 dlm-mcp 二进制时后者置灰**
+//! （每个用户按需装，不能假装它在那儿）。
 
 use eframe::egui;
 
 use super::App;
+use super::settings_spec::{Category, SettingKey, SettingSpec, search, specs_in};
 use crate::gui::RuntimeTuning;
 use crate::gui::Ticket;
 use crate::gui::app::theme;
+
+/// 连接与速度里"0 = 不限"这类尾注。
+const ZERO_MEANS_UNLIMITED: &str = "0 = 不限";
 
 impl App {
     pub(super) fn settings_panel(&mut self, ctx: &egui::Context) {
@@ -20,16 +42,30 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(480.0)
+            .default_width(760.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                // 顶部：搜索设置项（跨分类）。
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_search)
+                            .hint_text("搜索设置项…")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.add_space(8.0);
+
                 egui::ScrollArea::vertical()
-                    .max_height(440.0)
+                    .max_height(420.0)
                     .show(ui, |ui| {
-                        self.settings_body(ui);
+                        if self.settings_search.trim().is_empty() {
+                            self.settings_category_body(ui);
+                        } else {
+                            self.settings_search_body(ui);
+                        }
                     });
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -42,6 +78,12 @@ impl App {
                     ui.add_space(8.0);
                     if let Some(err) = &self.settings_error {
                         ui.label(egui::RichText::new(err).size(11.5).color(theme::BAD));
+                    } else {
+                        ui.label(
+                            egui::RichText::new("改动保存后立刻生效（除标注『重启后生效』的项）")
+                                .size(10.5)
+                                .color(theme::INK_3),
+                        );
                     }
                 });
             });
@@ -50,295 +92,545 @@ impl App {
             cancel = true;
         }
 
-        if save {
-            let parsed_dir = crate::gui::settings::parse_out_dir_input(&self.out_dir_text);
-            if self.draft.on_complete_ok() {
-                let dir = match parsed_dir {
-                    Ok(dir) => dir,
-                    Err(msg) => {
-                        self.settings_error = Some(format!("保存目录：{msg}"));
-                        return;
-                    }
-                };
-                self.draft.out_dir = dir;
-                match self.draft.save(&self.settings_dir) {
-                    Ok(()) => {
-                        self.settings = self.draft.clone();
-                        // 剪贴板开关变化要立刻生效。
-                        self.apply_settings_runtime();
-                        // E18：连接数 / 限速 / 每 host 上限也立刻生效。
-                        // 不发这一条的话，用户改完得重启程序 —— 设置界面等于在说谎。
-                        self.send(Ticket::ApplyRuntime(RuntimeTuning::from_settings_with(
-                            &self.settings,
-                            &self.default_out_dir,
-                            self.default_category_dirs,
-                        )));
-                        self.settings_error = None;
-                        open = false;
-                    }
-                    Err(err) => {
-                        self.settings_error = Some(format!("保存失败：{err:#}"));
-                    }
-                }
-            } else {
-                self.settings_error = Some("完成后动作只认 无 / open / run:<exe>".to_string());
-            }
+        if save && self.try_save_settings() {
+            open = false;
         }
         if cancel {
-            self.draft = self.settings.clone();
-            self.out_dir_text = self
-                .draft
-                .out_dir
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            self.settings_error = None;
+            self.reset_settings_draft();
             open = false;
         }
 
         self.settings_open = open;
     }
 
-    fn settings_body(&mut self, ui: &mut egui::Ui) {
-        // ---- 下载 ----
-        section(ui, "下载");
+    /// 存盘 + 让改动立刻生效。返回是否成功（失败时错误留在 `settings_error`，面板不关）。
+    ///
+    /// 抽成方法是因为"保存"现在有两个入口（面板按钮、Agent 页复制前的自检），
+    /// 两处各写一遍必然会有一处漏掉 `ApplyRuntime`。
+    fn try_save_settings(&mut self) -> bool {
+        let parsed_dir = crate::gui::settings::parse_out_dir_input(&self.out_dir_text);
+        if !self.draft.on_complete_ok() {
+            self.settings_error = Some("完成后动作只认 空 / open / run:<exe>".to_string());
+            return false;
+        }
+        let dir = match parsed_dir {
+            Ok(dir) => dir,
+            Err(msg) => {
+                self.settings_error = Some(format!("保存目录：{msg}"));
+                return false;
+            }
+        };
+        self.draft.out_dir = dir;
+        match self.draft.save(&self.settings_dir) {
+            Ok(()) => {
+                self.settings = self.draft.clone();
+                // 剪贴板开关这类"要动线程"的项。
+                self.apply_settings_runtime();
+                // E18：连接数 / 限速 / 每 host 上限也立刻生效。
+                // 不发这一条的话，用户改完得重启程序 —— 设置界面等于在说谎。
+                self.send(Ticket::ApplyRuntime(RuntimeTuning::from_settings_with(
+                    &self.settings,
+                    &self.default_out_dir,
+                    self.default_category_dirs,
+                )));
+                self.settings_error = None;
+                true
+            }
+            Err(err) => {
+                self.settings_error = Some(format!("保存失败：{err:#}"));
+                false
+            }
+        }
+    }
 
-        row(ui, "每个任务的连接数", |ui| {
-            ui.add(egui::DragValue::new(&mut self.draft.connections).range(1..=32));
+    fn reset_settings_draft(&mut self) {
+        self.draft = self.settings.clone();
+        self.out_dir_text = self
+            .draft
+            .out_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.settings_error = None;
+    }
+
+    /// 左侧分类 + 右侧该分类的分组卡片。
+    fn settings_category_body(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_top(|ui| {
+            // 左：分类列。
+            ui.vertical(|ui| {
+                ui.set_width(132.0);
+                for category in Category::ALL {
+                    let selected = self.settings_category == *category;
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(category.title()).size(12.0).color(
+                                    if selected {
+                                        theme::ACCENT_INK
+                                    } else {
+                                        theme::INK_2
+                                    },
+                                ),
+                            )
+                            .fill(if selected {
+                                theme::ACCENT_SOFT
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .min_size(egui::vec2(124.0, 26.0)),
+                        )
+                        .clicked()
+                    {
+                        self.settings_category = *category;
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+            // 右：这一类的分组卡片。
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                let category = self.settings_category;
+                if category == Category::Agent {
+                    self.agent_panel(ui);
+                }
+                self.render_specs(ui, specs_in(category).collect());
+            });
         });
-        row(ui, "同一服务器最大连接数", |ui| {
-            ui.add(egui::DragValue::new(&mut self.draft.per_host_connections).range(0..=32));
+    }
+
+    /// 搜索态：跨分类列出命中的项，每组前标出分类名，点标题能跳过去。
+    fn settings_search_body(&mut self, ui: &mut egui::Ui) {
+        let hits = search(&self.settings_search);
+        if hits.is_empty() {
+            ui.add_space(6.0);
             ui.label(
-                egui::RichText::new("0 = 不限")
-                    .size(10.5)
+                egui::RichText::new("没有匹配的设置项")
+                    .size(11.5)
                     .color(theme::INK_3),
             );
-        });
-        row(ui, "全局限速 (KiB/s)", |ui| {
-            ui.add(egui::DragValue::new(&mut self.draft.max_speed_kib).range(0..=1024 * 100));
-            ui.label(
-                egui::RichText::new("0 = 不限")
-                    .size(10.5)
-                    .color(theme::INK_3),
-            );
-        });
-        // 限速计划：每行一条 `22:00-06:00=512`，命中窗口时覆盖上面那条全局限速。
-        // 现在生效多少直接算给你看 —— 否则用户得盯着表猜"此刻到底限没限"。
-        // 代理：留空就是直连。写错时当场标红，但不阻止保存 —— 保存后仍可改回来，
-        // 而"整份设置因为一行代理写错就存不下去"是更糟的体验。
-        row(ui, "代理", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.draft.proxy)
-                    .hint_text("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")
-                    .desired_width(260.0),
-            );
-            ui.label(
-                egui::RichText::new("空 = 直连")
-                    .size(10.5)
-                    .color(theme::INK_3),
-            );
-            if ui.small_button("测试").clicked() {
-                self.proxy_test = Some(
-                    crate::proxy::probe_via(
-                        &self.draft.proxy,
-                        "https://www.gstatic.com/generate_204",
-                        std::time::Duration::from_secs(5),
-                    )
-                    .unwrap_or_else(|e| e),
+            return;
+        }
+        // 跨分类时按分类分段，保留"这条设置住在哪儿"的信息。
+        let mut last: Option<Category> = None;
+        for spec in hits {
+            if last != Some(spec.category) {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(spec.category.title())
+                        .size(10.5)
+                        .strong()
+                        .color(theme::INK_3),
+                );
+                last = Some(spec.category);
+            }
+            self.render_row(ui, spec);
+        }
+    }
+
+    /// 把一批设置项按分组画成卡片。
+    fn render_specs(&mut self, ui: &mut egui::Ui, specs: Vec<&'static SettingSpec>) {
+        let mut group: Option<&'static str> = None;
+        for spec in specs {
+            if group != Some(spec.group) {
+                if group.is_some() {
+                    ui.add_space(8.0);
+                }
+                group = Some(spec.group);
+                ui.label(
+                    egui::RichText::new(spec.group)
+                        .size(11.0)
+                        .strong()
+                        .color(theme::INK_3),
+                );
+                ui.add_space(2.0);
+            }
+            self.render_row(ui, spec);
+        }
+    }
+
+    /// 一行设置：标题 + 一句解释（左）｜控件（右）。
+    fn render_row(&mut self, ui: &mut egui::Ui, spec: &'static SettingSpec) {
+        egui::Frame::new()
+            .fill(theme::SURFACE)
+            .stroke(egui::Stroke::new(theme::STROKE, theme::LINE_SOFT))
+            .inner_margin(egui::Margin::symmetric(10, 7))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(300.0);
+                        ui.label(egui::RichText::new(spec.title).size(12.5).color(theme::INK));
+                        ui.label(
+                            egui::RichText::new(spec.hint)
+                                .size(10.5)
+                                .color(theme::INK_3),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if spec.read_only {
+                            ui.label(
+                                egui::RichText::new("程序自己记的")
+                                    .size(10.5)
+                                    .color(theme::INK_3),
+                            );
+                        } else {
+                            self.setting_control(ui, spec.key);
+                        }
+                    });
+                });
+            });
+        ui.add_space(4.0);
+    }
+
+    /// 一个设置项画成什么控件。**穷举 `match`**：加了键不画就编译不过。
+    fn setting_control(&mut self, ui: &mut egui::Ui, key: SettingKey) {
+        match key {
+            SettingKey::OutDir => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.out_dir_text)
+                        .hint_text("留空 = 下载文件夹")
+                        .desired_width(300.0),
                 );
             }
-            if let Some(msg) = &self.proxy_test {
+            SettingKey::CategoryDirs => {
+                ui.checkbox(&mut self.draft.category_dirs, "");
+            }
+            SettingKey::RenameTemplate => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.rename_template)
+                        .hint_text("留空 = 原名")
+                        .desired_width(260.0),
+                );
+            }
+            SettingKey::OnDuplicate => {
+                egui::ComboBox::from_id_salt("on-dup")
+                    .selected_text(match self.draft.on_duplicate.as_str() {
+                        "skip" => "跳过",
+                        "overwrite" => "覆盖",
+                        _ => "自动加编号",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.draft.on_duplicate,
+                            "auto".into(),
+                            "自动加编号",
+                        );
+                        ui.selectable_value(&mut self.draft.on_duplicate, "skip".into(), "跳过");
+                        ui.selectable_value(
+                            &mut self.draft.on_duplicate,
+                            "overwrite".into(),
+                            "覆盖",
+                        );
+                    });
+            }
+            SettingKey::OnComplete => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.on_complete)
+                        .hint_text("open / run:程序.exe")
+                        .desired_width(220.0),
+                );
+            }
+            SettingKey::ScanAfterDone => {
+                ui.checkbox(&mut self.draft.scan_after_done, "");
+            }
+            SettingKey::Connections => {
+                ui.add(egui::DragValue::new(&mut self.draft.connections).range(1..=32));
+            }
+            SettingKey::PerHostConnections => {
+                ui.add(egui::DragValue::new(&mut self.draft.per_host_connections).range(0..=32));
                 ui.label(
-                    egui::RichText::new(msg.clone())
+                    egui::RichText::new(ZERO_MEANS_UNLIMITED)
                         .size(10.5)
                         .color(theme::INK_3),
                 );
             }
-            match crate::proxy::parse_proxy(&self.draft.proxy) {
-                Ok(None) => {}
-                Ok(Some(spec)) => {
-                    ui.label(
-                        egui::RichText::new(format!("生效：{}", spec.redacted()))
-                            .size(10.5)
-                            .color(theme::INK_3),
+            SettingKey::MaxSpeedKiB => {
+                ui.add(egui::DragValue::new(&mut self.draft.max_speed_kib).range(0..=1024 * 100));
+                ui.label(
+                    egui::RichText::new(ZERO_MEANS_UNLIMITED)
+                        .size(10.5)
+                        .color(theme::INK_3),
+                );
+            }
+            SettingKey::SpeedWindows => {
+                // 一行一条，行内可删；"此刻"直接算给用户看（否则得盯着表猜）。
+                let mut remove = None;
+                ui.vertical(|ui| {
+                    for (i, w) in self.draft.speed_windows.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(w)
+                                    .hint_text("22:00-06:00=512")
+                                    .desired_width(170.0),
+                            );
+                            if ui.small_button("×").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if ui.small_button("+ 一条").clicked() {
+                        self.draft.speed_windows.push(String::new());
+                    }
+                    let parsed: Vec<_> = self
+                        .draft
+                        .speed_windows
+                        .iter()
+                        .filter_map(|w| crate::gui::speed_schedule::SpeedWindow::parse(w).ok())
+                        .collect();
+                    let eff = crate::gui::speed_schedule::rate_at(
+                        crate::gui::speed_schedule::local_minute_of_day(),
+                        &parsed,
+                        self.draft.max_speed_kib as u32,
                     );
-                }
-                Err(err) => {
                     ui.label(
-                        egui::RichText::new(err)
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(0xc6, 0x28, 0x28)),
+                        egui::RichText::new(if eff == 0 {
+                            "此刻：不限速".to_string()
+                        } else {
+                            format!("此刻：{eff} KiB/s")
+                        })
+                        .size(10.5)
+                        .color(theme::INK_3),
                     );
+                });
+                if let Some(i) = remove {
+                    self.draft.speed_windows.remove(i);
                 }
             }
-        });
-        row(ui, "限速计划", |ui| {
-            let mut remove = None;
-            for (i, w) in self.draft.speed_windows.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(w)
-                            .hint_text("22:00-06:00=512")
-                            .desired_width(170.0),
-                    );
-                    if ui.small_button("×").clicked() {
-                        remove = Some(i);
+            SettingKey::Proxy => {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.draft.proxy)
+                                .hint_text("http://127.0.0.1:7890")
+                                .desired_width(220.0),
+                        );
+                        if ui.small_button("测试").clicked() {
+                            self.proxy_test = Some(
+                                crate::proxy::probe_via(
+                                    &self.draft.proxy,
+                                    "https://www.gstatic.com/generate_204",
+                                    std::time::Duration::from_secs(5),
+                                )
+                                .unwrap_or_else(|e| e),
+                            );
+                        }
+                    });
+                    if let Some(msg) = &self.proxy_test {
+                        ui.label(
+                            egui::RichText::new(msg.clone())
+                                .size(10.5)
+                                .color(theme::INK_3),
+                        );
+                    }
+                    // 写错当场标红，但不阻止保存：一行代理写错就存不下整份设置更糟。
+                    match crate::proxy::parse_proxy(&self.draft.proxy) {
+                        Ok(None) => {}
+                        Ok(Some(spec)) => {
+                            ui.label(
+                                egui::RichText::new(format!("生效：{}", spec.redacted()))
+                                    .size(10.5)
+                                    .color(theme::INK_3),
+                            );
+                        }
+                        Err(err) => {
+                            ui.label(
+                                egui::RichText::new(err)
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(0xc6, 0x28, 0x28)),
+                            );
+                        }
                     }
                 });
             }
-            if ui.small_button("+ 一条").clicked() {
-                self.draft.speed_windows.push(String::new());
+            SettingKey::AgentConfirm => {
+                ui.checkbox(&mut self.draft.agent_confirm, "");
             }
-            let now = crate::gui::speed_schedule::local_minute_of_day();
-            let parsed: Vec<_> = self
-                .draft
-                .speed_windows
-                .iter()
-                .filter_map(|w| crate::gui::speed_schedule::SpeedWindow::parse(w).ok())
-                .collect();
-            let eff =
-                crate::gui::speed_schedule::rate_at(now, &parsed, self.draft.max_speed_kib as u32);
-            ui.label(
-                egui::RichText::new(if eff == 0 {
-                    "此刻：不限速".to_string()
-                } else {
-                    format!("此刻：{eff} KiB/s")
-                })
+            SettingKey::Autostart => {
+                ui.checkbox(&mut self.draft.autostart, "");
+            }
+            SettingKey::CloseToTray => {
+                ui.checkbox(&mut self.draft.close_to_tray, "");
+            }
+            SettingKey::TrayHint => {
+                ui.checkbox(&mut self.draft.tray_hint, "");
+            }
+            SettingKey::TrayHintShown => {
+                // 只读项：`render_row` 已经拦掉了，这里不需要画控件。
+            }
+            SettingKey::WatchClipboard => {
+                ui.checkbox(&mut self.draft.watch_clipboard, "");
+            }
+            SettingKey::Rules => {
+                // 规则还没有界面（0.6.0 阶段 4 的界面部分没排上）。这里只报数，
+                // 但不假装能改 —— 界面说谎比功能缺席更糟。
+                ui.label(
+                    egui::RichText::new(format!("已配置 {} 条", self.draft.rules.len()))
+                        .size(11.0)
+                        .monospace()
+                        .color(theme::INK_2),
+                );
+            }
+            SettingKey::AutoCheckUpdate => {
+                ui.checkbox(&mut self.draft.auto_check_update, "");
+            }
+        }
+    }
+
+    /// 「Agent 接入」页头：两段可复制的配置 + 一句说明。
+    ///
+    /// 判据是"CLI 命令现在就能用、MCP 配置没装就置灰"。置灰不是偷懒：
+    /// 把一段指向不存在程序的配置交给用户，比不提供更糟。
+    fn agent_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Agent 接入")
+                .size(12.5)
+                .strong()
+                .color(theme::INK),
+        );
+        ui.label(
+            egui::RichText::new("让人或 Agent 都能下：命令行一直可用；MCP 需要另外装 dlm-mcp。")
                 .size(10.5)
                 .color(theme::INK_3),
+        );
+        ui.add_space(6.0);
+
+        // CLI：一行命令，复制即用。
+        let cli = agent_cli_line();
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                egui::vec2(300.0, 44.0),
+                egui::Label::new(
+                    egui::RichText::new(&cli)
+                        .size(11.0)
+                        .monospace()
+                        .color(theme::INK_2),
+                ),
             );
-            if let Some(i) = remove {
-                self.draft.speed_windows.remove(i);
+            if ui.button("复制").clicked() {
+                ui.ctx().copy_text(cli.clone());
+                self.agent_copied = Some("cli".to_string());
             }
         });
+        ui.add_space(6.0);
 
-        row(ui, "重命名模板", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.draft.rename_template)
-                    .hint_text("留空 = 原名；可用 {name} {ext} {date} {n}")
-                    .desired_width(280.0),
-            );
-        });
-        row(ui, "同名文件", |ui| {
-            egui::ComboBox::from_id_salt("on-dup")
-                .selected_text(match self.draft.on_duplicate.as_str() {
-                    "skip" => "跳过",
-                    "overwrite" => "覆盖",
-                    _ => "自动加编号",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.draft.on_duplicate, "auto".into(), "自动加编号");
-                    ui.selectable_value(&mut self.draft.on_duplicate, "skip".into(), "跳过");
-                    ui.selectable_value(&mut self.draft.on_duplicate, "overwrite".into(), "覆盖");
-                });
-        });
-        row(ui, "按类型分目录", |ui| {
-            ui.checkbox(&mut self.draft.category_dirs, "");
-            ui.label(
-                egui::RichText::new("视频 / 音频 / 压缩包各进一个子目录；只影响新任务")
-                    .size(10.5)
-                    .color(theme::INK_3),
-            );
-        });
-
-        row(ui, "默认保存目录", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.out_dir_text)
-                    .hint_text("留空 = 下载文件夹")
-                    .desired_width(280.0),
-            );
-        });
+        // MCP：一段 JSON。没装 dlm-mcp 时置灰。
+        let available = mcp_available(&std::env::current_exe().ok(), |p| p.exists());
+        let snippet = agent_mcp_snippet();
         ui.horizontal(|ui| {
-            ui.add_space(96.0);
-            ui.label(
-                egui::RichText::new("只影响之后新建的任务；保存后立刻生效，不用重启")
-                    .size(10.5)
-                    .color(theme::INK_3),
-            );
-        });
-
-        ui.add_space(10.0);
-        section(ui, "行为");
-
-        // 剪贴板：带一句说明，讲清它只看"像下载链接"的文本。
-        row(ui, "监视剪贴板", |ui| {
-            ui.checkbox(&mut self.draft.watch_clipboard, "");
-            ui.label(
-                egui::RichText::new("只匹配看起来像下载链接的文本，不上传任何内容")
-                    .size(10.5)
-                    .color(theme::INK_3),
-            );
-        });
-
-        row(ui, "完成后动作", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.draft.on_complete)
-                    .hint_text("留空 / open / run:程序.exe")
-                    .desired_width(220.0),
-            );
-        });
-
-        row(ui, "完成后扫描", |ui| {
-            ui.checkbox(&mut self.draft.scan_after_done, "");
-            ui.label(
-                egui::RichText::new("用 Windows Defender 扫一遍；失败只记日志，不影响任务")
-                    .size(10.5)
-                    .color(theme::INK_3),
-            );
-        });
-
-        ui.add_space(10.0);
-        section(ui, "界面");
-
-        row(ui, "关闭窗口时收进托盘", |ui| {
-            ui.checkbox(&mut self.draft.close_to_tray, "");
-        });
-        row(ui, "收进托盘时提示", |ui| {
-            ui.checkbox(&mut self.draft.tray_hint, "");
-            if self.draft.tray_hint_shown {
+            if available {
+                if ui.button("复制 MCP 配置").clicked() {
+                    ui.ctx().copy_text(snippet.clone());
+                    self.agent_copied = Some("mcp".to_string());
+                }
                 ui.label(
-                    egui::RichText::new("已提示过")
+                    egui::RichText::new("粘到 MCP 客户端配置里即可")
+                        .size(10.5)
+                        .color(theme::INK_3),
+                );
+            } else {
+                ui.add_enabled(false, egui::Button::new("复制 MCP 配置"));
+                ui.label(
+                    egui::RichText::new("没找到 dlm-mcp.exe：先装那一份再复制")
                         .size(10.5)
                         .color(theme::INK_3),
                 );
             }
         });
-
-        ui.add_space(10.0);
-        section(ui, "更新");
-
-        // 关掉之后 `gui::run` 不起检查线程，一个外网请求都不发 ——
-        // 勾选框背后要真有这个行为，否则就是「界面在说谎」。
-        row(ui, "自动检查更新", |ui| {
-            ui.checkbox(&mut self.draft.auto_check_update, "");
+        if let Some(what) = &self.agent_copied {
             ui.label(
-                egui::RichText::new("启动后查一次清单；关掉则不发任何外网请求")
+                egui::RichText::new(format!("已复制（{what}）"))
                     .size(10.5)
-                    .color(theme::INK_3),
+                    .color(theme::OK),
             );
-        });
+        }
+        ui.add_space(8.0);
     }
 }
 
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(title.to_uppercase())
-            .size(10.5)
-            .strong()
-            .color(theme::INK_3),
-    );
-    ui.add_space(4.0);
+/// CLI 那一行：照着改就能用。占位符用尖括号，免得被误抄成真路径。
+pub(crate) fn agent_cli_line() -> String {
+    "dlm --url <下载链接> --out-dir \"<目录>\"".to_string()
 }
 
-/// 一行设置：左边标签（定宽），右边控件。
-fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            egui::vec2(160.0, 20.0),
-            egui::Label::new(egui::RichText::new(label).size(12.0).color(theme::INK_2)),
+/// MCP 客户端要的那段配置。路径先给占位符：真正的路径只有本机知道，
+/// 而写死一个 `C:\Users\xxx` 只会让每个用户都要手改。
+pub(crate) fn agent_mcp_snippet() -> String {
+    "{\n  \"mcpServers\": {\n    \"dlm\": {\n      \"command\": \"dlm-mcp.exe\"\n    }\n  }\n}"
+        .to_string()
+}
+
+/// 本机有没有 `dlm-mcp.exe`（与 GUI 同目录）。
+///
+/// `exists` 作为参数传进来是为了能测：真去问文件系统的话，用例就得往
+/// 安装目录里塞文件，那是测试不该做的事。
+pub(crate) fn mcp_available(
+    current_exe: &Option<std::path::PathBuf>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> bool {
+    let Some(exe) = current_exe else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    exists(&dir.join("dlm-mcp.exe"))
+}
+
+/// 设置面板一行都没画时，至少得让人看得出"有哪些分类"—— 这里只是给用例用的自查。
+#[cfg(test)]
+pub(crate) fn spec_count() -> usize {
+    super::settings_spec::SPECS.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn the_mcp_copy_button_needs_an_actual_binary_next_to_the_gui() {
+        let exe = Some(PathBuf::from("C:\\app\\dlm-gui.exe"));
+        assert!(
+            !mcp_available(&exe, |_| false),
+            "没装 dlm-mcp 时不能让人复制一段指向空气的配置"
         );
-        add(ui);
-    });
-    ui.add_space(2.0);
+        assert!(mcp_available(&exe, |p| p == Path::new("C:\\app\\dlm-mcp.exe")));
+        assert!(!mcp_available(&None, |_| true), "拿不到自身路径就当没装");
+    }
+
+    #[test]
+    fn the_agent_snippets_name_the_commands_they_want() {
+        assert!(
+            agent_cli_line().contains("dlm --url"),
+            "CLI 那行得是用户能直接粘的命令"
+        );
+        let mcp = agent_mcp_snippet();
+        assert!(mcp.contains("mcpServers"), "{mcp}");
+        assert!(mcp.contains("dlm-mcp.exe"), "{mcp}");
+        // 是合法 JSON：粘到客户端配置里不能一粘就坏。
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&mcp).is_ok(),
+            "MCP 配置必须是合法 JSON"
+        );
+    }
+
+    /// 每个分类都要能落到界面上：分类列表就是 `Category::ALL`，这里确认顺序稳定。
+    #[test]
+    fn the_left_column_lists_all_seven_categories_in_order() {
+        let titles: Vec<&str> = Category::ALL.iter().map(|c| c.title()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "下载",
+                "连接与速度",
+                "限速计划",
+                "代理",
+                "Agent 接入",
+                "界面",
+                "高级"
+            ]
+        );
+        assert!(spec_count() > 0);
+    }
 }

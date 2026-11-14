@@ -168,7 +168,9 @@ pub(crate) fn drawer_body(
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             ui.add_space(12.0);
-            if ui.small_button("✕").clicked() {
+            // 用 `×`（U+00D7）而不是 `✕`（U+2715）：后者在 Microsoft YaHei 里没有字形，
+            // 会画成空心方框（`gui::tests::every_symbol_we_put_in_the_ui_has_a_glyph` 守这条）。
+            if ui.small_button("×").clicked() {
                 actions.close = true;
             }
         });

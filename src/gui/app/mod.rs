@@ -34,6 +34,7 @@ pub mod icons;
 pub mod list;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
+pub mod settings_spec;
 pub mod settings_ui;
 pub mod shortcuts;
 pub mod sidebar;
@@ -140,6 +141,12 @@ pub struct App {
     pub(super) out_dir_text: String,
     /// 保存失败的提示。
     pub(super) settings_error: Option<String>,
+    /// 设置面板里「搜索设置项」的内容（空 = 按分类浏览）。
+    pub(super) settings_search: String,
+    /// 设置面板当前选中的分类（左侧那一列）。
+    pub(super) settings_category: settings_spec::Category,
+    /// Agent 接入页刚复制了什么（`cli` / `mcp`），只用来显示一行"已复制"。
+    pub(super) agent_copied: Option<String>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
@@ -256,6 +263,9 @@ impl App {
             default_category_dirs: wiring_category_dirs,
             out_dir_text: settings_out_dir_text,
             settings_error: None,
+            settings_search: String::new(),
+            settings_category: settings_spec::Category::Download,
+            agent_copied: None,
             start_hidden: 0,
             clipboard_hit: None,
             clipboard_dismissed: None,
