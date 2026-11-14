@@ -976,23 +976,61 @@ fn search_matches_names_and_urls_case_insensitively() {
     assert!(!matches_search(&view, "nope"), "不匹配就是不匹配");
 }
 
-/// 关窗判定：只有「有活 + 能回到窗口」才藏进托盘。
+/// **长日志不能把抽屉撑宽**（0.6.1 缺陷 3）。
+///
+/// 病根是日志 label 被包在 `ui.horizontal` 里：横轴无限宽 ⇒ 永不换行 ⇒ 撑破窗口。
+/// 判据：给一个 360 宽的画布，塞一条 300 字的单行日志，画完的宽度必须还在 360 左右。
 #[test]
-fn closing_hides_only_when_there_is_work_and_a_tray_to_come_back_from() {
+fn a_long_single_line_log_wraps_instead_of_widening_the_drawer() {
+    use super::app::drawer::{DrawerDiag, drawer_body};
+    let view = task_view_named("a.bin", TaskStatus::Failed);
+    let long = "dlm 无法启动：error sending request for url (http://127.0.0.1:1/seed.bin): \
+client error (Connect): tcp connect error: 目标计算机拒绝连接 (os error 10061) "
+        .repeat(4);
+
+    let ctx = egui::Context::default();
+    let mut width = 0.0f32;
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ui.set_max_width(360.0);
+        let _ = drawer_body(
+            ui,
+            &view,
+            &DrawerDiag {
+                speed: None,
+                history: Vec::new(),
+                stalled_secs: None,
+            },
+            &long,
+        );
+        width = ui.min_rect().width();
+    });
+    output.textures_delta.clear();
+
+    assert!(
+        width <= 361.0,
+        "日志把抽屉撑宽了：画完 {width} 宽（应当不超过 360）"
+    );
+}
+
+/// 关窗判定：开关开着且托盘可用，就收进托盘 —— **与有没有任务无关**。
+///
+/// 0.6.0 的判据多了一个"还有任务在跑"，导致空闲时点 × 直接退出：用户刚装上、
+/// 队列还空着，点一下窗口就没了，而设置里那一项写的是「关闭窗口时收进托盘」。
+#[test]
+fn closing_hides_whenever_the_switch_is_on_and_a_tray_exists() {
     use super::app::hide_on_close;
 
     assert!(
-        !hide_on_close(true, false, true),
+        hide_on_close(true, true),
+        "开关开着且托盘可用 ⇒ 收进托盘（空闲也一样：开关就是开关）"
+    );
+    assert!(
+        !hide_on_close(true, false),
         "托盘没建起来就绝不能藏 —— 窗口一藏就再也没有入口找回来"
     );
     assert!(
-        !hide_on_close(true, true, false),
-        "全空闲时点 X 应该真的退出"
-    );
-    assert!(hide_on_close(true, true, true), "有任务在跑才收进托盘");
-    assert!(
-        !hide_on_close(false, true, true),
-        "用户关掉「收进托盘」就照做"
+        !hide_on_close(false, true),
+        "用户关掉「收进托盘」就照做：直接退出"
     );
 }
 
@@ -1297,3 +1335,54 @@ fn every_settings_page_renders() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **Ctrl+K 真的打开命令面板**（用户报"按了没反应"，所以这里连 App 的接线一起测）。
+///
+/// 判据只有一条：往窗口喂一个「Ctrl+K 按下」的事件，`palette_open` 必须为真。
+/// `shortcut_for` 的映射另有单测，这条管的是"按键 → App 状态"这段接线。
+/// **命令面板必须真的画出来**（0.6.1 缺陷 1）。
+///
+/// 0.6.0 的病根是：`Window::open(&mut false)` 被 egui 当成"窗口已关闭"，于是每帧跳过绘制 ——
+/// 状态置上了、快捷键也触发了，屏幕上什么都没有。所以这条只断言一件事：
+/// 面板开着的那一帧，**画出了东西**（shapes 非空），而不是只看 `palette_open`。
+#[test]
+fn the_palette_actually_paints_while_it_is_open() {
+    let (mut app, dir) = test_app("palette-paints", Vec::new());
+    let ctx = egui::Context::default();
+
+    // 先跑一帧关着的，取个基准：整帧本来就有大量 shapes，所以不能只断言"大于某个常数"
+    // （第一版用例就是这么写的，把 bug 放回去它照样绿 —— 无效断言）。
+    let mut closed = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    closed.textures_delta.clear();
+    let base = closed.shapes.len();
+
+    app.palette_open = true;
+    app.palette_take_focus = true;
+    let mut opened = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    opened.textures_delta.clear();
+
+    assert!(
+        opened.shapes.len() > base,
+        "面板开着却比关着画得更少（{} vs {}）—— 多半是 `.open(初值 false)` 那个坑又回来了",
+        opened.shapes.len(),
+        base
+    );
+    // 面板一打开就要求焦点给输入框；没有焦点说明它根本没被画出来。
+    assert!(
+        ctx.memory(|m| m.focused()).is_some(),
+        "面板开着时应当有输入框拿到焦点"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+// **`Ctrl+K` 的端到端按键不走单元用例**（0.6.1 补丁）。
+//
+// 理由是这里的脚手架表达不了修饰键：手造 `Event::Key { modifiers: ctrl }` 时，
+// egui 0.37 并不会把它反映到 `input.modifiers`（实测 `ctrl=false, k_pressed=true`），
+// 断言只会得到假红。拆成两条更有意义：
+//
+// - `app::shortcut_for` 的用例管"按键组合 → 命令"的映射；
+// - `the_palette_actually_paints_while_it_is_open` 管"面板开着 → 真的画出来"。
+//
+// 真机那次按下由证据文档里的截图背书（启动 GUI → 按 Ctrl K → 面板出现）。

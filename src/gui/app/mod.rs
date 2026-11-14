@@ -547,10 +547,10 @@ impl App {
         // 托盘动作（勘误 E6/E3）：在主线程 poll，不另起消息泵。
         self.drain_tray(&ctx);
 
-        // 关窗策略（2026-11-13 改）：
-        // - 有任务在跑/排队 → 收进托盘。误点 X 不该把正在下的活停掉。
-        // - 全空闲 → 真的退出。用户点 X 通常就是"我要关掉它"。
-        // - 托盘没建起来 → 绝不隐藏，否则窗口藏了却没有任何入口找回来。
+        // 关窗策略（0.6.1 改）：**只看设置项与托盘**，不看有没有任务。
+        // - 开关「关闭窗口时收进托盘」开着 + 托盘可用 → 收进托盘（退出走托盘菜单）。
+        // - 开关关着，或托盘没建起来 → 照 user 的意思退出 / 绝不能藏（藏了就找不回来）。
+        // 曾经把"还有任务在跑"算进来，结果是空闲时点 × 直接退出，与开关的字面意思相反。
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quitting
             && self.hide_instead_of_quit()
@@ -712,17 +712,16 @@ impl App {
     /// 抽成纯判定是为了能直接测：这三种组合以前混在 UI 分支里，
     /// 出问题时只能靠人手点窗口复现（"关了却关不掉"就是这么来的）。
     pub(crate) fn hide_instead_of_quit(&self) -> bool {
-        hide_on_close(
-            self.close_to_tray,
-            self.tray.is_some(),
-            self.tasks()
-                .iter()
-                .any(|t| t.status == "running" || t.status == "queued"),
-        )
+        hide_on_close(self.close_to_tray, self.tray.is_some())
     }
 }
 
-/// 纯判定：`close_to_tray` 开关 + 托盘是否可用 + 是否还有活。
-pub(crate) fn hide_on_close(close_to_tray: bool, tray_available: bool, busy: bool) -> bool {
-    close_to_tray && tray_available && busy
+/// 纯判定：`close_to_tray` 开关 + 托盘是否可用。
+///
+/// **不含"是否还有任务在跑"**。0.6.0 曾把它算进去（`&& busy`），结果是：
+/// 空闲时点 × 直接退出，与设置项「关闭窗口时收进托盘」的字面意思相反 ——
+/// 用户第一次装上、队列还空着，点一下窗口就没了（0.6.1 修的就是这个）。
+/// 开关就是开关；真要走托盘菜单的「退出」。
+pub(crate) fn hide_on_close(close_to_tray: bool, tray_available: bool) -> bool {
+    close_to_tray && tray_available
 }

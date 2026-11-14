@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dlm 界面提案 · 0.6.1</title>
+<style>
+  /* 取自 app/theme.rs 的真实颜色，改稿不该先改配色 */
+  :root{
+    --paper:#F6F3EC; --surface:#FFFDF8; --surface2:#F1EDE3;
+    --line:#E4DFD2; --line-soft:#EDE8DC;
+    --ink:#2A2720; --ink2:#5C574B; --ink3:#8C8579;
+    --accent:#C06340; --accent-ink:#A34F31; --accent-soft:#F2E1D7;
+    --ok:#4E7A5C; --ok-soft:#E4EDE4; --warn:#A9762A; --bad:#A2443A;
+    --track:#E7E2D5; --shadow:0 10px 30px rgba(42,39,32,.10);
+  }
+  html[data-theme="dark"]{
+    --paper:#191713; --surface:#211E19; --surface2:#282419;
+    --line:#37322A; --line-soft:#2E2A23;
+    --ink:#F2EEE6; --ink2:#B9B2A5; --ink3:#857F72;
+    --accent:#D87E58; --accent-ink:#E89A79; --accent-soft:#3A2A22;
+    --ok:#79A98A; --ok-soft:#22301F; --warn:#D2A05A; --bad:#CF7A6E;
+    --track:#332E26; --shadow:0 10px 30px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font:13px/1.6 "Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+    padding:28px 24px 64px;}
+  h1{font-size:19px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
+  .sub{color:var(--ink3);font-size:12px;margin-bottom:22px}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+  .seg button{border:0;background:transparent;color:var(--ink2);padding:6px 13px;font:inherit;font-size:12px;cursor:pointer}
+  .seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+  .hint{color:var(--ink3);font-size:11.5px}
+  .stage{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    box-shadow:var(--shadow);overflow:hidden;max-width:1120px;margin-bottom:14px}
+  /* ---- 假窗口 ---- */
+  .title{display:flex;align-items:center;gap:8px;height:38px;padding:0 12px;
+    background:var(--surface2);border-bottom:1px solid var(--line);font-size:12px;color:var(--ink2)}
+  .dot{width:14px;height:14px;border-radius:4px;background:var(--accent);color:#fff;
+    display:grid;place-items:center;font-size:9px;font-weight:700}
+  .title .ctl{margin-left:auto;display:flex;gap:16px;color:var(--ink3);font-size:12px}
+  .toolbar{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line)}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:7px;
+    background:var(--accent);color:#fff;font-size:12.5px;cursor:pointer;border:0;font-family:inherit}
+  .btn.ghost{background:transparent;color:var(--ink2);border:1px solid var(--line)}
+  .searchbox{flex:1;height:30px;border:1px solid var(--line);border-radius:7px;background:var(--surface2);
+    display:flex;align-items:center;padding:0 11px;color:var(--ink3);font-size:12px}
+  .kbd{font-size:10.5px;color:var(--ink3);border:1px solid var(--line);border-radius:5px;padding:1px 5px;background:var(--surface)}
+  .icon{width:26px;text-align:center;color:var(--ink2);font-size:15px;cursor:pointer}
+  .body{display:flex;min-height:430px}
+  /* ---- 左栏：新标签页 ---- */
+  .side{width:196px;border-right:1px solid var(--line);padding:10px 0;background:var(--surface);flex:none}
+  .tabs{display:flex;gap:4px;padding:0 10px 10px}
+  .tabs button{flex:1;border:1px solid var(--line);background:var(--surface2);color:var(--ink2);
+    border-radius:7px;padding:7px 4px;font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap}
+  .tabs button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);
+    color:var(--accent-ink);font-weight:600}
+  .side h4{margin:10px 14px 6px;font-size:10.5px;color:var(--ink3);font-weight:500;letter-spacing:.4px}
+  .nav{padding:5px 14px;display:flex;justify-content:space-between;color:var(--ink2);font-size:12.5px;cursor:pointer}
+  .nav.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+  .nav span:last-child{color:var(--ink3);font-size:11.5px}
+  /* ---- 主区 ---- */
+  .main{flex:1;padding:14px 16px;min-width:0}
+  .table{width:100%;border-collapse:collapse;font-size:12px}
+  .table th{text-align:left;font-weight:400;color:var(--ink3);font-size:11px;padding:0 6px 7px}
+  .table td{padding:9px 6px;border-top:1px solid var(--line-soft);vertical-align:middle}
+  .name{color:var(--ink);font-size:12.5px}
+  .host{color:var(--ink3);font-size:10.5px}
+  .bar66{height:5px;border-radius:3px;background:var(--track);position:relative;width:150px}
+  .bar66 i{position:absolute;inset:0 34% 0 0;background:var(--ok);border-radius:3px}
+  .pill{display:inline-block;padding:2.5px 9px;border-radius:20px;font-size:11px}
+  .pill.done{background:var(--ok-soft);color:var(--ok)}
+  .pill.bad{background:#F4E2DF;color:var(--bad)}
+  html[data-theme="dark"] .pill.bad{background:#3B2622}
+  .statusline{display:flex;align-items:center;gap:12px;padding:7px 14px;border-top:1px solid var(--line);
+    color:var(--ink3);font-size:11.5px;background:var(--surface)}
+  .statusline .ver{margin-left:auto}
+  /* ---- 新建页 ---- */
+  .form{max-width:660px}
+  .field{margin-bottom:14px}
+  .field label{display:block;font-size:11.5px;color:var(--ink3);margin-bottom:5px}
+  .field .box{height:32px;border:1px solid var(--line);border-radius:7px;background:var(--surface2);
+    display:flex;align-items:center;padding:0 10px;color:var(--ink3);font-size:12px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+  .chip{border:1px solid var(--line);border-radius:20px;padding:3px 10px;font-size:11px;color:var(--ink2);cursor:pointer}
+  .chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  /* ---- 设置窗（固定尺寸） ---- */
+  .modal-wrap{position:relative;height:470px;background:var(--paper);display:grid;place-items:center}
+  .modal{width:720px;height:440px;background:var(--surface);border:1px solid var(--line);
+    border-radius:10px;box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden}
+  .modal .hd{height:36px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 12px;border-bottom:1px solid var(--line);font-size:12.5px;color:var(--ink2);background:var(--surface2)}
+  .modal .bd{flex:1;display:flex;min-height:0}
+  .mside{width:150px;border-right:1px solid var(--line);padding:10px 0}
+  .mside div{padding:6px 14px;font-size:12px;color:var(--ink2);cursor:pointer}
+  .mside div.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+  .mmain{flex:1;padding:12px 16px;overflow:auto}
+  .mmain .searchbox{margin-bottom:10px;height:28px}
+  .card{border:1px solid var(--line);border-radius:8px;margin-bottom:10px;overflow:hidden}
+  .card .r{display:flex;align-items:center;justify-content:space-between;gap:14px;
+    padding:9px 12px;border-top:1px solid var(--line-soft)}
+  .card .r:first-child{border-top:0}
+  .card .r .t{font-size:12.5px}
+  .card .r .h{font-size:10.5px;color:var(--ink3);margin-top:1px}
+  .ctl-sel{border:1px solid var(--line);border-radius:6px;background:var(--surface2);
+    padding:3px 9px;font-size:11.5px;color:var(--ink2);min-width:96px;text-align:center}
+  .modal .ft{height:38px;border-top:1px solid var(--line);display:flex;align-items:center;
+    gap:8px;padding:0 12px;background:var(--surface)}
+  .modal .ft .note{margin-left:auto;color:var(--ink3);font-size:10.5px}
+  table.cmp{max-width:1120px;width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+  table.cmp th{text-align:left;color:var(--ink3);font-weight:400;font-size:11px;padding:6px 8px;border-bottom:1px solid var(--line)}
+  table.cmp td{padding:8px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  .old{color:var(--ink3);text-decoration:line-through}
+  .new{color:var(--ink)}
+  .sec{max-width:1120px;margin:26px 0 10px;font-size:14px;font-weight:600}
+  .tag{display:inline-block;font-size:10px;padding:1px 7px;border-radius:20px;background:var(--accent-soft);color:var(--accent-ink);margin-left:6px;vertical-align:2px}
+  .tag.bug{background:#F4E2DF;color:var(--bad)}
+  html[data-theme="dark"] .tag.bug{background:#3B2622}
+  ul.notes{max-width:1120px;color:var(--ink2);font-size:12.5px;padding-left:20px}
+  ul.notes li{margin:5px 0}
+  code{background:var(--surface2);border:1px solid var(--line-soft);border-radius:4px;padding:0 4px;font-size:11px}
+</style>
+</head>
+<body>
+
+<h1>dlm 界面提案 · 0.6.1</h1>
+<div class="sub">对着你的 5 条意见做的稿子。可以点：左栏两个标签、主题、语言。</div>
+
+<div class="bar">
+  <div class="seg" role="group" aria-label="主题">
+    <button id="th-light" aria-pressed="true" onclick="setTheme('light')">浅色</button>
+    <button id="th-dark" aria-pressed="false" onclick="setTheme('dark')">深色</button>
+  </div>
+  <div class="seg" role="group" aria-label="语言">
+    <button id="lg-zh" aria-pressed="true" onclick="setLang('zh')">中文</button>
+    <button id="lg-en" aria-pressed="false" onclick="setLang('en')">English</button>
+  </div>
+  <span class="hint">主题与语言在这里只是示意；实装后是设置里的两项，且会影响整窗。</span>
+</div>
+
+<!-- ========== 1. 主界面 + 左栏标签 ========== -->
+<div class="stage">
+  <div class="title">
+    <span class="dot">↓</span><span>dlm</span>
+    <span class="ctl"><span>—</span><span>▢</span><span>×</span></span>
+  </div>
+  <div class="toolbar">
+    <button class="btn" onclick="showPane('new')"><span data-l="new">新建下载</span></button>
+    <div class="searchbox"><span data-l="search">搜索名字、链接或站点</span></div>
+    <span class="kbd">Ctrl K</span>
+    <span class="icon" title="设置">⚙</span>
+    <span class="icon" title="更多">···</span>
+  </div>
+  <div class="body">
+    <div class="side">
+      <div class="tabs">
+        <button id="tab-new" aria-pressed="false" onclick="showPane('new')"><span data-l="tabNew">新建</span></button>
+        <button id="tab-grab" aria-pressed="false" onclick="showPane('grab')"><span data-l="tabGrab">站点抓取</span></button>
+      </div>
+      <h4 data-l="tasks">任务</h4>
+      <div class="nav on"><span data-l="all">全部任务</span><span>3</span></div>
+      <div class="nav"><span data-l="running">进行中</span><span>0</span></div>
+      <div class="nav"><span data-l="done">已完成</span><span>2</span></div>
+      <div class="nav"><span data-l="failed">失败</span><span>1</span></div>
+      <h4 data-l="cats">分类</h4>
+      <div class="nav"><span data-l="doc">文档</span><span>0</span></div>
+      <div class="nav"><span data-l="video">视频</span><span>0</span></div>
+      <div class="nav"><span data-l="audio">音频</span><span>0</span></div>
+      <div class="nav"><span data-l="zip">压缩包</span><span>2</span></div>
+      <div class="nav"><span data-l="app">程序</span><span>0</span></div>
+      <div class="nav"><span data-l="img">图片</span><span>0</span></div>
+      <div class="nav"><span data-l="other">其它</span><span>1</span></div>
+    </div>
+
+    <!-- 主区：列表 -->
+    <div class="main" id="pane-list">
+      <table class="table">
+        <tr><th style="width:42%">文件名</th><th>大小</th><th>进度</th><th>速度</th><th>剩余</th><th>状态</th></tr>
+        <tr>
+          <td><div class="name">ubuntu-24.04.iso</div><div class="host">releases.ubuntu.com</div></td>
+          <td>6.0 MiB</td><td><div class="bar66"><i></i></div></td>
+          <td>—</td><td>—</td><td><span class="pill done" data-l="stDone">已完成</span></td>
+        </tr>
+        <tr>
+          <td><div class="name">dlm-0.5.0-win-x64.zip</div><div class="host">github.com</div></td>
+          <td>11.7 MiB</td><td><div class="bar66"><i></i></div></td>
+          <td>—</td><td>—</td><td><span class="pill done" data-l="stDone">已完成</span></td>
+        </tr>
+        <tr>
+          <td><div class="name">seed.bin</div><div class="host">127.0.0.1:1</div></td>
+          <td>?</td><td><div class="bar66"><i style="inset:0 100% 0 0"></i></div></td>
+          <td>—</td><td>—</td><td><span class="pill bad" data-l="stFail">失败</span></td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- 主区：新建 -->
+    <div class="main" id="pane-new" style="display:none">
+      <div class="form">
+        <div class="field">
+          <label data-l="fUrl">链接</label>
+          <div class="box">https://…</div>
+        </div>
+        <div class="row2">
+          <div class="field">
+            <label data-l="fName">文件名</label>
+            <div class="box" data-l="fNameHint">留空则从链接推断</div>
+          </div>
+          <div class="field">
+            <label data-l="fDir">保存到</label>
+            <div class="box">Downloads</div>
+          </div>
+        </div>
+        <div class="field">
+          <label data-l="fBatch">批量：一行一个链接</label>
+          <div class="box" style="height:78px;align-items:flex-start;padding-top:8px">…</div>
+        </div>
+        <div class="field">
+          <label data-l="fMore">更多</label>
+          <div class="chips">
+            <span class="chip on" data-l="cConn">连接数 8</span>
+            <span class="chip" data-l="cSpeed">限速</span>
+            <span class="chip" data-l="cRef">来源页</span>
+            <span class="chip" data-l="cAfter">完成后</span>
+          </div>
+        </div>
+        <button class="btn" data-l="fGo">加入队列</button>
+      </div>
+    </div>
+
+    <!-- 主区：站点抓取 -->
+    <div class="main" id="pane-grab" style="display:none">
+      <div class="form">
+        <div class="field">
+          <label data-l="gStart">起始页</label>
+          <div class="box">https://example.com/gallery/</div>
+        </div>
+        <div class="row2">
+          <div class="field">
+            <label data-l="gDepth">深度</label>
+            <div class="box">2 层</div>
+          </div>
+          <div class="field">
+            <label data-l="gTpl">模板</label>
+            <div class="chips">
+              <span class="chip on">图片 · 本机</span>
+              <span class="chip">整站镜像</span>
+              <span class="chip">+ 存为模板</span>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label data-l="gFilter">包含 / 排除</label>
+          <div class="box">.jpg,.png · 排除 thumb,_thumb</div>
+        </div>
+        <button class="btn" data-l="gScan">扫描</button>
+      </div>
+      <div class="hint" style="margin-top:12px">扫描后这里换成清单：勾选 · 文件名 · 类型 · 来自 · 已去重（不占位）</div>
+    </div>
+  </div>
+  <div class="statusline">
+    <span><span data-l="idle">0 个在跑</span></span>
+    <span class="chip" data-l="noLimit">限速 不限</span>
+    <span class="ver">v0.6.1</span>
+  </div>
+</div>
+
+<!-- ========== 2. 设置窗：固定尺寸 ========== -->
+<div class="sec">设置窗 · 固定 720×440，切标签不再变<span class="tag">意见 1</span></div>
+<div class="stage">
+  <div class="modal-wrap">
+    <div class="modal">
+      <div class="hd"><span data-l="settings">设置</span><span style="cursor:pointer">×</span></div>
+      <div class="bd">
+        <div class="mside">
+          <div class="on" data-l="sDownload">下载</div>
+          <div data-l="sNet">连接与速度</div>
+          <div data-l="sPlan">限速计划</div>
+          <div data-l="sProxy">代理</div>
+          <div data-l="sAgent">Agent 接入</div>
+          <div data-l="sUi">界面</div>
+          <div data-l="sAdv">高级</div>
+        </div>
+        <div class="mmain">
+          <div class="searchbox"><span data-l="sSearch">搜索设置项</span></div>
+          <div class="card">
+            <div class="r"><div><div class="t" data-l="rLang">语言</div><div class="h" data-l="rLangH">界面文字，立刻生效</div></div>
+              <div class="ctl-sel" data-l="langVal">中文</div></div>
+            <div class="r"><div><div class="t" data-l="rTheme">主题</div><div class="h" data-l="rThemeH">跟随系统 / 浅色 / 深色</div></div>
+              <div class="ctl-sel" data-l="themeVal">跟随系统</div></div>
+            <div class="r"><div><div class="t" data-l="rDensity">密度</div><div class="h" data-l="rDensityH">标准 / 紧凑</div></div>
+              <div class="ctl-sel" data-l="densityVal">标准</div></div>
+          </div>
+          <div class="card">
+            <div class="r"><div><div class="t" data-l="rAcrylic">半透明背景</div><div class="h" data-l="rAcrylicH">仅 Windows 11</div></div><div class="ctl-sel">关</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="ft">
+        <button class="btn">保存</button>
+        <button class="btn ghost" data-l="cancel">取消</button>
+        <span class="note" data-l="applyNote">改动保存后立即生效</span>
+      </div>
+    </div>
+  </div>
+  <div class="statusline"><span data-l="fixedNote">窗口尺寸固定；内容超出时内部滚动，标签之间不再跳动</span></div>
+</div>
+
+<!-- ========== 3. 文案瘦身 ========== -->
+<div class="sec">设置文案 · 瘦身对照<span class="tag">意见 2</span></div>
+<table class="cmp">
+  <tr><th style="width:22%">项</th><th style="width:39%">现在</th><th>建议</th></tr>
+  <tr><td>默认目录</td>
+      <td class="old">新任务都落到这里；留空 = 系统下载文件夹</td>
+      <td class="new">留空则用系统「下载」</td></tr>
+  <tr><td>按类型分子目录</td>
+      <td class="old">视频 / 音频 / 压缩包各进一个子目录；只影响新任务</td>
+      <td class="new">按类型建子目录，只影响新任务</td></tr>
+  <tr><td>同名文件</td>
+      <td class="old">目标位置已有同名文件时怎么办</td>
+      <td class="new">同名时</td></tr>
+  <tr><td>完成后动作</td>
+      <td class="old">留空 = 什么都不做；open 打开文件；run:程序.exe 跑一个程序</td>
+      <td class="new">留空不动作；open 打开，run:程序.exe 运行</td></tr>
+  <tr><td>Defender 扫描</td>
+      <td class="old">用 Windows Defender 扫一遍；失败只记日志，不影响任务成败</td>
+      <td class="new">下载后扫毒；失败只记日志</td></tr>
+</table>
+<div class="hint" style="margin-top:8px">规则：一句一条事实，最长 16 个汉字；机制细节收进问号提示，不占行。</div>
+
+<!-- ========== 4. 两个 bug ========== -->
+<div class="sec">你报的两个 bug · 根因已定位<span class="tag bug">意见 3 / 4</span></div>
+<ul class="notes">
+  <li><b>Ctrl K 没反应</b>：快捷键触发了（探针实测 <code>hit=OpenPalette</code>），是面板自己没画出来 —— 我给它传了 <code>.open(false)</code>，egui 把这个当作「窗口已关闭」。改成不传 <code>.open</code>，Esc 关机照旧。</li>
+  <li><b>× 没收进托盘</b>：判据写成了 <code>收托盘 && 有托盘 && 还有任务在跑</code>。你截图那一刻是「0 个在跑」，所以直接退出了。开关的字面意思应该就是开关：改成 <code>收托盘 && 有托盘</code>，「有任务在跑」不再参与。顺带在托盘菜单加「退出」，免得开关打开后只能从托盘关。</li>
+</ul>
+
+<script>
+  const T = {
+    zh: {},
+    en: {
+      new:"New download", search:"Search name, link or site", tabNew:"New", tabGrab:"Site grab",
+      tasks:"TASKS", all:"All", running:"Downloading", done:"Completed", failed:"Failed",
+      cats:"CATEGORIES", doc:"Documents", video:"Video", audio:"Audio", zip:"Archives",
+      app:"Programs", img:"Images", other:"Other",
+      stDone:"Done", stFail:"Failed", idle:"0 running", noLimit:"No limit",
+      fUrl:"Link", fName:"File name", fNameHint:"Blank = from link", fDir:"Save to",
+      fBatch:"Batch: one link per line", fMore:"Options", cConn:"Connections 8",
+      cSpeed:"Speed cap", cRef:"Referer", cAfter:"After finish", fGo:"Add to queue",
+      gStart:"Start page", gDepth:"Depth", gTpl:"Template", gFilter:"Include / exclude",
+      gScan:"Scan", settings:"Settings", sDownload:"Download", sNet:"Connection",
+      sPlan:"Speed plan", sProxy:"Proxy", sAgent:"Agent", sUi:"Interface", sAdv:"Advanced",
+      sSearch:"Search settings", rLang:"Language", rLangH:"Applies at once", langVal:"Chinese",
+      rTheme:"Theme", rThemeH:"System / Light / Dark", themeVal:"System",
+      rDensity:"Density", rDensityH:"Comfortable / Compact", densityVal:"Comfortable",
+      rAcrylic:"Translucent background", rAcrylicH:"Windows 11 only",
+      cancel:"Cancel", applyNote:"Saved changes apply at once",
+      fixedNote:"Fixed size; content scrolls inside instead of resizing"
+    }
+  };
+  const orig = {};
+  document.querySelectorAll('[data-l]').forEach(el=>{
+    const k = el.dataset.l; if(!(k in orig)) orig[k] = el.textContent;
+  });
+  function setLang(lang){
+    document.documentElement.lang = lang==='en' ? 'en' : 'zh-CN';
+    document.querySelectorAll('[data-l]').forEach(el=>{
+      const k = el.dataset.l;
+      el.textContent = lang==='en' ? (T.en[k] ?? orig[k]) : orig[k];
+    });
+    document.getElementById('lg-zh').setAttribute('aria-pressed', lang==='zh');
+    document.getElementById('lg-en').setAttribute('aria-pressed', lang==='en');
+  }
+  function setTheme(t){
+    document.documentElement.dataset.theme = t;
+    document.getElementById('th-light').setAttribute('aria-pressed', t==='light');
+    document.getElementById('th-dark').setAttribute('aria-pressed', t==='dark');
+  }
+  function showPane(p){
+    document.getElementById('pane-list').style.display = 'block';
+    document.getElementById('pane-new').style.display = p==='new' ? 'block' : 'none';
+    document.getElementById('pane-grab').style.display = p==='grab' ? 'block' : 'none';
+    if (p === 'new' || p === 'grab') {
+      document.getElementById('pane-list').style.display = 'none';
+    }
+    document.getElementById('tab-new').setAttribute('aria-pressed', p==='new');
+    document.getElementById('tab-grab').setAttribute('aria-pressed', p==='grab');
+  }
+  // 初态：列表
+  document.getElementById('pane-list').style.display='block';
+</script>
+</body>
+</html>

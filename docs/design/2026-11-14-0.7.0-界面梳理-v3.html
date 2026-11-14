@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-font="sans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dlm 界面梳理 v3</title>
+<style>
+  :root{
+    --paper:#F6F3EC; --surface:#FFFDF8; --surface2:#F1EDE3; --surface3:#FAF7F0;
+    --line:#E4DFD2; --line-soft:#EDE8DC;
+    --ink:#2A2720; --ink2:#5C574B; --ink3:#8C8579;
+    --accent:#C06340; --accent-ink:#A34F31; --accent-soft:#F2E1D7;
+    --ok:#4E7A5C; --ok-soft:#E4EDE4; --bad:#A2443A; --warn:#A9762A;
+    --track:#E7E2D5; --shadow:0 12px 34px rgba(42,39,32,.12);
+  }
+  html[data-theme="dark"]{
+    --paper:#191713; --surface:#211E19; --surface2:#282419; --surface3:#1D1A16;
+    --line:#37322A; --line-soft:#2E2A23;
+    --ink:#F2EEE6; --ink2:#B9B2A5; --ink3:#857F72;
+    --accent:#D87E58; --accent-ink:#E89A79; --accent-soft:#3A2A22;
+    --ok:#79A98A; --ok-soft:#22301F; --bad:#CF7A6E; --warn:#D2A05A;
+    --track:#332E26; --shadow:0 12px 34px rgba(0,0,0,.5);
+  }
+  html[data-font="serif"] body{
+    font-family:Georgia,"Times New Roman","Source Han Serif SC","Noto Serif CJK SC","Songti SC",SimSun,serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font:13px/1.6 "Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;padding:24px 22px 64px}
+  h1{font-size:19px;margin:0 0 3px;font-weight:600}
+  .sub{color:var(--ink3);font-size:12px;margin-bottom:16px}
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+  .seg button{border:0;background:transparent;color:var(--ink2);padding:6px 12px;font:inherit;font-size:12px;cursor:pointer}
+  .seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+  .hint{color:var(--ink3);font-size:11.5px}
+  .sec{max-width:1180px;margin:24px 0 9px;font-size:14px;font-weight:600}
+  .sec small{font-weight:400;color:var(--ink3);font-size:11.5px;margin-left:8px}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;border:0;
+    background:var(--accent);color:#fff;font:inherit;font-size:12.5px;cursor:pointer}
+  .btn.ghost{background:transparent;color:var(--ink2);border:1px solid var(--line)}
+  .btn.sm{padding:4px 9px;font-size:11.5px;border-radius:6px}
+  svg.i{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;
+    stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+  /* ---------------- 壳 ---------------- */
+  .app{max-width:1180px;background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column;position:relative}
+
+  /* 顶栏：品牌｜搜索｜图标 */
+  .tb{display:flex;align-items:center;gap:10px;height:52px;padding:0 14px;border-bottom:1px solid var(--line);flex:none}
+  .brand{display:flex;align-items:center;gap:8px;flex:none;user-select:none}
+  .brand .logo{width:24px;height:24px;border-radius:6px;background:var(--accent);color:#fff;
+    display:grid;place-items:center}
+  /* 品牌名直接用英文全称并加粗：不再出现缩写 */
+  .brand .name{font-size:14.5px;font-weight:700;letter-spacing:.3px;color:var(--ink);white-space:nowrap}
+  html[data-font="serif"] .brand .name{font-family:Georgia,"Times New Roman",serif;letter-spacing:.5px}
+  .search{flex:0 1 560px;min-width:0;height:30px;margin-left:26px;border:1px solid transparent;border-radius:7px;
+    background:color-mix(in srgb,var(--surface2) 55%,transparent);
+    display:flex;align-items:center;gap:7px;padding:0 10px;color:var(--ink3);font-size:12px;
+    cursor:text;opacity:.86;transition:opacity .14s,border-color .14s,background .14s}
+  .search:hover{opacity:1;border-color:var(--line);background:var(--surface2)}
+  .search .ph{opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .search .sk{margin-left:auto;font-size:10.5px;color:var(--ink3);opacity:.7;flex:none;
+    border:1px solid var(--line);border-radius:5px;padding:0 5px;background:var(--surface)}
+  .icb{width:30px;height:30px;flex:none;display:grid;place-items:center;border-radius:7px;
+    color:var(--ink2);cursor:pointer}
+  .icb:hover{background:var(--surface2)}
+
+  .main{display:flex;min-height:440px}
+
+  /* 左栏 */
+  .side{width:210px;flex:none;border-right:1px solid var(--line);background:var(--surface);
+    display:flex;flex-direction:column;transition:width .16s ease;overflow:hidden}
+  .side.mini{width:52px}
+  .side.mini .lbl,.side.mini .cnt,.side.mini .full,.side.mini .car{display:none}
+  .side.mini .entry,.side.mini .nav{justify-content:center;padding:7px 0}
+  .side.mini .ghead{display:block;width:24px;height:1px;margin:9px auto;padding:0;background:var(--line)}
+  .side.mini .top{justify-content:center}
+  .side.mini .top .grow{display:none}
+  .top{display:flex;align-items:center;padding:6px 6px 4px}
+  .top .grow{flex:1}
+  .entry{display:flex;align-items:center;gap:8px;padding:7px 10px;margin:1px 6px;border-radius:7px;
+    color:var(--ink2);font-size:12.5px;cursor:pointer;white-space:nowrap}
+  .entry:hover{background:var(--surface2)}
+  .entry.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+  .entry .car{margin-left:auto;color:var(--ink3);font-size:10px}
+  .ghead{margin:9px 12px 3px;font-size:10.5px;color:var(--ink3);letter-spacing:.4px}
+  .nav{display:flex;align-items:center;gap:8px;padding:5px 12px;color:var(--ink2);font-size:12.5px;cursor:pointer}
+  .nav:hover{background:var(--surface2)}
+  .nav.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+  .nav .nic{width:16px;display:grid;place-items:center;color:var(--ink3)}
+  .nav .nic.run{color:var(--accent)} .nav .nic.ok{color:var(--ok)} .nav .nic.bad{color:var(--bad)}
+  .nav.on .nic{color:var(--accent-ink)}
+  .nav .cnt{margin-left:auto;color:var(--ink3);font-size:11.5px}
+
+  /* 主区 */
+  .pane{flex:1;min-width:0;display:flex;flex-direction:column}
+  .batchbar{display:none;align-items:center;gap:8px;padding:7px 12px;
+    border-bottom:1px solid var(--line);background:var(--accent-soft);color:var(--accent-ink);font-size:11.5px}
+  .batchbar.on{display:flex}
+  .batchbar .grow{flex:1}
+  .listwrap{flex:1;overflow:auto}
+  table.list{width:100%;border-collapse:collapse;font-size:12px}
+  table.list th{position:sticky;top:0;background:var(--surface);text-align:left;font-weight:400;
+    color:var(--ink3);font-size:11px;padding:8px 6px;border-bottom:1px solid var(--line)}
+  table.list td{padding:8px 6px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+  table.list tr.sel td{background:var(--accent-soft)}
+  table.list tr:hover td{background:var(--surface3)}
+  .cb{width:14px;height:14px;border:1.4px solid var(--line);border-radius:4px;background:var(--surface);
+    display:inline-grid;place-items:center;cursor:pointer;font-size:10px;line-height:1}
+  .cb.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .nm{color:var(--ink);font-size:12.5px}
+  .hs{color:var(--ink3);font-size:10.5px}
+  .prog{height:5px;border-radius:3px;background:var(--track);width:130px;position:relative}
+  .prog i{position:absolute;inset:0 32% 0 0;background:var(--ok);border-radius:3px}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px}
+  .pill.done{background:var(--ok-soft);color:var(--ok)}
+  .pill.bad{background:#F4E2DF;color:var(--bad)}
+  html[data-theme="dark"] .pill.bad{background:#3B2622}
+  .fld{margin-bottom:11px}
+  .fld label{display:block;font-size:11px;color:var(--ink3);margin-bottom:4px}
+  .fld .box{height:31px;border:1px solid var(--line);border-radius:7px;background:var(--surface2);
+    display:flex;align-items:center;padding:0 10px;color:var(--ink3);font-size:12px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{border:1px solid var(--line);border-radius:20px;padding:3px 10px;font-size:11px;color:var(--ink2);cursor:pointer}
+  .chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
+
+  /* 右栏详情 */
+  .drawer{width:330px;flex:none;border-left:1px solid var(--line);background:var(--surface);
+    display:flex;flex-direction:column;min-width:0}
+  .drawer .dh{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
+  .drawer .dh .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .drawer .dbody{flex:1;overflow-y:auto;padding:10px 12px;min-height:0}
+  .kv{display:grid;grid-template-columns:44px 1fr;gap:2px 8px;font-size:11.5px;margin-bottom:10px}
+  .kv .k{color:var(--ink3);font-size:10.5px}
+  .kv .v{color:var(--ink2);word-break:break-all}
+  .big{font-size:21px;color:var(--accent);font-family:ui-monospace,Consolas,monospace}
+  .logbox{background:var(--surface3);border:1px solid var(--line-soft);border-radius:7px;padding:8px;
+    max-height:150px;overflow-y:auto;font:10.5px/1.55 ui-monospace,Consolas,monospace;
+    color:var(--ink2);word-break:break-all;white-space:pre-wrap}
+  .drawer .dfoot{border-top:1px solid var(--line);padding:8px 12px;display:flex;gap:6px;flex-wrap:wrap}
+
+  /* 窗口级状态栏 */
+  .sbar{display:flex;align-items:center;gap:10px;height:30px;flex:none;padding:0 12px;
+    border-top:1px solid var(--line);background:var(--surface);color:var(--ink3);font-size:11.5px}
+  .sbar .dotrun{width:6px;height:6px;border-radius:50%;background:var(--track)}
+  .sbar .cap{border:1px solid var(--line);border-radius:20px;padding:1px 9px;background:var(--surface2);cursor:pointer}
+  .sbar .grow{flex:1}
+  .sbar .ver{font-size:10.5px}
+
+  /* 右键菜单 */
+  .menu{position:absolute;background:var(--surface);border:1px solid var(--line);border-radius:9px;
+    box-shadow:var(--shadow);padding:5px;min-width:190px;display:none;z-index:12}
+  .menu.on{display:block}
+  .menu .mi{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:6px;
+    font-size:12px;color:var(--ink2);cursor:pointer}
+  .menu .mi:hover{background:var(--surface2)}
+  .menu .mi.danger{color:var(--bad)}
+  .menu .sk{margin-left:auto;color:var(--ink3);font-size:10.5px}
+  .menu hr{border:0;border-top:1px solid var(--line-soft);margin:4px 2px}
+
+  /* 抓取页 */
+  .steps{display:flex;align-items:center;padding:12px 16px 4px;color:var(--ink3);font-size:11.5px}
+  .steps .s{display:flex;align-items:center;gap:6px}
+  .steps .n{width:17px;height:17px;border-radius:50%;border:1px solid var(--line);
+    display:grid;place-items:center;font-size:10px}
+  .steps .s.on .n{background:var(--accent);border-color:var(--accent);color:#fff}
+  .steps .s.on{color:var(--accent-ink);font-weight:600}
+  .steps .sep{width:26px;height:1px;background:var(--line);margin:0 8px}
+  .grid2{display:grid;grid-template-columns:1fr 280px;gap:14px;padding:8px 16px 14px}
+  .sidecard{border:1px solid var(--line);border-radius:9px;padding:10px;background:var(--surface3)}
+  .sidecard h5{margin:0 0 8px;font-size:11.5px;color:var(--ink3);font-weight:500}
+
+  /* 设置窗 */
+  .stg{max-width:1180px;display:flex;justify-content:center}
+  .stgbox{width:720px;height:440px;background:var(--surface);border:1px solid var(--line);border-radius:10px;
+    box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden}
+  .stgbox .hd{height:38px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;
+    border-bottom:1px solid var(--line);background:var(--surface2);font-size:12.5px;color:var(--ink2)}
+  .stgbox .hd .grow{flex:1}
+  .stgbox .bd{flex:1;display:flex;min-height:0}
+  .mside{width:158px;flex:none;border-right:1px solid var(--line);padding:8px 0;overflow-y:auto}
+  .mi{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:12px;color:var(--ink2);cursor:pointer}
+  .mi:hover{background:var(--surface2)}
+  .mi.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+  .mmain{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
+  .mmain .search{margin:10px 14px 8px;height:28px;flex:none;width:auto;max-width:none;opacity:1}
+  .pages{flex:1;overflow-y:auto;padding:0 14px 10px;min-height:0}
+  .page{display:none} .page.on{display:block}
+  .card{border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:9px}
+  .card>.gt{font-size:10.5px;color:var(--ink3);letter-spacing:.4px;padding:6px 11px 3px;background:var(--surface3)}
+  .row{display:flex;align-items:center;gap:12px;padding:8px 11px;border-top:1px solid var(--line-soft)}
+  .row:first-child{border-top:0}
+  .row .txt{flex:1;min-width:0}
+  .row .t{font-size:12.5px;color:var(--ink)}
+  .row .h{font-size:10.5px;color:var(--ink3);margin-top:1px}
+  .ctl-sel{border:1px solid var(--line);border-radius:6px;background:var(--surface2);padding:3px 9px;
+    font-size:11.5px;color:var(--ink2);min-width:92px;text-align:center;cursor:pointer;white-space:nowrap}
+  .ctl-box{border:1px solid var(--line);border-radius:6px;background:var(--surface2);padding:3px 9px;
+    font-size:11.5px;color:var(--ink3);min-width:112px;text-align:right;white-space:nowrap}
+  .sw{width:32px;height:18px;border-radius:9px;background:var(--track);position:relative;flex:none;
+    cursor:pointer;transition:background .14s}
+  .sw i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;
+    box-shadow:0 1px 2px rgba(0,0,0,.25);transition:left .14s}
+  .sw.on{background:var(--accent)} .sw.on i{left:16px}
+  .stgbox .ft{height:40px;flex:none;border-top:1px solid var(--line);background:var(--surface);
+    display:flex;align-items:center;gap:8px;padding:0 12px}
+  .stgbox .ft .note{margin-left:auto;color:var(--ink3);font-size:10.5px}
+
+  /* 命令面板 */
+  .overlay{position:fixed;inset:0;background:rgba(20,18,14,.28);display:none;z-index:40}
+  .overlay.on{display:block}
+  html[data-theme="dark"] .overlay{background:rgba(0,0,0,.5)}
+  .palette{position:absolute;left:50%;top:84px;transform:translateX(-50%);width:470px;
+    background:var(--surface);border:1px solid var(--line);border-radius:11px;overflow:hidden;
+    box-shadow:0 18px 50px rgba(20,18,14,.28)}
+  html[data-theme="dark"] .palette{box-shadow:0 18px 50px rgba(0,0,0,.6)}
+  .palette .pin{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .palette .pin .q{flex:1;color:var(--ink3);font-size:13px}
+  .palette .pin .esc{font-size:10.5px;color:var(--ink3);border:1px solid var(--line);
+    border-radius:5px;padding:1px 6px;background:var(--surface2)}
+  .plist{max-height:322px;overflow-y:auto;padding:6px}
+  .pgrp{font-size:10px;color:var(--ink3);letter-spacing:.5px;padding:7px 9px 3px}
+  .prow{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;
+    font-size:12.5px;color:var(--ink2);cursor:pointer}
+  .prow:hover{background:var(--surface2)}
+  .prow.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+  .prow .en{color:var(--ink3);font-size:10.5px;font-weight:400}
+  .prow .sk{margin-left:auto;font-size:10.5px;color:var(--ink3);border:1px solid var(--line);
+    border-radius:5px;padding:0 5px;background:var(--surface)}
+  .pfoot{display:flex;gap:12px;padding:7px 14px;border-top:1px solid var(--line);
+    color:var(--ink3);font-size:10.5px;background:var(--surface3)}
+
+  table.cmp{max-width:1180px;width:100%;border-collapse:collapse;font-size:12px}
+  table.cmp th{text-align:left;color:var(--ink3);font-weight:400;font-size:11px;
+    padding:6px 8px;border-bottom:1px solid var(--line)}
+  table.cmp td{padding:8px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  .old{color:var(--ink3);text-decoration:line-through}
+  code{background:var(--surface2);border:1px solid var(--line-soft);border-radius:4px;padding:0 4px;font-size:11px}
+</style>
+</head>
+<body>
+
+<h1>dlm 界面梳理 v3</h1>
+<div class="sub">整份重写（上一版被我打补丁改崩了）。全部可点：侧栏收起 / 右键菜单 / 批量 / 命令面板 / 设置八个分类 / 字体。</div>
+
+<div class="bar">
+  <div class="seg"><button id="th-l" aria-pressed="true" onclick="th('light')">浅色</button><button id="th-d" aria-pressed="false" onclick="th('dark')">深色</button></div>
+  <div class="seg"><button id="ft-s" aria-pressed="true" onclick="font('sans')">无衬线</button><button id="ft-r" aria-pressed="false" onclick="font('serif')">衬线</button></div>
+  <button class="btn ghost sm" onclick="collapse()">收起侧栏</button>
+  <button class="btn ghost sm" onclick="toggleSel()">批量选择</button>
+  <button class="btn ghost sm" onclick="showMenu()">右键菜单</button>
+  <button class="btn ghost sm" onclick="palette(true)">Ctrl K 面板</button>
+</div>
+
+<!-- ================= 窗口 ================= -->
+<div class="app" id="app">
+
+  <!-- 顶栏 -->
+  <div class="tb">
+    <div class="brand">
+      <span class="logo"><svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M12 4v10"/><path d="M8 10l4 4 4-4"/><path d="M5 19h14"/></svg></span>
+      <span class="name">Download Manager</span>
+    </div>
+    <div class="search" onclick="palette(true)" title="搜索或命令面板">
+      <svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <span class="ph">搜索任务、链接或站点，亦可输入命令</span>
+      <span class="sk">Ctrl K</span>
+    </div>
+    <div style="flex:1"></div>
+    <div class="icb" title="设置"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14 3h-4l-.6 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2L10 21h4l.6-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg></div>
+    <div class="icb" title="更多"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></div>
+  </div>
+
+  <!-- 主体 -->
+  <div class="main">
+
+    <!-- 左栏 -->
+    <div class="side" id="side">
+      <div class="top">
+        <div class="icb" onclick="collapse()" title="收起 / 展开侧栏">
+          <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/></svg>
+        </div>
+        <div class="grow"></div>
+      </div>
+
+      <div class="entry" onclick="pane('new')" title="新建任务">
+        <svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        <span class="lbl">新建任务</span>
+      </div>
+      <div class="entry" onclick="pane('grab')" title="站点抓取">
+        <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+        <span class="lbl">站点抓取</span><span class="car">›</span>
+      </div>
+      <div class="entry" onclick="pane('list')" title="下载列表">
+        <svg class="i" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span class="lbl">下载列表</span>
+      </div>
+
+      <div class="ghead"><span class="lbl">任务</span></div>
+      <div class="nav on" title="全部任务"><span class="nic"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h9"/></svg></span><span class="lbl">全部任务</span><span class="cnt">3</span></div>
+      <div class="nav" title="进行中"><span class="nic run"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v10"/><path d="M8 10l4 4 4-4"/><path d="M5 19h14"/></svg></span><span class="lbl">进行中</span><span class="cnt">0</span></div>
+      <div class="nav" title="已完成"><span class="nic ok"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M8.5 12.2l2.4 2.4 4.6-5"/></svg></span><span class="lbl">已完成</span><span class="cnt">2</span></div>
+      <div class="nav" title="失败"><span class="nic bad"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16.2v.1"/></svg></span><span class="lbl">失败</span><span class="cnt">1</span></div>
+
+      <div class="ghead"><span class="lbl">分类</span></div>
+      <div class="nav" title="文档"><span class="nic"><svg class="i" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M9.5 12h5M9.5 15.5h5"/></svg></span><span class="lbl">文档</span><span class="cnt">0</span></div>
+      <div class="nav" title="视频"><span class="nic"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10.5l4-2.2v7.4l-4-2.2z"/></svg></span><span class="lbl">视频</span><span class="cnt">0</span></div>
+      <div class="nav" title="音频"><span class="nic"><svg class="i" viewBox="0 0 24 24"><path d="M10 18V6l8-2v12"/><circle cx="7.5" cy="18" r="2.5"/><circle cx="15.5" cy="16" r="2.5"/></svg></span><span class="lbl">音频</span><span class="cnt">0</span></div>
+      <div class="nav" title="压缩包"><span class="nic"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M12 4v6M9.5 7h5M12 10v3"/></svg></span><span class="lbl">压缩包</span><span class="cnt">2</span></div>
+      <div class="nav" title="程序"><span class="nic"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8.5 9.5l2.5 2.5-2.5 2.5M13 15h3"/></svg></span><span class="lbl">程序</span><span class="cnt">0</span></div>
+      <div class="nav" title="图片"><span class="nic"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/></svg></span><span class="lbl">图片</span><span class="cnt">0</span></div>
+      <div class="nav" title="其它"><span class="nic"><svg class="i" viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9H3z"/></svg></span><span class="lbl">其它</span><span class="cnt">1</span></div>
+    </div>
+
+    <!-- 主区 -->
+    <div class="pane">
+      <div class="batchbar" id="bb">
+        <span>已选 2 项</span><span class="grow"></span>
+        <button class="btn ghost sm">继续</button>
+        <button class="btn ghost sm">暂停</button>
+        <button class="btn ghost sm">重新下载</button>
+        <button class="btn ghost sm" style="color:var(--bad)">删除</button>
+      </div>
+
+      <div class="listwrap" id="pane-list">
+        <table class="list">
+          <tr>
+            <th style="width:34px"><span class="cb" onclick="toggleSel()"></span></th>
+            <th style="width:38%">文件名</th><th>大小</th><th>进度</th><th>速度</th><th>剩余</th><th>状态</th>
+          </tr>
+          <tr oncontextmenu="showMenu(event,this)" onclick="selRow(this)">
+            <td><span class="cb"></span></td>
+            <td><div class="nm">ubuntu-24.04.iso</div><div class="hs">releases.ubuntu.com</div></td>
+            <td>6.0 MiB</td><td><div class="prog"><i></i></div></td><td>—</td><td>—</td>
+            <td><span class="pill done">已完成</span></td>
+          </tr>
+          <tr oncontextmenu="showMenu(event,this)" onclick="selRow(this)">
+            <td><span class="cb"></span></td>
+            <td><div class="nm">dlm-0.5.0-win-x64.zip</div><div class="hs">github.com</div></td>
+            <td>11.7 MiB</td><td><div class="prog"><i></i></div></td><td>—</td><td>—</td>
+            <td><span class="pill done">已完成</span></td>
+          </tr>
+          <tr oncontextmenu="showMenu(event,this)" onclick="selRow(this)">
+            <td><span class="cb"></span></td>
+            <td><div class="nm">seed.bin</div><div class="hs">127.0.0.1:1</div></td>
+            <td>?</td><td><div class="prog"><i style="inset:0 100% 0 0"></i></div></td><td>—</td><td>—</td>
+            <td><span class="pill bad">失败</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <div id="pane-new" style="display:none;padding:14px 16px">
+        <div class="fld"><label>链接</label><div class="box">https://…</div></div>
+        <div class="fld"><label>批量：一行一个</label><div class="box" style="height:74px;align-items:flex-start;padding-top:8px">…</div></div>
+        <div class="fld"><label>选项</label><div class="chips">
+          <span class="chip on">连接数 8</span><span class="chip">限速</span>
+          <span class="chip">来源页</span><span class="chip">完成后</span></div></div>
+        <button class="btn">加入队列</button>
+      </div>
+
+      <div id="pane-grab" style="display:none">
+        <div class="steps">
+          <div class="s on"><span class="n">1</span>地址</div><span class="sep"></span>
+          <div class="s"><span class="n">2</span>范围</div><span class="sep"></span>
+          <div class="s"><span class="n">3</span>清单</div>
+        </div>
+        <div class="grid2">
+          <div>
+            <div class="fld"><label>起始页</label><div class="box">https://example.com/gallery/</div></div>
+            <div class="fld"><label>包含 · 排除</label><div class="box">.jpg,.png ｜ 排除 thumb,_thumb</div></div>
+            <div class="fld"><label>范围</label><div class="chips">
+              <span class="chip on">深度 2</span><span class="chip on">只抓同站</span>
+              <span class="chip">跟随翻页</span></div></div>
+            <button class="btn">扫描</button>
+          </div>
+          <div class="sidecard">
+            <h5>模板</h5>
+            <div class="chips" style="margin-bottom:8px"><span class="chip on">图片 · 本机</span><span class="chip">整站镜像</span></div>
+            <div class="fld" style="margin:0"><label>存为模板</label><div class="box">图片 · 本机</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右栏详情 -->
+    <div class="drawer" id="drawer">
+      <div class="dh">
+        <span class="nm">seed.bin</span>
+        <div class="icb" onclick="document.getElementById('drawer').style.display='none'" title="关闭">
+          <svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </div>
+      </div>
+      <div class="dbody">
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
+          <span class="big">0%</span>
+          <div><div style="font-size:12px">失败</div><div class="hs">0 B / ?</div></div>
+        </div>
+        <div class="kv">
+          <div class="k">速度</div><div class="v">—</div>
+          <div class="k">剩余</div><div class="v">—</div>
+          <div class="k">重试</div><div class="v">第 2 次</div>
+          <div class="k">落点</div><div class="v">…\target\visual-stage1\dl\seed.bin</div>
+        </div>
+        <div style="font-size:10.5px;color:var(--ink3);margin-bottom:3px">URL</div>
+        <div class="logbox" style="max-height:52px;margin-bottom:10px">http://127.0.0.1:1/seed.bin</div>
+        <div style="font-size:10.5px;color:var(--ink3);margin-bottom:4px">日志</div>
+        <div class="logbox">无法启动下载：试探请求发送失败：error sending request for url (http://127.0.0.1:1/seed.bin): client error (Connect): tcp connect error: 目标计算机拒绝连接。 (os error 10061)</div>
+      </div>
+      <div class="dfoot">
+        <button class="btn ghost sm">打开文件</button>
+        <button class="btn ghost sm">打开文件夹</button>
+        <button class="btn ghost sm">复制链接</button>
+      </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div class="menu" id="menu" onmouseleave="hideMenu()">
+      <div class="mi"><svg class="i" viewBox="0 0 24 24"><path d="M8 5l10 7-10 7z"/></svg>继续<span class="sk">Enter</span></div>
+      <div class="mi"><svg class="i" viewBox="0 0 24 24"><path d="M7 5v14M17 5v14"/></svg>暂停</div>
+      <hr>
+      <div class="mi"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="12" height="16" rx="2"/><path d="M16 12h5"/></svg>打开文件</div>
+      <div class="mi"><svg class="i" viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9H3z"/></svg>打开文件夹</div>
+      <div class="mi"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/></svg>复制链接</div>
+      <hr>
+      <div class="mi danger"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>删除<span class="sk">Del</span></div>
+    </div>
+
+  </div><!-- /main -->
+
+  <!-- 窗口级状态栏 -->
+  <div class="sbar">
+    <span class="dotrun"></span><span>进行中 0 项</span>
+    <span class="cap">限速 不限</span>
+    <span class="grow"></span>
+    <span class="ver" title="桌面端 0.7.0 · 内核 0.1.0 · 扩展 0.2.16 · MCP 未安装">v0.7.0</span>
+  </div>
+</div><!-- /app -->
+
+<!-- ================= 设置窗 ================= -->
+<div class="sec">设置窗 <small>固定 720×440：八个分类逐个点，尺寸一动不动</small></div>
+<div class="stg">
+  <div class="stgbox">
+    <div class="hd"><span>设置</span><span class="grow"></span><span style="cursor:pointer">×</span></div>
+    <div class="bd">
+      <div class="mside">
+        <div class="mi on" data-cat="dl" onclick="setCat('dl')"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg>下载</div>
+        <div class="mi" data-cat="net" onclick="setCat('net')"><svg class="i" viewBox="0 0 24 24"><path d="M4 12h4l3-6 3 12 3-6h3"/></svg>连接与速度</div>
+        <div class="mi" data-cat="plan" onclick="setCat('plan')"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>限速计划</div>
+        <div class="mi" data-cat="proxy" onclick="setCat('proxy')"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>代理</div>
+        <div class="mi" data-cat="agent" onclick="setCat('agent')"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M9 12h.01M15 12h.01M12 7V4"/></svg>Agent 接入</div>
+        <div class="mi" data-cat="ext" onclick="setCat('ext')"><svg class="i" viewBox="0 0 24 24"><path d="M9 4h6v5a3 3 0 1 0 0 6v5H9v-5a3 3 0 1 0 0-6z"/></svg>浏览器扩展</div>
+        <div class="mi" data-cat="ui" onclick="setCat('ui')"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg>界面</div>
+        <div class="mi" data-cat="adv" onclick="setCat('adv')"><svg class="i" viewBox="0 0 24 24"><path d="M10 6h10M4 6h3M10 12h10M4 12h3M10 18h10M4 18h3"/></svg>高级</div>
+      </div>
+      <div class="mmain">
+        <div class="search"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><span class="ph">搜索设置项</span></div>
+        <div class="pages">
+
+          <div class="page on" data-cat="dl">
+            <div class="card"><div class="gt">存放位置</div>
+              <div class="row"><div class="txt"><div class="t">默认目录</div><div class="h">留空则使用系统下载目录</div></div><div class="ctl-box">C:\Users\…\Downloads</div></div>
+              <div class="row"><div class="txt"><div class="t">按类型分子目录</div><div class="h">仅作用于新任务</div></div><div class="sw on" onclick="sw(this)"><i></i></div></div>
+            </div>
+            <div class="card"><div class="gt">命名</div>
+              <div class="row"><div class="txt"><div class="t">重命名模板</div><div class="h">可用 {name} {ext} {date} {n}</div></div><div class="ctl-box">留空 = 原名</div></div>
+              <div class="row"><div class="txt"><div class="t">同名时</div></div><div class="ctl-sel">自动编号 ▾</div></div>
+            </div>
+            <div class="card"><div class="gt">完成后</div>
+              <div class="row"><div class="txt"><div class="t">动作</div><div class="h">open 打开，run:程序.exe 运行</div></div><div class="ctl-box">留空则不执行动作</div></div>
+              <div class="row"><div class="txt"><div class="t">Defender 扫毒</div><div class="h">失败仅记录日志，不影响任务结果</div></div><div class="sw" onclick="sw(this)"><i></i></div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="net">
+            <div class="card"><div class="gt">连接</div>
+              <div class="row"><div class="txt"><div class="t">每个任务连接数</div><div class="h">1–32，按剩余分段的中间位置切分</div></div><div class="ctl-sel">8 ▾</div></div>
+              <div class="row"><div class="txt"><div class="t">同时下载几个</div><div class="h">超出后进入排队</div></div><div class="ctl-sel">2 ▾</div></div>
+            </div>
+            <div class="card"><div class="gt">限速</div>
+              <div class="row"><div class="txt"><div class="t">单任务上限</div><div class="h">0 = 不限</div></div><div class="ctl-box">0 KiB/s</div></div>
+              <div class="row"><div class="txt"><div class="t">全局限速</div></div><div class="ctl-box">0 KiB/s</div></div>
+            </div>
+            <div class="card"><div class="gt">容错</div>
+              <div class="row"><div class="txt"><div class="t">自动重试</div><div class="h">退避 30s → 2min</div></div><div class="ctl-sel">2 次 ▾</div></div>
+              <div class="row"><div class="txt"><div class="t">配额窗口</div><div class="h">本月流量用尽后暂停派发</div></div><div class="ctl-box">不限</div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="plan">
+            <div class="card"><div class="gt">时间段</div>
+              <div class="row"><div class="txt"><div class="t">09:00 – 18:00</div><div class="h">工作日</div></div><div class="ctl-box">2 MiB/s</div></div>
+              <div class="row"><div class="txt"><div class="t">18:00 – 09:00</div><div class="h">其余时间</div></div><div class="ctl-box">不限</div></div>
+              <div class="row"><div class="txt"><div class="t">＋ 加一段</div></div></div>
+            </div>
+            <div class="card"><div class="gt">夜间批次</div>
+              <div class="row"><div class="txt"><div class="t">只在窗口内派发</div><div class="h">22:00 – 07:00，运行中的任务不中断</div></div><div class="sw" onclick="sw(this)"><i></i></div></div>
+              <div class="row"><div class="txt"><div class="t">跑完关机</div><div class="h">队列清空后执行</div></div><div class="sw" onclick="sw(this)"><i></i></div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="proxy">
+            <div class="card"><div class="gt">代理</div>
+              <div class="row"><div class="txt"><div class="t">模式</div><div class="h">直连 / 系统 / 手动</div></div><div class="ctl-sel">直连 ▾</div></div>
+              <div class="row"><div class="txt"><div class="t">地址</div><div class="h">http:// 或 socks5://</div></div><div class="ctl-box">—</div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="agent">
+            <div class="card"><div class="gt">命令行</div>
+              <div class="row"><div class="txt"><div class="t">命令行调用</div><div class="h">复制到终端执行；无需桌面端运行</div></div><div class="ctl-sel">复制命令</div></div>
+            </div>
+            <div class="card"><div class="gt">MCP 桥接（dlm-mcp）</div>
+              <div class="row"><div class="txt"><div class="t">获取 dlm-mcp</div><div class="h">未安装 · 单独分发，约 2 MB</div></div><div class="ctl-sel">下载</div></div>
+              <div class="row"><div class="txt"><div class="t">安装位置</div><div class="h">置于桌面端同目录可自动识别</div></div><div class="ctl-box">未安装</div></div>
+              <div class="row"><div class="txt"><div class="t">dlm-mcp 版本</div><div class="h">已安装 / 本程序要求 ≥ 0.6.0（接口 api 2）</div></div><div class="ctl-box">未安装</div></div>
+              <div class="row"><div class="txt"><div class="t">复制 MCP 配置</div><div class="h">自动定位端点文件，无需填写 token</div></div><div class="ctl-sel">复制配置</div></div>
+            </div>
+            <div class="card"><div class="gt">权限</div>
+              <div class="row"><div class="txt"><div class="t">Agent 添加任务需人工确认</div><div class="h">启用时仅生成待确认票据，确认后加入队列</div></div><div class="sw on" onclick="sw(this)"><i></i></div></div>
+              <div class="row"><div class="txt"><div class="t">待确认票据有效期</div><div class="h">超时自动作废，与拒绝分别记录</div></div><div class="ctl-sel">5 分钟 ▾</div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="ext">
+            <div class="card"><div class="gt">安装状态</div>
+              <div class="row"><div class="txt"><div class="t">已安装版本</div><div class="h">Chrome · 运行中</div></div><div class="ctl-box">0.2.16</div></div>
+              <div class="row"><div class="txt"><div class="t">随本程序提供</div><div class="h">安装包内 browser/extension 目录</div></div><div class="ctl-box">0.2.16</div></div>
+            </div>
+            <div class="card"><div class="gt">管理</div>
+              <div class="row"><div class="txt"><div class="t">复制扩展路径</div><div class="h">用于「加载已解压的扩展程序」</div></div><div class="ctl-sel">复制</div></div>
+              <div class="row"><div class="txt"><div class="t">打开扩展管理页</div><div class="h">浏览器不允许程序代为重新加载</div></div><div class="ctl-sel">打开</div></div>
+              <div class="row"><div class="txt"><div class="t">重新导出扩展文件</div><div class="h">覆盖至固定目录，供原路径继续使用</div></div><div class="ctl-sel">导出</div></div>
+            </div>
+            <div class="card"><div class="gt">更新</div>
+              <div class="row"><div class="txt"><div class="t">检测到新版时</div><div class="h">本程序无法代为更新，需在扩展页手动重新加载</div></div><div class="ctl-box">提醒</div></div>
+              <div class="row"><div class="txt"><div class="t">用策略强制安装（可选）</div><div class="h">写入注册表 ExtensionInstallForcelist，需管理员权限</div></div><div class="sw" onclick="sw(this)"><i></i></div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="ui">
+            <div class="card"><div class="gt">外观</div>
+              <div class="row"><div class="txt"><div class="t">语言</div><div class="h">立刻生效</div></div><div class="ctl-sel">中文 ▾</div></div>
+              <div class="row"><div class="txt"><div class="t">主题</div><div class="h">跟随系统 / 浅色 / 深色</div></div><div class="ctl-sel">跟随系统 ▾</div></div>
+              <div class="row"><div class="txt"><div class="t">密度</div><div class="h">标准 / 紧凑</div></div><div class="ctl-sel">标准 ▾</div></div>
+            </div>
+            <div class="card"><div class="gt">窗口</div>
+              <div class="row"><div class="txt"><div class="t">启动时收起侧栏</div><div class="h">仅保留图标条</div></div><div class="sw" onclick="sw(this)"><i></i></div></div>
+              <div class="row"><div class="txt"><div class="t">关闭窗口时收进托盘</div><div class="h">托盘菜单中提供「退出」</div></div><div class="sw on" onclick="sw(this)"><i></i></div></div>
+              <div class="row"><div class="txt"><div class="t">首次收托盘时提示</div></div><div class="sw on" onclick="sw(this)"><i></i></div></div>
+            </div>
+          </div>
+
+          <div class="page" data-cat="adv">
+            <div class="card"><div class="gt">落点规则</div>
+              <div class="row"><div class="txt"><div class="t">URL 规则</div><div class="h">3 条 · 按顺序匹配</div></div><div class="ctl-sel">编辑 ▾</div></div>
+              <div class="row"><div class="txt"><div class="t">抓取模板</div><div class="h">2 个站点</div></div><div class="ctl-sel">管理 ▾</div></div>
+            </div>
+            <div class="card"><div class="gt">版本</div>
+              <div class="row"><div class="txt"><div class="t">桌面端</div><div class="h">Download Manager</div></div><div class="ctl-box">0.7.0</div></div>
+              <div class="row"><div class="txt"><div class="t">下载内核</div><div class="h">dlm.exe</div></div><div class="ctl-box">0.1.0</div></div>
+              <div class="row"><div class="txt"><div class="t">浏览器扩展</div><div class="h">已安装 0.2.16 · 随包 0.2.16</div></div><div class="ctl-box">0.2.16</div></div>
+              <div class="row"><div class="txt"><div class="t">MCP 桥接</div><div class="h">dlm-mcp · 未安装</div></div><div class="ctl-box">—</div></div>
+              <div class="row"><div class="txt"><div class="t">复制版本信息</div><div class="h">四项一起，便于贴到 issue</div></div><div class="ctl-sel">复制</div></div>
+            </div>
+            <div class="card"><div class="gt">网络与更新</div>
+              <div class="row"><div class="txt"><div class="t">本地端口</div><div class="h">仅绑定 127.0.0.1，需 token</div></div><div class="ctl-box">自动</div></div>
+              <div class="row"><div class="txt"><div class="t">自动检查更新</div><div class="h">每日检查一次</div></div><div class="sw on" onclick="sw(this)"><i></i></div></div>
+              <div class="row"><div class="txt"><div class="t">开机自启</div><div class="h">仅启动队列，不显示窗口</div></div><div class="sw" onclick="sw(this)"><i></i></div></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+    <div class="ft">
+      <button class="btn sm">保存</button>
+      <button class="btn ghost sm">取消</button>
+      <span class="note">保存后立即生效（标注「重启后生效」的除外）</span>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 对照 ================= -->
+<div class="sec">结构变化对照</div>
+<table class="cmp">
+  <tr><th style="width:18%">你提的</th><th style="width:34%">现在</th><th>提案</th></tr>
+  <tr><td>入口位置</td><td class="old">顶栏「新建 ▾」下拉里藏着三个入口</td>
+      <td>左栏顶部平铺：新建任务 / 站点抓取 / 下载列表。顶栏换成品牌位。</td></tr>
+  <tr><td>顶栏</td><td class="old">新建按钮 + 拉满整行的搜索框</td>
+      <td>品牌 + 英文全称；搜索框撑满剩余宽度但半透明、无边框，Ctrl K 内嵌右端。</td></tr>
+  <tr><td>侧栏</td><td class="old">固定 210px，收不起来</td>
+      <td>可收成 52px 图标条；状态栏搬到窗口底部，收起时不再缩水。</td></tr>
+  <tr><td>任务操作</td><td class="old">选中后出现一条按钮行</td>
+      <td>右键菜单 + 多选后的批量条。</td></tr>
+  <tr><td>任务详情</td><td class="old">浮窗，挡列表、被窗口边缘裁掉、两个关闭按钮</td>
+      <td>右侧固定栏：单关闭、宽度固定、长日志在框内换行滚动。</td></tr>
+  <tr><td>抓取页</td><td class="old">一张表单从上往下堆</td>
+      <td>三步条 + 左表单右模板卡。</td></tr>
+</table>
+
+<!-- ================= 命令面板 ================= -->
+<div class="overlay" id="ov" onclick="if(event.target===this)palette(false)">
+  <div class="palette">
+    <div class="pin">
+      <svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <span class="q">输入命令，或检索任务…</span>
+      <span class="esc">Esc</span>
+    </div>
+    <div class="plist" id="plist">
+      <div class="pgrp">搜索</div>
+      <div class="prow on"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>搜索任务<span class="en">search tasks</span></div>
+      <div class="pgrp">新建</div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建下载<span class="en">new download</span><span class="sk">Ctrl N</span></div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>站点抓取<span class="en">site grab</span></div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="3" width="12" height="12" rx="2"/><path d="M5 9v10a2 2 0 0 0 2 2h10"/></svg>批量粘贴<span class="en">paste links</span><span class="sk">Ctrl V</span></div>
+      <div class="pgrp">任务</div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><path d="M7 5v14M17 5v14"/></svg>全部暂停<span class="en">pause all</span></div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>删除全部已完成<span class="en">clear completed</span></div>
+      <div class="pgrp">跳转</div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14 3h-4l-.6 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2L10 21h4l.6-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg>设置<span class="en">settings</span><span class="sk">Ctrl ,</span></div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9H3z"/></svg>打开保存目录<span class="en">open download folder</span></div>
+      <div class="prow"><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v5h-5"/></svg>检查更新<span class="en">check for updates</span></div>
+    </div>
+    <div class="pfoot"><span>↑↓ 选择</span><span>↵ 执行</span><span>Esc 关闭</span></div>
+  </div>
+</div>
+
+<script>
+  function th(t){
+    document.documentElement.dataset.theme=t;
+    document.getElementById('th-l').setAttribute('aria-pressed',t==='light');
+    document.getElementById('th-d').setAttribute('aria-pressed',t==='dark');
+  }
+  function font(f){
+    document.documentElement.dataset.font=f;
+    document.getElementById('ft-s').setAttribute('aria-pressed',f==='sans');
+    document.getElementById('ft-r').setAttribute('aria-pressed',f==='serif');
+  }
+  function collapse(){ document.getElementById('side').classList.toggle('mini'); }
+  function pane(p){
+    document.getElementById('pane-list').style.display = p==='list'?'block':'none';
+    document.getElementById('pane-new').style.display  = p==='new'?'block':'none';
+    document.getElementById('pane-grab').style.display = p==='grab'?'block':'none';
+  }
+  function setCat(cat){
+    document.querySelectorAll('.mside .mi').forEach(function(m){ m.classList.toggle('on', m.dataset.cat===cat); });
+    document.querySelectorAll('.pages .page').forEach(function(p){ p.classList.toggle('on', p.dataset.cat===cat); });
+  }
+  function sw(el){ el.classList.toggle('on'); }
+
+  var batch=false;
+  function toggleSel(){
+    batch=!batch;
+    document.getElementById('bb').classList.toggle('on',batch);
+    var cbs=document.querySelectorAll('table.list .cb');
+    for(var i=1;i<cbs.length;i++){
+      cbs[i].classList.toggle('on',batch);
+      cbs[i].textContent = batch ? '✓' : '';
+    }
+    document.querySelectorAll('table.list tr').forEach(function(r,i){
+      if(i>0) r.classList.toggle('sel',batch);
+    });
+  }
+  function selRow(tr){
+    if(!batch) return;
+    tr.classList.toggle('sel');
+    var cb=tr.querySelector('.cb');
+    cb.classList.toggle('on');
+    cb.textContent = cb.classList.contains('on') ? '✓' : '';
+  }
+  function showMenu(ev){
+    if(ev) ev.preventDefault();
+    var m=document.getElementById('menu');
+    var app=document.getElementById('app').getBoundingClientRect();
+    if(ev){
+      m.style.left=Math.max(0,Math.min(ev.clientX-app.left, app.width-210))+'px';
+      m.style.top=(ev.clientY-app.top)+'px';
+    } else { m.style.left='320px'; m.style.top='150px'; }
+    m.classList.add('on');
+  }
+  function hideMenu(){ document.getElementById('menu').classList.remove('on'); }
+
+  var sel=0;
+  function rows(){ return Array.prototype.slice.call(document.querySelectorAll('#plist .prow')); }
+  function drawPalette(){
+    rows().forEach(function(r,i){ r.classList.toggle('on', i===sel); });
+    var cur=rows()[sel];
+    if(cur && cur.scrollIntoView) cur.scrollIntoView({block:'nearest'});
+  }
+  function palette(open){
+    document.getElementById('ov').classList.toggle('on', open!==false);
+    if(open!==false){ sel=0; drawPalette(); }
+  }
+  document.addEventListener('keydown', function(e){
+    var on=document.getElementById('ov').classList.contains('on');
+    if(e.ctrlKey && (e.key==='k'||e.key==='K')){ e.preventDefault(); palette(!on); return; }
+    if(!on) return;
+    if(e.key==='Escape'){ e.preventDefault(); palette(false); }
+    if(e.key==='ArrowDown'){ e.preventDefault(); sel=Math.min(sel+1,rows().length-1); drawPalette(); }
+    if(e.key==='ArrowUp'){ e.preventDefault(); sel=Math.max(sel-1,0); drawPalette(); }
+    if(e.key==='Enter'){ e.preventDefault(); palette(false); }
+  });
+  rows().forEach(function(r,i){ r.addEventListener('click',function(){ sel=i; drawPalette(); }); });
+
+  /* 截图/分享用：?mini=1 收起侧栏，?pal=1 打开命令面板，?dark=1 深色，?serif=1 衬线 */
+  (function(){
+    var q = new URLSearchParams(location.search);
+    if(q.get('mini')==='1') collapse();
+    if(q.get('dark')==='1') th('dark');
+    if(q.get('serif')==='1') font('serif');
+    if(q.get('pal')==='1') palette(true);
+  })();
+</script>
+</body>
+</html>

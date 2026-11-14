@@ -119,8 +119,10 @@ impl App {
         let mut chosen: Option<&'static str> = None;
         let mut close = false;
 
+        // **不要传 `.open(&mut close)`**：egui 把这个 bool 的初值当成"窗口是否打开"，
+        // 初值 `false` 会让它每帧直接跳过绘制 —— 快捷键明明触发了，面板却不出现
+        // （0.6.0 发布版就是这个症状）。面板本来没有标题栏，也就没有X按钮需要这个参数。
         egui::Window::new("命令面板")
-            .open(&mut close)
             .collapsible(false)
             .resizable(false)
             .title_bar(false)

@@ -207,13 +207,10 @@ pub(crate) fn drawer_body(
                     .color(theme::INK_3),
             );
         });
+        // 关闭入口只有标题栏那一个 `×`（窗口自带的）。0.6.0 在这里又画了一个，
+        // 于是详情斜上方并排两个 ×，都是关同一个东西 —— 用户第一眼就问"哪个才是关"。
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             ui.add_space(12.0);
-            // 用 `×`（U+00D7）而不是 `✕`（U+2715）：后者在 Microsoft YaHei 里没有字形，
-            // 会画成空心方框（`gui::tests::every_symbol_we_put_in_the_ui_has_a_glyph` 守这条）。
-            if ui.small_button("×").clicked() {
-                actions.close = true;
-            }
         });
     });
     ui.add_space(10.0);
@@ -368,22 +365,32 @@ pub(crate) fn drawer_body(
         ui.label(egui::RichText::new("日志").size(10.5).color(theme::INK_3));
     });
     ui.add_space(4.0);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
+    // **不要包在 `ui.horizontal(...)` 里**：horizontal 的横轴是无限宽，label 于是永远不换行，
+    // 一条长报错会把整个窗口撑变形（0.6.0 用户截图里那条 os error 10061 就是这么溢出的）。
+    // 用 margin 做缩进，让 label 按抽屉宽度换行；外面再套竖向滚动，长日志在框内滚。
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(16, 0))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(16.0);
-                ui.label(
-                    egui::RichText::new(if log_tail.is_empty() {
-                        "（还没有日志：任务还没开始跑）"
+            egui::ScrollArea::vertical()
+                .id_salt("drawer-log")
+                .max_height(200.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let text = if log_tail.is_empty() {
+                        "（尚无日志）"
                     } else {
                         log_tail
-                    })
-                    .size(10.5)
-                    .monospace()
-                    .color(theme::INK_2),
-                );
-            });
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .size(10.5)
+                                .monospace()
+                                .color(theme::INK_2),
+                        )
+                        .wrap(),
+                    );
+                });
         });
 
     actions
