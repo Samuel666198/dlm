@@ -5,7 +5,7 @@
 把大文件切成多段并行下载，支持断点续传、限速、配额、完成后动作；
 浏览器里右键或点悬浮球就能把下载交给它，桌面窗口统一看进度。
 
-**当前发布版：0.6.0** ——
+**当前发布版：0.7.0** ——
 [下载](https://github.com/Samuel666198/dlm/releases/latest) ·
 [更新清单](https://raw.githubusercontent.com/Samuel666198/dlm/main/latest.json)
 （内核 `0.1.0` / 扩展 `0.2.16`）
@@ -117,7 +117,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-package.ps1
 
 `dlm-mcp.exe` **不进主包**：它是第二个产物（同一个 Release 里单独一个附件，或
 `dlm-mcp-<version>-win-x64.zip`），谁要用 Agent 谁才下。它要求 `dlm-gui` 支持
-Agent 接口（`api >= 2`，即 0.6.0+），装错版本会在第一次调用时明确报出来。
+Agent 接口（`api >= 2`，即 0.6.0+），装错版本会在第一次调用时明确报出来。`dlm-mcp --version` 可直接查版本。
 
 扩展仍需在浏览器开发者模式里"加载已解压"。详见 [`packaging/README.md`](packaging/README.md)。
 

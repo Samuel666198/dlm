@@ -67,7 +67,20 @@ fn check_compat(server_api: u32) -> Result<(), String> {
 }
 
 fn main() {
-    let explicit = resolve_endpoint_path(std::env::args().skip(1).collect());
+    // `--version` / `-V`：MCP 客户端里装的是哪个版本，得能一句话问出来。
+    // 打 stdout 而不是 stderr —— 这是给人看的、要能管道出去的东西。
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        println!(
+            "{name} MCP 桥接 {rel}（内核 {core}，接口 api {api}）",
+            name = "Download Manager",
+            rel = dlm::gui::RELEASE,
+            core = env!("CARGO_PKG_VERSION"),
+            api = dlm::gui::AGENT_API,
+        );
+        return;
+    }
+    let explicit = resolve_endpoint_path(argv);
     let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
