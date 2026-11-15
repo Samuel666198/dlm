@@ -117,6 +117,17 @@ fn parse() -> Result<GuiConfig> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            // `--version` 直接把发行版与内核两个号都报出来，然后退出。
+            // 界面上「设置 → 高级 → 版本」是同一个信息的可视化版本。
+            "--version" | "-V" => {
+                println!(
+                    "{} {}（内核 {}）",
+                    gui::APP_NAME,
+                    gui::RELEASE,
+                    env!("CARGO_PKG_VERSION")
+                );
+                std::process::exit(0);
+            }
             "--port" => config.port = next(&mut args, "--port")?.parse()?,
             "--queue" => config.queue = PathBuf::from(next(&mut args, "--queue")?),
             "--out-dir" => config.out_dir = PathBuf::from(next(&mut args, "--out-dir")?),

@@ -71,12 +71,14 @@ fn main() {
     // 打 stdout 而不是 stderr —— 这是给人看的、要能管道出去的东西。
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.iter().any(|a| a == "--version" || a == "-V") {
+        // 名字也是常量，别写成字面量（clippy 的 print-literal 会拦，也确实该拦：
+        // 三处文案各写一遍"Download Manager"迟早不一致）。
         println!(
-            "{name} MCP 桥接 {rel}（内核 {core}，接口 api {api}）",
-            name = "Download Manager",
-            rel = dlm::gui::RELEASE,
-            core = env!("CARGO_PKG_VERSION"),
-            api = dlm::gui::AGENT_API,
+            "{} MCP 桥接 {}（内核 {}，接口 api {}）",
+            dlm::gui::APP_NAME,
+            dlm::gui::RELEASE,
+            env!("CARGO_PKG_VERSION"),
+            dlm::gui::AGENT_API,
         );
         return;
     }
