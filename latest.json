@@ -1,11 +1,11 @@
 {
-    "release":  "0.6.0",
+    "release":  "0.7.0",
     "core":  "0.1.0",
     "extension":  "0.2.16",
-    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.6.0/dlm-0.6.0-win-x64.zip",
-    "sha256":  "f86c21b2e68125b88f878055f06065694895b33c974560382a29ffff82765a00",
-    "size":  11805452,
-    "notes":  "界面按设计稿重做：主界面、设置页、站点抓取窗口；新增夜间批次、命令面板、卡顿诊断；Agent 接入闭环（MCP 桥 dlm-mcp 单独下载）。",
+    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.0/dlm-0.7.0-win-x64.zip",
+    "sha256":  "c2387480e4c4750aec43925ab753016f647ef620534a32569fd16e093790f1ab",
+    "size":  12020681,
+    "notes":  "界面第二轮重做：左栏可收起、详情改右栏、列表批量选择与右键菜单、命令面板分四组、设置八分类（含浏览器扩展页与版本一览）、站点抓取三步、明暗主题。修掉 0.6.1 四个缺陷，并把整份界面接进无障碍树（accesskit）。",
     "min_core":  "0.1.0",
-    "published_at":  "2026-11-14T07:55:02Z"
+    "published_at":  "2026-11-15T05:08:13Z"
 }
