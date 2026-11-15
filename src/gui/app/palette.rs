@@ -27,66 +27,91 @@ pub(crate) struct Command {
     pub zh: &'static str,
     /// 一句解释：这条命令到底干什么。
     pub hint: &'static str,
+    /// 分组（新建 / 视图 / 任务操作 / 系统）。**同组的必须连在一起** —— 面板按组打小标题，
+    /// 顺序一乱就会同一个组名出现两次。
+    pub group: &'static str,
 }
+
+/// 四个分组，顺序即面板里的顺序。
+pub(crate) const GROUPS: [&str; 4] = ["新建", "视图", "任务操作", "系统"];
 
 /// 全部命令。**顺序就是面板里的顺序**：常用的在前。
 pub(crate) const COMMANDS: &[Command] = &[
-    Command {
-        id: "search",
-        en: "search-tasks",
-        zh: "搜索任务",
-        hint: "回到搜索框，按文件名 / 站点过滤列表",
-    },
+    // ---- 新建 ----
     Command {
         id: "new",
         en: "new-task",
         zh: "新建任务",
         hint: "粘贴一条链接，选个落点就开下",
+        group: "新建",
     },
     Command {
         id: "paste",
         en: "paste-links",
         zh: "批量粘贴链接",
         hint: "一次贴一堆链接，逐条建任务",
+        group: "新建",
     },
     Command {
         id: "grab",
         en: "grab-site",
         zh: "站点抓取",
         hint: "扫一个站点出清单，勾选后再下",
+        group: "新建",
     },
+    // ---- 视图 ----
+    Command {
+        id: "search",
+        en: "search-tasks",
+        zh: "搜索任务",
+        hint: "回到搜索框，按文件名 / 站点过滤列表",
+        group: "视图",
+    },
+    Command {
+        id: "toggle-sidebar",
+        en: "toggle-sidebar",
+        zh: "收起 / 展开侧栏",
+        hint: "只留一条图标，把宽度让给列表",
+        group: "视图",
+    },
+    // ---- 任务操作 ----
     Command {
         id: "pause-all",
         en: "pause-all",
         zh: "全部暂停",
         hint: "正在跑的与排队的都停下，已下载的分片保留",
+        group: "任务操作",
     },
     Command {
         id: "delete-done",
         en: "delete-completed",
         zh: "删除全部已完成",
         hint: "只清列表记录，磁盘上的文件不动",
+        group: "任务操作",
     },
+    // ---- 系统 ----
     Command {
         id: "settings",
         en: "settings",
         zh: "设置",
         hint: "连接数、限速、代理、规则、夜间批次",
+        group: "系统",
     },
     Command {
         id: "open-out-dir",
         en: "open-out-dir",
         zh: "打开保存目录",
         hint: "在资源管理器里打开默认落点",
+        group: "系统",
     },
     Command {
         id: "check-update",
         en: "check-update",
         zh: "检查更新",
         hint: "查一次清单，有新版会提示",
+        group: "系统",
     },
 ];
-
 /// 这条命令跟查询词对不对得上（英文名 / 中文名 / 解释任一处包含即可）。
 pub(crate) fn matches(cmd: &Command, query: &str) -> bool {
     let q = query.trim().to_lowercase();
@@ -148,7 +173,27 @@ impl App {
                             .color(super::theme::ink_3()),
                     );
                 }
+                let mut last_group: Option<&str> = None;
                 for (i, cmd) in hits.iter().enumerate() {
+                    // 组小标题：只在换组时出现一次。搜索态下它就是"这条命令住在哪"。
+                    if last_group != Some(cmd.group) {
+                        // 组名只能是那四个之一（调试版里当场炸，别等它悄悄画出个野组名）。
+                        debug_assert!(
+                            GROUPS.contains(&cmd.group),
+                            "命令 {} 的组名不在 GROUPS 里",
+                            cmd.id
+                        );
+                        if last_group.is_some() {
+                            ui.add_space(2.0);
+                        }
+                        ui.label(
+                            egui::RichText::new(cmd.group)
+                                .size(9.5)
+                                .strong()
+                                .color(super::theme::ink_3()),
+                        );
+                        last_group = Some(cmd.group);
+                    }
                     let selected = i == self.palette_sel;
                     let resp = ui
                         .push_id(cmd.id, |ui| {
@@ -224,7 +269,10 @@ mod tests {
     #[test]
     fn an_empty_query_lists_every_command_in_order() {
         assert_eq!(ids("").len(), COMMANDS.len());
-        assert_eq!(ids("")[0], "search", "常用的排最前");
+        // 0.7.0 起按组分块，第一项从「搜索任务」变成「新建任务」：
+        // 「新建」是这条面板最常被打开的理由，而搜索有 Ctrl F 这个专用键。
+        assert_eq!(ids("")[0], "new", "新建排最前");
+        assert!(ids("").contains(&"search"), "搜索仍在表里，只是不在第一位");
     }
 
     #[test]
@@ -268,6 +316,38 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for c in COMMANDS {
             assert!(seen.insert(c.id), "命令 id 重复：{}", c.id);
+        }
+    }
+
+    /// **同组必须连在一起**，而且组名只能是那四个之一。
+    ///
+    /// 面板按组打小标题：一组接一组地画，换组才画标题。命令表里只要有一条排错位置，
+    /// 界面上就会出现两次「系统」这种重复小标题 —— 而且不会报错，只是看着乱。
+    #[test]
+    fn commands_are_clustered_by_group() {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut last: Option<&str> = None;
+        for c in COMMANDS {
+            assert!(
+                GROUPS.contains(&c.group),
+                "未知分组：{}（{}）",
+                c.group,
+                c.id
+            );
+            if last != Some(c.group) {
+                assert!(
+                    !seen.contains(&c.group),
+                    "分组「{}」出现了两次：{} 之后又接回来，面板里会重复小标题",
+                    c.group,
+                    c.id
+                );
+                seen.push(c.group);
+                last = Some(c.group);
+            }
+        }
+        // 四个分组都有命令：空组等于面板里缺一整类。
+        for g in GROUPS {
+            assert!(COMMANDS.iter().any(|c| c.group == g), "分组「{g}」是空的");
         }
     }
 }
