@@ -145,7 +145,7 @@ impl App {
                     ui.label(
                         egui::RichText::new("没有匹配的命令")
                             .size(11.0)
-                            .color(super::theme::INK_3),
+                            .color(super::theme::ink_3()),
                     );
                 }
                 for (i, cmd) in hits.iter().enumerate() {
@@ -164,7 +164,7 @@ impl App {
                         ui.label(
                             egui::RichText::new(cmd.hint)
                                 .size(10.0)
-                                .color(super::theme::INK_3),
+                                .color(super::theme::ink_3()),
                         );
                     });
                     if resp.clicked() {
@@ -177,7 +177,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("↑↓ 选择 · 回车执行 · Esc 关闭")
                         .size(10.0)
-                        .color(super::theme::INK_3),
+                        .color(super::theme::ink_3()),
                 );
             });
 

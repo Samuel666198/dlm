@@ -467,6 +467,11 @@ pub fn run(config: GuiConfig) -> Result<()> {
     let ui_tx = tx.clone();
     let ui_gate = Arc::clone(&agent_gate);
 
+    // 主题要在建窗口之前定下来：`theme::apply` 在首帧读全局开关，
+    // 晚一步就会先闪一下浅色再变深，看起来像闪屏。
+    let boot_settings = settings::Settings::load(&settings_dir);
+    app::apply_theme_preference(&boot_settings.theme);
+
     let autostart = config.autostart;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

@@ -59,14 +59,18 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("剪贴板").size(10.5).color(theme::INK_3));
+            ui.label(
+                egui::RichText::new("剪贴板")
+                    .size(10.5)
+                    .color(theme::ink_3()),
+            );
             // 只显示末段，整条 URL 太长会把按钮挤出去；完整地址在 tooltip 里。
             let short = short_name(&hit.url);
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(short)
                         .size(11.5)
-                        .color(theme::INK_2)
+                        .color(theme::ink_2())
                         .monospace(),
                 )
                 .truncate(),

@@ -80,12 +80,12 @@ impl App {
                     }
                     ui.add_space(8.0);
                     if let Some(err) = &self.settings_error {
-                        ui.label(egui::RichText::new(err).size(11.5).color(theme::BAD));
+                        ui.label(egui::RichText::new(err).size(11.5).color(theme::bad()));
                     } else {
                         ui.label(
                             egui::RichText::new("改动保存后立刻生效（除标注『重启后生效』的项）")
                                 .size(10.5)
-                                .color(theme::INK_3),
+                                .color(theme::ink_3()),
                         );
                     }
                 });
@@ -170,14 +170,14 @@ impl App {
                             egui::Button::new(
                                 egui::RichText::new(category.title()).size(12.0).color(
                                     if selected {
-                                        theme::ACCENT_INK
+                                        theme::accent_ink()
                                     } else {
-                                        theme::INK_2
+                                        theme::ink_2()
                                     },
                                 ),
                             )
                             .fill(if selected {
-                                theme::ACCENT_SOFT
+                                theme::accent_soft()
                             } else {
                                 egui::Color32::TRANSPARENT
                             })
@@ -211,7 +211,7 @@ impl App {
             ui.label(
                 egui::RichText::new("没有匹配的设置项")
                     .size(11.5)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             );
             return;
         }
@@ -224,7 +224,7 @@ impl App {
                     egui::RichText::new(spec.category.title())
                         .size(10.5)
                         .strong()
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
                 last = Some(spec.category);
             }
@@ -245,7 +245,7 @@ impl App {
                     egui::RichText::new(spec.group)
                         .size(11.0)
                         .strong()
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
                 ui.add_space(2.0);
             }
@@ -258,18 +258,22 @@ impl App {
     /// 规则那一项例外：它的编辑器要整行宽（见 [`Self::rules_editor`]）。
     fn render_row(&mut self, ui: &mut egui::Ui, spec: &'static SettingSpec) {
         egui::Frame::new()
-            .fill(theme::SURFACE)
-            .stroke(egui::Stroke::new(theme::STROKE, theme::LINE_SOFT))
+            .fill(theme::surface())
+            .stroke(egui::Stroke::new(theme::STROKE, theme::line_soft()))
             .inner_margin(egui::Margin::symmetric(10, 7))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.set_width(300.0);
-                        ui.label(egui::RichText::new(spec.title).size(12.5).color(theme::INK));
+                        ui.label(
+                            egui::RichText::new(spec.title)
+                                .size(12.5)
+                                .color(theme::ink()),
+                        );
                         ui.label(
                             egui::RichText::new(spec.hint)
                                 .size(10.5)
-                                .color(theme::INK_3),
+                                .color(theme::ink_3()),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -277,7 +281,7 @@ impl App {
                             ui.label(
                                 egui::RichText::new("程序自己记的")
                                     .size(10.5)
-                                    .color(theme::INK_3),
+                                    .color(theme::ink_3()),
                             );
                         } else {
                             self.setting_control(ui, spec.key);
@@ -357,7 +361,7 @@ impl App {
             ui.label(
                 egui::RichText::new("按顺序先命中先用；留空的字段不改那项")
                     .size(10.5)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             );
         });
 
@@ -428,7 +432,7 @@ impl App {
                 ui.label(
                     egui::RichText::new(ZERO_MEANS_UNLIMITED)
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             }
             SettingKey::MaxSpeedKiB => {
@@ -436,7 +440,7 @@ impl App {
                 ui.label(
                     egui::RichText::new(ZERO_MEANS_UNLIMITED)
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             }
             SettingKey::SpeedWindows => {
@@ -476,7 +480,7 @@ impl App {
                             format!("此刻：{eff} KiB/s")
                         })
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                     );
                 });
                 if let Some(i) = remove {
@@ -511,7 +515,7 @@ impl App {
                         ui.label(
                             egui::RichText::new(msg.clone())
                                 .size(10.5)
-                                .color(theme::INK_3),
+                                .color(theme::ink_3()),
                         );
                     }
                     // 写错当场标红，但不阻止保存：一行代理写错就存不下整份设置更糟。
@@ -521,7 +525,7 @@ impl App {
                             ui.label(
                                 egui::RichText::new(format!("生效：{}", spec.redacted()))
                                     .size(10.5)
-                                    .color(theme::INK_3),
+                                    .color(theme::ink_3()),
                             );
                         }
                         Err(err) => {
@@ -542,6 +546,29 @@ impl App {
             }
             SettingKey::CloseToTray => {
                 ui.checkbox(&mut self.draft.close_to_tray, "");
+            }
+            SettingKey::Theme => {
+                let current = match self.draft.theme.as_str() {
+                    "light" => "浅色",
+                    "dark" => "深色",
+                    _ => "跟随系统",
+                };
+                egui::ComboBox::from_id_salt("theme-combo")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (value, label) in
+                            [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
+                        {
+                            ui.selectable_value(&mut self.draft.theme, value.to_string(), label);
+                        }
+                    });
+                // 立刻生效：主题是"看得见"的开关，等保存会让人以为坏了。
+                if self.draft.theme != self.applied_theme {
+                    self.applied_theme = self.draft.theme.clone();
+                    super::apply_theme_preference(&self.draft.theme);
+                    // 原生控件的配色也要跟着换，不然输入框/下拉仍是旧的一套。
+                    super::theme::apply(ui.ctx());
+                }
             }
             SettingKey::SidebarCollapsed => {
                 // 勾上之后**立刻**反映到界面：这类"看得见"的开关如果还要点保存才生效，
@@ -566,7 +593,7 @@ impl App {
                     egui::RichText::new(format!("{} 条", self.draft.rules.len()))
                         .size(11.0)
                         .monospace()
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 );
             }
             SettingKey::AutoCheckUpdate => {
@@ -579,7 +606,7 @@ impl App {
                     egui::RichText::new(format!("{} 个站点", self.draft.grab_templates.len()))
                         .size(11.0)
                         .monospace()
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 );
             }
         }
@@ -594,17 +621,17 @@ impl App {
             egui::RichText::new("Agent 接入")
                 .size(12.5)
                 .strong()
-                .color(theme::INK),
+                .color(theme::ink()),
         );
         ui.label(
             egui::RichText::new("让人或 Agent 都能下：命令行一直可用；MCP 需要另外装 dlm-mcp。")
                 .size(10.5)
-                .color(theme::INK_3),
+                .color(theme::ink_3()),
         );
         ui.label(
             egui::RichText::new("dlm-mcp 自己去找 dlm-gui 写的端点文件，不用把 token 抄进配置。")
                 .size(10.5)
-                .color(theme::INK_3),
+                .color(theme::ink_3()),
         );
         ui.add_space(6.0);
 
@@ -617,7 +644,7 @@ impl App {
                     egui::RichText::new(&cli)
                         .size(11.0)
                         .monospace()
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 ),
             );
             if ui.button("复制").clicked() {
@@ -639,14 +666,14 @@ impl App {
                 ui.label(
                     egui::RichText::new("粘到 MCP 客户端配置里即可")
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             } else {
                 ui.add_enabled(false, egui::Button::new("复制 MCP 配置"));
                 ui.label(
                     egui::RichText::new("没找到 dlm-mcp.exe：先装那一份（它与 dlm-gui 同目录）")
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             }
         });
@@ -654,7 +681,7 @@ impl App {
             ui.label(
                 egui::RichText::new(format!("已复制（{what}）"))
                     .size(10.5)
-                    .color(theme::OK),
+                    .color(theme::ok()),
             );
         }
         ui.add_space(8.0);
@@ -669,22 +696,26 @@ impl App {
         let on = b.on;
         ui.add_enabled_ui(on, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("窗口").size(11.0).color(theme::INK_3));
+                ui.label(egui::RichText::new("窗口").size(11.0).color(theme::ink_3()));
                 ui.add(egui::DragValue::new(&mut b.start_hour).range(0..=23));
                 ui.label("点 到");
                 ui.add(egui::DragValue::new(&mut b.end_hour).range(0..=23));
                 ui.label("点");
                 if b.start_hour > b.end_hour {
-                    ui.label(egui::RichText::new("跨午夜").size(10.0).color(theme::INK_3));
+                    ui.label(
+                        egui::RichText::new("跨午夜")
+                            .size(10.0)
+                            .color(theme::ink_3()),
+                    );
                 }
             });
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("限速").size(11.0).color(theme::INK_3));
+                ui.label(egui::RichText::new("限速").size(11.0).color(theme::ink_3()));
                 ui.add(egui::DragValue::new(&mut b.speed_kib).range(0..=1024 * 100));
                 ui.label(
                     egui::RichText::new("KiB/s（0 = 不限速）")
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             });
             ui.checkbox(&mut b.shutdown_when_done, "队列跑空后关机");
@@ -696,7 +727,7 @@ impl App {
                 "关着的时候白天也照常派发".to_string()
             })
             .size(10.5)
-            .color(theme::INK_3),
+            .color(theme::ink_3()),
         );
     }
 }

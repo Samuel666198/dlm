@@ -41,13 +41,13 @@ impl App {
             ui.label(
                 egui::RichText::new(format!("{running} 个在跑"))
                     .size(11.5)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             );
             if waiting > 0 {
                 ui.label(
                     egui::RichText::new(format!("· {waiting} 个等待"))
                         .size(11.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             }
 
@@ -59,7 +59,7 @@ impl App {
                     egui::RichText::new(format!("· {}", crate::gui::app::list::fmt_speed(total)))
                         .size(11.5)
                         .monospace()
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 );
             }
 
@@ -72,7 +72,7 @@ impl App {
                     egui::RichText::new(format!("v{}", crate::gui::RELEASE))
                         .size(11.5)
                         .monospace()
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
 
                 if let Some(q) = quota {
@@ -85,14 +85,14 @@ impl App {
                         ))
                         .size(11.0)
                         .monospace()
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                     );
                     ui.add_space(4.0);
                     // 配额条：一条 78pt 的细轨。
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(78.0, 4.0), egui::Sense::hover());
                     let painter = ui.painter();
-                    painter.rect_filled(rect, 99.0, theme::TRACK);
+                    painter.rect_filled(rect, 99.0, theme::track());
                     let frac = if q.limit == 0 {
                         0.0
                     } else {
@@ -105,11 +105,11 @@ impl App {
                                 egui::vec2(rect.width() * frac, rect.height()),
                             ),
                             99.0,
-                            theme::ACCENT,
+                            theme::accent(),
                         );
                     }
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("配额").size(11.5).color(theme::INK_3));
+                    ui.label(egui::RichText::new("配额").size(11.5).color(theme::ink_3()));
                 }
 
                 // 有新版 / 检查失败时，这里多一枚可点的标记。没更新的机器看不到任何东西。
@@ -199,7 +199,7 @@ fn pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let font = egui::FontId::proportional(11.0);
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), font, theme::INK_2);
+        .layout_no_wrap(label.to_string(), font, theme::ink_2());
     // 左内边距 8 + 文字 + 间距 6 + 箭头 9 + 右内边距 8。
     let width = galley.size().x + 31.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 20.0), egui::Sense::click());
@@ -208,16 +208,16 @@ fn pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         rect,
         99.0,
         if response.hovered() {
-            theme::ACCENT_SOFT
+            theme::accent_soft()
         } else {
-            theme::SURFACE_2
+            theme::surface_2()
         },
     );
     let galley_y = rect.center().y - galley.size().y / 2.0;
     painter.galley(
         egui::pos2(rect.left() + 8.0, galley_y),
         galley,
-        theme::INK_2,
+        theme::ink_2(),
     );
     let chevron = egui::Rect::from_center_size(
         egui::pos2(rect.right() - 12.0, rect.center().y),
@@ -227,7 +227,7 @@ fn pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         painter,
         super::icons::Icon::ChevronDown,
         chevron,
-        theme::INK_3,
+        theme::ink_3(),
     );
     response
 }

@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 /// 设置文件名。与 `queue.json` 同目录。
 pub const FILE_NAME: &str = "settings.json";
 
+fn default_theme() -> String {
+    "system".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -83,6 +87,9 @@ pub struct Settings {
     /// 侧栏是否收起（只留图标条）。0.7.0 起可切换，状态记忆在这里。
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// 主题：`system` / `light` / `dark`。0.7.0 起支持深色。
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// 收进托盘时提示一次。
     pub tray_hint: bool,
     /// 是否已经提示过（避免每次都说）。与 `tray_hint` 分开，语义才清楚。
@@ -118,6 +125,7 @@ impl Default for Settings {
             autostart: false,
             close_to_tray: true,
             sidebar_collapsed: false,
+            theme: default_theme(),
             tray_hint: true,
             tray_hint_shown: false,
             auto_check_update: true,

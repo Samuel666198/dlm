@@ -63,18 +63,22 @@ impl App {
                 ui.label(
                     egui::RichText::new("先扫描出清单，勾选后才建任务；扫描本身不下载任何文件")
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
                 ui.add_space(8.0);
 
                 // ---- 起始页 ----
                 egui::Frame::new()
-                    .fill(theme::SURFACE)
-                    .stroke(egui::Stroke::new(theme::STROKE, theme::LINE))
+                    .fill(theme::surface())
+                    .stroke(egui::Stroke::new(theme::STROKE, theme::line()))
                     .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("起始页").size(11.5).color(theme::INK_3));
+                            ui.label(
+                                egui::RichText::new("起始页")
+                                    .size(11.5)
+                                    .color(theme::ink_3()),
+                            );
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.grab_url)
                                     .hint_text("https://example.com/downloads/")
@@ -85,7 +89,7 @@ impl App {
                                 ui.label(
                                     egui::RichText::new(self.grab_elapsed_label())
                                         .size(11.0)
-                                        .color(theme::INK_3),
+                                        .color(theme::ink_3()),
                                 );
                             } else if ui.button("扫描").clicked() {
                                 start_scan = true;
@@ -94,7 +98,7 @@ impl App {
 
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("范围").size(11.5).color(theme::INK_3));
+                            ui.label(egui::RichText::new("范围").size(11.5).color(theme::ink_3()));
                             ui.label("深度");
                             ui.add(egui::DragValue::new(&mut self.grab_depth).range(1..=3));
                             ui.checkbox(&mut self.grab_same_host, "只抓同站");
@@ -116,7 +120,7 @@ impl App {
                         // ---- 模板（按站点记）----
                         ui.add_space(6.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new("模板").size(11.5).color(theme::INK_3));
+                            ui.label(egui::RichText::new("模板").size(11.5).color(theme::ink_3()));
                             let templates: Vec<crate::grab::Template> =
                                 grab::templates_for(&self.settings.grab_templates, &self.grab_url)
                                     .into_iter()
@@ -132,7 +136,7 @@ impl App {
                                 ui.label(
                                     egui::RichText::new("这个站还没有模板")
                                         .size(10.5)
-                                        .color(theme::INK_3),
+                                        .color(theme::ink_3()),
                                 );
                             }
                             ui.add_space(6.0);
@@ -156,7 +160,7 @@ impl App {
 
                 if let Some(err) = &self.grab_error {
                     ui.add_space(4.0);
-                    ui.colored_label(theme::BAD, err);
+                    ui.colored_label(theme::bad(), err);
                 }
 
                 ui.add_space(8.0);
@@ -173,7 +177,7 @@ impl App {
                                 plan.skipped.len()
                             ))
                             .size(11.5)
-                            .color(theme::INK_2),
+                            .color(theme::ink_2()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("全不选").clicked() {
@@ -205,13 +209,15 @@ impl App {
                                 for (url, why) in &plan.skipped {
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            egui::RichText::new(why).size(10.5).color(theme::INK_3),
+                                            egui::RichText::new(why)
+                                                .size(10.5)
+                                                .color(theme::ink_3()),
                                         );
                                         ui.label(
                                             egui::RichText::new(url)
                                                 .size(10.5)
                                                 .monospace()
-                                                .color(theme::INK_3),
+                                                .color(theme::ink_3()),
                                         );
                                     });
                                 }
@@ -225,14 +231,14 @@ impl App {
                         ui.label(
                             egui::RichText::new(format!("已选 {picked} 个"))
                                 .size(11.5)
-                                .color(theme::INK_2),
+                                .color(theme::ink_2()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // 判据：没勾一个就点不动。
                             if ui
                                 .add_enabled(
                                     enqueue_enabled(picked),
-                                    egui::Button::new("加入队列").fill(theme::ACCENT),
+                                    egui::Button::new("加入队列").fill(theme::accent()),
                                 )
                                 .clicked()
                             {
@@ -241,7 +247,7 @@ impl App {
                             ui.label(
                                 egui::RichText::new("大小要等入队后才显示（扫描不额外发请求）")
                                     .size(10.0)
-                                    .color(theme::INK_3),
+                                    .color(theme::ink_3()),
                             );
                         });
                     });
@@ -250,7 +256,7 @@ impl App {
                     ui.label(
                         egui::RichText::new("还没有清单：填好起始页，点「扫描」")
                             .size(11.5)
-                            .color(theme::INK_3),
+                            .color(theme::ink_3()),
                     );
                 }
             });
@@ -414,14 +420,14 @@ fn file_table(ui: &mut egui::Ui, files: &[GrabFile], checked: &mut [bool]) {
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
             for title in ["", "文件名", "类型", "来自", "大小"] {
-                ui.label(egui::RichText::new(title).size(10.5).color(theme::INK_3));
+                ui.label(egui::RichText::new(title).size(10.5).color(theme::ink_3()));
             }
             ui.end_row();
 
             for (i, file) in files.iter().enumerate() {
                 if file.duplicate {
                     // 已去重：不可勾，给一枚标记说明"这条是同一份文件的另一个地址"。
-                    ui.label(egui::RichText::new("—").size(10.5).color(theme::INK_3));
+                    ui.label(egui::RichText::new("—").size(10.5).color(theme::ink_3()));
                 } else {
                     let mut on = checked.get(i).copied().unwrap_or(false);
                     if ui.checkbox(&mut on, "").changed()
@@ -437,31 +443,35 @@ fn file_table(ui: &mut egui::Ui, files: &[GrabFile], checked: &mut [bool]) {
                         egui::RichText::new(&name)
                             .size(12.0)
                             .color(if file.duplicate {
-                                theme::INK_3
+                                theme::ink_3()
                             } else {
-                                theme::INK
+                                theme::ink()
                             }),
                     );
                     ui.label(
                         egui::RichText::new(&file.url)
                             .size(9.5)
                             .monospace()
-                            .color(theme::INK_3),
+                            .color(theme::ink_3()),
                     );
                 });
 
                 let kind = category_label(crate::queue::category_for(&name));
-                ui.label(egui::RichText::new(kind).size(10.5).color(theme::INK_2));
+                ui.label(egui::RichText::new(kind).size(10.5).color(theme::ink_2()));
                 ui.label(
                     egui::RichText::new(&file.from)
                         .size(10.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
                 if file.duplicate {
-                    ui.label(egui::RichText::new("已去重").size(10.5).color(theme::WARN));
+                    ui.label(
+                        egui::RichText::new("已去重")
+                            .size(10.5)
+                            .color(theme::warn()),
+                    );
                 } else {
                     // 扫描不查大小（见模块注释），所以这一格恒为 —。
-                    ui.label(egui::RichText::new("—").size(10.5).color(theme::INK_3));
+                    ui.label(egui::RichText::new("—").size(10.5).color(theme::ink_3()));
                 }
                 ui.end_row();
             }

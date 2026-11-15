@@ -49,94 +49,213 @@ pub const WINDOW_MIN: [f32; 2] = [760.0, 480.0];
 
 // ---------------------------------------------------------------- 颜色
 
-/// 窗口底色：暖纸。
-pub const PAPER: Color32 = Color32::from_rgb(0xF6, 0xF3, 0xEC);
-/// 列表、抽屉底色。
-pub const SURFACE: Color32 = Color32::from_rgb(0xFF, 0xFD, 0xF8);
-/// 侧栏、状态栏、标题栏底色。
-pub const SURFACE_2: Color32 = Color32::from_rgb(0xF1, 0xED, 0xE4);
-/// 主描边。
-pub const LINE: Color32 = Color32::from_rgb(0xE4, 0xDF, 0xD2);
-/// 弱描边（行分隔）。
-pub const LINE_SOFT: Color32 = Color32::from_rgb(0xED, 0xE8, 0xDC);
-/// 正文。
-pub const INK: Color32 = Color32::from_rgb(0x2A, 0x27, 0x20);
-/// 次要文字。
-pub const INK_2: Color32 = Color32::from_rgb(0x6C, 0x68, 0x60);
-/// 弱化文字：占位、表头。
-pub const INK_3: Color32 = Color32::from_rgb(0x9C, 0x97, 0x8D);
-/// 强调色：陶土橙。只用于主按钮、进度、选中态。
-pub const ACCENT: Color32 = Color32::from_rgb(0xC0, 0x63, 0x40);
-/// 强调色按下态。
-pub const ACCENT_INK: Color32 = Color32::from_rgb(0xA3, 0x4F, 0x31);
-/// 强调色淡底。
-pub const ACCENT_SOFT: Color32 = Color32::from_rgb(0xF2, 0xE1, 0xD7);
-/// 成功：已完成。
-pub const OK: Color32 = Color32::from_rgb(0x4E, 0x7A, 0x5C);
-pub const OK_SOFT: Color32 = Color32::from_rgb(0xE4, 0xED, 0xE4);
-/// 警告：等待、暂停。
-pub const WARN: Color32 = Color32::from_rgb(0xA9, 0x76, 0x2A);
-pub const WARN_SOFT: Color32 = Color32::from_rgb(0xF3, 0xEA, 0xD7);
-/// 失败。
-pub const BAD: Color32 = Color32::from_rgb(0xA2, 0x44, 0x3A);
-pub const BAD_SOFT: Color32 = Color32::from_rgb(0xF4, 0xE2, 0xDF);
-/// 进度槽底。
-pub const TRACK: Color32 = Color32::from_rgb(0xE7, 0xE2, 0xD5);
+// ---------------------------------------------------------------- 取色（明/暗）
+//
+// 色值不能是裸 `const`：明暗两套要能切换。做法是一个不可变的结构 + 一个全局开关，
+// 调用处写 `theme::paper()`。**带下划线的函数名与旧常量一一对应**，替换是机械的，
+// 编译器会替我们核对每一处。
 
-// ---------------------------------------------------------------- 字体
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// 正文与控件用的无衬线。Windows 上 `Segoe UI Variable` 从 Win11 才有，
-/// 退到 `Segoe UI`；中文走 `Microsoft YaHei UI`。
-pub const SANS: &str = "Segoe UI";
-/// 数字列用的等宽。下载器天天盯数字，列不齐最难受。
-pub const MONO: &str = "Consolas";
+static DARK: AtomicBool = AtomicBool::new(false);
 
-// ---------------------------------------------------------------- 状态色
+/// 当前是不是深色。界面层只需在切换时调 [`set_dark`]。
+pub fn set_dark(on: bool) {
+    DARK.store(on, Ordering::Relaxed);
+}
 
+pub fn is_dark() -> bool {
+    DARK.load(Ordering::Relaxed)
+}
+
+/// 一套配色。字段名 = 旧常量名的小写。
+struct Palette {
+    paper: Color32,
+    surface: Color32,
+    surface_2: Color32,
+    line: Color32,
+    line_soft: Color32,
+    ink: Color32,
+    ink_2: Color32,
+    ink_3: Color32,
+    accent: Color32,
+    accent_ink: Color32,
+    accent_soft: Color32,
+    ok: Color32,
+    ok_soft: Color32,
+    warn: Color32,
+    warn_soft: Color32,
+    bad: Color32,
+    bad_soft: Color32,
+    track: Color32,
+}
+
+/// 浅色：暖纸底 + 陶土橙（0.6.0 起的样子，不动）。
+const LIGHT: Palette = Palette {
+    paper: Color32::from_rgb(0xF6, 0xF3, 0xEC),
+    surface: Color32::from_rgb(0xFF, 0xFD, 0xF8),
+    surface_2: Color32::from_rgb(0xF1, 0xED, 0xE4),
+    line: Color32::from_rgb(0xE4, 0xDF, 0xD2),
+    line_soft: Color32::from_rgb(0xED, 0xE8, 0xDC),
+    ink: Color32::from_rgb(0x2A, 0x27, 0x20),
+    ink_2: Color32::from_rgb(0x6C, 0x68, 0x60),
+    ink_3: Color32::from_rgb(0x9C, 0x97, 0x8D),
+    accent: Color32::from_rgb(0xC0, 0x63, 0x40),
+    accent_ink: Color32::from_rgb(0xA3, 0x4F, 0x31),
+    accent_soft: Color32::from_rgb(0xF2, 0xE1, 0xD7),
+    ok: Color32::from_rgb(0x4E, 0x7A, 0x5C),
+    ok_soft: Color32::from_rgb(0xE4, 0xED, 0xE4),
+    warn: Color32::from_rgb(0xA9, 0x76, 0x2A),
+    warn_soft: Color32::from_rgb(0xF3, 0xEA, 0xD7),
+    bad: Color32::from_rgb(0xA2, 0x44, 0x3A),
+    bad_soft: Color32::from_rgb(0xF4, 0xE2, 0xDF),
+    track: Color32::from_rgb(0xE7, 0xE2, 0xD5),
+};
+
+/// 深色：**不是把浅色反相**。
+///
+/// 三条实测出来的原则：
+/// 1. 底色用暖黑（`#191713`）而不是纯黑 —— 纯黑配暖橙会发脏；
+/// 2. 强调色提亮到 `#D87E58`：`#C06340` 在深底上几乎没有存在感；
+/// 3. 语义色（ok/warn/bad）必须整体提亮 —— 深底上原来的墨绿 `#4E7A5C` 等于隐身。
+const DARK_PAL: Palette = Palette {
+    paper: Color32::from_rgb(0x19, 0x17, 0x13),
+    surface: Color32::from_rgb(0x21, 0x1E, 0x19),
+    surface_2: Color32::from_rgb(0x28, 0x24, 0x19),
+    line: Color32::from_rgb(0x37, 0x32, 0x2A),
+    line_soft: Color32::from_rgb(0x2E, 0x2A, 0x23),
+    ink: Color32::from_rgb(0xF2, 0xEE, 0xE6),
+    ink_2: Color32::from_rgb(0xB9, 0xB2, 0xA5),
+    ink_3: Color32::from_rgb(0x85, 0x7F, 0x72),
+    accent: Color32::from_rgb(0xD8, 0x7E, 0x58),
+    accent_ink: Color32::from_rgb(0xE8, 0x9A, 0x79),
+    accent_soft: Color32::from_rgb(0x3A, 0x2A, 0x22),
+    ok: Color32::from_rgb(0x79, 0xA9, 0x8A),
+    ok_soft: Color32::from_rgb(0x22, 0x30, 0x1F),
+    warn: Color32::from_rgb(0xD2, 0xA0, 0x5A),
+    warn_soft: Color32::from_rgb(0x35, 0x2C, 0x1D),
+    bad: Color32::from_rgb(0xCF, 0x7A, 0x6E),
+    bad_soft: Color32::from_rgb(0x3B, 0x26, 0x22),
+    track: Color32::from_rgb(0x33, 0x2E, 0x26),
+};
+
+fn pal() -> &'static Palette {
+    if is_dark() { &DARK_PAL } else { &LIGHT }
+}
+
+pub fn paper() -> Color32 {
+    pal().paper
+}
+pub fn surface() -> Color32 {
+    pal().surface
+}
+pub fn surface_2() -> Color32 {
+    pal().surface_2
+}
+pub fn line() -> Color32 {
+    pal().line
+}
+pub fn line_soft() -> Color32 {
+    pal().line_soft
+}
+pub fn ink() -> Color32 {
+    pal().ink
+}
+pub fn ink_2() -> Color32 {
+    pal().ink_2
+}
+pub fn ink_3() -> Color32 {
+    pal().ink_3
+}
+pub fn accent() -> Color32 {
+    pal().accent
+}
+pub fn accent_ink() -> Color32 {
+    pal().accent_ink
+}
+pub fn accent_soft() -> Color32 {
+    pal().accent_soft
+}
+pub fn ok() -> Color32 {
+    pal().ok
+}
+pub fn ok_soft() -> Color32 {
+    pal().ok_soft
+}
+pub fn warn() -> Color32 {
+    pal().warn
+}
+pub fn warn_soft() -> Color32 {
+    pal().warn_soft
+}
+pub fn bad() -> Color32 {
+    pal().bad
+}
+pub fn bad_soft() -> Color32 {
+    pal().bad_soft
+}
+pub fn track() -> Color32 {
+    pal().track
+}
 /// 状态字符串 → (文字, 前景色, 底色)。
 ///
 /// `TaskView.status` 是 `String`（HTTP 那边要序列化它），所以这里按字符串匹配，
 /// 不用 `TaskStatus`。UI 与托盘 tooltip 共用这一份。
 pub fn status_style(status: &str) -> (&'static str, Color32, Color32) {
     match status {
-        "running" => ("下载中", ACCENT_INK, ACCENT_SOFT),
-        "queued" => ("排队中", WARN, WARN_SOFT),
-        "paused" => ("已暂停", WARN, WARN_SOFT),
-        "done" => ("已完成", OK, OK_SOFT),
-        "failed" => ("失败", BAD, BAD_SOFT),
-        _ => ("未知", INK_3, SURFACE_2),
+        "running" => ("下载中", accent_ink(), accent_soft()),
+        "queued" => ("排队中", warn(), warn_soft()),
+        "paused" => ("已暂停", warn(), warn_soft()),
+        "done" => ("已完成", ok(), ok_soft()),
+        "failed" => ("失败", bad(), bad_soft()),
+        _ => ("未知", ink_3(), surface_2()),
     }
 }
 
 /// 把 egui 的视觉风格调成 demo 那套：去掉默认的蓝色高亮、圆角收小、
 /// 描边统一成 1pt 暖灰。
+///
+/// **明暗两套都要调**：只改 `Visuals::light()` 的底色而文字仍按深色配，
+/// 深色模式下原生控件（输入框、下拉箭头）会看不见。
 pub fn apply(ctx: &eframe::egui::Context) {
     use eframe::egui::{Stroke, Visuals};
 
-    let mut visuals = Visuals::light();
-    visuals.panel_fill = PAPER;
-    visuals.window_fill = SURFACE;
-    visuals.extreme_bg_color = SURFACE_2;
-    visuals.faint_bg_color = SURFACE_2;
-    visuals.override_text_color = Some(INK);
+    let mut visuals = if is_dark() {
+        Visuals::dark()
+    } else {
+        Visuals::light()
+    };
+    visuals.panel_fill = paper();
+    visuals.window_fill = surface();
+    visuals.extreme_bg_color = surface_2();
+    visuals.faint_bg_color = surface_2();
+    visuals.override_text_color = Some(ink());
 
-    visuals.widgets.noninteractive.bg_fill = SURFACE;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(STROKE, LINE);
+    visuals.widgets.noninteractive.bg_fill = surface();
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(STROKE, line());
 
-    visuals.widgets.inactive.bg_fill = SURFACE;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(STROKE, LINE);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(STROKE, INK_2);
+    visuals.widgets.inactive.bg_fill = surface();
+    visuals.widgets.inactive.bg_stroke = Stroke::new(STROKE, line());
+    visuals.widgets.inactive.fg_stroke = Stroke::new(STROKE, ink_2());
 
-    visuals.widgets.hovered.bg_fill = SURFACE_2;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(STROKE, LINE);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(STROKE, INK);
+    visuals.widgets.hovered.bg_fill = surface_2();
+    visuals.widgets.hovered.bg_stroke = Stroke::new(STROKE, line());
+    visuals.widgets.hovered.fg_stroke = Stroke::new(STROKE, ink());
 
-    visuals.widgets.active.bg_fill = ACCENT_SOFT;
-    visuals.widgets.active.bg_stroke = Stroke::new(STROKE, ACCENT);
-    visuals.widgets.active.fg_stroke = Stroke::new(STROKE, ACCENT_INK);
+    visuals.widgets.active.bg_fill = accent_soft();
+    visuals.widgets.active.bg_stroke = Stroke::new(STROKE, accent());
+    visuals.widgets.active.fg_stroke = Stroke::new(STROKE, accent_ink());
 
-    visuals.selection.bg_fill = ACCENT_SOFT;
-    visuals.selection.stroke = Stroke::new(STROKE, ACCENT_INK);
+    visuals.selection.bg_fill = accent_soft();
+    visuals.selection.stroke = Stroke::new(STROKE, accent_ink());
 
+    // **两件都要做**：`set_visuals` 只改当前这一份；`set_theme` 才定下"这套配色的身份"。
+    // 只做前者的话，eframe 一旦按系统外观重新应用主题（Windows 浅色模式），
+    // 我们设的深色就会被顶掉 —— 实测表现是"一半控件深、一半浅"。
+    ctx.set_theme(if is_dark() {
+        eframe::egui::Theme::Dark
+    } else {
+        eframe::egui::Theme::Light
+    });
     ctx.set_visuals(visuals);
 }

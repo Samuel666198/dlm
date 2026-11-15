@@ -56,7 +56,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("一行一个链接，空行和 # 开头的行会忽略")
                         .size(10.5)
-                        .color(super::theme::INK_3),
+                        .color(super::theme::ink_3()),
                 );
                 ui.add_space(6.0);
                 ui.add(

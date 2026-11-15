@@ -135,7 +135,7 @@ impl Tray {
 
 /// 生成 32×32 的托盘图标：陶土橙圆角方块 + 白色下箭头。
 ///
-/// 与 `theme::ACCENT` 同色，保证托盘与窗口是同一套视觉。
+/// 与 `theme::accent()` 同色，保证托盘与窗口是同一套视觉。
 pub fn make_icon() -> Icon {
     const SIZE: u32 = 32;
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];

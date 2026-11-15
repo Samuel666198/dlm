@@ -33,14 +33,14 @@ impl App {
                 ui.label(
                     egui::RichText::new("支持公开直链；带 Cookie 的下载仍走浏览器入口。")
                         .size(11.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
                 ui.add_space(10.0);
 
                 ui.label(
                     egui::RichText::new("下载 URL")
                         .size(11.5)
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 );
                 let url = ui.add(
                     egui::TextEdit::singleline(&mut self.add_form.url)
@@ -54,7 +54,11 @@ impl App {
                 }
 
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("文件名").size(11.5).color(theme::INK_2));
+                ui.label(
+                    egui::RichText::new("文件名")
+                        .size(11.5)
+                        .color(theme::ink_2()),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.add_form.name)
                         .hint_text("自动从 URL 推断")
@@ -65,7 +69,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("Referer（可选）")
                         .size(11.5)
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.add_form.referer)
@@ -75,7 +79,7 @@ impl App {
 
                 if let Some(err) = &self.add_form.error {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(err).size(11.5).color(theme::BAD));
+                    ui.label(egui::RichText::new(err).size(11.5).color(theme::bad()));
                 }
 
                 ui.add_space(14.0);
@@ -172,13 +176,13 @@ impl App {
                 ui.label(
                     egui::RichText::new("已经下载到磁盘的文件不会被删除，只是不再列在队列里。")
                         .size(11.5)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new(
-                            egui::RichText::new("删除").color(theme::BAD),
+                            egui::RichText::new("删除").color(theme::bad()),
                         ))
                         .clicked()
                     {

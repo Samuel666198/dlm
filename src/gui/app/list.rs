@@ -149,7 +149,7 @@ impl App {
 
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, 0.0, eframe::egui::Color32::from_rgb(0xFB, 0xF6, 0xF0));
+            painter.rect_filled(rect, 0.0, theme::accent_soft());
             // 左侧 2.5pt 强调条。
             painter.rect_filled(
                 egui::Rect::from_min_size(
@@ -157,13 +157,13 @@ impl App {
                     egui::vec2(2.5, rect.height() - 16.0),
                 ),
                 2.0,
-                theme::ACCENT,
+                theme::accent(),
             );
         } else if checked {
             // 勾中但没在看：淡蓝底。与"正在查看"的橙条区分开，两种状态可以同时存在。
-            painter.rect_filled(rect, 0.0, eframe::egui::Color32::from_rgb(0xEE, 0xF3, 0xF6));
+            painter.rect_filled(rect, 0.0, theme::surface_2());
         } else if response.hovered() {
-            painter.rect_filled(rect, 0.0, eframe::egui::Color32::from_rgb(0xFB, 0xF8, 0xF2));
+            painter.rect_filled(rect, 0.0, theme::surface_2());
         }
         // 行分隔线。
         painter.rect_filled(
@@ -172,7 +172,7 @@ impl App {
                 egui::vec2(rect.width(), 1.0),
             ),
             0.0,
-            theme::LINE_SOFT,
+            theme::line_soft(),
         );
 
         let cols = columns(rect);
@@ -186,16 +186,22 @@ impl App {
             ui,
             size_rect,
             &fmt_bytes_opt(task.total_len),
-            theme::INK_2,
+            theme::ink_2(),
             12.0,
         );
         draw_progress(ui, progress_rect, task);
         let speed = self.speed_of(&task.id);
         if let Some(speed_rect) = cols.speed {
-            text_right(ui, speed_rect, &speed_text(task, speed), theme::INK_2, 12.0);
+            text_right(
+                ui,
+                speed_rect,
+                &speed_text(task, speed),
+                theme::ink_2(),
+                12.0,
+            );
         }
         if let Some(eta_rect) = cols.eta {
-            text_right(ui, eta_rect, &eta_text(task, speed), theme::INK_3, 12.0);
+            text_right(ui, eta_rect, &eta_text(task, speed), theme::ink_3(), 12.0);
         }
         draw_status(ui, status_rect, task);
 
@@ -227,7 +233,7 @@ impl App {
         let mut is_checked = checked;
         let cb_resp = ui
             .put(cb_rect, egui::Checkbox::without_text(&mut is_checked))
-            .on_hover_text("加入批量选择");
+            .on_hover_text(format!("勾选 {}", task.name));
 
         if cb_resp.changed() {
             // 勾复选框**只动批量**：右栏不跳，避免"我想多选几条"把详情也带着乱翻。
@@ -263,7 +269,7 @@ impl App {
             egui::Align2::LEFT_CENTER,
             elide(name, 46),
             egui::FontId::proportional(12.5),
-            theme::INK,
+            theme::ink(),
         );
         // 副标题：host 或落点目录。
         painter.text(
@@ -271,7 +277,7 @@ impl App {
             egui::Align2::LEFT_CENTER,
             elide(&host_of(&task.url), 56),
             egui::FontId::proportional(11.0),
-            theme::INK_3,
+            theme::ink_3(),
         );
     }
 
@@ -283,14 +289,14 @@ impl App {
             egui::Sense::hover(),
         );
         let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, theme::SURFACE);
+        painter.rect_filled(rect, 0.0, theme::surface());
         painter.rect_filled(
             egui::Rect::from_min_size(
                 egui::pos2(rect.left(), rect.bottom() - 1.0),
                 egui::vec2(rect.width(), 1.0),
             ),
             0.0,
-            theme::LINE,
+            theme::line(),
         );
 
         let cols = columns(rect);
@@ -300,7 +306,7 @@ impl App {
         let status_rect = cols.status;
 
         let font = egui::FontId::proportional(10.5);
-        let ink = theme::INK_3;
+        let ink = theme::ink_3();
         painter.text(
             name_rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -372,14 +378,14 @@ impl App {
         let mut act: Option<BatchAction> = None;
 
         egui::Frame::new()
-            .fill(egui::Color32::from_rgb(0xEE, 0xF3, 0xF6))
+            .fill(theme::surface_2())
             .inner_margin(egui::Margin::symmetric(12, 7))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!("已选 {} 项", targets.len()))
                             .size(11.5)
-                            .color(theme::INK_2),
+                            .color(theme::ink_2()),
                     );
                     ui.add_space(8.0);
                     if ui.button("继续").clicked() {
@@ -429,13 +435,13 @@ impl App {
     fn empty_state(&self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(120.0);
-            ui.label(egui::RichText::new("↓").size(44.0).color(theme::INK_3));
+            ui.label(egui::RichText::new("↓").size(44.0).color(theme::ink_3()));
             ui.add_space(9.0);
             ui.label(
                 egui::RichText::new("队列是空的")
                     .size(13.0)
                     .strong()
-                    .color(theme::INK_2),
+                    .color(theme::ink_2()),
             );
             ui.add_space(6.0);
             ui.label(
@@ -444,7 +450,7 @@ impl App {
                      扩展会在页面上留一个悬浮球，随时能投递。",
                 )
                 .size(12.0)
-                .color(theme::INK_3),
+                .color(theme::ink_3()),
             );
         });
     }
@@ -498,7 +504,7 @@ fn draw_progress(ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
         egui::pos2(rect.left(), rect.center().y - track_h / 2.0),
         egui::vec2(rect.width() - pct_w - 8.0, track_h),
     );
-    painter.rect_filled(track_rect, 99.0, theme::TRACK);
+    painter.rect_filled(track_rect, 99.0, theme::track());
 
     let pct = (task.progress / 100.0).clamp(0.0, 1.0) as f32;
     if pct > 0.0 {
@@ -507,9 +513,9 @@ fn draw_progress(ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
             egui::vec2(track_rect.width() * pct, track_h),
         );
         let color = if task.status == "done" {
-            theme::OK
+            theme::ok()
         } else {
-            theme::ACCENT
+            theme::accent()
         };
         painter.rect_filled(fill, 99.0, color);
     }
@@ -524,7 +530,7 @@ fn draw_progress(ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
         egui::Align2::RIGHT_CENTER,
         label,
         egui::FontId::monospace(11.0),
-        theme::INK_2,
+        theme::ink_2(),
     );
 }
 

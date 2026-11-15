@@ -149,8 +149,12 @@ pub(crate) struct DrawerDiag {
 /// 而不是留一块空白让人以为界面坏了。
 fn painter_spark(ui: &egui::Ui, rect: egui::Rect, history: &[f64], stalled: bool) {
     let painter = ui.painter();
-    painter.rect_filled(rect, 4.0, theme::SURFACE_2);
-    let color = if stalled { theme::WARN } else { theme::ACCENT };
+    painter.rect_filled(rect, 4.0, theme::surface_2());
+    let color = if stalled {
+        theme::warn()
+    } else {
+        theme::accent()
+    };
     let pts = super::diagnose::spark_points(history, rect.shrink(3.0));
     if pts.len() < 2 {
         painter.line_segment(
@@ -158,7 +162,7 @@ fn painter_spark(ui: &egui::Ui, rect: egui::Rect, history: &[f64], stalled: bool
                 egui::pos2(rect.left() + 3.0, rect.center().y),
                 egui::pos2(rect.right() - 3.0, rect.center().y),
             ],
-            egui::Stroke::new(1.0, theme::LINE),
+            egui::Stroke::new(1.0, theme::line()),
         );
         return;
     }
@@ -174,7 +178,8 @@ pub(crate) fn drawer_body(
 ) -> DrawerActions {
     let mut actions = DrawerActions::default();
 
-    ui.painter().rect_filled(ui.max_rect(), 0.0, theme::SURFACE);
+    ui.painter()
+        .rect_filled(ui.max_rect(), 0.0, theme::surface());
     ui.add_space(12.0);
 
     // ---- 标题 + 关闭 ----
@@ -185,13 +190,13 @@ pub(crate) fn drawer_body(
                 egui::RichText::new(elide(&task.name, 34))
                     .size(14.0)
                     .strong()
-                    .color(theme::INK),
+                    .color(theme::ink()),
             );
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(host_of(&task.url))
                     .size(11.0)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             );
         });
         // **只有一个关闭入口**。0.6.0 是浮窗：标题栏自带一个 ×，这里又画一个，
@@ -219,14 +224,14 @@ pub(crate) fn drawer_body(
             egui::RichText::new(format!("{:.0}%", task.progress))
                 .size(20.0)
                 .monospace()
-                .color(theme::ACCENT),
+                .color(theme::accent()),
         );
         ui.add_space(8.0);
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(status_label(&task.status))
                     .size(12.0)
-                    .color(theme::INK),
+                    .color(theme::ink()),
             );
             ui.label(
                 egui::RichText::new(format!(
@@ -236,7 +241,7 @@ pub(crate) fn drawer_body(
                 ))
                 .size(11.0)
                 .monospace()
-                .color(theme::INK_3),
+                .color(theme::ink_3()),
             );
         });
     });
@@ -277,7 +282,7 @@ pub(crate) fn drawer_body(
             ui.label(
                 egui::RichText::new("最近速度")
                     .size(10.5)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             );
         });
         ui.horizontal(|ui| {
@@ -293,9 +298,9 @@ pub(crate) fn drawer_body(
                 ui.add_space(16.0);
                 ui.label(egui::RichText::new(note).size(10.5).color(
                     if diag.stalled_secs.is_some() {
-                        theme::WARN
+                        theme::warn()
                     } else {
-                        theme::INK_3
+                        theme::ink_3()
                     },
                 ));
             });
@@ -310,7 +315,7 @@ pub(crate) fn drawer_body(
     for (label, value) in [("落点", task.path.as_str()), ("URL", task.url.as_str())] {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            ui.label(egui::RichText::new(label).size(10.5).color(theme::INK_3));
+            ui.label(egui::RichText::new(label).size(10.5).color(theme::ink_3()));
         });
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -319,7 +324,7 @@ pub(crate) fn drawer_body(
                     egui::RichText::new(elide(value, 46))
                         .size(11.0)
                         .monospace()
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 )
                 .sense(egui::Sense::click()),
             );
@@ -357,7 +362,7 @@ pub(crate) fn drawer_body(
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
-        ui.label(egui::RichText::new("日志").size(10.5).color(theme::INK_3));
+        ui.label(egui::RichText::new("日志").size(10.5).color(theme::ink_3()));
     });
     ui.add_space(4.0);
     // **不要包在 `ui.horizontal(...)` 里**：horizontal 的横轴是无限宽，label 于是永远不换行，
@@ -381,7 +386,7 @@ pub(crate) fn drawer_body(
                             egui::RichText::new(text)
                                 .size(10.5)
                                 .monospace()
-                                .color(theme::INK_2),
+                                .color(theme::ink_2()),
                         )
                         .wrap(),
                     );
@@ -403,12 +408,12 @@ pub(crate) fn read_log_tail(path: &std::path::Path, lines: usize) -> String {
 
 fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.vertical(|ui| {
-        ui.label(egui::RichText::new(key).size(10.5).color(theme::INK_3));
+        ui.label(egui::RichText::new(key).size(10.5).color(theme::ink_3()));
         ui.label(
             egui::RichText::new(value)
                 .size(11.5)
                 .monospace()
-                .color(theme::INK),
+                .color(theme::ink()),
         );
     });
 }

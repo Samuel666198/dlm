@@ -126,6 +126,8 @@ pub struct App {
     pub(super) sidebar_collapsed: bool,
     /// 批量操作勾中的任务（与"右栏正在查看的那一条"是两套状态，见 `batch` 模块文档）。
     pub(super) batch: batch::Batch,
+    /// 已经应用过的主题偏好。与 `draft.theme` 比对，切换即时生效而不必点保存。
+    pub(super) applied_theme: String,
     /// 窗口当前是否可见。托盘「显示窗口」把它置 true。
     pub window_visible: bool,
     /// 托盘句柄。None = 建不起来（无托盘环境），此时关窗即退出。
@@ -281,6 +283,7 @@ impl App {
             close_to_tray: true,
             sidebar_collapsed: settings.sidebar_collapsed,
             batch: batch::Batch::new(),
+            applied_theme: settings.theme.clone(),
             window_visible: true,
             tray: tray::Tray::new(),
             tray_hint_at: 0,
@@ -530,6 +533,11 @@ impl App {
         let ctx = ui.ctx().clone();
 
         // 速率采样要在画之前做：这一帧画出来的数字与它同一时刻。
+        // 主题自愈：eframe 会在系统外观变化时重新应用主题，把我们的深色顶掉。
+        // 每帧比一次，不一致就拉回来 —— 比去猜 eframe 的时机便宜也可靠。
+        if (ctx.theme() == eframe::egui::Theme::Dark) != theme::is_dark() {
+            theme::apply(&ctx);
+        }
         self.sample_rates();
         // Agent 票据：同步开关、清过期、收回执。
         self.sync_agent_gate();
@@ -647,6 +655,20 @@ impl App {
             self.run_command(id, &ctx);
         }
     }
+}
+
+/// 按偏好应用主题。`system` 走 egui 对系统外观的探测。
+pub(crate) fn apply_theme_preference(pref: &str) {
+    let dark = match pref {
+        "dark" => true,
+        "light" => false,
+        // 跟随系统：`Context::system_theme()` 拿不到就按浅色。
+        _ => eframe::egui::Context::default()
+            .system_theme()
+            .map(|t| t == eframe::egui::Theme::Dark)
+            .unwrap_or(false),
+    };
+    crate::gui::app::theme::set_dark(dark);
 }
 
 /// 把窗口藏起来（`--autostart` 纯托盘用）。

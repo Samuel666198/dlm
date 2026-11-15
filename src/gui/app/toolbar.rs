@@ -173,7 +173,7 @@ fn brand_block(ui: &mut egui::Ui) {
         egui::pos2(rect.left() + 12.0, rect.center().y),
         egui::vec2(24.0, 24.0),
     );
-    painter.rect_filled(logo, 6.0, theme::ACCENT);
+    painter.rect_filled(logo, 6.0, theme::accent());
     super::icons::draw_icon(
         painter,
         Icon::Download,
@@ -185,7 +185,7 @@ fn brand_block(ui: &mut egui::Ui) {
         egui::Align2::LEFT_CENTER,
         crate::gui::APP_NAME,
         egui::FontId::proportional(14.0),
-        theme::INK,
+        theme::ink(),
     );
 }
 
@@ -197,7 +197,7 @@ impl App {
     fn search_field(&mut self, ui: &mut egui::Ui, width: f32) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
         let painter = ui.painter().clone();
-        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::SURFACE_2);
+        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::surface_2());
 
         let chip_w = 46.0;
         let inner = egui::Rect::from_min_max(
@@ -226,13 +226,13 @@ impl App {
             egui::pos2(rect.right() - chip_w / 2.0 - 7.0, rect.center().y),
             egui::vec2(chip_w, 18.0),
         );
-        painter.rect_filled(chip, 4.0, theme::SURFACE);
+        painter.rect_filled(chip, 4.0, theme::surface());
         painter.text(
             chip.center(),
             egui::Align2::CENTER_CENTER,
             "Ctrl K",
             egui::FontId::monospace(9.5),
-            theme::INK_3,
+            theme::ink_3(),
         );
         // 点提示也能聚焦：记不住键位的人有个可点的地方。
         if ui

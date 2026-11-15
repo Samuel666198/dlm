@@ -100,20 +100,20 @@ impl App {
                 ui.label(
                     egui::RichText::new("有 Agent 想往队列里加任务。点「允许」才会真的开始下载。")
                         .size(11.5)
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                 );
                 ui.add_space(8.0);
                 for (id, name, url, _referer) in &pending {
                     egui::Frame::new()
-                        .fill(theme::SURFACE_2)
+                        .fill(theme::surface_2())
                         .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(name).size(12.5).color(theme::INK));
+                            ui.label(egui::RichText::new(name).size(12.5).color(theme::ink()));
                             ui.label(
                                 egui::RichText::new(url)
                                     .size(10.0)
                                     .monospace()
-                                    .color(theme::INK_3),
+                                    .color(theme::ink_3()),
                             );
                             ui.horizontal(|ui| {
                                 if ui.button("允许").clicked() {
@@ -125,7 +125,7 @@ impl App {
                                 ui.label(
                                     egui::RichText::new(format!("票据 {id}"))
                                         .size(9.5)
-                                        .color(theme::INK_3),
+                                        .color(theme::ink_3()),
                                 );
                             });
                         });
@@ -137,7 +137,7 @@ impl App {
                         TICKET_TTL_SECS
                     ))
                     .size(10.0)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
                 );
             });
 

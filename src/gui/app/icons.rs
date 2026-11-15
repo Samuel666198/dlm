@@ -129,14 +129,14 @@ pub(crate) fn tool_button(
     let hovered = enabled && response.hovered();
     let painter = ui.painter();
     if hovered {
-        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::SURFACE_2);
+        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::surface_2());
     }
     let ink = if !enabled {
-        theme::INK_3
+        theme::ink_3()
     } else if hovered {
-        theme::INK
+        theme::ink()
     } else {
-        theme::INK_2
+        theme::ink_2()
     };
     let icon_rect =
         egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, 8.0), egui::vec2(16.0, 16.0));
@@ -179,7 +179,7 @@ pub(crate) fn action_button(
         rect,
         theme::RADIUS - 3.0,
         if hovered {
-            theme::SURFACE
+            theme::surface()
         } else {
             egui::Color32::TRANSPARENT
         },
@@ -188,17 +188,17 @@ pub(crate) fn action_button(
             if danger && enabled {
                 egui::Color32::from_rgb(0xF3, 0xCD, 0xC7)
             } else {
-                theme::LINE
+                theme::line()
             },
         ),
         egui::StrokeKind::Inside,
     );
     let ink = if !enabled {
-        theme::INK_3
+        theme::ink_3()
     } else if danger {
-        theme::BAD
+        theme::bad()
     } else {
-        theme::ACCENT_INK
+        theme::accent_ink()
     };
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + 17.0, rect.center().y),
@@ -694,7 +694,7 @@ mod tests {
                 let x = 16.0 + (i % 6) as f32 * 20.0;
                 let y = 16.0 + (i / 6) as f32 * 20.0;
                 let rect = egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(16.0, 16.0));
-                draw_icon(painter, *icon, rect, theme::INK);
+                draw_icon(painter, *icon, rect, theme::ink());
                 painted += 1;
             }
         });

@@ -35,15 +35,14 @@ impl App {
 
         // 底：浅蓝（设计稿 #f0f7ff）—— 与工具条、列表都区分开，一眼看出"这是上下文"。
         let rect = ui.max_rect();
-        ui.painter()
-            .rect_filled(rect, 0.0, egui::Color32::from_rgb(0xF0, 0xF7, 0xFF));
+        ui.painter().rect_filled(rect, 0.0, theme::accent_soft());
 
         ui.horizontal_centered(|ui| {
             ui.add_space(14.0);
             ui.label(
                 egui::RichText::new("已选 · ")
                     .size(11.5)
-                    .color(theme::ACCENT_INK),
+                    .color(theme::accent_ink()),
             );
             // 名字可能很长：截一半也不许把按钮挤出去。
             let name = elide(&task.name, 28);
@@ -51,7 +50,7 @@ impl App {
                 egui::RichText::new(name)
                     .size(11.5)
                     .strong()
-                    .color(theme::INK),
+                    .color(theme::ink()),
             );
 
             ui.add_space(12.0);
@@ -76,7 +75,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("Esc 取消选择")
                         .size(11.0)
-                        .color(theme::INK_3),
+                        .color(theme::ink_3()),
                 );
             });
         });

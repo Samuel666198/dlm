@@ -69,6 +69,7 @@ pub(crate) enum SettingKey {
     AgentConfirm,
     Autostart,
     CloseToTray,
+    Theme,
     SidebarCollapsed,
     TrayHint,
     TrayHintShown,
@@ -245,6 +246,14 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "窗口",
         "关闭窗口时收进托盘",
         "关闭窗口时收进托盘；退出请用托盘菜单",
+    ),
+    spec(
+        SettingKey::Theme,
+        "theme",
+        Category::Interface,
+        "外观",
+        "主题",
+        "跟随系统 / 浅色 / 深色；切换后立即生效",
     ),
     spec(
         SettingKey::SidebarCollapsed,

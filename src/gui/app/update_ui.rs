@@ -88,7 +88,7 @@ impl App {
             ui.label(
                 egui::RichText::new("检查更新…")
                     .size(11.0)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             );
             return;
         }
@@ -100,7 +100,7 @@ impl App {
                 format!("有新版 {latest}")
             };
             let button =
-                egui::Button::new(egui::RichText::new(text).size(11.0).color(theme::ACCENT))
+                egui::Button::new(egui::RichText::new(text).size(11.0).color(theme::accent()))
                     .frame(false);
             if ui
                 .add(button)
@@ -115,7 +115,7 @@ impl App {
             let button = egui::Button::new(
                 egui::RichText::new("更新检查失败")
                     .size(11.0)
-                    .color(theme::INK_3),
+                    .color(theme::ink_3()),
             )
             .frame(false);
             if ui.add(button).on_hover_text("点开看原因").clicked() {
@@ -152,14 +152,14 @@ impl App {
                         egui::RichText::new(format!("发行版 {} → {latest}", view.current))
                             .size(14.0)
                             .strong()
-                            .color(theme::ACCENT),
+                            .color(theme::accent()),
                     );
                 } else {
                     let current = view.latest.clone().unwrap_or(view.current.clone());
                     ui.label(
                         egui::RichText::new(format!("已是最新（发行版 {current}）"))
                             .size(13.0)
-                            .color(theme::INK_2),
+                            .color(theme::ink_2()),
                     );
                 }
 
@@ -177,7 +177,7 @@ impl App {
                             view.core_current, core_target
                         ))
                         .size(11.5)
-                        .color(theme::INK_2),
+                        .color(theme::ink_2()),
                     );
                 }
 
@@ -188,7 +188,7 @@ impl App {
                     view.extension_disk.as_deref(),
                     view.extension_running.as_deref(),
                 ) {
-                    ui.label(egui::RichText::new(line).size(11.5).color(theme::INK_2));
+                    ui.label(egui::RichText::new(line).size(11.5).color(theme::ink_2()));
                 }
 
                 if let Some(notes) = &view.notes
@@ -198,9 +198,9 @@ impl App {
                     ui.label(
                         egui::RichText::new("这个版本改了什么")
                             .size(10.5)
-                            .color(theme::INK_3),
+                            .color(theme::ink_3()),
                     );
-                    ui.label(egui::RichText::new(notes).size(11.5).color(theme::INK_2));
+                    ui.label(egui::RichText::new(notes).size(11.5).color(theme::ink_2()));
                 }
 
                 // 有新版但不能自动装：原因必须写出来，否则用户只会看到「有新版」
@@ -209,13 +209,13 @@ impl App {
                     && !blocked.trim().is_empty()
                 {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(blocked).size(11.0).color(theme::BAD));
+                    ui.label(egui::RichText::new(blocked).size(11.0).color(theme::bad()));
                 }
                 if let Some(err) = &view.error
                     && !err.trim().is_empty()
                 {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(err).size(11.0).color(theme::BAD));
+                    ui.label(egui::RichText::new(err).size(11.0).color(theme::bad()));
                 }
 
                 ui.add_space(4.0);
@@ -230,11 +230,11 @@ impl App {
                         }
                     }
                 };
-                ui.label(egui::RichText::new(meta).size(10.0).color(theme::INK_3));
+                ui.label(egui::RichText::new(meta).size(10.0).color(theme::ink_3()));
 
                 if let Some(err) = &self.update_install_error {
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new(err).size(11.0).color(theme::BAD));
+                    ui.label(egui::RichText::new(err).size(11.0).color(theme::bad()));
                 }
 
                 ui.add_space(10.0);
@@ -288,7 +288,7 @@ impl App {
                         ui.label(
                             egui::RichText::new("扩展重载")
                                 .size(10.5)
-                                .color(theme::INK_3),
+                                .color(theme::ink_3()),
                         );
                         if ui
                             .button("复制 chrome://extensions")

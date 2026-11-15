@@ -136,7 +136,7 @@ fn section_label(ui: &mut egui::Ui, text: &str, collapsed: bool) {
         egui::Align2::LEFT_CENTER,
         text.to_uppercase(),
         egui::FontId::proportional(10.5),
-        theme::INK_3,
+        theme::ink_3(),
     );
 }
 
@@ -151,7 +151,7 @@ fn divider(ui: &mut egui::Ui, collapsed: bool) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     let line = egui::Rect::from_center_size(rect.center(), egui::vec2(width, 1.0));
-    ui.painter().rect_filled(line, 0.0, theme::LINE);
+    ui.painter().rect_filled(line, 0.0, theme::line());
     ui.add_space(if collapsed { 6.0 } else { 2.0 });
 }
 
@@ -187,9 +187,13 @@ fn entry_row(
     let hovered = response.hovered();
     if hovered {
         ui.painter()
-            .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 7.0, theme::SURFACE_2);
+            .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 7.0, theme::surface_2());
     }
-    let ink = if hovered { theme::INK } else { theme::INK_2 };
+    let ink = if hovered {
+        theme::ink()
+    } else {
+        theme::ink_2()
+    };
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(
             if collapsed {
@@ -242,28 +246,27 @@ fn nav_item(
     }
 
     if active {
-        ui.painter().rect_filled(rect, 7.0, theme::ACCENT_SOFT);
+        ui.painter().rect_filled(rect, 7.0, theme::accent_soft());
     } else if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, 7.0, eframe::egui::Color32::from_rgb(0xE9, 0xE4, 0xD8));
+        ui.painter().rect_filled(rect, 7.0, theme::surface_2());
     }
 
     let ink = if active {
-        theme::ACCENT_INK
+        theme::accent_ink()
     } else {
-        theme::INK_2
+        theme::ink_2()
     };
 
     {
         // 状态图标带颜色语义：一列黑字要逐行读才知道哪行是失败，带色可以扫过去。
         let icon_color = if active {
-            theme::ACCENT_INK
+            theme::accent_ink()
         } else {
             match icon {
-                Icon::Running => theme::ACCENT,
-                Icon::Done => theme::OK,
-                Icon::Failed => theme::BAD,
-                _ => theme::INK_3,
+                Icon::Running => theme::accent(),
+                Icon::Done => theme::ok(),
+                Icon::Failed => theme::bad(),
+                _ => theme::ink_3(),
             }
         };
         let icon_rect = egui::Rect::from_center_size(
@@ -294,9 +297,9 @@ fn nav_item(
             count.to_string(),
             egui::FontId::monospace(11.0),
             if active {
-                theme::ACCENT_INK
+                theme::accent_ink()
             } else {
-                theme::INK_3
+                theme::ink_3()
             },
         );
     } else {
