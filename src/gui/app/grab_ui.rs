@@ -36,6 +36,30 @@ use crate::gui::app::theme;
 ///
 /// 抽成纯函数是因为这条判据写在设计稿的验收里，而它以前埋在界面代码的分支里 ——
 /// 没人能证明"没勾选时按钮一定点不动"，只能靠手点一遍。
+/// 一步的标题：小方块里一个阿拉伯数字 + 一句动作。
+///
+/// 用数字方块而不是 ①②③：那几个字形依赖字体，缺了就变方框（本项目踩过好几次）。
+/// 方块自己画，数字用画笔画 —— 与图标同一套做法。
+fn step_label(ui: &mut egui::Ui, n: u32, text: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 4.0, theme::accent_soft());
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            n.to_string(),
+            egui::FontId::proportional(11.0),
+            theme::accent_ink(),
+        );
+        ui.label(
+            egui::RichText::new(text)
+                .size(11.5)
+                .strong()
+                .color(theme::ink_2()),
+        );
+    });
+}
+
 pub(crate) fn enqueue_enabled(picked: usize) -> bool {
     picked > 0
 }
@@ -67,7 +91,9 @@ impl App {
                 );
                 ui.add_space(8.0);
 
-                // ---- 起始页 ----
+                // ---- 第 1 步：起始页 ----
+                step_label(ui, 1, "填起始页，点扫描");
+                ui.add_space(4.0);
                 egui::Frame::new()
                     .fill(theme::surface())
                     .stroke(egui::Stroke::new(theme::STROKE, theme::line()))
@@ -165,8 +191,10 @@ impl App {
 
                 ui.add_space(8.0);
 
-                // ---- 清单 ----
+                // ---- 第 2 步：清单 ----
                 if let Some(plan) = self.grab_plan.clone() {
+                    step_label(ui, 2, "勾选要下的文件");
+                    ui.add_space(4.0);
                     let picked = self.grab_checked.iter().filter(|c| **c).count();
                     ui.horizontal(|ui| {
                         ui.label(
@@ -227,6 +255,8 @@ impl App {
                     ui.add_space(6.0);
                     ui.separator();
                     ui.add_space(6.0);
+                    step_label(ui, 3, "加入队列");
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(format!("已选 {picked} 个"))
