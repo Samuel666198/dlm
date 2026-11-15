@@ -24,6 +24,8 @@ pub(crate) enum Category {
     Proxy,
     Agent,
     Interface,
+    /// 浏览器扩展：安装状态、管理与更新（0.7.0 新增）。
+    Browser,
     Advanced,
 }
 
@@ -35,6 +37,7 @@ impl Category {
         Category::Proxy,
         Category::Agent,
         Category::Interface,
+        Category::Browser,
         Category::Advanced,
     ];
 
@@ -46,6 +49,7 @@ impl Category {
             Category::Proxy => "代理",
             Category::Agent => "Agent 接入",
             Category::Interface => "界面",
+            Category::Browser => "浏览器扩展",
             Category::Advanced => "高级",
         }
     }
@@ -385,9 +389,9 @@ mod tests {
         assert_eq!(keys.len(), SPECS.len(), "SettingKey 重复");
     }
 
-    /// **判据 2**：每个条目都落在七个分类之一，没有"其它"兜底。
+    /// **判据 2**：每个条目都落在分类列表之一，没有"其它"兜底。
     #[test]
-    fn every_spec_belongs_to_one_of_the_seven_categories() {
+    fn every_spec_belongs_to_one_of_the_categories() {
         for spec in SPECS {
             assert!(
                 Category::ALL.contains(&spec.category),
@@ -405,8 +409,14 @@ mod tests {
                 spec.field
             );
         }
-        // 七个分类都要有内容：空分类等于把一条设置藏起来了。
+        // 每个分类都要有内容：空分类等于把一条设置藏起来了。
+        //
+        // 「浏览器扩展」是例外：那一页是一片**状态面板**（装了没、跑的是哪个版本、
+        // 怎么重载），没有可勾可填的设置项。允许它空，但空得有名有姓 —— 不是漏了。
         for category in Category::ALL {
+            if *category == Category::Browser {
+                continue;
+            }
             assert!(
                 specs_in(*category).next().is_some(),
                 "分类「{}」是空的",

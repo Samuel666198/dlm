@@ -393,7 +393,7 @@ fn release_page(download_url: &str) -> Option<String> {
 }
 
 /// 用系统默认方式打开一个网页。
-fn open_external(url: &str) {
+pub(crate) fn open_external(url: &str) {
     #[cfg(windows)]
     {
         let _ = std::process::Command::new("cmd")

@@ -739,6 +739,24 @@ pub(crate) fn install_update_view(
 }
 
 /// 已安装扩展的目录。与 `packaging/install.ps1` 里的 `$Ext` 同一个地方。
+/// 在资源管理器里打开一个目录。
+///
+/// 与「打开文件 / 打开文件夹」同一套门禁：`DLM_NO_SHELL_OPEN` 置上时不真的拉起来，
+/// 否则无人值守的测试会弹出窗口，把后续用例的键盘焦点抢走。
+pub fn open_dir(dir: &std::path::Path) {
+    if std::env::var_os("DLM_NO_SHELL_OPEN").is_some() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
+}
+
 pub fn default_extension_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)

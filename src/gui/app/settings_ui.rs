@@ -197,6 +197,12 @@ impl App {
                 let category = self.settings_category;
                 if category == Category::Agent {
                     self.agent_panel(ui);
+                } else if category == Category::Browser {
+                    self.browser_panel(ui);
+                } else if category == Category::Advanced {
+                    // 版本一览放最早：「高级」是出问题第一个点进来的地方，
+                    // 而排查第一句要问的就是这四个数。
+                    self.version_block(ui);
                 }
                 self.render_specs(ui, specs_in(category).collect());
             });
@@ -616,6 +622,169 @@ impl App {
     ///
     /// 判据是"CLI 命令现在就能用、MCP 配置没装就置灰"。置灰不是偷懒：
     /// 把一段指向不存在程序的配置交给用户，比不提供更糟。
+    /// 浏览器扩展：装没装、跑的是哪个版本、以及"为什么本程序替不了你更新"。
+    ///
+    /// **文案必须诚实**：Chromium 不允许程序化安装或更新「已解压」扩展，这是安全边界。
+    /// 所以这里给的是三件能做对的事（对账版本、复制路径、打开目录），
+    /// 而不是一个点了没反应的「更新」按钮。
+    fn browser_panel(&mut self, ui: &mut egui::Ui) {
+        let view = self.update_view();
+
+        ui.label(
+            egui::RichText::new("浏览器扩展")
+                .size(12.5)
+                .strong()
+                .color(theme::ink()),
+        );
+        ui.label(
+            egui::RichText::new("扩展负责在网页上接管下载；它是「加载已解压」，由浏览器自己管理。")
+                .size(10.5)
+                .color(theme::ink_3()),
+        );
+        ui.add_space(6.0);
+
+        // 三个版本数：浏览器里正在跑的、磁盘上那份、安装包里带的。
+        let running = view.extension_running.clone();
+        let on_disk = view.extension_disk.clone();
+        let packaged = crate::updater::extension_version(&crate::gui::default_extension_dir());
+        for (label, value) in [
+            ("浏览器中运行的版本", running.clone()),
+            ("磁盘上的版本", on_disk.clone()),
+            ("本程序内置的版本", packaged.clone()),
+        ] {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    egui::vec2(130.0, 18.0),
+                    egui::Label::new(egui::RichText::new(label).size(11.0).color(theme::ink_3())),
+                );
+                ui.label(
+                    egui::RichText::new(value.unwrap_or_else(|| "未知（扩展未连接）".into()))
+                        .size(11.5)
+                        .monospace()
+                        .color(theme::ink_2()),
+                );
+            });
+        }
+        ui.add_space(4.0);
+
+        // 与前两者的对照：跑的和盘上的不一致 ⇒ 该重载了。
+        if let (Some(run), Some(disk)) = (&running, &on_disk)
+            && run != disk
+        {
+            ui.label(
+                egui::RichText::new(format!(
+                    "浏览器里跑的是 {run}，磁盘上已经是 {disk}：请在扩展管理页点一次「重新加载」"
+                ))
+                .size(10.5)
+                .color(theme::warn()),
+            );
+            ui.add_space(4.0);
+        }
+
+        let dir = crate::gui::default_extension_dir();
+        ui.horizontal(|ui| {
+            if ui.button("复制扩展路径").clicked() {
+                ui.ctx().copy_text(dir.display().to_string());
+                self.agent_copied = Some("扩展路径".to_string());
+            }
+            if ui.button("打开扩展目录").clicked() {
+                crate::gui::open_dir(&dir);
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "本程序无法代为更新扩展：Chromium 不允许程序安装或更新已解压的扩展。\
+请在浏览器的扩展管理页手动「重新加载」。",
+            )
+            .size(10.5)
+            .color(theme::ink_3()),
+        );
+        if let Some(what) = &self.agent_copied {
+            ui.label(
+                egui::RichText::new(format!("已复制（{what}）"))
+                    .size(10.5)
+                    .color(theme::ok()),
+            );
+        }
+        ui.add_space(8.0);
+    }
+
+    /// 版本一览：桌面端 / 下载内核 / 浏览器扩展 / MCP 桥接，加一个"复制全部"。
+    ///
+    /// 放在「高级」页顶部而不是各页各写一行：排查问题时第一个要问的就是这四个数，
+    /// 得有个一眼看全的地方。
+    fn version_block(&mut self, ui: &mut egui::Ui) {
+        let view = self.update_view();
+        let mcp_dir = std::env::current_exe().ok();
+        let rows = [
+            (
+                "桌面端",
+                format!("{} {}", crate::gui::APP_NAME, crate::gui::RELEASE),
+            ),
+            (
+                "下载内核",
+                format!("{}（{}）", view.core_current, "dlm.exe"),
+            ),
+            (
+                "浏览器扩展",
+                view.extension_disk
+                    .clone()
+                    .or(view.extension.clone())
+                    .unwrap_or_else(|| "未检测到".into()),
+            ),
+            (
+                "MCP 桥接",
+                if mcp_available(&mcp_dir, |p| p.exists()) {
+                    "已安装（与桌面端同目录）".to_string()
+                } else {
+                    "未安装".to_string()
+                },
+            ),
+        ];
+        ui.label(
+            egui::RichText::new("版本")
+                .size(12.0)
+                .strong()
+                .color(theme::ink()),
+        );
+        for (k, v) in &rows {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    egui::vec2(78.0, 18.0),
+                    egui::Label::new(egui::RichText::new(*k).size(11.0).color(theme::ink_3())),
+                );
+                ui.label(
+                    egui::RichText::new(v)
+                        .size(11.5)
+                        .monospace()
+                        .color(theme::ink_2()),
+                );
+            });
+        }
+        if ui.button("复制版本信息").clicked() {
+            let text = format!(
+                "{APP} {rel} · 内核 {core} · 扩展 {ext} · MCP {mcp}",
+                APP = crate::gui::APP_NAME,
+                rel = crate::gui::RELEASE,
+                core = self.update_view().core_current,
+                ext = self
+                    .update_view()
+                    .extension_disk
+                    .or_else(|| self.update_view().extension)
+                    .unwrap_or_else(|| "未知".into()),
+                mcp = if mcp_available(&mcp_dir, |p| p.exists()) {
+                    "已安装"
+                } else {
+                    "未安装"
+                },
+            );
+            ui.ctx().copy_text(text);
+            self.agent_copied = Some("版本信息".to_string());
+        }
+        ui.add_space(8.0);
+    }
+
     fn agent_panel(&mut self, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Agent 接入")
@@ -675,6 +844,21 @@ impl App {
                         .size(10.5)
                         .color(theme::ink_3()),
                 );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("获取 dlm-mcp").clicked() {
+                        // 指到发布页而不是某个具体包的直链：直链会随版本变，
+                        // 而发布页永远是最新那一份，链接不会烂。
+                        super::update_ui::open_external(MCP_RELEASES_URL);
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "在发布页下载 dlm-mcp-*-win-x64.zip，解压到本程序同目录",
+                        )
+                        .size(10.5)
+                        .color(theme::ink_3()),
+                    );
+                });
             }
         });
         if let Some(what) = &self.agent_copied {
@@ -756,6 +940,9 @@ pub(crate) fn agent_mcp_snippet() -> String {
 ///
 /// `exists` 作为参数传进来是为了能测：真去问文件系统的话，用例就得往
 /// 安装目录里塞文件，那是测试不该做的事。
+/// MCP 桥接的发布页。列成常量而不是散在按钮里，改仓库名时只改一处。
+pub(crate) const MCP_RELEASES_URL: &str = "https://github.com/Samuel666198/dlm/releases/latest";
+
 pub(crate) fn mcp_available(
     current_exe: &Option<std::path::PathBuf>,
     exists: impl Fn(&std::path::Path) -> bool,
@@ -809,7 +996,7 @@ mod tests {
 
     /// 每个分类都要能落到界面上：分类列表就是 `Category::ALL`，这里确认顺序稳定。
     #[test]
-    fn the_left_column_lists_all_seven_categories_in_order() {
+    fn the_left_column_lists_all_categories_in_order() {
         let titles: Vec<&str> = Category::ALL.iter().map(|c| c.title()).collect();
         assert_eq!(
             titles,
@@ -820,6 +1007,7 @@ mod tests {
                 "代理",
                 "Agent 接入",
                 "界面",
+                "浏览器扩展",
                 "高级"
             ]
         );
