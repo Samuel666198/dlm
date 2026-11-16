@@ -73,7 +73,7 @@ impl App {
                 .iter()
                 .filter(|t| matches_state(&t.status, key))
                 .count();
-            let active = self.filter.as_deref() == Some(*key);
+            let active = is_active(self.filter.as_deref(), key);
             if nav_item(ui, collapsed, *icon, label, count, active) {
                 self.filter = if *key == "all" {
                     None
@@ -109,6 +109,18 @@ impl App {
         if let Err(err) = self.settings.save(&self.settings_dir) {
             eprintln!("dlm-gui: 保存侧栏状态失败：{err}");
         }
+    }
+}
+
+/// 这一项是不是"当前视图"。
+///
+/// `filter == None` 就是「全部任务」—— 0.7.0 这里写的是 `filter == Some("all")`，
+/// 而 `filter` 在默认视图下是 `None`，于是**默认视图永远不高亮**：展开态看着像没选中，
+/// 收起态更是完全看不出现在在哪个视图。
+pub(crate) fn is_active(filter: Option<&str>, key: &str) -> bool {
+    match filter {
+        None => key == "all",
+        Some(current) => current == key,
     }
 }
 
@@ -247,6 +259,18 @@ fn nav_item(
 
     if active {
         ui.painter().rect_filled(rect, 7.0, theme::accent_soft());
+        if collapsed {
+            // 收起态只剩图标，光靠一层浅底不够醒目：补一条 3pt 的左侧强调条，
+            // 这样"我现在在哪个视图"扫一眼就有答案，而不必去猜编号。
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), rect.top() + 6.0),
+                    egui::vec2(3.0, rect.height() - 12.0),
+                ),
+                1.5,
+                theme::accent(),
+            );
+        }
     } else if response.hovered() {
         ui.painter().rect_filled(rect, 7.0, theme::surface_2());
     }
@@ -312,4 +336,25 @@ fn nav_item(
         egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{label}（{count}）"))
     });
     response.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_active;
+
+    /// 默认视图（「全部任务」）必须高亮 —— `filter == None` 就是它。
+    #[test]
+    fn the_current_view_is_highlighted_even_when_no_filter_is_set() {
+        // 默认：什么都没筛 ⇒ 「全部任务」是当前视图，其余都不是。
+        assert!(is_active(None, "all"));
+        assert!(!is_active(None, "active"));
+        assert!(!is_active(None, "done"));
+
+        // 筛了「失败」⇒ 只有它亮。
+        assert!(!is_active(Some("failed"), "all"));
+        assert!(is_active(Some("failed"), "failed"));
+
+        // 分类筛选走同一个字段，同样要亮。
+        assert!(is_active(Some("video"), "video"));
+    }
 }
