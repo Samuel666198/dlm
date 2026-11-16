@@ -69,6 +69,15 @@ pub(crate) fn targets(batch: &Batch, visible_order: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// 删几条才值得再问一句。
+///
+/// 单条删除不确认：用户在行上点「删除」、上下文条上点「删除」，对象就在眼前，
+/// 多问一句只是拖慢。**两条以上要问** —— 那是"一次点掉一批"，误触成本完全不同
+/// （丢的是断点进度，不是重下一次就有的小文件）。
+pub(crate) fn needs_batch_confirm(count: usize) -> bool {
+    count >= 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +151,17 @@ mod tests {
         // 现在只剩 a 可见（b 被筛掉了）—— 批量动作只作用于看得见的。
         let visible = ids(&["a"]);
         assert_eq!(targets(&b, &visible), ids(&["a"]));
+    }
+
+    /// 一条不问、两条起才问。
+    #[test]
+    fn only_multi_item_deletes_ask_for_confirmation() {
+        assert!(!needs_batch_confirm(0), "空集合没得问");
+        assert!(
+            !needs_batch_confirm(1),
+            "单条删除与上下文条一致，不多问一句"
+        );
+        assert!(needs_batch_confirm(2));
+        assert!(needs_batch_confirm(37));
     }
 }

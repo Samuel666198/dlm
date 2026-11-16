@@ -120,7 +120,8 @@ impl App {
 
     /// 「打开文件 / 打开文件夹」。与 `/api/reveal` 同一套动作，也同一套抑制开关：
     /// 门禁里 `DLM_NO_SHELL_OPEN` 置上时不真的拉起资源管理器。
-    fn reveal_task(&self, task: &TaskView, mode: RevealMode) {
+    /// `pub(super)`：列表的右键菜单也要用同一套 —— 两处各写一遍必然有一处忘了抑制开关。
+    pub(super) fn reveal_task(&self, task: &TaskView, mode: RevealMode) {
         if crate::actions::shell_suppressed() {
             return;
         }

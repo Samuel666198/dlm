@@ -212,3 +212,70 @@ impl App {
         }
     }
 }
+
+/// 「删除选中的 N 个任务」的二次确认框。
+///
+/// 为什么单条不问、批量要问：单条删除的对象就在眼前（行上的复选框、上下文条上都写着名字），
+/// 多问一句只是拖慢；批量是一次点掉一批，丢掉的是 N 条断点进度。
+///
+/// 确认时**重算一遍**要删的 id（与「删除全部已完成」同一套理由）：等着确认的这几秒里，
+/// 队列可能又变了，或者用户又勾掉了一条。拿打开那一刻的集合去删会删错东西。
+impl App {
+    pub(super) fn confirm_batch_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(count) = self.confirm_batch_delete else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+
+        egui::Window::new("删除选中的任务？")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(format!("{count} 个任务会从列表里移除。")).size(12.5));
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("已经下载到磁盘的文件不会被删除；未下完的会丢掉断点进度。")
+                        .size(11.5)
+                        .color(theme::ink_3()),
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("删除").color(theme::bad()),
+                        ))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+
+        if confirm {
+            // 重算：只删"现在还勾着、且还看得见"的那些。
+            let visible: Vec<String> = self
+                .tasks()
+                .iter()
+                .filter(|t| self.visible(t))
+                .map(|t| t.id.clone())
+                .collect();
+            let ids = crate::gui::app::batch::targets(&self.batch, &visible);
+            self.remove_targets(&ids);
+            self.confirm_batch_delete = None;
+        }
+        if cancel {
+            self.confirm_batch_delete = None;
+        }
+    }
+}

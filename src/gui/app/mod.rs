@@ -203,6 +203,10 @@ pub struct App {
     /// `Some` 就是"确认框开着"。真正的 id 列表在点确认时重算（见 `confirm_delete_all_dialog`）：
     /// 等着确认的这几秒里任务可能又完成或被别处删掉，拿旧快照删会删错。
     pub(super) confirm_delete_all: Option<usize>,
+    /// 「删除选中的 N 个任务」还等着二次确认时，这里是那一刻的条数。
+    ///
+    /// 与 `confirm_delete_all` 同一套：存条数只为显示，确认时按当时的勾选重算 id。
+    pub(super) confirm_batch_delete: Option<usize>,
     /// 限速菜单里"自定义"那一格的当前值（KiB/s）。与应用过的限速分开存，
     /// 否则拖一下数字就等于改设置。
     pub(super) speed_custom_kib: u64,
@@ -324,6 +328,7 @@ impl App {
             clipboard_hit: None,
             clipboard_dismissed: None,
             confirm_delete_all: None,
+            confirm_batch_delete: None,
             speed_custom_kib,
         }
     }
@@ -457,6 +462,7 @@ impl App {
                 .map(|g| g.tickets.has_pending())
                 .unwrap_or(false)
             || self.confirm_delete_all.is_some()
+            || self.confirm_batch_delete.is_some()
     }
 
     /// 执行一条命令面板里的命令（id 来自 `palette::COMMANDS`）。
@@ -662,6 +668,9 @@ impl App {
         }
         if self.confirm_delete_all.is_some() {
             self.confirm_delete_all_dialog(&ctx);
+        }
+        if self.confirm_batch_delete.is_some() {
+            self.confirm_batch_delete_dialog(&ctx);
         }
         // Agent 票据：有待确认的就弹框，并顺手把 runner 的回执写回票据状态。
         self.agent_tickets_dialog(&ctx);

@@ -3,6 +3,7 @@
 use eframe::egui;
 
 use super::App;
+use crate::actions::RevealMode;
 use crate::gui::app::theme;
 use crate::gui::snapshot::TaskView;
 
@@ -26,6 +27,117 @@ const NAME_MIN: f32 = 150.0;
 const CB_COL: f32 = 34.0;
 /// 勾选框中心距行左边的距离。
 const CB_X: f32 = 20.0;
+
+/// 右键菜单里的动作。
+///
+/// 0.7.0 那版这里是六个 `let _ = ui.button("…")` —— 一个都没接线，点下去什么都不发生，
+/// 而且 `tests.rs` 里搜不到任何与"右键"有关的用例，所以它从引入起就是死的。
+///
+/// 现在动作走枚举 + 穷举 `match`：往菜单里加一项却忘了处理，**编译**就红。
+/// 这条比"记得写用例"更结实，因为漏接线这件事本来就发生在写用例之前。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowMenuAction {
+    Resume,
+    Pause,
+    OpenFile,
+    OpenFolder,
+    CopyLink,
+    Remove,
+}
+
+/// 右键菜单的一项。
+pub(crate) struct RowMenuItem {
+    pub action: RowMenuAction,
+    pub label: &'static str,
+    /// 右侧的快捷键提示（设计决定 10 要求带）。
+    pub shortcut: Option<&'static str>,
+    pub enabled: bool,
+    /// 这一项前面是否来一条分隔线（分组）。
+    pub separator_before: bool,
+}
+
+/// 某一行的右键菜单。
+///
+/// **可用性由任务状态决定**，不交给调用方判断：「继续」对正在跑的没意义；
+/// 「打开文件」对还没下完的只会在 runner 那边换来一句"任务还没下完"。
+pub(crate) fn row_menu_items(task: &TaskView) -> Vec<RowMenuItem> {
+    let can_resume = matches!(task.status.as_str(), "paused" | "failed");
+    let can_pause = matches!(task.status.as_str(), "running" | "queued");
+    let done = task.status == "done";
+    vec![
+        RowMenuItem {
+            action: RowMenuAction::Resume,
+            label: "继续",
+            shortcut: Some("Space"),
+            enabled: can_resume,
+            separator_before: false,
+        },
+        RowMenuItem {
+            action: RowMenuAction::Pause,
+            label: "暂停",
+            shortcut: Some("Space"),
+            enabled: can_pause,
+            separator_before: false,
+        },
+        RowMenuItem {
+            action: RowMenuAction::OpenFile,
+            label: "打开文件",
+            shortcut: None,
+            enabled: done,
+            separator_before: true,
+        },
+        RowMenuItem {
+            action: RowMenuAction::OpenFolder,
+            label: "打开文件夹",
+            shortcut: None,
+            enabled: done,
+            separator_before: false,
+        },
+        RowMenuItem {
+            action: RowMenuAction::CopyLink,
+            label: "复制链接",
+            shortcut: None,
+            enabled: true,
+            separator_before: false,
+        },
+        RowMenuItem {
+            action: RowMenuAction::Remove,
+            label: "删除",
+            shortcut: Some("Del"),
+            enabled: true,
+            separator_before: true,
+        },
+    ]
+}
+
+/// 画右键菜单，返回被点中的那一项。
+///
+/// 返回值必须被处理。**注意 `#[must_use]` 挡不住 `let _ =`**（实测：
+/// `let _ = f();` 不会触发 `unused_must_use`）—— 0.7.0 那六个死按钮正是这么写出来的。
+/// 真正拦住"加了菜单项却没接线"的是调用处的**穷举 `match`**：
+/// 往 [`RowMenuAction`] 里加一个变体而不处理，编译直接报 non-exhaustive。
+/// 这个属性只是顺手拦住"忘了接收返回值"那种写法。
+#[must_use]
+pub(crate) fn row_menu_ui(ui: &mut egui::Ui, task: &TaskView) -> Option<RowMenuAction> {
+    let mut picked = None;
+    for item in row_menu_items(task) {
+        if item.separator_before {
+            ui.separator();
+        }
+        let button = egui::Button::new(item.label);
+        let button = match item.shortcut {
+            Some(key) => {
+                button.shortcut_text(egui::RichText::new(key).size(10.0).color(theme::ink_3()))
+            }
+            None => button,
+        };
+        if ui.add_enabled(item.enabled, button).clicked() {
+            picked = Some(item.action);
+            ui.close();
+        }
+    }
+    picked
+}
 
 /// 批量条上按下的东西。收集起来出闭包再执行 —— 闭包里动 `self` 会与 `&self.batch` 打架。
 enum BatchAction {
@@ -247,17 +359,36 @@ impl App {
         }
 
         // ---- 右键菜单 ----
+        //
+        // 右键先把这一行设为"正在查看"：否则菜单里的动作会作用在右栏那个看不见的任务上。
+        if response.secondary_clicked() {
+            self.selected = Some(task.id.clone());
+        }
+        let mut menu_action: Option<RowMenuAction> = None;
         response.context_menu(|ui| {
             ui.set_min_width(180.0);
-            let _ = ui.button("继续");
-            let _ = ui.button("暂停");
-            ui.separator();
-            let _ = ui.button("打开文件");
-            let _ = ui.button("打开文件夹");
-            let _ = ui.button("复制链接");
-            ui.separator();
-            let _ = ui.button("删除");
+            // `row_menu_ui` 带 `#[must_use]`：这里若把它丢掉，门禁（clippy -D warnings）
+            // 就会以 `unused_must_use` 失败 —— 0.7.0 的六个死按钮就是这么来的。
+            let picked = row_menu_ui(ui, task);
+            if picked.is_some() {
+                menu_action = picked;
+            }
         });
+        match menu_action {
+            Some(RowMenuAction::Resume) => self.send(crate::gui::Ticket::Resume(task.id.clone())),
+            Some(RowMenuAction::Pause) => self.send(crate::gui::Ticket::Pause(task.id.clone())),
+            Some(RowMenuAction::OpenFile) => self.reveal_task(task, RevealMode::Open),
+            Some(RowMenuAction::OpenFolder) => self.reveal_task(task, RevealMode::Select),
+            Some(RowMenuAction::CopyLink) => ui.ctx().copy_text(task.url.clone()),
+            Some(RowMenuAction::Remove) => {
+                self.send(crate::gui::Ticket::Remove(task.id.clone()));
+                if self.selected.as_deref() == Some(task.id.as_str()) {
+                    self.selected = None;
+                    self.drawer_log = None;
+                }
+            }
+            None => {}
+        }
     }
 
     fn draw_name(&self, ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
@@ -417,18 +548,35 @@ impl App {
                 }
             }
             Some(BatchAction::Remove) => {
-                for id in &targets {
-                    self.send(crate::gui::Ticket::Remove(id.clone()));
-                }
-                for id in &targets {
-                    if self.selected.as_deref() == Some(id.as_str()) {
-                        self.selected = None;
-                        self.drawer_log = None;
-                    }
+                // 一条以上先问：批量删除一次丢掉的是 N 条断点进度，误触成本与单条不对等。
+                if batch::needs_batch_confirm(targets.len()) {
+                    self.confirm_batch_delete = Some(targets.len());
+                } else {
+                    self.remove_targets(&targets);
                 }
             }
             Some(BatchAction::Clear) => self.batch.clear(),
             None => {}
+        }
+    }
+
+    /// 真去删这批任务。**批量条与确认框共用这一份**：
+    /// 两处各写一遍迟早有一处忘了清 `selected` / `drawer_log`。
+    /// `pub(super)`：确认框在 `dialog` 模块里。
+    pub(super) fn remove_targets(&mut self, ids: &[String]) {
+        for id in ids {
+            self.send(crate::gui::Ticket::Remove(id.clone()));
+        }
+        if let Some(sel) = self.selected.clone()
+            && ids.contains(&sel)
+        {
+            self.selected = None;
+            self.drawer_log = None;
+        }
+        // 删掉的东西不能继续留在批量里：留着的话下一次批量动作会对着空气发。
+        // 用 `remove` 而不是 `toggle` —— toggle 对不在集合里的 id 会**加进去**。
+        for id in ids {
+            self.batch.remove(id);
         }
     }
 
@@ -456,7 +604,7 @@ impl App {
     }
 
     /// 筛选：状态键与分类键共用一个字段，先按状态再按分类判断；搜索是**与**关系。
-    fn visible(&self, task: &TaskView) -> bool {
+    pub(super) fn visible(&self, task: &TaskView) -> bool {
         if !matches_search(task, &self.search) {
             return false;
         }
@@ -666,7 +814,8 @@ fn elide(s: &str, max: usize) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::columns;
+    use super::{RowMenuAction, columns, row_menu_items};
+    use crate::gui::snapshot::TaskView;
     use eframe::egui;
 
     /// **列不许重叠**（0.7.0 详情改成右栏之后踩到的就是这个）。
@@ -722,5 +871,107 @@ mod tests {
             narrow.size.right() <= narrow.progress.left() + 0.01,
             "大小压到进度上"
         );
+    }
+
+    /// 右键菜单：六项都在，且每一项都有动作。
+    ///
+    /// 这条用例的直接来历：0.7.0 那版六个按钮全是 `let _ = ui.button(...)`，
+    /// 点了什么都不会发生，而仓库里没有任何用例能发现它。
+    #[test]
+    fn the_row_menu_offers_six_live_actions() {
+        let task = task_with("done");
+        let items = row_menu_items(&task);
+        assert_eq!(
+            items.len(),
+            6,
+            "继续/暂停/打开文件/打开文件夹/复制链接/删除"
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for item in &items {
+            assert!(!item.label.trim().is_empty(), "菜单项必须有文字");
+            // 动作不许重复：两项指同一个动作，说明有一项是摆设。
+            assert!(
+                seen.insert(format!("{:?}", item.action)),
+                "动作重复：{:?}",
+                item.action
+            );
+        }
+        for action in [
+            RowMenuAction::Resume,
+            RowMenuAction::Pause,
+            RowMenuAction::OpenFile,
+            RowMenuAction::OpenFolder,
+            RowMenuAction::CopyLink,
+            RowMenuAction::Remove,
+        ] {
+            assert!(
+                items.iter().any(|i| i.action == action),
+                "菜单里缺 {action:?}"
+            );
+        }
+        // 破坏性那一项必须有快捷键提示，且和 Del 一致。
+        let remove = items
+            .iter()
+            .find(|i| i.action == RowMenuAction::Remove)
+            .unwrap();
+        assert_eq!(remove.shortcut, Some("Del"));
+        assert!(remove.separator_before, "删除要单独一组，别贴着复制链接");
+    }
+
+    /// 可用性跟着任务状态走：不能让人点一个只会换来报错的项。
+    #[test]
+    fn the_row_menu_only_enables_what_makes_sense_for_the_status() {
+        let enabled = |status: &str, action: RowMenuAction| -> bool {
+            row_menu_items(&task_with(status))
+                .into_iter()
+                .find(|i| i.action == action)
+                .map(|i| i.enabled)
+                .unwrap_or(false)
+        };
+
+        // 失败的任务：可以继续，不能暂停，也没文件可打开。
+        assert!(enabled("failed", RowMenuAction::Resume));
+        assert!(!enabled("failed", RowMenuAction::Pause));
+        assert!(!enabled("failed", RowMenuAction::OpenFile));
+
+        // 正在跑：能暂停不能继续。
+        assert!(enabled("running", RowMenuAction::Pause));
+        assert!(!enabled("running", RowMenuAction::Resume));
+
+        // 下完了：打开文件/文件夹才有意义。
+        assert!(enabled("done", RowMenuAction::OpenFile));
+        assert!(enabled("done", RowMenuAction::OpenFolder));
+        assert!(!enabled("queued", RowMenuAction::OpenFile));
+
+        // 复制链接与删除：任何状态都能用。
+        for status in ["running", "queued", "paused", "failed", "done"] {
+            assert!(enabled(status, RowMenuAction::CopyLink), "{status}");
+            assert!(enabled(status, RowMenuAction::Remove), "{status}");
+        }
+    }
+
+    fn task_with(status: &str) -> TaskView {
+        TaskView {
+            id: format!("t-{status}"),
+            url: "https://example.com/a.bin".to_string(),
+            name: "a.bin".to_string(),
+            path: "C:\\dl\\a.bin".to_string(),
+            referer: None,
+            status: status.to_string(),
+            pid: None,
+            exit_code: None,
+            log: "C:\\dl\\a.log".to_string(),
+            progress: 0.0,
+            total_len: Some(1),
+            delivered: Some(0),
+            created_at: 0,
+            updated_at: 0,
+            start_at: None,
+            hold_until: None,
+            on_complete: None,
+            attempts: 0,
+            category: "other",
+        }
     }
 }
