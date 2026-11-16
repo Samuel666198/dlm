@@ -36,6 +36,7 @@ pub mod fonts;
 pub mod grab_ui;
 pub mod icons;
 pub mod list;
+pub mod mcp_install;
 pub mod palette;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
