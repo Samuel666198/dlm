@@ -60,6 +60,23 @@ fn step_label(ui: &mut egui::Ui, n: u32, text: &str) {
     });
 }
 
+/// 抓取窗该多宽：跟着主窗走，别把 720 钉死（主窗最小内径是 760，720 几乎顶满）。
+pub(crate) fn grab_window_width(viewport_w: f32) -> f32 {
+    (viewport_w - 120.0).clamp(560.0, 940.0)
+}
+
+/// 抓取窗该多高：同样别钉死，但要留得下三步与结果表。
+pub(crate) fn grab_window_height(viewport_h: f32) -> f32 {
+    (viewport_h - 160.0).clamp(380.0, 700.0)
+}
+
+/// 「包含 / 排除」两个输入框的宽度：按这一行剩下的宽度分，并各自留上下限。
+pub(crate) fn grab_filter_widths(row_width: f32) -> (f32, f32) {
+    let include = (row_width * 0.22).clamp(140.0, 280.0);
+    let exclude = (row_width * 0.18).clamp(110.0, 220.0);
+    (include, exclude)
+}
+
 pub(crate) fn enqueue_enabled(picked: usize) -> bool {
     picked > 0
 }
@@ -77,12 +94,13 @@ impl App {
         let mut save_template = false;
         let mut apply_template: Option<usize> = None;
 
+        let viewport = ui.ctx().content_rect().size();
         egui::Window::new("站点抓取")
             .open(&mut open)
             .resizable(true)
             .collapsible(false)
-            .default_width(720.0)
-            .default_height(520.0)
+            .default_width(grab_window_width(viewport.x))
+            .default_height(grab_window_height(viewport.y))
             .show(ui.ctx(), |ui| {
                 ui.label(
                     egui::RichText::new("先扫描出清单，勾选后才建任务；扫描本身不下载任何文件")
@@ -123,6 +141,9 @@ impl App {
                         });
 
                         ui.add_space(6.0);
+                        // 两个输入框的宽度按这一行的实际可用宽度算：写死 150 / 110 时
+                        // 窗口一宽就浪费、一窄就把「排除」挤出去。
+                        let (include_w, exclude_w) = grab_filter_widths(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("范围").size(11.5).color(theme::ink_3()));
                             ui.label("深度");
@@ -133,13 +154,13 @@ impl App {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.grab_include)
                                     .hint_text("*.zip, *.mp4（空 = 全收）")
-                                    .desired_width(150.0),
+                                    .desired_width(include_w),
                             );
                             ui.label("排除");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.grab_exclude)
                                     .hint_text("*sample*")
-                                    .desired_width(110.0),
+                                    .desired_width(exclude_w),
                             );
                         });
 
@@ -538,7 +559,40 @@ pub(crate) fn split_patterns(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{enqueue_enabled, name_of, split_patterns};
+    use super::{
+        enqueue_enabled, grab_filter_widths, grab_window_height, grab_window_width, name_of,
+        split_patterns,
+    };
+
+    /// 抓取窗跟着主窗走，不再把 720 钉死。
+    #[test]
+    fn the_grab_window_follows_the_main_window() {
+        // 主窗按默认尺寸：比原来的 720 宽一点，够放三列。
+        assert_eq!(grab_window_width(1120.0), 940.0);
+        // 主窗最小内径 760：不能继续要 720（几乎顶满、右侧贴边）。
+        assert_eq!(grab_window_width(760.0), 640.0);
+        // 再小也有下限，别缩成一条缝。
+        assert_eq!(grab_window_width(500.0), 560.0);
+        // 高同理。
+        assert_eq!(grab_window_height(700.0), 540.0);
+        assert_eq!(grab_window_height(480.0), 380.0);
+    }
+
+    /// 「包含 / 排除」两个框按行宽分，且各自有上下限。
+    #[test]
+    fn the_filter_fields_share_the_row_width() {
+        let (include, exclude) = grab_filter_widths(600.0);
+        assert_eq!((include, exclude), (140.0, 110.0), "窄行取下限");
+        let (include, exclude) = grab_filter_widths(1200.0);
+        assert!(include > 200.0 && exclude > 160.0, "宽行要长起来");
+        assert!(include <= 280.0 && exclude <= 220.0, "但也别无限长");
+        // 排除永远比包含短一档：它填的是收窄条件，通常更短。
+        let (i, e) = grab_filter_widths(1000.0);
+        assert!(e < i);
+        // 极窄也不许出 0 或负数。
+        let (i, e) = grab_filter_widths(10.0);
+        assert!(i > 0.0 && e > 0.0);
+    }
 
     #[test]
     fn patterns_split_on_comma_semicolon_and_chinese_comma() {
