@@ -768,14 +768,28 @@ impl App {
         }
         let mcp_version = self.mcp_version_cache.clone().flatten();
 
-        let packaged = crate::updater::extension_version(&crate::gui::default_extension_dir());
+        // 扩展的三个版本数各有来源，别混：
+        //   磁盘上那份 = **本地读目录**（`%LOCALAPPDATA%\dlm\extension` 的 manifest）
+        //   本程序内置 = 安装目录里的 `browser/extension`
+        //   浏览器中运行 = 扩展自己上报（走快照）
+        //
+        // 磁盘那份**必须本地读**：清单检查失败（断网、限流）不该让"装了"变成"没检测到"。
+        // 实跑时踩到过：更新检查一失败，扩展卡就从「磁盘上有」跳成「未检测到已装入浏览器」。
+        let ext_dir = crate::gui::default_extension_dir();
+        let disk = disk_extension(
+            view.extension_disk.clone(),
+            crate::updater::extension_version(&ext_dir),
+        );
+        let bundled = exe_dir.as_ref().and_then(|dir| {
+            crate::updater::extension_version(&dir.join("browser").join("extension"))
+        });
         let input = components::ComponentInput {
             app_name: crate::gui::APP_NAME,
             release: crate::gui::RELEASE,
             core_current: &view.core_current,
-            extension_disk: view.extension_disk.as_deref(),
+            extension_disk: disk.as_deref(),
             extension_running: view.extension_running.as_deref(),
-            extension_packaged: packaged.as_deref(),
+            extension_packaged: bundled.as_deref(),
             mcp_version: mcp_version.as_deref(),
             mcp_present,
             channel_url: self.update_url.as_deref(),
@@ -994,6 +1008,13 @@ enum ComponentAction {
     CopyVersions,
 }
 
+/// 「磁盘上的扩展版本」取谁：**本地读到的优先**，清单里那份只是补充。
+///
+/// 本地那份才是"磁盘上到底有没有"的事实来源；清单那份是网络回来的，断网就没了。
+pub(crate) fn disk_extension(from_check: Option<String>, local: Option<String>) -> Option<String> {
+    local.or(from_check)
+}
+
 /// 本程序所在目录：`dlm-mcp.exe` 就装在这儿。
 fn current_exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe()
@@ -1173,6 +1194,27 @@ mod tests {
             specs_in(Category::Component).next().is_none(),
             "组件页不该混进设置项：那是状态面板"
         );
+    }
+
+    /// 磁盘上的扩展版本必须本地优先：清单检查失败不该把"装了"变成"没检测到"。
+    #[test]
+    fn the_disk_extension_version_survives_a_failed_manifest_check() {
+        // 断网：清单那份没有，但本地读到了 —— 必须留下本地的。
+        assert_eq!(
+            disk_extension(None, Some("0.2.16".into())),
+            Some("0.2.16".to_string())
+        );
+        // 两边都有、且不一致：本地才是磁盘的事实。
+        assert_eq!(
+            disk_extension(Some("0.2.15".into()), Some("0.2.16".into())),
+            Some("0.2.16".to_string())
+        );
+        // 本地读不到才退到清单那份。
+        assert_eq!(
+            disk_extension(Some("0.2.15".into()), None),
+            Some("0.2.15".to_string())
+        );
+        assert_eq!(disk_extension(None, None), None);
     }
 
     /// 每张卡都得有按钮，且「没装 MCP」时的主按钮必须是安装本身。

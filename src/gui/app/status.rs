@@ -87,6 +87,15 @@ impl App {
                         .clone()
                         .on_hover_text(crate::gui::app::components::hover_tip(&rows));
                 }
+                // **画出来的控件默认不在无障碍树里**（而且是 Label 而不是 Button）：
+                // 不报身份，读屏与自动化都只看到一个读不动的 statictext。
+                version.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::Button,
+                        true,
+                        format!("版本 v{}（点击打开组件页）", crate::gui::RELEASE),
+                    )
+                });
                 if version.clicked() {
                     self.settings_open = true;
                     self.draft = self.settings.clone();
