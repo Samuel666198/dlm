@@ -1,7 +1,5 @@
 //! 组件状态：桌面端（含内核）/ MCP 桥接 / 浏览器扩展 / 更新通道。
 //!
-// 组分页在下一个提交接上；这一提交只有模型与用例，先把判定钉死。
-#![allow(dead_code)]
 //!
 //! ## 为什么要有这一层
 //!
@@ -64,7 +62,7 @@ pub(crate) enum ComponentState {
 
 impl ComponentState {
     /// 状态那一格显示的字。
-    pub(crate) fn short(self) -> String {
+    pub(crate) fn short(&self) -> String {
         match self {
             ComponentState::Ok => "正常".to_string(),
             ComponentState::NeedsAction(_) => "需处理".to_string(),
@@ -120,14 +118,17 @@ pub(crate) struct ComponentInput<'a> {
     pub update_error: Option<&'a str>,
 }
 
-/// 四行状态。顺序固定 = [`ComponentId::ALL`]。
+/// 四行状态。顺序固定 = [`ComponentId::ALL`] —— **一处定义**，别再手抄一遍。
 pub(crate) fn build_rows(input: &ComponentInput<'_>) -> Vec<ComponentRow> {
-    vec![
-        desktop_row(input),
-        mcp_row(input),
-        extension_row(input),
-        channel_row(input),
-    ]
+    ComponentId::ALL
+        .iter()
+        .map(|id| match id {
+            ComponentId::Desktop => desktop_row(input),
+            ComponentId::Mcp => mcp_row(input),
+            ComponentId::Extension => extension_row(input),
+            ComponentId::Channel => channel_row(input),
+        })
+        .collect()
 }
 
 fn desktop_row(input: &ComponentInput<'_>) -> ComponentRow {
@@ -283,9 +284,20 @@ fn ago_label(checked_at: u64) -> String {
     ago_label_at(checked_at, crate::queue::now_secs())
 }
 
+/// 「复制版本信息」用的那一行：**只放版本，不放状态**。
+///
+/// 贴到 issue 里时"未知"这种状态词是噪音，版本号才是要核对的东西。
+pub(crate) fn versions_line(rows: &[ComponentRow]) -> String {
+    rows.iter()
+        .map(|r| format!("{} {}", r.id.title(), r.version))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// 状态栏悬停时那一行摘要：四个组件各一段。
 ///
 /// 抽成纯函数是因为它是**唯一**一处能一眼看全四个数的地方 —— 拼错了没人会发现。
+#[allow(dead_code)] // 状态栏悬停摘要：下一步接上
 pub(crate) fn summary_line(rows: &[ComponentRow]) -> String {
     rows.iter()
         .map(|r| match &r.state {
@@ -445,7 +457,8 @@ mod tests {
         );
     }
 
-    /// 状态栏摘要：四个组件各一段，缺一个都算漏。    #[test]
+    /// 状态栏摘要：四个组件各一段，缺一个都算漏。
+    #[test]
     fn the_summary_line_mentions_all_four_components() {
         let rows = build_rows(&input());
         let line = summary_line(&rows);
@@ -464,5 +477,26 @@ mod tests {
         assert_eq!(ago_label_at(1_000, 1_000 + 172_800), "2 天前");
         // 时钟回拨也不许 panic、不许出现"负几分钟"。
         assert_eq!(ago_label_at(1_000, 500), "刚刚");
+    }
+
+    /// 复制给 issue 的那一行：四个版本号都在，但不掺状态词。
+    #[test]
+    fn the_copy_line_carries_versions_without_state_words() {
+        let mut i = input();
+        i.extension_disk = Some("0.2.16");
+        i.mcp_present = true;
+        i.mcp_version = Some("0.7.0");
+        let rows = build_rows(&i);
+        let line = versions_line(&rows);
+        for id in ComponentId::ALL {
+            assert!(line.contains(id.title()), "缺 {}：{line}", id.title());
+        }
+        assert!(line.contains("0.2.16") && line.contains("0.7.0"), "{line}");
+        for noise in ["正常", "未知", "未安装", "需处理"] {
+            assert!(
+                !line.contains(noise),
+                "复制行不该带状态词「{noise}」：{line}"
+            );
+        }
     }
 }

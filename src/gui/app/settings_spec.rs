@@ -24,8 +24,11 @@ pub(crate) enum Category {
     Proxy,
     Agent,
     Interface,
-    /// 浏览器扩展：安装状态、管理与更新（0.7.0 新增）。
-    Browser,
+    /// 组件：桌面端（含内核）/ MCP 桥接 / 浏览器扩展 / 更新通道。
+    ///
+    /// 这一页是**状态面板**，没有可勾可填的设置项 —— 所以它在
+    /// `every_spec_belongs_to_one_of_the_categories` 里是具名豁免。
+    Component,
     Advanced,
 }
 
@@ -37,7 +40,7 @@ impl Category {
         Category::Proxy,
         Category::Agent,
         Category::Interface,
-        Category::Browser,
+        Category::Component,
         Category::Advanced,
     ];
 
@@ -49,7 +52,7 @@ impl Category {
             Category::Proxy => "代理",
             Category::Agent => "Agent 接入",
             Category::Interface => "界面",
-            Category::Browser => "浏览器扩展",
+            Category::Component => "组件",
             Category::Advanced => "高级",
         }
     }
@@ -411,10 +414,10 @@ mod tests {
         }
         // 每个分类都要有内容：空分类等于把一条设置藏起来了。
         //
-        // 「浏览器扩展」是例外：那一页是一片**状态面板**（装了没、跑的是哪个版本、
-        // 怎么重载），没有可勾可填的设置项。允许它空，但空得有名有姓 —— 不是漏了。
+        // 「组件」是例外：那一页是一片**状态面板**（四个组件的版本、状态与动作），
+        // 没有可勾可填的设置项。允许它空，但空得有名有姓 —— 不是漏了。
         for category in Category::ALL {
-            if *category == Category::Browser {
+            if *category == Category::Component {
                 continue;
             }
             assert!(

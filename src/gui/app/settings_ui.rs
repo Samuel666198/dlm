@@ -24,6 +24,9 @@
 use eframe::egui;
 
 use super::App;
+use super::components;
+use super::mcp_install;
+use super::mcp_install::Host as _;
 use super::settings_spec::{Category, SettingKey, SettingSpec, search, specs_in};
 use crate::gui::RuntimeTuning;
 use crate::gui::Ticket;
@@ -242,12 +245,10 @@ impl App {
                 let category = self.settings_category;
                 if category == Category::Agent {
                     self.agent_panel(ui);
-                } else if category == Category::Browser {
-                    self.browser_panel(ui);
-                } else if category == Category::Advanced {
-                    // 版本一览放最早：「高级」是出问题第一个点进来的地方，
+                } else if category == Category::Component {
+                    // 版本一览就在这一页里头：出问题第一个要点进来的地方，
                     // 而排查第一句要问的就是这四个数。
-                    self.version_block(ui);
+                    self.component_panel(ui);
                 }
                 self.render_specs(ui, specs_in(category).collect());
             });
@@ -663,88 +664,45 @@ impl App {
         }
     }
 
-    /// 「Agent 接入」页头：两段可复制的配置 + 一句说明。
+    /// 「组件」页：桌面端（含内核）/ MCP 桥接 / 浏览器扩展 / 更新通道。
     ///
-    /// 判据是"CLI 命令现在就能用、MCP 配置没装就置灰"。置灰不是偷懒：
-    /// 把一段指向不存在程序的配置交给用户，比不提供更糟。
-    /// 浏览器扩展：装没装、跑的是哪个版本、以及"为什么本程序替不了你更新"。
-    ///
-    /// **文案必须诚实**：Chromium 不允许程序化安装或更新「已解压」扩展，这是安全边界。
-    /// 所以这里给的是三件能做对的事（对账版本、复制路径、打开目录），
-    /// 而不是一个点了没反应的「更新」按钮。
-    fn browser_panel(&mut self, ui: &mut egui::Ui) {
-        let view = self.update_view();
+    /// 这一页回答的是**"我装的到底是哪几个版本、哪个该动一下"** —— 以前这四个数散在
+    /// 高级页顶部、浏览器扩展页、Agent 页与状态栏四处，问一遍要翻四个地方。
+    fn component_panel(&mut self, ui: &mut egui::Ui) {
+        // 装完的回执：后台线程跑完把结果塞回来，这里取。
+        self.drain_mcp_install(ui.ctx());
 
+        let rows = self.component_rows();
+        let mut action: Option<ComponentAction> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("组件")
+                    .size(12.5)
+                    .strong()
+                    .color(theme::ink()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("复制版本信息").clicked() {
+                    action = Some(ComponentAction::CopyVersions);
+                }
+            });
+        });
         ui.label(
-            egui::RichText::new("浏览器扩展")
-                .size(12.5)
-                .strong()
-                .color(theme::ink()),
-        );
-        ui.label(
-            egui::RichText::new("扩展负责在网页上接管下载；它是「加载已解压」，由浏览器自己管理。")
+            egui::RichText::new("四个组件各自升级；这一页只看它们的版本与状态")
                 .size(10.5)
                 .color(theme::ink_3()),
         );
         ui.add_space(6.0);
 
-        // 三个版本数：浏览器里正在跑的、磁盘上那份、安装包里带的。
-        let running = view.extension_running.clone();
-        let on_disk = view.extension_disk.clone();
-        let packaged = crate::updater::extension_version(&crate::gui::default_extension_dir());
-        for (label, value) in [
-            ("浏览器中运行的版本", running.clone()),
-            ("磁盘上的版本", on_disk.clone()),
-            ("本程序内置的版本", packaged.clone()),
-        ] {
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    egui::vec2(130.0, 18.0),
-                    egui::Label::new(egui::RichText::new(label).size(11.0).color(theme::ink_3())),
-                );
-                ui.label(
-                    egui::RichText::new(value.unwrap_or_else(|| "未知（扩展未连接）".into()))
-                        .size(11.5)
-                        .monospace()
-                        .color(theme::ink_2()),
-                );
-            });
-        }
-        ui.add_space(4.0);
-
-        // 与前两者的对照：跑的和盘上的不一致 ⇒ 该重载了。
-        if let (Some(run), Some(disk)) = (&running, &on_disk)
-            && run != disk
-        {
-            ui.label(
-                egui::RichText::new(format!(
-                    "浏览器里跑的是 {run}，磁盘上已经是 {disk}：请在扩展管理页点一次「重新加载」"
-                ))
-                .size(10.5)
-                .color(theme::warn()),
-            );
-            ui.add_space(4.0);
+        for row in &rows {
+            component_card(ui, row, &mut action);
+            ui.add_space(6.0);
         }
 
-        let dir = crate::gui::default_extension_dir();
-        ui.horizontal(|ui| {
-            if ui.button("复制扩展路径").clicked() {
-                ui.ctx().copy_text(dir.display().to_string());
-                self.agent_copied = Some("扩展路径".to_string());
-            }
-            if ui.button("打开扩展目录").clicked() {
-                crate::gui::open_dir(&dir);
-            }
-        });
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(
-                "本程序无法代为更新扩展：Chromium 不允许程序安装或更新已解压的扩展。\
-请在浏览器的扩展管理页手动「重新加载」。",
-            )
-            .size(10.5)
-            .color(theme::ink_3()),
-        );
+        if let Some(note) = &self.mcp_install_note {
+            ui.label(egui::RichText::new(note).size(10.5).color(theme::ink_2()));
+        }
         if let Some(what) = &self.agent_copied {
             ui.label(
                 egui::RichText::new(format!("已复制（{what}）"))
@@ -752,84 +710,138 @@ impl App {
                     .color(theme::ok()),
             );
         }
-        ui.add_space(8.0);
+
+        // 动作统一出闭包再执行：画的时候 `rows` 还借着 `self` 的只读借用。
+        match action {
+            Some(ComponentAction::InstallMcp) => self.start_mcp_install(ui.ctx()),
+            Some(ComponentAction::RecheckMcp) => {
+                self.mcp_version_cache = None;
+                self.mcp_install_note = Some("重新探测 dlm-mcp…".to_string());
+            }
+            Some(ComponentAction::OpenUpdatePanel) => self.update_open = true,
+            Some(ComponentAction::CheckUpdate) => self.check_update_now(ui.ctx()),
+            Some(ComponentAction::OpenReleases) => {
+                super::update_ui::open_external(&mcp_install::releases_page_url());
+            }
+            Some(ComponentAction::CopyExtPath) => {
+                ui.ctx()
+                    .copy_text(crate::gui::default_extension_dir().display().to_string());
+                self.agent_copied = Some("扩展路径".to_string());
+            }
+            Some(ComponentAction::OpenExtDir) => {
+                crate::gui::open_dir(&crate::gui::default_extension_dir());
+            }
+            Some(ComponentAction::CopyExtPage) => {
+                // 浏览器不许程序化打开 `chrome://extensions`，只能复制过去让用户粘。
+                ui.ctx().copy_text("chrome://extensions".to_string());
+                self.agent_copied = Some("chrome://extensions".to_string());
+            }
+            Some(ComponentAction::CopyVersions) => {
+                ui.ctx().copy_text(components::versions_line(&rows));
+                self.agent_copied = Some("版本信息".to_string());
+            }
+            None => {}
+        }
     }
 
-    /// 版本一览：桌面端 / 下载内核 / 浏览器扩展 / MCP 桥接，加一个"复制全部"。
-    ///
-    /// 放在「高级」页顶部而不是各页各写一行：排查问题时第一个要问的就是这四个数，
-    /// 得有个一眼看全的地方。
-    fn version_block(&mut self, ui: &mut egui::Ui) {
+    /// 组件页要的四行状态。事实从快照与本机探测来，判定交给 [`components::build_rows`]。
+    fn component_rows(&mut self) -> Vec<components::ComponentRow> {
         let view = self.update_view();
-        let mcp_dir = std::env::current_exe().ok();
-        let rows = [
-            (
-                "桌面端",
-                format!("{} {}", crate::gui::APP_NAME, crate::gui::RELEASE),
-            ),
-            (
-                "下载内核",
-                format!("{}（{}）", view.core_current, "dlm.exe"),
-            ),
-            (
-                "浏览器扩展",
-                view.extension_disk
-                    .clone()
-                    .or(view.extension.clone())
-                    .unwrap_or_else(|| "未检测到".into()),
-            ),
-            (
-                "MCP 桥接",
-                if mcp_available(&mcp_dir, |p| p.exists()) {
-                    "已安装（与桌面端同目录）".to_string()
-                } else {
-                    "未安装".to_string()
-                },
-            ),
-        ];
-        ui.label(
-            egui::RichText::new("版本")
-                .size(12.0)
-                .strong()
-                .color(theme::ink()),
-        );
-        for (k, v) in &rows {
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    egui::vec2(78.0, 18.0),
-                    egui::Label::new(egui::RichText::new(*k).size(11.0).color(theme::ink_3())),
-                );
-                ui.label(
-                    egui::RichText::new(v)
-                        .size(11.5)
-                        .monospace()
-                        .color(theme::ink_2()),
-                );
-            });
+        let exe_dir = current_exe_dir();
+        let mcp_present = exe_dir
+            .as_ref()
+            .map(|dir| dir.join(mcp_install::MCP_BINARY).is_file())
+            .unwrap_or(false);
+
+        // 探测版本要起一个子进程：只在第一次进这一页（或点「重新探测」）时做，
+        // 每帧跑一次会把界面拖成幻灯片。
+        if !mcp_present {
+            self.mcp_version_cache = None;
+        } else if self.mcp_version_cache.is_none() {
+            let version = exe_dir
+                .as_ref()
+                .map(|dir| dir.join(mcp_install::MCP_BINARY))
+                .and_then(|exe| mcp_install::RealHost.probe(&exe));
+            self.mcp_version_cache = Some(version);
         }
-        if ui.button("复制版本信息").clicked() {
-            let text = format!(
-                "{APP} {rel} · 内核 {core} · 扩展 {ext} · MCP {mcp}",
-                APP = crate::gui::APP_NAME,
-                rel = crate::gui::RELEASE,
-                core = self.update_view().core_current,
-                ext = self
-                    .update_view()
-                    .extension_disk
-                    .or_else(|| self.update_view().extension)
-                    .unwrap_or_else(|| "未知".into()),
-                mcp = if mcp_available(&mcp_dir, |p| p.exists()) {
-                    "已安装"
-                } else {
-                    "未安装"
-                },
-            );
-            ui.ctx().copy_text(text);
-            self.agent_copied = Some("版本信息".to_string());
-        }
-        ui.add_space(8.0);
+        let mcp_version = self.mcp_version_cache.clone().flatten();
+
+        let packaged = crate::updater::extension_version(&crate::gui::default_extension_dir());
+        let input = components::ComponentInput {
+            app_name: crate::gui::APP_NAME,
+            release: crate::gui::RELEASE,
+            core_current: &view.core_current,
+            extension_disk: view.extension_disk.as_deref(),
+            extension_running: view.extension_running.as_deref(),
+            extension_packaged: packaged.as_deref(),
+            mcp_version: mcp_version.as_deref(),
+            mcp_present,
+            channel_url: self.update_url.as_deref(),
+            latest: view.latest.as_deref(),
+            checked_at: view.checked_at,
+            update_error: view.error.as_deref(),
+        };
+        components::build_rows(&input)
     }
 
+    /// 起后台线程装 dlm-mcp：下载是网络活，不能压在 UI 线程上。
+    fn start_mcp_install(&mut self, ctx: &egui::Context) {
+        if self.mcp_install_rx.is_some() {
+            return;
+        }
+        let Some(dest) = current_exe_dir() else {
+            self.mcp_install_note = Some("拿不到本程序所在目录，无法安装".to_string());
+            return;
+        };
+        let release = crate::gui::RELEASE.to_string();
+        let work_root = std::env::temp_dir().join("dlm-mcp-install");
+        let suppressed = mcp_install::download_suppressed();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("dlm-mcp-install".into())
+            .spawn(move || {
+                let out = mcp_install::install_release(
+                    &release,
+                    &work_root,
+                    &dest,
+                    suppressed,
+                    &mcp_install::RealHost,
+                );
+                let _ = tx.send(out);
+            })
+            .ok();
+        self.mcp_install_rx = Some(rx);
+        self.mcp_install_note = Some("正在下载 dlm-mcp…".to_string());
+        ctx.request_repaint();
+    }
+
+    /// 收安装回执。成功后清掉版本缓存 —— 下一次画这一页会重新探测。
+    fn drain_mcp_install(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.mcp_install_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(out) => {
+                self.mcp_install_note = Some(out.message());
+                if out.installed() {
+                    self.mcp_version_cache = None;
+                }
+                self.mcp_install_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.mcp_install_rx = None;
+                self.mcp_install_note = Some("安装线程异常退出".to_string());
+            }
+        }
+    }
+
+    /// 「Agent 接入」页头：两段可复制的配置 + 一句说明。
+    ///
+    /// 判据是"CLI 命令现在就能用、MCP 配置没装就置灰"。置灰不是偷懒：
+    /// 把一段指向不存在程序的配置交给用户，比不提供更糟。
     fn agent_panel(&mut self, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Agent 接入")
@@ -891,17 +903,14 @@ impl App {
                 );
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if ui.button("获取 dlm-mcp").clicked() {
-                        // 指到发布页而不是某个具体包的直链：直链会随版本变，
-                        // 而发布页永远是最新那一份，链接不会烂。
-                        super::update_ui::open_external(MCP_RELEASES_URL);
+                    if ui.button("去「组件」页安装").clicked() {
+                        // 安装流程只在组件页有一份：两处各写一遍必然有一处落后。
+                        self.settings_category = Category::Component;
                     }
                     ui.label(
-                        egui::RichText::new(
-                            "在发布页下载 dlm-mcp-*-win-x64.zip，解压到本程序同目录",
-                        )
-                        .size(10.5)
-                        .color(theme::ink_3()),
+                        egui::RichText::new("在那一页点「下载并安装」，装完这里就能复制配置")
+                            .size(10.5)
+                            .color(theme::ink_3()),
                     );
                 });
             }
@@ -969,6 +978,108 @@ fn rule_dir_mut(rule: &mut crate::rules::Rule) -> &mut String {
     rule.dir.get_or_insert_with(String::new)
 }
 
+/// 组件卡上按下的动作。收集起来出闭包再执行 —— 画卡的时候还借着 `rows` 的只读借用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentAction {
+    InstallMcp,
+    RecheckMcp,
+    OpenUpdatePanel,
+    CheckUpdate,
+    OpenReleases,
+    CopyExtPath,
+    OpenExtDir,
+    CopyExtPage,
+    CopyVersions,
+}
+
+/// 本程序所在目录：`dlm-mcp.exe` 就装在这儿。
+fn current_exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+
+/// 这张卡上该有哪些按钮。`right_to_left` 布局下**第一个画在最右**，所以主按钮排前面。
+fn component_actions(row: &components::ComponentRow) -> Vec<(&'static str, ComponentAction)> {
+    match row.id {
+        components::ComponentId::Desktop => vec![("更新…", ComponentAction::OpenUpdatePanel)],
+        components::ComponentId::Mcp => match &row.state {
+            components::ComponentState::Missing => vec![
+                ("下载并安装", ComponentAction::InstallMcp),
+                ("打开发布页", ComponentAction::OpenReleases),
+            ],
+            components::ComponentState::Unknown(_) => vec![
+                ("重新探测", ComponentAction::RecheckMcp),
+                ("打开发布页", ComponentAction::OpenReleases),
+            ],
+            _ => vec![("重新探测", ComponentAction::RecheckMcp)],
+        },
+        components::ComponentId::Extension => vec![
+            ("复制 chrome://extensions", ComponentAction::CopyExtPage),
+            ("打开目录", ComponentAction::OpenExtDir),
+            ("复制路径", ComponentAction::CopyExtPath),
+        ],
+        components::ComponentId::Channel => vec![
+            ("立即检查", ComponentAction::CheckUpdate),
+            ("打开发布页", ComponentAction::OpenReleases),
+        ],
+    }
+}
+
+/// 一张组件卡：左「标题 + 状态 + 版本」，右动作按钮，底下一行说明。
+fn component_card(
+    ui: &mut egui::Ui,
+    row: &components::ComponentRow,
+    action: &mut Option<ComponentAction>,
+) {
+    egui::Frame::new()
+        .fill(theme::surface())
+        .stroke(egui::Stroke::new(theme::STROKE, theme::line_soft()))
+        .inner_margin(egui::Margin::symmetric(11, 9))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(232.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(row.id.title())
+                                .size(12.5)
+                                .color(theme::ink()),
+                        );
+                        ui.label(
+                            egui::RichText::new(row.state.short())
+                                .size(10.5)
+                                .color(row.state.color()),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new(&row.version)
+                            .size(11.5)
+                            .monospace()
+                            .color(theme::ink_2()),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    for (label, act) in component_actions(row) {
+                        if ui.button(label).clicked() {
+                            *action = Some(act);
+                        }
+                    }
+                });
+            });
+            // 需处理的那一句必须显眼：它是"该干什么"的唯一出处。
+            if let components::ComponentState::NeedsAction(what) = &row.state {
+                ui.label(egui::RichText::new(what).size(10.5).color(theme::warn()));
+            }
+            ui.label(
+                egui::RichText::new(&row.hint)
+                    .size(10.5)
+                    .color(theme::ink_3()),
+            );
+        });
+}
+
 /// CLI 那一行：照着改就能用。占位符用尖括号，免得被误抄成真路径。
 pub(crate) fn agent_cli_line() -> String {
     "dlm --url <下载链接> --out-dir \"<目录>\"".to_string()
@@ -985,9 +1096,6 @@ pub(crate) fn agent_mcp_snippet() -> String {
 ///
 /// `exists` 作为参数传进来是为了能测：真去问文件系统的话，用例就得往
 /// 安装目录里塞文件，那是测试不该做的事。
-/// MCP 桥接的发布页。列成常量而不是散在按钮里，改仓库名时只改一处。
-pub(crate) const MCP_RELEASES_URL: &str = "https://github.com/Samuel666198/dlm/releases/latest";
-
 pub(crate) fn mcp_available(
     current_exe: &Option<std::path::PathBuf>,
     exists: impl Fn(&std::path::Path) -> bool,
@@ -1052,11 +1160,66 @@ mod tests {
                 "代理",
                 "Agent 接入",
                 "界面",
-                "浏览器扩展",
+                "组件",
                 "高级"
             ]
         );
         assert!(spec_count() > 0);
+        // 「组件」是状态面板：有页面、没有设置项。它必须是**有名有姓的空**，
+        // 而不是"漏了一条设置"。
+        assert!(
+            specs_in(Category::Component).next().is_none(),
+            "组件页不该混进设置项：那是状态面板"
+        );
+    }
+
+    /// 每张卡都得有按钮，且「没装 MCP」时的主按钮必须是安装本身。
+    #[test]
+    fn every_component_card_offers_an_action_and_mcp_missing_offers_install() {
+        use crate::gui::app::components::{ComponentId, ComponentState};
+
+        let missing = crate::gui::app::components::ComponentRow {
+            id: ComponentId::Mcp,
+            version: "未安装".to_string(),
+            state: ComponentState::Missing,
+            hint: String::new(),
+        };
+        let actions = component_actions(&missing);
+        assert_eq!(
+            actions.first().map(|(label, _)| *label),
+            Some("下载并安装"),
+            "没装时主按钮就是安装（right_to_left 下第一个画在最右）"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|(_, a)| *a == ComponentAction::InstallMcp)
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|(_, a)| *a == ComponentAction::OpenReleases),
+            "还要留一条手动下载的路：直链可能 404"
+        );
+
+        // 其余三张卡也不能是"有状态没动作"的死卡。
+        for id in [
+            ComponentId::Desktop,
+            ComponentId::Extension,
+            ComponentId::Channel,
+        ] {
+            let row = crate::gui::app::components::ComponentRow {
+                id,
+                version: "–".to_string(),
+                state: ComponentState::Ok,
+                hint: String::new(),
+            };
+            assert!(
+                !component_actions(&row).is_empty(),
+                "{} 卡上一个按钮都没有",
+                id.title()
+            );
+        }
     }
 
     /// 设置窗跟着主窗收敛，不许顶满客户区。

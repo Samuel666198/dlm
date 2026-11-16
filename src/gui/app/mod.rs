@@ -163,6 +163,16 @@ pub struct App {
     pub(super) settings_category: settings_spec::Category,
     /// Agent 接入页刚复制了什么（`cli` / `mcp`），只用来显示一行"已复制"。
     pub(super) agent_copied: Option<String>,
+    /// 组件页：`dlm-mcp.exe --version` 的探测结果。
+    ///
+    /// 三层含义：`None` = 还没探测过；`Some(None)` = 探测过但读不到版本；
+    /// `Some(Some(v))` = 读到了。探测要起子进程，所以**只做一次**并缓存。
+    pub(super) mcp_version_cache: Option<Option<String>>,
+    /// 正在后台装 dlm-mcp 时这里是回执通道。
+    pub(super) mcp_install_rx:
+        Option<std::sync::mpsc::Receiver<crate::gui::app::mcp_install::McpInstallOutcome>>,
+    /// 上一次安装的结果文案（成功与失败都写在这儿）。
+    pub(super) mcp_install_note: Option<String>,
     /// Agent 确认闸门（与 HTTP 线程共享一份）：票据在这儿生成、在这儿被点。
     pub(super) agent_gate: std::sync::Arc<std::sync::Mutex<crate::gui::AgentGate>>,
     /// 已批准、但还在等 runner 回执的票据 → (票据 id, 回执通道)。
@@ -301,6 +311,9 @@ impl App {
             settings_search: String::new(),
             settings_category: settings_spec::Category::Download,
             agent_copied: None,
+            mcp_version_cache: None,
+            mcp_install_rx: None,
+            mcp_install_note: None,
             agent_gate,
             ticket_replies: Vec::new(),
             palette_open: false,
