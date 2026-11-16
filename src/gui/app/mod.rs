@@ -27,6 +27,7 @@ pub mod agent_ui;
 pub mod basket;
 pub mod batch;
 pub mod clipboard_hint;
+pub mod components;
 pub mod context_bar;
 pub mod diagnose;
 pub mod dialog;
