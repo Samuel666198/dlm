@@ -745,7 +745,9 @@ impl App {
     }
 
     /// 组件页要的四行状态。事实从快照与本机探测来，判定交给 [`components::build_rows`]。
-    fn component_rows(&mut self) -> Vec<components::ComponentRow> {
+    ///
+    /// `pub(super)`：状态栏悬停摘要也要用同一份判定 —— 两处各算一次，口径迟早会分叉。
+    pub(super) fn component_rows(&mut self) -> Vec<components::ComponentRow> {
         let view = self.update_view();
         let exe_dir = current_exe_dir();
         let mcp_present = exe_dir

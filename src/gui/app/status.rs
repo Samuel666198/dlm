@@ -68,12 +68,31 @@ impl App {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(14.0);
-                ui.label(
-                    egui::RichText::new(format!("v{}", crate::gui::RELEASE))
-                        .size(11.5)
-                        .monospace()
-                        .color(theme::ink_3()),
+                // 版本号既是"我装的哪版"，也是去组件页的入口：
+                // 排查问题时第一句就是问版本，别让人再去设置里翻一层。
+                let version = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("v{}", crate::gui::RELEASE))
+                            .size(11.5)
+                            .monospace()
+                            .color(theme::ink_3()),
+                    )
+                    .sense(egui::Sense::click()),
                 );
+                if version.hovered() {
+                    // 摘要只在真悬停时才拼：拼它要起一次 MCP 版本探测（有缓存），
+                    // 每帧都拼等于每帧都问一遍文件系统。
+                    let rows = self.component_rows();
+                    version
+                        .clone()
+                        .on_hover_text(crate::gui::app::components::hover_tip(&rows));
+                }
+                if version.clicked() {
+                    self.settings_open = true;
+                    self.draft = self.settings.clone();
+                    self.settings_error = None;
+                    self.settings_category = crate::gui::app::settings_spec::Category::Component;
+                }
 
                 if let Some(q) = quota {
                     ui.add_space(10.0);

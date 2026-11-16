@@ -297,7 +297,6 @@ pub(crate) fn versions_line(rows: &[ComponentRow]) -> String {
 /// 状态栏悬停时那一行摘要：四个组件各一段。
 ///
 /// 抽成纯函数是因为它是**唯一**一处能一眼看全四个数的地方 —— 拼错了没人会发现。
-#[allow(dead_code)] // 状态栏悬停摘要：下一步接上
 pub(crate) fn summary_line(rows: &[ComponentRow]) -> String {
     rows.iter()
         .map(|r| match &r.state {
@@ -310,6 +309,11 @@ pub(crate) fn summary_line(rows: &[ComponentRow]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// 状态栏悬停提示：四项摘要 + 一句"点这里"。
+pub(crate) fn hover_tip(rows: &[ComponentRow]) -> String {
+    format!("{}\n点击打开「组件」页", summary_line(rows))
 }
 
 #[cfg(test)]
@@ -477,6 +481,19 @@ mod tests {
         assert_eq!(ago_label_at(1_000, 1_000 + 172_800), "2 天前");
         // 时钟回拨也不许 panic、不许出现"负几分钟"。
         assert_eq!(ago_label_at(1_000, 500), "刚刚");
+    }
+
+    /// 悬停提示 = 四项摘要 + 一句去向。
+    #[test]
+    fn the_status_bar_tip_says_where_to_click() {
+        let rows = build_rows(&input());
+        let tip = hover_tip(&rows);
+        assert!(tip.contains("组件"), "{tip}");
+        assert!(tip.contains("点击打开"), "{tip}");
+        for id in ComponentId::ALL {
+            assert!(tip.contains(id.title()), "缺 {}：{tip}", id.title());
+        }
+        assert!(tip.contains('\n'), "摘要与去向要分行：{tip}");
     }
 
     /// 复制给 issue 的那一行：四个版本号都在，但不掺状态词。
