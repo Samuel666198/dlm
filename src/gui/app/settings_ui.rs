@@ -32,19 +32,64 @@ use crate::gui::app::theme;
 /// 连接与速度里"0 = 不限"这类尾注。
 const ZERO_MEANS_UNLIMITED: &str = "0 = 不限";
 
+/// 设置窗的期望尺寸。
+const SETTINGS_WINDOW_DESIRED: egui::Vec2 = egui::vec2(760.0, 520.0);
+/// 与主窗边缘至少留这么多：不留的话圆角与投影会被客户区裁掉，看起来像"溢出一点点"。
+const SETTINGS_WINDOW_MARGIN: f32 = 32.0;
+/// 再小就没法用（左分类列 132 + 卡片最少宽度）。
+const SETTINGS_WINDOW_MIN: egui::Vec2 = egui::vec2(560.0, 360.0);
+/// 标题栏 + 搜索框 + 分隔线 + 底部按钮那一行占掉的高度。
+const SETTINGS_CHROME_H: f32 = 100.0;
+/// 内容区的最小高度：再矮就只剩一条缝，滚动也失去意义。
+const SETTINGS_SCROLL_MIN_H: f32 = 120.0;
+
+/// 设置窗该多大。
+///
+/// **为什么不再写死 `fixed_size(760, 520)`**：`theme::WINDOW_MIN` 是 760×480，
+/// 而设置窗曾有 760×520 —— 与主窗**同宽、还高 40pt**。主窗一缩到接近下限，
+/// 设置窗就顶满客户区（左右各剩约 7pt，圆角被切），竖向直接被裁。
+/// 所以尺寸要由视口算出来：先服从视口，再抬到下限；视口比下限还小时以视口为准，
+/// 免得"为了不溢出而溢出"。
+pub(crate) fn settings_window_size(viewport: egui::Vec2) -> egui::Vec2 {
+    let avail = egui::vec2(
+        (viewport.x - SETTINGS_WINDOW_MARGIN).max(0.0),
+        (viewport.y - SETTINGS_WINDOW_MARGIN).max(0.0),
+    );
+    let floor = egui::vec2(
+        SETTINGS_WINDOW_MIN.x.min(avail.x),
+        SETTINGS_WINDOW_MIN.y.min(avail.y),
+    );
+    egui::vec2(
+        SETTINGS_WINDOW_DESIRED.x.min(avail.x).max(floor.x),
+        SETTINGS_WINDOW_DESIRED.y.min(avail.y).max(floor.y),
+    )
+}
+
+/// 内容区（可滚的那块）有多高。
+///
+/// 以前是硬编码 `max_height(420)`：窗高一固定，420 恰好合适；一旦窗跟着视口缩，
+/// 420 就会把底部按钮挤出窗口。改成由窗高反推 —— 760×520 时仍是 420，观感不变。
+pub(crate) fn settings_scroll_height(window: egui::Vec2) -> f32 {
+    (window.y - SETTINGS_CHROME_H).max(SETTINGS_SCROLL_MIN_H)
+}
+
 impl App {
     pub(super) fn settings_panel(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         let mut save = false;
         let mut cancel = false;
 
+        // 尺寸由主窗视口算（见 `settings_window_size`）：主窗缩小时跟着缩，不再顶满客户区。
+        let window_size = settings_window_size(ctx.content_rect().size());
+        let scroll_height = settings_scroll_height(window_size);
+
         egui::Window::new("设置")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             // **固定尺寸**：原先只固定了宽度，高度跟着内容走 —— 切分类时窗口一高一矮地跳，
-            // 眼睛每次都要重新找"保存"在哪。现在 760×520 钉死，内容在里头滚。
-            .fixed_size(egui::vec2(760.0, 520.0))
+            // 眼睛每次都要重新找"保存"在哪。现在尺寸由视口算出，内容在里头滚。
+            .fixed_size(window_size)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 // 顶部：搜索设置项（跨分类）。
@@ -58,7 +103,7 @@ impl App {
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical()
-                    .max_height(420.0)
+                    .max_height(scroll_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.settings_search.trim().is_empty() {
@@ -1012,5 +1057,58 @@ mod tests {
             ]
         );
         assert!(spec_count() > 0);
+    }
+
+    /// 设置窗跟着主窗收敛，不许顶满客户区。
+    ///
+    /// 原来的写法是 `fixed_size(760, 520)`，而 `theme::WINDOW_MIN` 是 760×480 ——
+    /// 同宽、还高 40pt，所以主窗接近下限时设置窗右侧与底部都被裁。
+    #[test]
+    fn the_settings_window_shrinks_with_the_main_window_instead_of_overflowing() {
+        // 主窗按默认尺寸（1120×700）：设置窗保持设计尺寸。
+        assert_eq!(
+            settings_window_size(egui::vec2(1120.0, 700.0)),
+            SETTINGS_WINDOW_DESIRED
+        );
+
+        // 主窗缩到最小内径（760×480）：设置窗必须跟着收，且留出边距。
+        let small = settings_window_size(egui::vec2(760.0, 480.0));
+        assert_eq!(small, egui::vec2(728.0, 448.0));
+        assert!(
+            small.x <= 760.0 - SETTINGS_WINDOW_MARGIN && small.y <= 480.0 - SETTINGS_WINDOW_MARGIN,
+            "设置窗不许超出视口：{small:?}"
+        );
+
+        // 视口比下限还小：以视口为准，绝不"为了不溢出而溢出"。
+        let tiny = settings_window_size(egui::vec2(400.0, 300.0));
+        assert!(
+            tiny.x <= 400.0 - SETTINGS_WINDOW_MARGIN && tiny.y <= 300.0 - SETTINGS_WINDOW_MARGIN,
+            "{tiny:?}"
+        );
+
+        // 尺寸随视口单调不增：视口变小，窗不能反而变大。
+        let mut last = settings_window_size(egui::vec2(1600.0, 1000.0));
+        for w in [1400.0, 1200.0, 1000.0, 900.0, 800.0, 760.0] {
+            let now = settings_window_size(egui::vec2(w, 700.0));
+            assert!(now.x <= last.x, "视口缩小时设置窗宽度不该变大");
+            last = now;
+        }
+    }
+
+    /// 内容区高度由窗高反推，设计尺寸下仍是 420（观感不变）。
+    #[test]
+    fn the_settings_content_area_follows_the_window_height() {
+        assert_eq!(
+            settings_scroll_height(SETTINGS_WINDOW_DESIRED),
+            420.0,
+            "760×520 时必须还是原来那个 420，否则等于顺手改了观感"
+        );
+        assert!(settings_scroll_height(egui::vec2(760.0, 448.0)) < 420.0);
+        assert_eq!(settings_scroll_height(egui::vec2(560.0, 360.0)), 260.0);
+        // 再矮也留一条能滚的缝，不能算出负数。
+        assert_eq!(
+            settings_scroll_height(egui::vec2(560.0, 150.0)),
+            SETTINGS_SCROLL_MIN_H
+        );
     }
 }
