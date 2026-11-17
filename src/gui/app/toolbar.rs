@@ -163,31 +163,42 @@ impl App {
     }
 }
 
-/// 品牌位：一个方块标 + **英文全称**（界面里不出现缩写 `dlm`，它只留在文件名与命令上）。
+/// 品牌位：**只有文字，没有图标**。
 ///
-/// 全称用粗体：它是这一行的"身份"，不该和搜索框的占位字一样轻。
+/// ## 为什么删掉那个方块图标
+///
+/// 窗口顶部本来就有两个 `Download Manager`：上面是 Windows **原生标题栏**的窗口标题，
+/// 下面是这里画的"方块标 + 全称"。`docs/superpowers/specs/2026-11-10-native-shell-errata.md`
+/// 的 E10 已经裁定走原生装饰（理由是"下载器不是设计作品，系统一致性更重要"），
+/// 所以自绘品牌位是那条裁定的**遗留矛盾**。
+///
+/// 用户 2026-11-17 的处置：**删图标、保留文字、文字加粗**。
+/// 这样系统标题栏里的那个是"系统告诉你的"，这里是"设计上的品牌位"，
+/// 两份不再长得一模一样，也就不刺眼了。图标挪去别处（窗口图标 + 托盘图标都还在用同一份像素）。
 fn brand_block(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(180.0, 28.0), egui::Sense::hover());
-    let painter = ui.painter();
-    let logo = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 12.0, rect.center().y),
-        egui::vec2(24.0, 24.0),
-    );
-    painter.rect_filled(logo, 6.0, theme::accent());
-    super::icons::draw_icon(
-        painter,
-        Icon::Download,
-        egui::Rect::from_center_size(logo.center(), egui::vec2(13.0, 13.0)),
-        egui::Color32::from_rgb(0xFF, 0xF9, 0xF4),
-    );
-    painter.text(
-        egui::pos2(logo.right() + 8.0, rect.center().y),
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(BRAND_W, 28.0), egui::Sense::hover());
+    // **真加粗**：egui 的 `RichText::strong()` 只改颜色不改字形，
+    // 所以这里直接指定名字为 `dlm-bold` 的字族（见 `fonts::BOLD_FAMILY`）。
+    // 找不到粗体字体时退回 Proportional，至少文字还在、只是不粗。
+    let family = if super::fonts::bold_available() {
+        egui::FontFamily::Name(super::fonts::BOLD_FAMILY.into())
+    } else {
+        egui::FontFamily::Proportional
+    };
+    ui.painter().text(
+        rect.left_center(),
         egui::Align2::LEFT_CENTER,
         crate::gui::APP_NAME,
-        egui::FontId::proportional(14.0),
+        egui::FontId::new(14.5, family),
         theme::ink(),
     );
 }
+
+/// 品牌位占的宽度。
+///
+/// 原来是 180（塞了个 24pt 方块标 + 文字）。删掉图标后按文字实测宽度给，
+/// 多留 8pt 是因为中文回退字体下 `APP_NAME` 比 Ubuntu 排出来略宽。
+const BRAND_W: f32 = 150.0;
 
 impl App {
     /// 搜索框：自己画底，输入框无边框塞进去，`Ctrl K` 提示**内嵌**在右端。
@@ -197,7 +208,9 @@ impl App {
     fn search_field(&mut self, ui: &mut egui::Ui, width: f32) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
         let painter = ui.painter().clone();
-        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::surface_2());
+        // **`sunken` 而不是 `surface_2`**：输入框是"凹进去"的，`surface_2` 是 hover 色。
+        // 一个色值兼两个语义，正是 0.7.0 层次压平的原因之一。
+        painter.rect_filled(rect, theme::RADIUS - 2.0, theme::sunken());
 
         let chip_w = 46.0;
         let inner = egui::Rect::from_min_max(

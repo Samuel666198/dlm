@@ -655,7 +655,14 @@ impl App {
             self.drawer(ui);
         }
 
-        egui::CentralPanel::default().show(ui, |ui| self.list(ui));
+        // 列表主区垫成 **`surface`（卡片层）**，侧栏/状态栏留在 `paper`（窗口底）。
+        //
+        // 这是"层次感"最实在的一步：0.7.x 之前两者都是 `paper`，列表内容与侧栏
+        // 连成一片，看不出"内容区是一块板"。现在差 ΔE ≈ 9（浅色）/ 10.5（深色），
+        // 内容区自己立起来了，而且不需要加任何阴影 —— egui 也做不出高斯模糊阴影。
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::surface()))
+            .show(ui, |ui| self.list(ui));
 
         if self.adding {
             self.add_dialog(&ctx);

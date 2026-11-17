@@ -273,8 +273,10 @@ impl App {
             );
         } else if checked {
             // 勾中但没在看：淡蓝底。与"正在查看"的橙条区分开，两种状态可以同时存在。
-            painter.rect_filled(rect, 0.0, theme::surface_2());
+            // 勾中：走 `surface_3`（内嵌层），与"悬停"区分开 —— 两种状态可以同时存在。
+            painter.rect_filled(rect, 0.0, theme::surface_3());
         } else if response.hovered() {
+            // 悬停才用 `surface_2`。这一处是它从今往后的**唯一**语义。
             painter.rect_filled(rect, 0.0, theme::surface_2());
         }
         // 行分隔线。
@@ -420,7 +422,8 @@ impl App {
             egui::Sense::hover(),
         );
         let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, theme::surface());
+        // 表头是内容的"页眉条"，用 surface_3 而不是与列表同色 —— 否则表头与行连成一片。
+        painter.rect_filled(rect, 0.0, theme::surface_3());
         painter.rect_filled(
             egui::Rect::from_min_size(
                 egui::pos2(rect.left(), rect.bottom() - 1.0),
@@ -509,7 +512,7 @@ impl App {
         let mut act: Option<BatchAction> = None;
 
         egui::Frame::new()
-            .fill(theme::surface_2())
+            .fill(theme::surface_3())
             .inner_margin(egui::Margin::symmetric(12, 7))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {

@@ -69,15 +69,47 @@ pub fn is_dark() -> bool {
 }
 
 /// 一套配色。字段名 = 旧常量名的小写。
+///
+/// ## 四层表面（0.7.x 起）
+///
+/// ```
+/// sunken  <  paper  <  surface3  <  surface
+/// 凹进去      窗口底     内嵌块       卡片/浮层
+/// ```
+///
+/// 每层只承担**一个**语义，这是"层次感"的来源。0.7.0 只有两档在起作用
+/// （`paper`→`surface` 的 ΔE 才 3.61，卡片像贴在底色上），而且 `surface_2`
+/// 被迫同时当"次级底"和"hover 底"，职责重叠把层次压平了。
+///
+/// 门槛按每对的职责定，不搞一刀切 —— 浅色从纸底到纯白只有约 12 ΔE 的跨度，
+/// 四层相邻都要求 5 就得吃掉 15，只能靠纯黑纯白（无约束搜索确实跑出过这种废解）：
+///
+/// | 对 | 门槛 | 理由 |
+/// |---|---|---|
+/// | `sunken` → `paper` | ≥5 | 凹槽要看得出来，否则输入框和纸底粘在一起 |
+/// | `paper` → `surface` | ≥5 | **卡片浮起感的核心** |
+/// | `paper` → `surface3` | ≥3 | 内嵌块靠 1px 描边区分，不该抢主卡片 |
+/// | `surface3` → `surface` | ≥3 | 同上，故意做淡 |
+///
+/// 实测（`docs/design/2026-11-17-界面精致度-讨论记录.md` §7）：
+/// 浅色 paper→surface **9.06**、深色 **10.50**；四层的暖纸调性 R>G>B 保持。
 struct Palette {
+    /// 凹进去的底：输入框、进度条轨道。
+    sunken: Color32,
     paper: Color32,
+    /// 卡片里的内嵌块：模板卡、代码块、清单项。
+    surface_3: Color32,
     surface: Color32,
+    /// **只做 hover / 选中底**（0.7.x 起不再兼任"次级底"）。
     surface_2: Color32,
     line: Color32,
     line_soft: Color32,
     ink: Color32,
     ink_2: Color32,
+    /// 说明文字。浅色下对比度 **4.67**（0.7.0 是 2.62，低于 AA 正文 4.5，不合规）。
     ink_3: Color32,
+    /// **仅装饰 / 禁用**：对比度低于 3.0，不许承载信息。
+    ink_4: Color32,
     accent: Color32,
     accent_ink: Color32,
     accent_soft: Color32,
@@ -90,16 +122,19 @@ struct Palette {
     track: Color32,
 }
 
-/// 浅色：暖纸底 + 陶土橙（0.6.0 起的样子，不动）。
+/// 浅色：暖纸底 + 陶土橙。
 const LIGHT: Palette = Palette {
-    paper: Color32::from_rgb(0xF6, 0xF3, 0xEC),
-    surface: Color32::from_rgb(0xFF, 0xFD, 0xF8),
-    surface_2: Color32::from_rgb(0xF1, 0xED, 0xE4),
-    line: Color32::from_rgb(0xE4, 0xDF, 0xD2),
-    line_soft: Color32::from_rgb(0xED, 0xE8, 0xDC),
+    sunken: Color32::from_rgb(0xE1, 0xD8, 0xC5),
+    paper: Color32::from_rgb(0xED, 0xE6, 0xD8),
+    surface_3: Color32::from_rgb(0xF8, 0xF4, 0xEC),
+    surface: Color32::from_rgb(0xFF, 0xFD, 0xF7),
+    surface_2: Color32::from_rgb(0xE7, 0xDF, 0xCD),
+    line: Color32::from_rgb(0xDC, 0xD4, 0xC4),
+    line_soft: Color32::from_rgb(0xE8, 0xE2, 0xD4),
     ink: Color32::from_rgb(0x2A, 0x27, 0x20),
-    ink_2: Color32::from_rgb(0x6C, 0x68, 0x60),
-    ink_3: Color32::from_rgb(0x9C, 0x97, 0x8D),
+    ink_2: Color32::from_rgb(0x57, 0x52, 0x46),
+    ink_3: Color32::from_rgb(0x6B, 0x65, 0x55),
+    ink_4: Color32::from_rgb(0xA6, 0x9F, 0x91),
     accent: Color32::from_rgb(0xC0, 0x63, 0x40),
     accent_ink: Color32::from_rgb(0xA3, 0x4F, 0x31),
     accent_soft: Color32::from_rgb(0xF2, 0xE1, 0xD7),
@@ -109,24 +144,31 @@ const LIGHT: Palette = Palette {
     warn_soft: Color32::from_rgb(0xF3, 0xEA, 0xD7),
     bad: Color32::from_rgb(0xA2, 0x44, 0x3A),
     bad_soft: Color32::from_rgb(0xF4, 0xE2, 0xDF),
-    track: Color32::from_rgb(0xE7, 0xE2, 0xD5),
+    track: Color32::from_rgb(0xDD, 0xD5, 0xC3),
 };
 
 /// 深色：**不是把浅色反相**。
 ///
 /// 三条实测出来的原则：
-/// 1. 底色用暖黑（`#191713`）而不是纯黑 —— 纯黑配暖橙会发脏；
+/// 1. 底色用暖黑（`#1C1915`）而不是纯黑 —— 纯黑配暖橙会发脏；
 /// 2. 强调色提亮到 `#D87E58`：`#C06340` 在深底上几乎没有存在感；
 /// 3. 语义色（ok/warn/bad）必须整体提亮 —— 深底上原来的墨绿 `#4E7A5C` 等于隐身。
+///
+/// 深色下定稿的表面阶梯：`paper #1C1915` → `surface #332D24`，ΔE **10.50**
+/// （0.7.0 只有 3.76，深色反而比浅色更平）。`sunken` 压到 `#0D0B09`，
+/// 深色里"凹槽"不压到接近纯黑就看不出来。
 const DARK_PAL: Palette = Palette {
-    paper: Color32::from_rgb(0x19, 0x17, 0x13),
-    surface: Color32::from_rgb(0x21, 0x1E, 0x19),
-    surface_2: Color32::from_rgb(0x28, 0x24, 0x19),
-    line: Color32::from_rgb(0x37, 0x32, 0x2A),
-    line_soft: Color32::from_rgb(0x2E, 0x2A, 0x23),
-    ink: Color32::from_rgb(0xF2, 0xEE, 0xE6),
-    ink_2: Color32::from_rgb(0xB9, 0xB2, 0xA5),
-    ink_3: Color32::from_rgb(0x85, 0x7F, 0x72),
+    sunken: Color32::from_rgb(0x0D, 0x0B, 0x09),
+    paper: Color32::from_rgb(0x1C, 0x19, 0x15),
+    surface_3: Color32::from_rgb(0x28, 0x23, 0x19),
+    surface: Color32::from_rgb(0x33, 0x2D, 0x24),
+    surface_2: Color32::from_rgb(0x3E, 0x37, 0x2C),
+    line: Color32::from_rgb(0x44, 0x3D, 0x31),
+    line_soft: Color32::from_rgb(0x32, 0x2D, 0x25),
+    ink: Color32::from_rgb(0xF4, 0xF0, 0xE8),
+    ink_2: Color32::from_rgb(0xC6, 0xBF, 0xB2),
+    ink_3: Color32::from_rgb(0xA7, 0x9F, 0x91),
+    ink_4: Color32::from_rgb(0x5F, 0x59, 0x4F),
     accent: Color32::from_rgb(0xD8, 0x7E, 0x58),
     accent_ink: Color32::from_rgb(0xE8, 0x9A, 0x79),
     accent_soft: Color32::from_rgb(0x3A, 0x2A, 0x22),
@@ -136,7 +178,7 @@ const DARK_PAL: Palette = Palette {
     warn_soft: Color32::from_rgb(0x35, 0x2C, 0x1D),
     bad: Color32::from_rgb(0xCF, 0x7A, 0x6E),
     bad_soft: Color32::from_rgb(0x3B, 0x26, 0x22),
-    track: Color32::from_rgb(0x33, 0x2E, 0x26),
+    track: Color32::from_rgb(0x2A, 0x25, 0x1C),
 };
 
 fn pal() -> &'static Palette {
@@ -152,6 +194,17 @@ pub fn surface() -> Color32 {
 pub fn surface_2() -> Color32 {
     pal().surface_2
 }
+/// 卡片里的内嵌块（模板卡、代码块、清单项）。
+///
+/// 0.7.0 没有这一层，需要"再低一层"的地方只能借 `surface_2` —— 而那是 hover 色，
+/// 一个色值两个语义，层次就平了。
+pub fn surface_3() -> Color32 {
+    pal().surface_3
+}
+/// 凹进去的底：输入框、进度条轨道。
+pub fn sunken() -> Color32 {
+    pal().sunken
+}
 pub fn line() -> Color32 {
     pal().line
 }
@@ -166,6 +219,14 @@ pub fn ink_2() -> Color32 {
 }
 pub fn ink_3() -> Color32 {
     pal().ink_3
+}
+/// **仅装饰 / 禁用**：对比度低于 3.0，不许承载信息。
+///
+/// 立这一档是为了把"淡"和"看不清"分开：0.7.0 只有一个 `ink_3`，
+/// 既当"说明文字"（该读得清）又当"装饰"（该退下去），结果浅色下对比度只有 2.62，
+/// 两边都没做好。
+pub fn ink_4() -> Color32 {
+    pal().ink_4
 }
 pub fn accent() -> Color32 {
     pal().accent
@@ -227,8 +288,9 @@ pub fn apply(ctx: &eframe::egui::Context) {
     };
     visuals.panel_fill = paper();
     visuals.window_fill = surface();
-    visuals.extreme_bg_color = surface_2();
-    visuals.faint_bg_color = surface_2();
+    // 输入框这类"凹进去"的底走 `sunken`（0.7.0 借用的是 surface_2，和 hover 撞了）。
+    visuals.extreme_bg_color = sunken();
+    visuals.faint_bg_color = surface_3();
     visuals.override_text_color = Some(ink());
 
     visuals.widgets.noninteractive.bg_fill = surface();
@@ -238,6 +300,7 @@ pub fn apply(ctx: &eframe::egui::Context) {
     visuals.widgets.inactive.bg_stroke = Stroke::new(STROKE, line());
     visuals.widgets.inactive.fg_stroke = Stroke::new(STROKE, ink_2());
 
+    // hover 才用 surface_2 —— 它现在**只**承担这一个语义。
     visuals.widgets.hovered.bg_fill = surface_2();
     visuals.widgets.hovered.bg_stroke = Stroke::new(STROKE, line());
     visuals.widgets.hovered.fg_stroke = Stroke::new(STROKE, ink());
@@ -258,4 +321,182 @@ pub fn apply(ctx: &eframe::egui::Context) {
         eframe::egui::Theme::Light
     });
     ctx.set_visuals(visuals);
+
+    // ------------------------------------------------------------------
+    // Style：**手绘控件与 egui 原生控件必须用同一套度量**
+    //
+    // 0.7.0 完全没接管这一块，于是 `item_spacing` 还是默认的 (8, 3)、
+    // `button_padding` 是 (8, 2)、`window_margin` 是 6 —— 原生按钮/输入框/下拉
+    // 用默认密度，而手绘的行高是 52、圆角是 9。两套度量摆在一起，
+    // 看起来像"没做完"，这正是"粗糙"最实在的来源之一。
+    // ------------------------------------------------------------------
+    // egui 0.37 起 Style 是**按主题分开存**的（dark_style / light_style），
+    // `Context::style()` / `set_style()` 已经没了。这里用 `style_mut_of` 只改
+    // 当前这一份 —— 两套主题各调一次 `apply`，所以另一份到时候也会被调到。
+    let theme = if is_dark() {
+        eframe::egui::Theme::Dark
+    } else {
+        eframe::egui::Theme::Light
+    };
+    ctx.style_mut_of(theme, |style| {
+        // 间距阶梯：4 的倍数。默认 (8, 3) 的 3 是个没有来历的数。
+        style.spacing.item_spacing = eframe::egui::vec2(8.0, 4.0);
+        style.spacing.button_padding = eframe::egui::vec2(10.0, 5.0);
+        style.spacing.window_margin = eframe::egui::Margin::same(10);
+        style.spacing.menu_margin = eframe::egui::Margin::same(6);
+        // 交互目标最小尺寸：默认 (40, 20) 在 150% 缩放下太矮，指针不好点。
+        style.spacing.interact_size = eframe::egui::vec2(40.0, 26.0);
+
+        // 圆角三档，贯彻同一个 RADIUS：
+        //   控件（按钮/输入框）= RADIUS - 3
+        //   容器（卡片/菜单/浮层）= RADIUS
+        //   胶囊（进度条/状态点）= 大值由调用处给
+        style.visuals.widgets.noninteractive.corner_radius =
+            eframe::egui::CornerRadius::same(RADIUS_U8);
+        style.visuals.widgets.inactive.corner_radius =
+            eframe::egui::CornerRadius::same(RADIUS_U8.saturating_sub(3));
+        style.visuals.widgets.hovered.corner_radius =
+            eframe::egui::CornerRadius::same(RADIUS_U8.saturating_sub(3));
+        style.visuals.widgets.active.corner_radius =
+            eframe::egui::CornerRadius::same(RADIUS_U8.saturating_sub(3));
+        style.visuals.window_corner_radius = eframe::egui::CornerRadius::same(RADIUS_U8);
+        style.visuals.menu_corner_radius = eframe::egui::CornerRadius::same(RADIUS_U8);
+
+        // 动画时长：0.2s 是 egui 默认，保留；这里显式写出来是为了让它成为**我们的决定**，
+        // 而不是"碰巧用了默认值"。逐项动画的取舍见 `docs/design/2026-11-17-*` §6。
+        style.animation_time = 0.16;
+    });
+}
+
+/// `RADIUS` 的整数版：egui 的 `CornerRadius` 收 `u8`。
+const RADIUS_U8: u8 = RADIUS as u8;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 相对亮度（WCAG）。
+    fn lum(c: Color32) -> f64 {
+        let f = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+    }
+
+    /// 对比度。1.0 = 完全一样。
+    fn contrast(a: Color32, b: Color32) -> f64 {
+        let (la, lb) = (lum(a), lum(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// **层次用例 1：卡片必须从窗口底上浮起来。**
+    ///
+    /// 这是用户报「颜色太接近，整体没层次」的直接判据。
+    /// 0.7.0 实测 paper→surface 对比度只有 1.090（ΔE 3.61），肉眼几乎分不开；
+    /// 现在要求 ≥ 1.18（ΔE 约 9）。用固定数值断言，不靠肉眼看截图 —— 观感会骗人。
+    #[test]
+    fn the_content_panel_separates_from_the_window_background() {
+        for (name, p) in [("浅色", &LIGHT), ("深色", &DARK_PAL)] {
+            let c = contrast(p.paper, p.surface);
+            assert!(
+                c >= 1.18,
+                "{name}：窗口底与卡片太接近（对比度 {c:.3}，要求 >= 1.18）\
+                 —— 这正是「没有层次」的样子"
+            );
+        }
+    }
+
+    /// **层次用例 2：四层表面必须逐层变亮**，且相邻两层看得出差别。
+    ///
+    /// 单调这条防的是「调了个色，结果把顺序调乱了」—— 比如内嵌块比卡片还亮，
+    /// 看起来像浮在卡片外面。
+    #[test]
+    fn the_surface_ladder_is_monotonic_and_readable() {
+        for (name, p) in [("浅色", &LIGHT), ("深色", &DARK_PAL)] {
+            let ls = [
+                ("sunken", p.sunken),
+                ("paper", p.paper),
+                ("surface_3", p.surface_3),
+                ("surface", p.surface),
+            ];
+            for w in ls.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                assert!(
+                    lum(b.1) > lum(a.1),
+                    "{name}：{} 应当比 {} 更亮（层次顺序乱了）",
+                    b.0,
+                    a.0
+                );
+                // 相邻层必须有可测量的差别（>=1.04，约 dE 3）：完全相等就是"没做这层"。
+                let c = contrast(a.1, b.1);
+                assert!(
+                    c >= 1.04,
+                    "{name}：{} 与 {} 之间太接近（{c:.3} < 1.04）—— 这一层等于没做",
+                    a.0,
+                    b.0
+                );
+            }
+        }
+    }
+
+    /// **层次用例 3：说明文字必须读得清。**
+    ///
+    /// 0.7.0 的 `ink_3` 在浅色下对比度只有 **2.62**，低于 WCAG AA 正文的 4.5，
+    /// 也低于大字号/UI 元素的 3.0 —— 而它被大量用在副标题、灰字说明、计数上。
+    /// 根因是"色值不够用"：一个 `ink_3` 既要"淡"又要"读得清"。
+    #[test]
+    fn explanatory_text_meets_the_readable_threshold() {
+        for (name, p) in [("浅色", &LIGHT), ("深色", &DARK_PAL)] {
+            let c = contrast(p.ink_3, p.paper);
+            assert!(
+                c >= 4.5,
+                "{name}：ink_3 对比度 {c:.2} 低于 AA 正文 4.5 —— 说明文字读不清"
+            );
+            assert!(
+                contrast(p.ink, p.paper) > contrast(p.ink_2, p.paper),
+                "{name}：ink 应比 ink_2 更突出"
+            );
+            assert!(
+                contrast(p.ink_2, p.paper) > contrast(p.ink_3, p.paper),
+                "{name}：ink_2 应比 ink_3 更突出"
+            );
+        }
+    }
+
+    /// **层次用例 4：`ink_4` 只做装饰，不许被当成正文用。**
+    ///
+    /// 它的存在价值就是"明确地不可读"—— 如果它也能到 4.5，就该合并回 ink_3，
+    /// 多一个 token 只是增加选择困难。
+    #[test]
+    fn ink_4_is_decorative_only() {
+        for (name, p) in [("浅色", &LIGHT), ("深色", &DARK_PAL)] {
+            let c = contrast(p.ink_4, p.paper);
+            assert!(
+                c < 3.0,
+                "{name}：ink_4 对比度 {c:.2} 已经够读 —— 那它不该只当装饰"
+            );
+        }
+    }
+
+    /// 语义色在各自的浅底上要看得见（这就是深色单独重调过的原因）。
+    #[test]
+    fn semantic_colors_stay_visible_on_their_own_soft_backgrounds() {
+        for (name, p) in [("浅色", &LIGHT), ("深色", &DARK_PAL)] {
+            for (label, fg, bg) in [
+                ("ok", p.ok, p.ok_soft),
+                ("warn", p.warn, p.warn_soft),
+                ("bad", p.bad, p.bad_soft),
+                ("accent", p.accent_ink, p.accent_soft),
+            ] {
+                let c = contrast(fg, bg);
+                assert!(c >= 3.0, "{name}：{label} 在它的浅底上对比度只有 {c:.2}");
+            }
+        }
+    }
 }

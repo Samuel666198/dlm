@@ -150,7 +150,8 @@ pub(crate) struct DrawerDiag {
 /// 而不是留一块空白让人以为界面坏了。
 fn painter_spark(ui: &egui::Ui, rect: egui::Rect, history: &[f64], stalled: bool) {
     let painter = ui.painter();
-    painter.rect_filled(rect, 4.0, theme::surface_2());
+    // 曲线图的底是"凹槽"，用 sunken；surface_2 留给 hover。
+    painter.rect_filled(rect, 4.0, theme::sunken());
     let color = if stalled {
         theme::warn()
     } else {

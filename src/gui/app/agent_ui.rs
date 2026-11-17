@@ -105,7 +105,7 @@ impl App {
                 ui.add_space(8.0);
                 for (id, name, url, _referer) in &pending {
                     egui::Frame::new()
-                        .fill(theme::surface_2())
+                        .fill(theme::surface_3())
                         .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new(name).size(12.5).color(theme::ink()));
