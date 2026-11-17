@@ -191,6 +191,21 @@ impl Host {
     /// - **失败静默**：GUI 没起来、端点文件过期、端口没人听 —— 一律忽略。
     ///   宿主的存在意义是「让下载能用」，不能因为版本上报失败就影响下载。
     /// - **不阻塞回执**：2 秒超时，超了就放弃，回执早就发出去了。
+    ///
+    /// ## 「只转一次」必须**成功之后**才记账（2026-11-18 修的 bug）
+    ///
+    /// 原来是把版本写进 `last_ext_version` 就认账，**然后**才去发请求。
+    /// 于是出现一个非常容易撞上的序列：
+    ///
+    /// 1. 浏览器先起来，扩展 ping 宿主 → 宿主记下版本 → 发 HTTP 时 **GUI 还没起来**（失败，静默）
+    /// 2. 用户随后打开 dlm-gui
+    /// 3. 扩展再 ping → `last_ext_version` 已经等于这个版本 → **直接 return，永不再报**
+    ///
+    /// 结果：组件页的「浏览器中运行」永远显示"未知"，直到版本号变化或宿主重启。
+    /// 用户 2026-11-17 报的"浏览器扩展检测不是很稳定"就是这个 —— 不是网络抖动，
+    /// 是**记账时机遇错**。
+    ///
+    /// 修法：只有**真的发成功**才写 `last_ext_version`。
     fn report_ext_version(&mut self, op: &str, value: &Value) {
         eprintln!("dlm-native-host: 扩展 {op}");
         let Some(version) = value
@@ -204,7 +219,6 @@ impl Host {
         if self.last_ext_version.as_deref() == Some(version) {
             return;
         }
-        self.last_ext_version = Some(version.to_string());
         let Some(path) = &self.config.gui_endpoint else {
             return;
         };
@@ -219,7 +233,7 @@ impl Host {
             "http://127.0.0.1:{}/api/ext-hello?t={}",
             endpoint.port, endpoint.token
         );
-        let _ = reqwest::blocking::Client::builder()
+        let sent = reqwest::blocking::Client::builder()
             .no_proxy()
             .connect_timeout(std::time::Duration::from_secs(2))
             .timeout(std::time::Duration::from_secs(2))
@@ -230,8 +244,14 @@ impl Host {
                     .header("content-type", "application/json")
                     .body(json!({ "version": version }).to_string())
                     .send()
-                    .map(|_| ())
-            });
+            })
+            .map(|resp| resp.status().is_success())
+            .unwrap_or(false);
+        // **只在这之后记账**：失败就不能记，否则下一次 ping 会被去重挡掉，
+        // 那个版本再也送不出去。
+        if sent {
+            self.last_ext_version = Some(version.to_string());
+        }
     }
 
     /// E16：把队列任务的「继续」转给 `dlm-gui`。
@@ -1257,5 +1277,83 @@ mod tests {
             "队列明确拒绝时不许回退直连：{reply}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+    /// **失败的版本上报不许记账**（2026-11-18 修的 bug）。
+    ///
+    /// 撞上的序列：浏览器先起来 → 扩展 ping → 宿主记账 → 发 HTTP 时 GUI 还没起来（失败）
+    /// → 用户随后打开 GUI → 扩展再 ping → 被去重挡掉 → **这个版本永远送不出去**。
+    ///
+    /// 表现就是用户说的"浏览器扩展检测不是很稳定"：明明扩展在跑，组件页一直显示"未知"。
+    ///
+    /// 这条用例造两个服务端：第一个 **拒连**（端口关着），第二个正常收。
+    /// 判据：第一次失败后再 ping **必须**重发，且最终那个版本要送到。
+    #[test]
+    fn a_failed_version_report_is_retried_on_the_next_ping() {
+        use std::net::TcpListener;
+        let dir = std::env::temp_dir().join(format!("dlm-ext-retry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 1) 先指向一个**没人听**的端口：这次上报必然失败。
+        let dead_port = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+            // l 在这里被 drop，端口随即关闭
+        };
+        let mut host = Host::new(HostConfig {
+            gui_endpoint: Some(endpoint_file(&dir, dead_port)),
+            dlm_exe: dir.join("no-such-dlm.exe"),
+            ..config(&dir)
+        });
+        let _ = host.handle(br#"{"op":"ping","ext_version":"0.2.12"}"#);
+        assert_eq!(
+            host.last_ext_version, None,
+            "发送失败就不许记账，否则这个版本会被去重永久挡掉"
+        );
+
+        // 2) 换成真的收得下的服务端，再 ping 同一个版本：必须重发。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        let stub = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            sink.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = r#"{"ok":true}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        host.config.gui_endpoint = Some(endpoint_file(&dir, port));
+        let _ = host.handle(br#"{"op":"ping","ext_version":"0.2.12"}"#);
+        stub.join().unwrap();
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "失败过的版本必须重发：{requests:?}");
+        assert!(requests[0].contains("0.2.12"), "送到的是同一个版本");
+        assert_eq!(
+            host.last_ext_version.as_deref(),
+            Some("0.2.12"),
+            "成功了才记账"
+        );
+
+        // 3) 成功之后再 ping 同一版本：这时才该去重。
+        let _ = host.handle(br#"{"op":"ping","ext_version":"0.2.12"}"#);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "成功记账之后同一版本不该重复上报"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

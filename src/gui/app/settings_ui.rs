@@ -46,7 +46,19 @@ const SETTINGS_CHROME_H: f32 = 100.0;
 /// 内容区的最小高度：再矮就只剩一条缝，滚动也失去意义。
 const SETTINGS_SCROLL_MIN_H: f32 = 120.0;
 
-/// 设置窗该多大。
+/// 一行设置里，左侧「标题 + 解释」占多宽。
+///
+/// **这条必须跟着行宽走，不能写死 300。** 720pt 的窗里，减掉分类列 132、间距 10、
+/// 卡片内边距 20 之后只剩约 560；写死 300 之后，右侧再放一个 220 的输入框加按钮
+/// 就是约 590 —— 直接把卡片右缘顶破（用户 2026-11-17 报的代理页溢出）。
+///
+/// 取 46% 是因为标题最长的那句「关闭窗口时收进托盘」在 12.5pt 下约 250pt 宽；
+/// 上下限 220/320 防止窗口特别宽时左列吃掉太多。
+pub(crate) fn settings_row_text_width(row_width: f32) -> f32 {
+    (row_width * 0.46).clamp(220.0, 320.0)
+}
+
+/// 设置窗的期望尺寸。
 ///
 /// **为什么不再写死 `fixed_size(760, 520)`**：`theme::WINDOW_MIN` 是 760×480，
 /// 而设置窗曾有 760×520 —— 与主窗**同宽、还高 40pt**。主窗一缩到接近下限，
@@ -314,9 +326,15 @@ impl App {
             .stroke(egui::Stroke::new(theme::STROKE, theme::line_soft()))
             .inner_margin(egui::Margin::symmetric(10, 7))
             .show(ui, |ui| {
+                // **左列宽度由可用宽度算，不写死 300。**
+                //
+                // 720pt 的窗里，减掉分类列 132、间距 10、卡片内边距 20 之后只剩约 560；
+                // 左列占 300 时，右侧再放一个 220 的输入框加「测试」按钮就是约 590 ——
+                // 直接把卡片右缘顶破。用户 2026-11-17 报的代理页溢出就是这个。
+                let text_w = settings_row_text_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.set_width(300.0);
+                        ui.set_width(text_w);
                         ui.label(
                             egui::RichText::new(spec.title)
                                 .size(12.5)
@@ -550,7 +568,9 @@ impl App {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.draft.proxy)
                                 .hint_text("http://127.0.0.1:7890")
-                                .desired_width(220.0),
+                                // 扣掉「测试」按钮与间距，剩下的都给输入框。
+                                // 写死 220 时，窄窗口下这一行会把卡片右缘顶破。
+                                .desired_width((ui.available_width() - 72.0).clamp(120.0, 220.0)),
                         );
                         if ui.small_button("测试").clicked() {
                             self.proxy_test = Some(
@@ -1317,5 +1337,29 @@ mod tests {
             settings_scroll_height(egui::vec2(560.0, 150.0)),
             SETTINGS_SCROLL_MIN_H
         );
+    }
+    /// 设置行左列不能写死宽度：它必须跟着行宽走，否则右侧控件会把卡片顶破。
+    ///
+    /// 用户 2026-11-17 报的「代理界面右上角还有一点点溢出」根因就在这里：
+    /// 左列 300 + 输入框 220 + 按钮 ≈ 590 > 实际可用约 560。
+    #[test]
+    fn the_settings_row_text_column_adapts_instead_of_using_a_fixed_300() {
+        // 720pt 窗、分类列 132、间距 10、卡片内边距 20 → 约 558
+        let narrow = settings_row_text_width(558.0);
+        assert!(
+            narrow < 300.0,
+            "可用 558 时左列还占 {narrow}，右侧控件没地方站"
+        );
+        // 右侧至少要有 240pt 才放得下一个输入框加按钮。
+        assert!(
+            558.0 - narrow >= 240.0,
+            "右侧只剩 {:.0}pt，代理那行的输入框会被挤出去",
+            558.0 - narrow
+        );
+
+        // 宽窗口下也不能无限长。
+        assert_eq!(settings_row_text_width(2000.0), 320.0);
+        // 极窄也不塌成 0。
+        assert_eq!(settings_row_text_width(200.0), 220.0);
     }
 }

@@ -255,14 +255,6 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "关闭窗口时收进托盘；退出请用托盘菜单",
     ),
     spec(
-        SettingKey::Theme,
-        "theme",
-        Category::Interface,
-        "外观",
-        "主题",
-        "跟随系统 / 浅色 / 深色；切换后立即生效",
-    ),
-    spec(
         SettingKey::SidebarCollapsed,
         "sidebar_collapsed",
         Category::Interface,
@@ -286,6 +278,18 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "已经提示过",
         "程序自己记的状态，不用管",
     ),
+    spec(
+        SettingKey::Theme,
+        "theme",
+        Category::Interface,
+        "窗口",
+        "主题",
+        "跟随系统 / 浅色 / 深色；切换后立即生效",
+    ),
+    // **位置有讲究**：「窗口」组必须是连续的。
+    // 之前 Theme 被排在 CloseToTray 之后、SidebarCollapsed 之前，中间夹了个「外观」，
+    // 渲染时 `render_specs` 一见 group 变化就另起一张卡 —— 于是「窗口」被画成**两张同名卡**，
+    // 中间隔着「外观」。用户 2026-11-17 报的就是这个。
     spec(
         SettingKey::Autostart,
         "autostart",
@@ -458,5 +462,58 @@ mod tests {
             .find(|s| s.field == "tray_hint_shown")
             .expect("tray_hint_shown 要在表里");
         assert!(sh.read_only, "它是程序自己记的，界面不给改");
+    }
+    /// **同一分类里，同名的分组必须是连续的。**
+    ///
+    /// 渲染层 `render_specs` 一见 `group` 变化就另起一张卡，所以一张卡里放不下
+    /// 被别的组打断的字段。0.7.0 的「窗口」就吃过这个亏：`Theme`（当时 group 是
+    /// 「外观」）夹在 `CloseToTray` 与 `SidebarCollapsed` 之间，于是「窗口」被画成
+    /// **两张同名卡**。用户 2026-11-17 报的就是这个。
+    ///
+    /// 这条用例守的是"字段顺序"，而不是渲染代码 —— 因为错在顺序，不在渲染。
+    #[test]
+    fn a_group_is_never_split_by_another_group_in_the_same_category() {
+        for category in Category::ALL {
+            let groups: Vec<&str> = specs_in(*category).map(|s| s.group).collect();
+            // 每个组名出现的位置必须是一段连续区间。
+            let mut seen: Vec<&str> = Vec::new();
+            let mut closed: Vec<&str> = Vec::new();
+            for g in &groups {
+                if seen.last() == Some(g) {
+                    continue;
+                }
+                if seen.contains(g) {
+                    panic!(
+                        "分类「{}」的「{g}」被别的组打断了 —— 界面上会裂成两张同名卡。\
+                         当前顺序：{groups:?}",
+                        category.title()
+                    );
+                }
+                if let Some(last) = seen.last() {
+                    closed.push(last);
+                }
+                seen.push(g);
+            }
+        }
+    }
+
+    /// 「窗口」这一组必须装下全部窗口相关项，且与「外观」分开后不再裂开。
+    #[test]
+    fn the_window_group_holds_everything_window_related() {
+        let window: Vec<&str> = specs_in(Category::Interface)
+            .filter(|s| s.group == "窗口")
+            .map(|s| s.title)
+            .collect();
+        for expected in ["关闭窗口时收进托盘", "启动时收起侧栏", "主题"] {
+            assert!(
+                window.contains(&expected),
+                "「窗口」里缺「{expected}」：{window:?}"
+            );
+        }
+        // 主题属于"窗口"，不该自成一个组 —— 自成一个组就会把「窗口」劈成两半。
+        assert!(
+            specs_in(Category::Interface).all(|s| s.group != "外观"),
+            "「外观」这个组名已经并回「窗口」，不该再出现"
+        );
     }
 }
