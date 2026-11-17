@@ -49,6 +49,23 @@ pub mod toolbar;
 pub mod tray;
 pub mod update_ui;
 
+/// 主区显示哪一屏。
+///
+/// 从设计稿 v3 抄下来的结构：左栏三个入口对应三个 pane，同时只显示一个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MainView {
+    List,
+    NewTask,
+    Grab,
+}
+
+impl MainView {
+    /// 「下载列表」时才算回到列表。这三个入口在左栏是平铺的，没有下拉。
+    pub(super) fn is_list(self) -> bool {
+        matches!(self, MainView::List)
+    }
+}
+
 /// runner 换快照的句柄。
 pub type SnapshotSlot = Arc<Mutex<Vec<TaskView>>>;
 /// runner 换配额视图的句柄。
@@ -87,7 +104,6 @@ pub struct App {
     /// 快速添加窗口里的多行文本。
     pub(super) basket_text: String,
     /// 站点抓取窗口（0.4.0 · A）
-    pub(super) grab_open: bool,
     pub(super) grab_url: String,
     pub(super) grab_depth: u8,
     pub(super) grab_same_host: bool,
@@ -115,7 +131,6 @@ pub struct App {
     /// 筛选键：`None` = 全部；否则是状态键或分类键。
     pub(super) filter: Option<String>,
     /// 新建任务弹窗是否打开。
-    pub(super) adding: bool,
     /// 弹窗里的输入。
     pub(super) add_form: dialog::AddForm,
 
@@ -176,6 +191,13 @@ pub struct App {
     pub(super) agent_gate: std::sync::Arc<std::sync::Mutex<crate::gui::AgentGate>>,
     /// 已批准、但还在等 runner 回执的票据 → (票据 id, 回执通道)。
     pub(super) ticket_replies: Vec<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// 主区当前显示哪一屏：列表 / 新建任务 / 站点抓取。
+    ///
+    /// **这三者是互斥的"屏"，不是浮层。** 设计稿 v3 里它们是主区 pane
+    /// （`#pane-list` / `#pane-new` / `#pane-grab` 三选一），但 0.7.0 实现成了
+    /// `egui::Window` 模态弹窗 —— 用户 2026-11-17："新建任务和站点抓取不是讨论的
+    /// 单独界面形式，和 html 画的不太一样。" 这里按稿归位。
+    pub(super) main_view: MainView,
     /// 命令面板（`Ctrl K`）是否打开。
     pub(super) palette_open: bool,
     pub(super) palette_query: String,
@@ -277,7 +299,6 @@ impl App {
             search: String::new(),
             basket_open: false,
             basket_text: String::new(),
-            grab_open: false,
             grab_url: String::new(),
             grab_depth: 1,
             grab_same_host: true,
@@ -292,7 +313,6 @@ impl App {
             grab_template_name: String::new(),
             proxy_test: None,
             focus_search: false,
-            adding: false,
             add_form: dialog::AddForm::default(),
             quitting: false,
             close_to_tray: true,
@@ -319,6 +339,7 @@ impl App {
             mcp_install_note: None,
             agent_gate,
             ticket_replies: Vec::new(),
+            main_view: MainView::List,
             palette_open: false,
             palette_query: String::new(),
             palette_sel: 0,
@@ -391,7 +412,7 @@ impl App {
                     self.window_visible = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    self.adding = true;
+                    self.main_view = MainView::NewTask;
                     self.add_form.focused = false;
                     ctx.request_repaint();
                 }
@@ -443,10 +464,10 @@ impl App {
     ///
     /// Esc 的归属靠它决定：有框时 Esc 关框，没框时才取消选择（见 `shortcuts::shortcut_for`）。
     pub(super) fn overlay_open(&self) -> bool {
-        self.adding
+        self.main_view == MainView::NewTask
             || self.settings_open
             || self.basket_open
-            || self.grab_open
+            || self.main_view == MainView::Grab
             || self.update_open
             || self.palette_open
             || self
@@ -466,11 +487,11 @@ impl App {
         match id {
             "search" => self.focus_search = true,
             "new" => {
-                self.adding = true;
+                self.main_view = MainView::NewTask;
                 self.add_form.focused = false;
             }
             "paste" => self.basket_open = true,
-            "grab" => self.grab_open = true,
+            "grab" => self.main_view = MainView::Grab,
             "pause-all" => {
                 let ids = toolbar::pause_all_targets(&self.tasks());
                 for id in ids {
@@ -557,7 +578,6 @@ impl App {
         self.sync_agent_gate();
         self.handle_shortcuts(&ctx);
         self.basket(ui);
-        self.grab_window(ui);
 
         // `--autostart`：等窗口稳定后藏起来。
         //
@@ -647,11 +667,12 @@ impl App {
         // 内容区自己立起来了，而且不需要加任何阴影 —— egui 也做不出高斯模糊阴影。
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::surface()))
-            .show(ui, |ui| self.list(ui));
+            .show(ui, |ui| match self.main_view {
+                MainView::List => self.list(ui),
+                MainView::NewTask => self.new_task_pane(ui),
+                MainView::Grab => self.grab_pane(ui),
+            });
 
-        if self.adding {
-            self.add_dialog(&ctx);
-        }
         if self.settings_open {
             self.settings_panel(&ctx);
         }

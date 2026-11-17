@@ -1098,7 +1098,7 @@ fn the_grab_window_renders_a_plan_with_duplicates_and_skips() {
             "不同站点（b.example）".into(),
         )],
     };
-    app.grab_open = true;
+    app.main_view = super::app::MainView::Grab;
     app.grab_url = "https://a.example/".into();
     app.grab_checked = vec![true, false];
     app.grab_plan = Some(plan);
@@ -1376,11 +1376,39 @@ fn the_palette_actually_paints_while_it_is_open() {
 
 // **`Ctrl+K` 的端到端按键不走单元用例**（0.6.1 补丁）。
 //
-// 理由是这里的脚手架表达不了修饰键：手造 `Event::Key { modifiers: ctrl }` 时，
-// egui 0.37 并不会把它反映到 `input.modifiers`（实测 `ctrl=false, k_pressed=true`），
-// 断言只会得到假红。拆成两条更有意义：
-//
-// - `app::shortcut_for` 的用例管"按键组合 → 命令"的映射；
-// - `the_palette_actually_paints_while_it_is_open` 管"面板开着 → 真的画出来"。
-//
-// 真机那次按下由证据文档里的截图背书（启动 GUI → 按 Ctrl K → 面板出现）。
+// 理由是这里的脚手架表达不了修饰键：手造 `Event::Key { modifiers: ctrl /// **主区三个 pane 互斥**（2026-11-18 把弹窗改成 pane）。
+///
+/// 设计稿 v3 里 `#pane-list` / `#pane-new` / `#pane-grab` 是三选一；0.7.0 把后两个
+/// 做成了 `egui::Window` 弹窗，于是"新建任务"和"抓取"可以同时开、还能叠在列表上。
+/// 用户 2026-11-17：新建任务和站点抓取不是单独界面形式，和 html 画的不太一样。
+///
+/// 这条用例钉的是**状态只有一个来源**：`main_view` 一个字段决定画哪一屏，
+/// 不再有 `adding` / `grab_open` 两个布尔可以同时为真。
+#[test]
+fn the_main_area_shows_exactly_one_pane_at_a_time() {
+    let (mut app, dir) = test_app("pane", Vec::new());
+
+    // 默认在列表。
+    assert_eq!(app.main_view, super::app::MainView::List);
+    assert!(app.main_view.is_list());
+
+    let ctx = egui::Context::default();
+    // 每一屏都要能单独画出来（自绘屏没画 = 白屏，比报错更难发现）。
+    for view in [
+        super::app::MainView::List,
+        super::app::MainView::NewTask,
+        super::app::MainView::Grab,
+    ] {
+        app.main_view = view;
+        let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+        assert!(!output.shapes.is_empty(), "{view:?} 这一屏没画出任何图元");
+        output.textures_delta.clear();
+    }
+
+    // 三者里只有一个能被选为"列表"。
+    assert!(super::app::MainView::List.is_list());
+    assert!(!super::app::MainView::NewTask.is_list());
+    assert!(!super::app::MainView::Grab.is_list());
+
+    let _ = fs::remove_dir_all(dir);
+}

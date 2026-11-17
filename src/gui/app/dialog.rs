@@ -18,24 +18,38 @@ pub struct AddForm {
 }
 
 impl App {
-    pub(super) fn add_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = true;
+    /// 「新建任务」主区屏（**不是弹窗**）。
+    ///
+    /// 设计稿 v3 里 `#pane-new` 是主区的一块屏，与列表、抓取三选一；0.7.0 做成了
+    /// `egui::Window` 弹窗。用户 2026-11-17："新建任务和站点抓取不是讨论的单独界面
+    /// 形式，和 html 画的不太一样。"
+    ///
+    /// 改为屏之后有两个直接好处：
+    /// 1. 左栏「新建任务」能显示"我就是当前那一屏"（`entry_row_active`）；
+    /// 2. 表单能占满主区，链接框不再被 420pt 的弹窗宽度限制。
+    pub(super) fn new_task_pane(&mut self, ui: &mut egui::Ui) {
         let mut submit = false;
         let mut cancel = false;
 
-        egui::Window::new("添加下载任务")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(420.0)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
+        // 内容整体左对齐、限宽 720：主区很宽时表单不该拉成一条线。
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(720.0);
+                ui.label(
+                    egui::RichText::new("新建任务")
+                        .size(14.0)
+                        .strong()
+                        .color(theme::ink()),
+                );
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new("支持公开直链；带 Cookie 的下载仍走浏览器入口。")
                         .size(11.5)
                         .color(theme::ink_3()),
                 );
-                ui.add_space(10.0);
+                ui.add_space(12.0);
 
                 ui.label(
                     egui::RichText::new("下载 URL")
@@ -82,11 +96,11 @@ impl App {
                     ui.label(egui::RichText::new(err).size(11.5).color(theme::bad()));
                 }
 
-                ui.add_space(14.0);
+                ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     let can_submit = !self.add_form.url.trim().is_empty();
                     if ui
-                        .add_enabled(can_submit, egui::Button::new("添加"))
+                        .add_enabled(can_submit, egui::Button::new("加入队列"))
                         .clicked()
                     {
                         submit = true;
@@ -94,11 +108,18 @@ impl App {
                     if ui.button("取消").clicked() {
                         cancel = true;
                     }
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("Esc 返回列表")
+                            .size(10.5)
+                            .color(theme::ink_3()),
+                    );
                 });
             });
+        });
 
-        // Esc 关弹窗。
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Esc 回列表：pane 时代它不关窗，只是切回列表屏。
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             cancel = true;
         }
 
@@ -125,13 +146,12 @@ impl App {
                 reply: crate::gui::discard_reply(),
             });
             self.add_form = AddForm::default();
-            open = false;
+            self.main_view = super::MainView::List;
         }
 
         if cancel {
-            open = false;
+            self.main_view = super::MainView::List;
         }
-        self.adding = open;
     }
 }
 

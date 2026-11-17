@@ -17,6 +17,7 @@
 use eframe::egui;
 
 use super::App;
+use super::MainView;
 use super::icons::{self, Icon};
 use crate::gui::app::theme;
 
@@ -50,17 +51,42 @@ impl App {
             self.sidebar_collapsed = !collapsed;
             self.persist_sidebar_collapsed();
         }
-        if entry_row(ui, !collapsed, Icon::Plus, "新建任务", collapsed, "") {
-            self.adding = true;
+        if entry_row_active(
+            ui,
+            !collapsed,
+            Icon::Plus,
+            "新建任务",
+            collapsed,
+            "",
+            self.main_view == MainView::NewTask,
+        ) {
+            self.main_view = super::MainView::NewTask;
             self.add_form.focused = false;
             self.filter = None;
         }
-        if entry_row(ui, !collapsed, Icon::Grab, "站点抓取", collapsed, "") {
-            self.grab_open = true;
+        if entry_row_active(
+            ui,
+            !collapsed,
+            Icon::Grab,
+            "站点抓取",
+            collapsed,
+            "",
+            self.main_view == MainView::Grab,
+        ) {
+            self.main_view = super::MainView::Grab;
             self.filter = None;
         }
-        if entry_row(ui, !collapsed, Icon::List, "下载列表", collapsed, "") {
-            // 「下载列表」= 清掉所有筛选，回到完整清单。
+        if entry_row_active(
+            ui,
+            !collapsed,
+            Icon::List,
+            "下载列表",
+            collapsed,
+            "",
+            self.main_view.is_list(),
+        ) {
+            // 「下载列表」= 回到列表屏 + 清掉所有筛选（两个动作都是它）。
+            self.main_view = MainView::List;
             self.filter = None;
         }
 
@@ -190,6 +216,22 @@ fn entry_row(
     collapsed: bool,
     hover: &str,
 ) -> bool {
+    entry_row_active(ui, expanded, icon, label, collapsed, hover, false)
+}
+
+/// 带"当前在哪一屏"高亮的入口行。
+///
+/// 三个入口（新建 / 抓取 / 列表）现在对应三种**主区屏**，同时只显示一个，
+/// 所以它们必须能显示"我就是当前那一屏" —— 否则用户点完不知道自己在哪。
+fn entry_row_active(
+    ui: &mut egui::Ui,
+    expanded: bool,
+    icon: Icon,
+    label: &str,
+    collapsed: bool,
+    hover: &str,
+    active: bool,
+) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -197,11 +239,19 @@ fn entry_row(
     }
 
     let hovered = response.hovered();
-    if hovered {
+    if active {
+        ui.painter().rect_filled(
+            rect.shrink2(egui::vec2(4.0, 1.0)),
+            7.0,
+            theme::accent_soft(),
+        );
+    } else if hovered {
         ui.painter()
             .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 7.0, theme::surface_2());
     }
-    let ink = if hovered {
+    let ink = if active {
+        theme::accent_ink()
+    } else if hovered {
         theme::ink()
     } else {
         theme::ink_2()

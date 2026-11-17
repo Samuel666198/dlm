@@ -116,7 +116,7 @@ impl App {
         let has_selection = self.selected.is_some();
         match shortcut_for(keys, typing, has_selection, self.overlay_open()) {
             Some(Shortcut::NewTask) => {
-                self.adding = true;
+                self.main_view = super::MainView::NewTask;
                 self.add_form.focused = false;
             }
             Some(Shortcut::FocusSearch) => self.focus_search = true,

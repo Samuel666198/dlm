@@ -61,14 +61,8 @@ fn step_label(ui: &mut egui::Ui, n: u32, text: &str) {
 }
 
 /// 抓取窗该多宽：跟着主窗走，别把 720 钉死（主窗最小内径是 760，720 几乎顶满）。
-pub(crate) fn grab_window_width(viewport_w: f32) -> f32 {
-    (viewport_w - 120.0).clamp(560.0, 940.0)
-}
-
-/// 抓取窗该多高：同样别钉死，但要留得下三步与结果表。
-pub(crate) fn grab_window_height(viewport_h: f32) -> f32 {
-    (viewport_h - 160.0).clamp(380.0, 700.0)
-}
+/// 抓取屏的内容最大宽度：主区很宽时表单不该拉成一条线。
+pub(crate) const GRAB_PANE_MAX_W: f32 = 860.0;
 
 /// 「包含 / 排除」两个输入框的宽度：按这一行剩下的宽度分，并各自留上下限。
 pub(crate) fn grab_filter_widths(row_width: f32) -> (f32, f32) {
@@ -82,26 +76,26 @@ pub(crate) fn enqueue_enabled(picked: usize) -> bool {
 }
 
 impl App {
-    pub(super) fn grab_window(&mut self, ui: &mut egui::Ui) {
-        if !self.grab_open {
-            return;
-        }
+    /// 「站点抓取」主区屏（**不是弹窗**）。
+    ///
+    /// 设计稿 v3 里 `#pane-grab` 是主区的一块屏，与列表、新建任务三选一；
+    /// 0.7.0 做成了可缩放的 `egui::Window`。用户 2026-11-17 指出这个偏离。
+    ///
+    /// 改成屏之后「三步」才真正立得住：步骤条属于**这一屏**的标题区，
+    /// 而弹窗的标题栏在系统那一层，步骤条只能挤在内容里。
+    pub(super) fn grab_pane(&mut self, ui: &mut egui::Ui) {
         self.drain_grab_scan();
 
-        let mut open = true;
         let mut start_scan = false;
         let mut enqueue = false;
         let mut save_template = false;
         let mut apply_template: Option<usize> = None;
 
-        let viewport = ui.ctx().content_rect().size();
-        egui::Window::new("站点抓取")
-            .open(&mut open)
-            .resizable(true)
-            .collapsible(false)
-            .default_width(grab_window_width(viewport.x))
-            .default_height(grab_window_height(viewport.y))
-            .show(ui.ctx(), |ui| {
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(GRAB_PANE_MAX_W);
                 ui.label(
                     egui::RichText::new("先扫描出清单，勾选后才建任务；扫描本身不下载任何文件")
                         .size(10.5)
@@ -311,6 +305,7 @@ impl App {
                     );
                 }
             });
+        });
 
         // 出了闭包再动状态。
         if let Some(i) = apply_template {
@@ -338,7 +333,10 @@ impl App {
             self.enqueue_grab_picks();
         }
 
-        self.grab_open = open;
+        // Esc 回列表：pane 时代不关窗，只切屏。
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.main_view = super::MainView::List;
+        }
     }
 
     /// 收扫描线程的结果。
@@ -559,24 +557,7 @@ pub(crate) fn split_patterns(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        enqueue_enabled, grab_filter_widths, grab_window_height, grab_window_width, name_of,
-        split_patterns,
-    };
-
-    /// 抓取窗跟着主窗走，不再把 720 钉死。
-    #[test]
-    fn the_grab_window_follows_the_main_window() {
-        // 主窗按默认尺寸：比原来的 720 宽一点，够放三列。
-        assert_eq!(grab_window_width(1120.0), 940.0);
-        // 主窗最小内径 760：不能继续要 720（几乎顶满、右侧贴边）。
-        assert_eq!(grab_window_width(760.0), 640.0);
-        // 再小也有下限，别缩成一条缝。
-        assert_eq!(grab_window_width(500.0), 560.0);
-        // 高同理。
-        assert_eq!(grab_window_height(700.0), 540.0);
-        assert_eq!(grab_window_height(480.0), 380.0);
-    }
+    use super::{enqueue_enabled, grab_filter_widths, name_of, split_patterns};
 
     /// 「包含 / 排除」两个框按行宽分，且各自有上下限。
     #[test]
