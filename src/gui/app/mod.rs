@@ -645,11 +645,16 @@ impl App {
 
         // 收起时只留一条图标（52pt）。宽度**必须**跟着状态变，否则收起后只剩一条窄内容
         // 贴在左边、右边留一大块空白 —— 那看起来像布局坏了。
-        let sidebar_w = if self.sidebar_collapsed {
-            theme::SIDEBAR_MINI_W
-        } else {
-            theme::SIDEBAR_W
-        };
+        // **侧栏收起/展开也走动画**：212pt 与 52pt 之间是 160pt 的突变，
+        // 配合"内容跟着重排"会一起跳。用 animate_bool 让宽度连续变化 ——
+        // 它会在动画期间自动请求重绘（自己写插值最容易漏这一步）。
+        // `t` = 0 是展开态（212），1 是收起态（52），中间连续插值。
+        let t = ctx.animate_bool_with_time(
+            egui::Id::unique("sidebar-collapsed"),
+            self.sidebar_collapsed,
+            0.16,
+        );
+        let sidebar_w = theme::SIDEBAR_W - (theme::SIDEBAR_W - theme::SIDEBAR_MINI_W) * t;
         egui::Panel::left("sidebar")
             .exact_size(sidebar_w)
             .resizable(false)

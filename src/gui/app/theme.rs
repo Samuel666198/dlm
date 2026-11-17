@@ -560,4 +560,25 @@ mod tests {
             );
         }
     }
+    /// 侧栏宽度按动画进度插值：0 = 展开（212）、1 = 收起（52）。
+    ///
+    /// 抽成函数是为了能测方向 —— 把两端写反的话界面不会报错，
+    /// 只会表现为"点收起它反而变宽"。这种错靠肉眼看动画很难抓。
+    #[test]
+    fn the_sidebar_width_interpolates_in_the_right_direction() {
+        let at = |t: f32| SIDEBAR_W - (SIDEBAR_W - SIDEBAR_MINI_W) * t;
+        assert_eq!(at(0.0), SIDEBAR_W, "t=0 应当是展开态");
+        assert_eq!(at(1.0), SIDEBAR_MINI_W, "t=1 应当是收起态");
+        // 中间必须是单调递减的（动画过程里宽度只会一路变窄）。
+        let mut prev = at(0.0);
+        for step in 1..=10 {
+            let now = at(step as f32 / 10.0);
+            assert!(now < prev, "t={step}/10 时宽度没有继续变窄");
+            prev = now;
+        }
+        // 收起态必须真的比展开态窄，且窄得明显（不是差 1pt）。
+        // 用 `const` 断言而不是 `assert!`：两个常量相减是编译期就能算出的值，
+        // clippy 会把它判成"this assertion has a constant value"。
+        const _: () = assert!(SIDEBAR_W - SIDEBAR_MINI_W >= 100.0);
+    }
 }

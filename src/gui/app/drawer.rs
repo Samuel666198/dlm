@@ -27,6 +27,15 @@ use crate::gui::app::list::{eta_text, fmt_bytes, speed_text};
 use crate::gui::app::theme;
 use crate::gui::snapshot::TaskView;
 
+// ---------------------------------------------------------------- 动画
+
+/// 右栏滑入时长。0.16s 与 `theme` 里的全局 `animation_time` 一致 ——
+/// 面板动画比控件慢的话，整个界面会显得拖泥带水。
+const ANIM_SECS: f32 = 0.16;
+
+/// 滑入过程中至少留这么宽：宽度取 0 时 `Panel::right` 的边界计算容易抖。
+const MIN_SLIDE_W: f32 = 40.0;
+
 /// 抽屉里日志尾巴最多显示几行。
 const LOG_TAIL_LINES: usize = 40;
 
@@ -67,12 +76,37 @@ impl App {
         // **右栏而不是浮窗**（0.7.0）。浮窗会挡住列表，窄窗口下还会被窗口边缘裁掉 ——
         // 用户截图里那半个被切掉的详情就是它。改成固定宽度的右栏后，主区让位，
         // 列表列宽随之收窄，但没有任何东西被盖住。
+        // **右栏滑入**：宽度从 0 动画到 DRAWER_W。
+        //
+        // 用户 2026-11-17："可以做一些过渡动画，减少一些突兀感。"330pt 的面板凭空出现
+        // 是这份界面里最突兀的一处 —— 点一行，半个屏幕突然少掉 330pt。
+        //
+        // 用 `animate_bool_with_time` 而不是自己写插值：它会在动画期间自动请求重绘，
+        // 这正是这类代码最容易写错的地方（不请求重绘就卡在半路）。
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(egui::Id::unique("drawer-open"), true, ANIM_SECS);
+        let width = (theme::DRAWER_W * t).max(MIN_SLIDE_W);
         let actions = egui::Panel::right("drawer")
-            .exact_size(theme::DRAWER_W)
+            .exact_size(width)
             .resizable(false)
-            .show(ui, |ui| drawer_body(ui, &task, &diag, &log_tail))
+            // **动画期间不画内容**：330pt 的正文塞进 40pt 会横溢、文字飘到面板外
+            // （0.7.0 记过这个坑）。宽度到位之后再画。
+            .show(ui, |ui| {
+                // 动画早期的帧不画内容（宽度本身在变，画了会横溢），
+                // 返回 `None` = 这一帧没有任何动作被触发。
+                if t >= 0.98 {
+                    Some(drawer_body(ui, &task, &diag, &log_tail))
+                } else {
+                    None
+                }
+            })
             .inner;
 
+        let Some(actions) = actions else {
+            // 滑入动画还没结束：这一帧不该处理任何动作。
+            return;
+        };
         if actions.close {
             self.selected = None;
             self.drawer_log = None;
