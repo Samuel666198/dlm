@@ -31,7 +31,20 @@ use crate::gui::snapshot::TaskView;
 
 /// 右栏滑入时长。0.16s 与 `theme` 里的全局 `animation_time` 一致 ——
 /// 面板动画比控件慢的话，整个界面会显得拖泥带水。
-const ANIM_SECS: f32 = 0.16;
+pub(crate) const ANIM_SECS: f32 = 0.16;
+
+/// 滑入动画的 Id。关闭时要拿同一个 Id 把它拨回 0，所以抽成常量
+/// （两处各写一遍字符串，改一处漏一处就会变成"两次不同的动画"）。
+pub(crate) const DRAWER_ANIM_ID: &str = "drawer-open";
+
+/// 右栏不显示时，把滑入动画拨回 0。
+///
+/// 不这么做的话，`animate_bool` 的状态会在右栏关闭期间冻结；下次打开时
+/// elapsed 已远超动画时长，egui 直接补齐到 1.0 —— 表现就是"只有第一次打开有滑入"。
+/// 实测见 `the_drawer_slide_animation_progresses_and_restarts_after_a_gap`。
+pub(crate) fn reset_drawer_anim(ctx: &egui::Context) {
+    let _ = ctx.animate_bool_with_time(egui::Id::unique(DRAWER_ANIM_ID), false, ANIM_SECS);
+}
 
 /// 滑入过程中至少留这么宽：宽度取 0 时 `Panel::right` 的边界计算容易抖。
 const MIN_SLIDE_W: f32 = 40.0;
@@ -83,9 +96,18 @@ impl App {
         //
         // 用 `animate_bool_with_time` 而不是自己写插值：它会在动画期间自动请求重绘，
         // 这正是这类代码最容易写错的地方（不请求重绘就卡在半路）。
+        //
+        // **`drawer()` 只在选中任务时才被调用**，所以右栏关着的那几帧根本不会求值，
+        // `AnimationManager` 里那个按 Id 存的值就停在原地。实测（见用例
+        // `the_drawer_slide_animation_progresses_and_restarts_after_a_gap`）：
+        // 断一段时间再求值，elapsed 远超动画时长 ⇒ **直接补齐到 1.0**，
+        // 于是"第二次打开右栏"没有滑入，只有第一次有。
+        //
+        // 修法：右栏不显示时显式把它往 0 动画一次（`open_and_reset` 在 `App::ui`
+        // 里每帧调），这样下次显示从 0 重新爬。
         let t = ui
             .ctx()
-            .animate_bool_with_time(egui::Id::unique("drawer-open"), true, ANIM_SECS);
+            .animate_bool_with_time(egui::Id::unique(DRAWER_ANIM_ID), true, ANIM_SECS);
         let width = (theme::DRAWER_W * t).max(MIN_SLIDE_W);
         let actions = egui::Panel::right("drawer")
             .exact_size(width)

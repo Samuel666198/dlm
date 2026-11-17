@@ -1412,3 +1412,199 @@ fn the_main_area_shows_exactly_one_pane_at_a_time() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **右栏滑入动画：连续帧必须单调趋近 1，且"缺席一段时间再求值"会直接补齐。**
+///
+/// 这条记录的是 egui `animate_bool` 的**实测行为**：它按 Id 存状态，
+/// 缺席期间不求值 ⇒ 回来时 elapsed 已超长 ⇒ 直接跳到目标值。
+/// 正是这个行为导致"右栏只有第一次打开有滑入"，`drawer::reset_drawer_anim` 就是解法
+/// （下一条用例钉住）。
+#[test]
+fn the_drawer_slide_animation_progresses_monotonically() {
+    let ctx = egui::Context::default();
+    let id = egui::Id::unique(super::app::drawer::DRAWER_ANIM_ID);
+    let anim = 0.16;
+    let mut clock = 0.0f64;
+
+    let tick = |ctx: &egui::Context, clock: &mut f64, draw: bool| -> f32 {
+        *clock += 0.016;
+        let mut input = frame_input();
+        input.time = Some(*clock);
+        input.predicted_dt = 0.016;
+        let mut v = 0.0;
+        let mut output = ctx.run_ui(input, |ui| {
+            if draw {
+                v = ui.ctx().animate_bool_with_time(id, true, anim);
+            }
+        });
+        output.textures_delta.clear();
+        v
+    };
+
+    let mut prev = tick(&ctx, &mut clock, true);
+    assert!((0.0..=1.0).contains(&prev), "首次求值越界：{prev}");
+    for _ in 0..40 {
+        let now = tick(&ctx, &mut clock, true);
+        assert!(now + 1e-6 >= prev, "动画值倒退：{prev} -> {now}");
+        prev = now;
+    }
+    assert!(
+        (prev - 1.0).abs() < 1e-3,
+        "推了 40 帧（0.64s）还没走完：{prev}"
+    );
+
+    // 缺席 100 帧后回来：直接补齐（这是 egui 的行为，不是我们要的效果，
+    // 所以要靠 reset_drawer_anim 主动拨回 0 —— 见下一条用例）。
+    for _ in 0..100 {
+        tick(&ctx, &mut clock, false);
+    }
+    let after_gap = tick(&ctx, &mut clock, true);
+    assert!(
+        (after_gap - 1.0).abs() < 1e-2,
+        "缺席后再求值应当直接补齐：{after_gap}"
+    );
+}
+
+/// **右栏关掉再打开，滑入动画必须重播。**
+///
+/// 没有 `drawer::reset_drawer_anim` 的话，动画状态会在关闭期间冻结，
+/// 下次打开时 elapsed 已超长 ⇒ 直接跳 1.0 ⇒ **只有第一次打开有滑入**。
+/// 这类错门禁抓不到（不崩、不警告），只能靠这条用例。
+#[test]
+fn closing_the_drawer_resets_its_slide_animation() {
+    use super::app::drawer::{DRAWER_ANIM_ID, reset_drawer_anim};
+
+    let ctx = egui::Context::default();
+    let id = egui::Id::unique(DRAWER_ANIM_ID);
+    let anim = 0.16;
+    let mut clock = 0.0f64;
+
+    let tick = |ctx: &egui::Context, clock: &mut f64, open: bool| -> f32 {
+        *clock += 0.016;
+        let mut input = frame_input();
+        input.time = Some(*clock);
+        input.predicted_dt = 0.016;
+        let mut v = 0.0;
+        let mut output = ctx.run_ui(input, |ui| {
+            if open {
+                v = ui.ctx().animate_bool_with_time(id, true, anim);
+            } else {
+                reset_drawer_anim(ui.ctx());
+                v = ui.ctx().animate_bool_with_time(id, false, anim);
+            }
+        });
+        output.textures_delta.clear();
+        v
+    };
+
+    let mut last = 0.0;
+    for _ in 0..40 {
+        last = tick(&ctx, &mut clock, true);
+    }
+    assert!((last - 1.0).abs() < 1e-3, "打开后没走完：{last}");
+
+    let mut closed = 1.0;
+    for _ in 0..20 {
+        closed = tick(&ctx, &mut clock, false);
+    }
+    assert!(
+        closed < 0.01,
+        "关闭后动画值没回到 0：{closed} —— 下次打开就不会有滑入"
+    );
+
+    let reopened = tick(&ctx, &mut clock, true);
+    assert!(
+        reopened < 0.9,
+        "重开时直接给了 {reopened:.2}（应当低值起步）—— 滑入没有重播"
+    );
+}
+
+/// **`App` 真的会在右栏隐藏时调用 `reset_drawer_anim`**（接线用例）。
+///
+/// 上一条用例直接调那个函数，测的是"函数本身对不对"；**测不到"有没有接上"** ——
+/// 实测变异验证：把 `App::ui` 里的调用删掉，上一条用例照样绿（假绿）。
+///
+/// 这条走完整的 `App::ui_frame`，模拟"开 → 关 → 开"：
+/// 关着的那几帧必须把动画值压回 0，再开时才会从低值起步。
+#[test]
+fn the_app_resets_the_drawer_animation_when_nothing_is_selected() {
+    use super::app::drawer::DRAWER_ANIM_ID;
+
+    let (mut app, dir) = test_app("drawer-anim", vec![task_view("t-1")]);
+    let ctx = egui::Context::default();
+    let id = egui::Id::unique(DRAWER_ANIM_ID);
+    let mut clock = 0.0f64;
+
+    let frame = |app: &mut super::app::App, clock: &mut f64| -> Option<f32> {
+        *clock += 0.016;
+        let mut input = frame_input();
+        input.time = Some(*clock);
+        input.predicted_dt = 0.016;
+        let mut probed: Option<f32> = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            app.ui_frame(ui);
+            // 画完之后问一次当前动画进度（不改状态，只读）。
+            probed = Some(ui.ctx().animate_value_with_time(id, 0.0, 0.0));
+        });
+        output.textures_delta.clear();
+        probed
+    };
+
+    // 1) 选中一条，跑满：动画应当推进到接近 1。
+    app.selected = Some("t-1".to_string());
+    for _ in 0..44 {
+        frame(&mut app, &mut clock);
+    }
+    // 2) 取消选中，跑 20 帧：`App::ui` 每帧都会调 reset，动画该被压回 0。
+    app.selected = None;
+    for _ in 0..20 {
+        frame(&mut app, &mut clock);
+    }
+    // 3) 再选中：这一帧的动画值必须从低处起步（重播滑入）。
+    app.selected = Some("t-1".to_string());
+    frame(&mut app, &mut clock);
+    // 直接问 animate_bool 的当前值（同样的 Id）。
+    let mut input = frame_input();
+    clock += 0.016;
+    input.time = Some(clock);
+    input.predicted_dt = 0.016;
+    let mut t = 1.0;
+    let mut output = ctx.run_ui(input, |ui| {
+        t = ui
+            .ctx()
+            .animate_bool_with_time(id, true, super::app::drawer::ANIM_SECS);
+    });
+    output.textures_delta.clear();
+    assert!(
+        t < 0.9,
+        "重开时动画值是 {t:.2}（应当从低处起步）—— App 没有在隐藏时 reset，\
+         只有第一次打开会有滑入"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// 造一条最小可用的 `TaskView`。
+fn task_view(id: &str) -> TaskView {
+    TaskView {
+        id: id.to_string(),
+        url: "https://example.com/a.bin".to_string(),
+        name: "a.bin".to_string(),
+        path: "C:\\dl\\a.bin".to_string(),
+        referer: None,
+        status: "running".to_string(),
+        pid: None,
+        exit_code: None,
+        log: "C:\\dl\\a.log".to_string(),
+        progress: 0.0,
+        total_len: Some(1024),
+        delivered: Some(0),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        category: "other",
+    }
+}

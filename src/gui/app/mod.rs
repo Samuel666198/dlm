@@ -663,6 +663,11 @@ impl App {
         // 详情抽屉：右边，只有选中任务时才占位（没选中就完全不出现在布局里）。
         if self.selected.is_some() {
             self.drawer(ui);
+        } else {
+            // 右栏不显示时把滑入动画拨回 0：不然它会在关闭期间冻结，
+            // 下次打开时 elapsed 已超长、直接补齐到 1.0 —— 只有第一次打开有滑入。
+            // 实测见 tests.rs 的 the_drawer_slide_animation_progresses_and_restarts_after_a_gap。
+            drawer::reset_drawer_anim(&ctx);
         }
 
         // 列表主区垫成 **`surface`（卡片层）**，侧栏/状态栏留在 `paper`（窗口底）。
