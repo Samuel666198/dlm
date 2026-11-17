@@ -99,7 +99,9 @@ impl App {
             // 品牌位取代了 0.6.0 的「＋新建 ▾」大按钮：入口已经在左栏平铺，
             // 顶栏再放一个橙色大按钮既是重复，又把视线从内容上抢走。
             brand_block(ui);
-            ui.add_space(26.0);
+            // 26 是设计稿给"方块标 + 全称"那版的间距；删掉图标后文字宽度按实测算，
+            // 26 显得空。18 是视觉上与工具条右端 22 的间距呼应。
+            ui.add_space(18.0);
 
             // 搜索框：**先扣掉右侧固定宽度的东西**再问 `available_width`，否则最后两颗
             // 按钮会被挤出窗口右缘（0.6.0 第一版就是这么丢的 `⋯`，1684pt 窗口里只剩「设置」）。
@@ -176,7 +178,6 @@ impl App {
 /// 这样系统标题栏里的那个是"系统告诉你的"，这里是"设计上的品牌位"，
 /// 两份不再长得一模一样，也就不刺眼了。图标挪去别处（窗口图标 + 托盘图标都还在用同一份像素）。
 fn brand_block(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(BRAND_W, 28.0), egui::Sense::hover());
     // **真加粗**：egui 的 `RichText::strong()` 只改颜色不改字形，
     // 所以这里直接指定名字为 `dlm-bold` 的字族（见 `fonts::BOLD_FAMILY`）。
     // 找不到粗体字体时退回 Proportional，至少文字还在、只是不粗。
@@ -185,20 +186,27 @@ fn brand_block(ui: &mut egui::Ui) {
     } else {
         egui::FontFamily::Proportional
     };
+    let font = egui::FontId::new(14.5, family);
+
+    // **宽度按实测文字算，不再写死 180/150。**
+    //
+    // 写死的时代这里是 180（方块标 24 + 间距 8 + 文字），删掉图标之后仍留 150，
+    // 而实测文字只有 130 出头 —— 那 20pt 是**看不见的死空**，把搜索框往右顶了一截，
+    // 看起来像"搜索框离品牌太近、又离右边太远"。用户 2026-11-18 指出的就是这个。
+    let width = ui.fonts_mut(|f| {
+        f.layout_no_wrap(crate::gui::APP_NAME.to_owned(), font.clone(), theme::ink())
+            .rect
+            .width()
+    });
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
     ui.painter().text(
         rect.left_center(),
         egui::Align2::LEFT_CENTER,
         crate::gui::APP_NAME,
-        egui::FontId::new(14.5, family),
+        font,
         theme::ink(),
     );
 }
-
-/// 品牌位占的宽度。
-///
-/// 原来是 180（塞了个 24pt 方块标 + 文字）。删掉图标后按文字实测宽度给，
-/// 多留 8pt 是因为中文回退字体下 `APP_NAME` 比 Ubuntu 排出来略宽。
-const BRAND_W: f32 = 150.0;
 
 impl App {
     /// 搜索框：自己画底，输入框无边框塞进去，`Ctrl K` 提示**内嵌**在右端。

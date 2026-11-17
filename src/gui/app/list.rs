@@ -261,7 +261,9 @@ impl App {
 
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, 0.0, theme::accent_soft());
+            // 用专用的 `row_selected`，不再借 `accent_soft`（那是标签/胶囊的底）。
+            // 整行 52pt 涂一个"标签色"就是色块，太重 —— 见 theme.rs 的字段注释。
+            painter.rect_filled(rect, 0.0, theme::row_selected());
             // 左侧 2.5pt 强调条。
             painter.rect_filled(
                 egui::Rect::from_min_size(

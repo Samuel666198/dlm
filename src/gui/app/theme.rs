@@ -113,6 +113,13 @@ struct Palette {
     accent: Color32,
     accent_ink: Color32,
     accent_soft: Color32,
+    /// **列表行的"正在查看"底**。
+    ///
+    /// 0.7.0 直接复用 `accent_soft`（那是**标签/胶囊**的底，本来就比较实），
+    /// 涂在 52pt 高的整行上就成了一个色块 —— 用户 2026-11-18 报"选中颜色太深"。
+    /// 实测：`accent_soft` 对 `surface` 的 ΔE 是 **10.54**，而行选中只需要 5~7
+    /// （看得出选中、又不抢正文）。
+    row_selected: Color32,
     ok: Color32,
     ok_soft: Color32,
     warn: Color32,
@@ -138,6 +145,7 @@ const LIGHT: Palette = Palette {
     accent: Color32::from_rgb(0xC0, 0x63, 0x40),
     accent_ink: Color32::from_rgb(0xA3, 0x4F, 0x31),
     accent_soft: Color32::from_rgb(0xF2, 0xE1, 0xD7),
+    row_selected: Color32::from_rgb(0xF9, 0xEE, 0xE6),
     ok: Color32::from_rgb(0x4E, 0x7A, 0x5C),
     ok_soft: Color32::from_rgb(0xE4, 0xED, 0xE4),
     warn: Color32::from_rgb(0xA9, 0x76, 0x2A),
@@ -172,6 +180,7 @@ const DARK_PAL: Palette = Palette {
     accent: Color32::from_rgb(0xD8, 0x7E, 0x58),
     accent_ink: Color32::from_rgb(0xE8, 0x9A, 0x79),
     accent_soft: Color32::from_rgb(0x3A, 0x2A, 0x22),
+    row_selected: Color32::from_rgb(0x40, 0x37, 0x2C),
     ok: Color32::from_rgb(0x79, 0xA9, 0x8A),
     ok_soft: Color32::from_rgb(0x22, 0x30, 0x1F),
     warn: Color32::from_rgb(0xD2, 0xA0, 0x5A),
@@ -236,6 +245,10 @@ pub fn accent_ink() -> Color32 {
 }
 pub fn accent_soft() -> Color32 {
     pal().accent_soft
+}
+/// 列表行的"正在查看"底。与 `accent_soft` 分开：后者是标签/胶囊的底，更实。
+pub fn row_selected() -> Color32 {
+    pal().row_selected
 }
 pub fn ok() -> Color32 {
     pal().ok
@@ -388,6 +401,36 @@ mod tests {
         0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
     }
 
+    /// CIELAB ΔE76（感知色差）。判据：<2 看不出、2-5 微妙、>5 明显分层。
+    fn delta_e(a: Color32, b: Color32) -> f64 {
+        fn lab(c: Color32) -> (f64, f64, f64) {
+            let f = |v: u8| {
+                let v = v as f64 / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            let (r, g, bl) = (f(c.r()), f(c.g()), f(c.b()));
+            let x = (0.4124 * r + 0.3576 * g + 0.1805 * bl) / 0.95047;
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+            let z = (0.0193 * r + 0.1192 * g + 0.9505 * bl) / 1.08883;
+            let gg = |t: f64| {
+                if t > 0.008856 {
+                    t.powf(1.0 / 3.0)
+                } else {
+                    7.787 * t + 16.0 / 116.0
+                }
+            };
+            let (fx, fy, fz) = (gg(x), gg(y), gg(z));
+            (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+        }
+        let (l1, a1, b1) = lab(a);
+        let (l2, a2, b2) = lab(b);
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    }
+
     /// 对比度。1.0 = 完全一样。
     fn contrast(a: Color32, b: Color32) -> f64 {
         let (la, lb) = (lum(a), lum(b));
@@ -497,6 +540,26 @@ mod tests {
                 let c = contrast(fg, bg);
                 assert!(c >= 3.0, "{name}：{label} 在它的浅底上对比度只有 {c:.2}");
             }
+        }
+    }
+    /// **行选中色不能太重**（用户 2026-11-18 报"选中颜色太深"）。
+    ///
+    /// 0.7.0 直接借 `accent_soft` 涂整行 —— 那是标签/胶囊的底，ΔE 到 10.5，
+    /// 52pt 高的整行就成了色块。行选中只要"看得出选中、不抢正文"，5~8 合适。
+    #[test]
+    fn the_row_selection_tint_is_visible_but_not_a_color_block() {
+        for (name, p) in [("浅色", &LIGHT), ("深色", &DARK_PAL)] {
+            let d = delta_e(p.row_selected, p.surface);
+            assert!(
+                (5.0..=8.5).contains(&d),
+                "{name}：行选中底与卡片差 ΔE {d:.2}，要求 5~8.5 \
+                 （比这更淡看不出选中，更重就成了色块）"
+            );
+            // 必须比 accent_soft 淡：否则说明又退回"借标签色"那条路了。
+            assert!(
+                delta_e(p.row_selected, p.surface) < delta_e(p.accent_soft, p.surface),
+                "{name}：行选中比标签底还重，说明又借了 accent_soft"
+            );
         }
     }
 }
