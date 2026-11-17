@@ -23,6 +23,13 @@ const COL_PROGRESS_MIN: f32 = 64.0;
 /// 勾选框中心距行左边的距离。列排布从它右边开始，所以文件名列要跟着让。
 const NAME_MIN: f32 = 150.0;
 
+/// 批量悬浮岛的宽度与高度。
+///
+/// 宽 420：五个元素（计数 + 三颗按钮 + 取消选择）在 11.5pt 下刚好排开，再多就是空。
+/// 高 40：比一行按钮高 8pt，看起来才像"一块浮起来的东西"而不是压扁的横条。
+const ISLAND_W: f32 = 420.0;
+const ISLAND_H: f32 = 40.0;
+
 /// 勾选框那一列的宽度（含左右留白）。
 const CB_COL: f32 = 34.0;
 /// 勾选框中心距行左边的距离。
@@ -222,10 +229,6 @@ impl App {
         batch::prune(&mut self.batch, &alive);
 
         let visible_ids: Vec<String> = rows.iter().map(|t| t.id.clone()).collect();
-        if !self.batch.is_empty() {
-            self.batch_bar(ui, &visible_ids);
-        }
-
         if self.thead(ui, &visible_ids) {
             batch::toggle_all(&mut self.batch, &visible_ids);
         }
@@ -242,6 +245,9 @@ impl App {
                     self.row(ui, &rows[i]);
                 }
             });
+
+        // 悬浮岛**最后画**：它要盖在列表上面，而且不参与布局（列表位置不动）。
+        self.batch_island(ui, &visible_ids);
     }
 
     /// 一行任务。
@@ -505,41 +511,67 @@ impl App {
         hit.changed()
     }
 
-    /// 批量动作条：只在勾了东西时出现，占一行。
+    /// 批量动作条：**底部悬浮岛**，只在勾了东西时出现。
     ///
-    /// 为什么不是"选中就出按钮行"：那样每选一条就顶掉一行列表；批量条只在**真的要做批量**
-    /// 时才占位，日常浏览时列表高一行。
-    fn batch_bar(&mut self, ui: &mut egui::Ui, visible: &[String]) {
+    /// ## 为什么从"列表上方一条"改成"底部悬浮岛"
+    ///
+    /// 用户 2026-11-17："选择的时候这个工具栏变为底部一个悬浮岛，不然突然出现很突兀。"
+    ///
+    /// 原来它插在表头之上：勾第一条的瞬间，**整张列表被往下推 38pt**，视线跟着跳。
+    /// 悬浮岛浮在列表之上，不参与布局，所以列表位置纹丝不动 —— 这才是"不突兀"的关键，
+    /// 比加动画更根本（动画只能让跳动变慢，不能让它不跳）。
+    fn batch_island(&mut self, ui: &mut egui::Ui, visible: &[String]) {
         let targets = batch::targets(&self.batch, visible);
+        if targets.is_empty() {
+            return;
+        }
         let mut act: Option<BatchAction> = None;
 
-        egui::Frame::new()
-            .fill(theme::surface_3())
-            .inner_margin(egui::Margin::symmetric(12, 7))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("已选 {} 项", targets.len()))
-                            .size(11.5)
-                            .color(theme::ink_2()),
-                    );
-                    ui.add_space(8.0);
-                    if ui.button("继续").clicked() {
-                        act = Some(BatchAction::Resume);
-                    }
-                    if ui.button("暂停").clicked() {
-                        act = Some(BatchAction::Pause);
-                    }
-                    if ui.button("删除").clicked() {
-                        act = Some(BatchAction::Remove);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("取消选择").clicked() {
-                            act = Some(BatchAction::Clear);
-                        }
-                    });
-                });
-            });
+        // 岛的位置：列表区域底部居中，距底 18pt。
+        let area = ui.max_rect();
+        let island_w = (ISLAND_W).min(area.width() - 32.0);
+        let island_h = ISLAND_H;
+        let island_rect = egui::Rect::from_center_size(
+            egui::pos2(area.center().x, area.bottom() - 18.0 - island_h / 2.0),
+            egui::vec2(island_w, island_h),
+        );
+
+        // 浮层：先画底（含 1px 亮边——egui 没有高斯模糊阴影，靠描边分层）
+        let painter = ui.painter();
+        painter.rect_filled(island_rect, theme::RADIUS, theme::surface_2());
+        painter.rect_stroke(
+            island_rect,
+            theme::RADIUS,
+            egui::Stroke::new(theme::STROKE, theme::line()),
+            egui::StrokeKind::Inside,
+        );
+
+        let mut island_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(island_rect.shrink2(egui::vec2(14.0, 6.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let ui = &mut island_ui;
+        ui.label(
+            egui::RichText::new(format!("已选 {} 项", targets.len()))
+                .size(11.5)
+                .color(theme::ink_2()),
+        );
+        ui.add_space(8.0);
+        if ui.button("继续").clicked() {
+            act = Some(BatchAction::Resume);
+        }
+        if ui.button("暂停").clicked() {
+            act = Some(BatchAction::Pause);
+        }
+        if ui.button("删除").clicked() {
+            act = Some(BatchAction::Remove);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("取消选择").clicked() {
+                act = Some(BatchAction::Clear);
+            }
+        });
 
         match act {
             Some(BatchAction::Resume) => {

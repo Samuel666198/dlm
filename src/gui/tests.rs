@@ -1239,19 +1239,17 @@ fn a_whole_frame_renders_with_and_without_a_selection() {
     let shapes_without_selection = output.shapes.len();
     output.textures_delta.clear();
 
-    // 2) 选中一条：动作条出现，整帧仍然画得完。
+    // 2) 选中一条：右栏详情出现，整帧仍然画得完。
     //
-    //    这一格的判据是"真的画了东西"：动作条是自绘的（一条浅蓝底 + 三颗描边按钮），
-    //    选中后帧里的图元必然变多。这不是版面断言（egui 不给外面的代码看面板矩形），
-    //    但它能挡住"条件写了、内容没画"这种一半实现。
+    //    **判据在 0.7.x 改过**：原先断言"选中后图元变多"来钉顶部上下文动作条，
+    //    但那条 38pt 横条已被删除（用户 2026-11-18：任务动作已经在右键菜单里，
+    //    顶部再冒一行是重复）。现在选中带来的是**右栏详情**（330pt 宽的那块），
+    //    图元同样会变多 —— 判据形状不变，指向的东西变了。
     app.selected = Some("a.bin".to_string());
-    assert!(super::app::context_bar::task_actions_visible(
-        app.selected.is_some()
-    ));
     let mut output = ctx.run_ui(input, |ui| app.ui_frame(ui));
     assert!(
         output.shapes.len() > shapes_without_selection,
-        "选中后动作条该多画出图元：选中 {} 个 vs 没选中 {} 个",
+        "选中后右栏详情该多画出图元：选中 {} 个 vs 没选中 {} 个",
         output.shapes.len(),
         shapes_without_selection
     );

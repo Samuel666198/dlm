@@ -153,69 +153,6 @@ pub(crate) fn tool_button(
     response
 }
 
-/// 上下文动作条上的紧凑按钮：左图右字，78×26。
-///
-/// 比 [`tool_button`] 矮一半：动作条整行只有 40pt，再塞 40pt 的大按钮会顶满，
-/// 「已选 N 项」那行字就没地方站了。
-pub(crate) fn action_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    label: &str,
-    enabled: bool,
-    danger: bool,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(78.0, 26.0),
-        if enabled {
-            egui::Sense::click()
-        } else {
-            egui::Sense::hover()
-        },
-    );
-    let hovered = enabled && response.hovered();
-    let painter = ui.painter();
-    // 描边 + 悬停淡底：动作条是浅蓝色底，按钮要能被看出来是钮。
-    painter.rect(
-        rect,
-        theme::RADIUS - 3.0,
-        if hovered {
-            theme::surface()
-        } else {
-            egui::Color32::TRANSPARENT
-        },
-        egui::Stroke::new(
-            theme::STROKE,
-            if danger && enabled {
-                egui::Color32::from_rgb(0xF3, 0xCD, 0xC7)
-            } else {
-                theme::line()
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
-    let ink = if !enabled {
-        theme::ink_3()
-    } else if danger {
-        theme::bad()
-    } else {
-        theme::accent_ink()
-    };
-    let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 17.0, rect.center().y),
-        egui::vec2(12.0, 12.0),
-    );
-    draw_icon(painter, icon, icon_rect, ink);
-    painter.text(
-        egui::pos2(rect.left() + 28.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(12.0),
-        ink,
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
-    response
-}
-
 /// 16×16（或 12×12）框里画图标。全部用 1.6pt 线宽，与 demo 的描边感一致。
 pub(crate) fn draw_icon(painter: &egui::Painter, icon: Icon, r: egui::Rect, color: egui::Color32) {
     let s = egui::Stroke::new(1.6, color);

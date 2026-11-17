@@ -28,7 +28,6 @@ pub mod basket;
 pub mod batch;
 pub mod clipboard_hint;
 pub mod components;
-pub mod context_bar;
 pub mod diagnose;
 pub mod dialog;
 pub mod drawer;
@@ -440,12 +439,6 @@ impl App {
         let _ = self.tx.send(ticket);
     }
 
-    /// 当前选中的任务（按 id 从快照里取）。
-    pub(super) fn selected_task(&self) -> Option<TaskView> {
-        let id = self.selected.as_ref()?;
-        self.tasks().iter().find(|t| &t.id == id).cloned()
-    }
-
     /// 有没有全屏/居中层的框开着。
     ///
     /// Esc 的归属靠它决定：有框时 Esc 关框，没框时才取消选择（见 `shortcuts::shortcut_for`）。
@@ -621,14 +614,6 @@ impl App {
             egui::Panel::top("clipboard-hint")
                 .exact_size(theme::CLIPBOARD_HINT_H)
                 .show(ui, |ui| self.clipboard_hint_bar(ui));
-        }
-
-        // 0.6.0：上下文动作条。**只有选中任务时才占一行** —— 没选中时这里
-        // 连高度都不占，列表就多一行可见空间（这正是"动作收进上下文"的好处）。
-        if context_bar::task_actions_visible(self.selected.is_some()) {
-            egui::Panel::top("context-bar")
-                .exact_size(theme::CONTEXT_BAR_H)
-                .show(ui, |ui| self.context_bar(ui));
         }
 
         // 更新：把手动检查的结果收进槽里（非阻塞）。
