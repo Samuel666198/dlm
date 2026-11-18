@@ -1,4 +1,4 @@
-# dlm gates: run every check with one command.
+﻿# dlm gates: run every check with one command.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\gates.ps1 -SkipIntegration
@@ -126,6 +126,31 @@ else {
     $script:Results += [pscustomobject]@{ Gate = 'extension'; Result = 'SKIP'; Detail = 'node not found' }
     $script:Results += [pscustomobject]@{ Gate = 'ext-guard'; Result = 'SKIP'; Detail = 'node not found' }
 }
+
+# PowerShell 5.1 decodes a .ps1 WITHOUT a UTF-8 BOM using the local code page.
+# Non-ASCII text then turns into mojibake, and in the wrong combination the tokenizer
+# mis-parses and reports a bogus syntax error in a script nobody edited.
+# 2026-11-18: this cost two failed release runs (the packaging scripts would not start).
+#
+# The rule enforced here: any .ps1 in this repo that contains non-ASCII bytes
+# (comments included -- comments alone can trigger it when the file also has LF
+# endings) MUST start with a UTF-8 BOM. With a BOM both CRLF and LF are fine,
+# so line endings are deliberately NOT part of this check.
+Invoke-Gate -Name 'ps-enc' -Note 'PowerShell scripts with non-ASCII keep a UTF-8 BOM' -Body {
+    $bad = @()
+    $files = @()
+    $files += Get-ChildItem -Path $Root -Filter '*.ps1' -File
+    $files += Get-ChildItem -Path (Join-Path $Root 'packaging') -Filter '*.ps1' -File -ErrorAction SilentlyContinue
+    foreach ($f in $files) {
+        $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        $nonAscii = ($text.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count -gt 0
+        if ($nonAscii -and -not $hasBom) { $bad += $f.Name }
+    }
+    if ($bad.Count -gt 0) { throw ("missing UTF-8 BOM: " + ($bad -join ', ')) }
+}
+
 Write-Host ''
 Write-Host '=== summary ===' -ForegroundColor Cyan
 $script:Results | Format-Table -AutoSize | Out-String | Write-Host
