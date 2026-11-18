@@ -116,9 +116,15 @@ Invoke-Gate -Name 'clippy' -Note 'cargo clippy --all-targets -D warnings' -Body 
 if ($Node) {
 
     Invoke-Gate -Name 'extension' -Note 'check-extension-static.mjs' -Body { & $Node browser/test/check-extension-static.mjs }
+
+    # 扩展 content script 的存活守卫（2026-11-18）。
+    # 钉住"扩展重载后旧脚本不许刷 `Extension context invalidated`"这件事 ——
+    # 它是纯逻辑，用 vm 沙箱跑，不启动浏览器。
+    Invoke-Gate -Name 'ext-guard' -Note 'verify-content-guard.mjs' -Body { & $Node browser/test/verify-content-guard.mjs }
 }
 else {
     $script:Results += [pscustomobject]@{ Gate = 'extension'; Result = 'SKIP'; Detail = 'node not found' }
+    $script:Results += [pscustomobject]@{ Gate = 'ext-guard'; Result = 'SKIP'; Detail = 'node not found' }
 }
 Write-Host ''
 Write-Host '=== summary ===' -ForegroundColor Cyan

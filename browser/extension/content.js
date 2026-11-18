@@ -1,7 +1,228 @@
 // 页面里的 dlm 悬浮球：检测到的下载、进行中进度、确认后交付。
 // 组件住在 shadow DOM 里，避免被站点 CSS 污染；所有用户数据只用 textContent 写入。
 // 悬浮球可拖动，位置存 chrome.storage.local；空闲 5 秒后降到 55% 透明。
-document.documentElement.setAttribute("data-dlm-version", chrome.runtime.getManifest().version);
+//
+// ===================================================================
+// 存活守卫（2026-11-18）—— 修 "Uncaught Error: Extension context invalidated"
+// ===================================================================
+//
+// ## 错误是怎么来的
+//
+// 扩展被重载或更新后，浏览器让**旧的 content script 失去扩展上下文**：
+// `chrome.runtime` 变成空的/失效的，再调用就抛 `Extension context invalidated`。
+// 但旧脚本**还在页面里活着**，它注册的定时器、监听器照旧触发 —— 而本文件
+// 第 1062 行有一个 `setInterval(refreshMedia, 1500)`，于是**每 1.5 秒抛一次**
+// 未捕获异常，直到用户关掉那个标签页。用户截图里刷屏的就是这个。
+//
+// ## 三条原则
+//
+// 1. **所有 chrome.* 调用必须走本层**。原来 15 处 `chrome.runtime.*` + 9 处
+//    `chrome.storage.*` 散在各处，只有两处零散 try/catch（L1082/L1108），
+//    而抛错的那一处（refreshMedia 的第一句）恰好没有 —— 散着写必然漏。
+// 2. **一旦确认失效就立刻自杀**：清掉所有定时器、摘掉悬浮球，不再执行任何逻辑。
+//    否则报错只是变少，不会停。
+// 3. **对用户说一句**：悬浮球变成"扩展已更新，刷新页面生效"。悄悄死掉的话，
+//    用户只会觉得球坏了。
+//
+// ## 为什么不用 `chrome.runtime.onDisconnect`
+//
+// content script 直接 load 时没有 port 可断，也不保证能拿到 SW 的连接事件；
+// 最可靠的信号就是**调用本身抛错**（或 `chrome.runtime?.id` 变 undefined）。
+// 所以判据是"调一次看结果"，而不是"等一个事件"。
+
+/** 脚本是否还活着。一旦置 false，所有 chrome.* 调用与渲染都早退。 */
+let alive = true;
+
+/** 注册过的一次性清理动作（定时器 id、要摘的 DOM 回调等）。 */
+const cleanups = [];
+
+/** 记一个要在失效时执行的清理动作。 */
+function onDeath(fn) {
+  cleanups.push(fn);
+}
+
+/** 整个脚本退役：清定时器、摘监听、把球换成提示。幂等。 */
+function die(reason) {
+  if (!alive) return;
+  alive = false;
+  // 清定时器：这是止住"每 1.5 秒刷一次错"的关键。
+  for (const fn of cleanups.splice(0)) {
+    try {
+      fn();
+    } catch (_) {
+      /* 清理本身失败就算了，不能因此再抛一次 */
+    }
+  }
+  try {
+    if (shadow && host) {
+      // 不要直接 remove：让人看到"为什么球不动了"，比球凭空消失好。
+      const ball = shadow.getElementById("dlm-ball");
+      if (ball) {
+        ball.textContent = "⟳";
+        ball.title = reason || "扩展已更新，刷新页面生效";
+        ball.style.opacity = "0.45";
+        ball.style.pointerEvents = "none";
+      }
+      const ver = shadow.getElementById("dlm-ver");
+      if (ver) ver.textContent = "需刷新";
+    }
+  } catch (_) {
+    /* shadow 可能已经被别处摘掉 */
+  }
+}
+
+/**
+ * 判断一次失败是不是"扩展上下文没了"。
+ *
+ * 三路证据，任意一条成立就算：
+ * - 抛出的错误消息里带 `Extension context invalidated` / `context invalidated`
+ * - `chrome.runtime` 或它的 `id` 已经没了（重载后这是常态）
+ * - 回调里 `chrome.runtime.lastError` 报的是同一类消息
+ */
+function isContextGone(err) {
+  const msg = (err && (err.message || String(err))) || "";
+  if (/context invalidated|Extension context invalidated|Receiving end does not exist/i.test(msg)) {
+    return true;
+  }
+  try {
+    if (!chrome || !chrome.runtime) return true;
+    // 重载后 `chrome.runtime.id` 会变成 undefined —— 这是最直接的证据。
+    if (!chrome.runtime.id) return true;
+  } catch (_) {
+    // 连 `chrome` 都读不到，就是没了。
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 判断当前上下文是否还可用（不抛错）。
+ *
+ * 用于**定时器回调的第一句**：比 try/catch 更便宜，也更早。
+ */
+function contextOk() {
+  if (!alive) return false;
+  try {
+    return !!(chrome && chrome.runtime && chrome.runtime.id);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 包一次 chrome.* 调用：失效即退役，绝不把异常漏到页面。
+ *
+ * `fn` 里做实际的 chrome 调用；返回值原样返回。抛错时返回 `undefined`
+ * 并在确认是上下文失效时调 [`die`]。
+ *
+ * **所有 chrome.* 调用都必须包在这里** —— 这是本文件唯一的纪律。
+ */
+function guarded(fn) {
+  if (!contextOk()) {
+    die("扩展已更新，刷新页面生效");
+    return undefined;
+  }
+  try {
+    return fn();
+  } catch (err) {
+    if (isContextGone(err)) {
+      die("扩展已更新，刷新页面生效");
+    } else {
+      // 不是失效导致的错：既不吞也不刷屏，记一条就够。
+      console.warn("dlm: chrome 调用失败", err);
+    }
+    return undefined;
+  }
+}
+
+/**
+ * `chrome.runtime.sendMessage` 的安全版。
+ *
+ * 回调里 `chrome.runtime.lastError` 也要接住 —— 那是 Chrome 报"没接收方"的
+ * 方式（它**不会**抛异常，只设 lastError）。漏了它就是一个未捕获错误。
+ */
+function sendMessage(payload, callback) {
+  if (!contextOk()) {
+    die("扩展已更新，刷新页面生效");
+    return;
+  }
+  guarded(() =>
+    chrome.runtime.sendMessage(payload, (reply) => {
+      // 读一下 lastError 把它"消费"掉：不读的话 Chrome 会往控制台丢警告，
+      // 而且下一次读到的还是同一个错误。
+      let lastError = null;
+      try {
+        lastError = chrome.runtime.lastError;
+      } catch (_) {
+        /* 上下文已经没了，下面统一处理 */
+      }
+      if (lastError && isContextGone(lastError)) {
+        die("扩展已更新，刷新页面生效");
+        return;
+      }
+      if (callback) callback(reply, lastError);
+    })
+  );
+}
+
+/** `chrome.storage.local.get` 的安全版。 */
+function storageGet(keys, callback) {
+  guarded(() =>
+    chrome.storage.local.get(keys, (values) => {
+      let lastError = null;
+      try {
+        lastError = chrome.runtime.lastError;
+      } catch (_) {
+        /* 同上 */
+      }
+      if (lastError && isContextGone(lastError)) {
+        die("扩展已更新，刷新页面生效");
+        return;
+      }
+      if (callback) callback(values);
+    })
+  );
+}
+
+/** `chrome.storage.local.set` 的安全版。 */
+function storageSet(values) {
+  guarded(() => chrome.storage.local.set(values));
+}
+
+/** `chrome.storage.local.remove` 的安全版。 */
+function storageRemove(key) {
+  guarded(() => chrome.storage.local.remove(key));
+}
+
+/** 取扩展版本；上下文失效时给一个占位，绝不抛。 */
+function extVersion() {
+  try {
+    if (!chrome || !chrome.runtime || !chrome.runtime.id) return "";
+    return chrome.runtime.getManifest().version;
+  } catch (_) {
+    return "";
+  }
+}
+
+/**
+ * 用 `setInterval` 注册一个**受守卫**的周期任务。
+ *
+ * 与裸 `setInterval` 的区别：每次触发前先查 [`contextOk`]，
+ * 失效就自杀并停止。这就是当初那个刷屏错误的根治办法。
+ */
+function guardedInterval(fn, ms) {
+  const id = setInterval(() => {
+    if (!contextOk()) {
+      die("扩展已更新，刷新页面生效");
+      return;
+    }
+    guarded(() => fn());
+  }, ms);
+  onDeath(() => clearInterval(id));
+  return id;
+}
+
+document.documentElement.setAttribute("data-dlm-version", extVersion() || "unknown");
 
 const FILE_LINK_RE = /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab|pdf|docx?|xlsx?|pptx?|txt|md|epub|mobi|csv|exe|msi|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4[av]|mp3|flac|wav|aac|ogg|opus|wma|jpg|jpeg|png|gif|bmp|webp|svg|tiff?|heic|ts|bin)(?:$|[?#])/i;
 
@@ -286,7 +507,7 @@ function ensureWidget() {
   shadow.append(style, root);
   document.documentElement.appendChild(host);
   rootEl = root;
-  shadow.getElementById("dlm-ver").textContent = "v" + chrome.runtime.getManifest().version;
+  shadow.getElementById("dlm-ver").textContent = "v" + (extVersion() || "?");
 
   const ball = shadow.getElementById("dlm-toggle");
   // 点击不挂在这里：统一走 window 捕获路由（onWindowClick）。挂在元素上时，
@@ -300,7 +521,7 @@ function ensureWidget() {
 
   // 面板里的按钮和标签页也不挂监听：同样走 onWindowClick 统一路由。
 
-  chrome.storage.local.get([POS_KEY], (values) => {
+  storageGet([POS_KEY], (values) => {
     const pos = values && values[POS_KEY];
     if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
       moveTo(pos.x, pos.y);
@@ -346,11 +567,11 @@ function moveTo(x, y) {
 
 function savePosition() {
   const rect = host.getBoundingClientRect();
-  chrome.storage.local.set({ [POS_KEY]: { x: Math.round(rect.left), y: Math.round(rect.top) } });
+  storageSet({ [POS_KEY]: { x: Math.round(rect.left), y: Math.round(rect.top) } });
 }
 
 function resetPosition() {
-  chrome.storage.local.remove(POS_KEY);
+  storageRemove(POS_KEY);
   host.style.left = "auto";
   host.style.top = "auto";
   host.style.right = "12px";
@@ -452,10 +673,11 @@ function sendDownload(url, kind, fromPage) {
     render();
     return;
   }
-  chrome.runtime.sendMessage(
+  sendMessage(
     { op: "page-download", url, referer: location.href, hls: kind === "hls" },
-    (reply) => {
-      if (chrome.runtime.lastError || !reply || reply.ok === false) {
+    (reply, lastError) => {
+      if (!alive) return;
+      if (lastError || !reply || reply.ok === false) {
         if (fromPage) {
           window.location.assign(url);
         } else {
@@ -474,8 +696,9 @@ function cancelJob(job) {
     entry.stopping = true;
     render();
   }
-  chrome.runtime.sendMessage({ op: "cancel", job }, (reply) => {
-    if (chrome.runtime.lastError || !reply || !reply.ok) {
+  sendMessage({ op: "cancel", job }, (reply, lastError) => {
+    if (!alive) return;
+    if (lastError || !reply || !reply.ok) {
       const current = state.active.get(job);
       if (current) {
         current.stopping = false;
@@ -501,9 +724,10 @@ function resumeJob(item, index) {
   const payload = item.queue
     ? { op: "resume", queue: item.queue }
     : { op: "resume", url: item.url, name: item.name, referer: item.referer };
-  chrome.runtime.sendMessage(payload, (reply) => {
+  sendMessage(payload, (reply, lastError) => {
+    if (!alive) return;
     item.resuming = false;
-    if (chrome.runtime.lastError) {
+    if (lastError) {
       item.message = "继续失败：扩展未响应";
       render();
       return;
@@ -766,10 +990,24 @@ function mergeItems(a, b) {
 }
 
 function refreshMedia() {
+  // **这一句就是用户截图里报错的那行。**
+  //
+  // 原来直接 `chrome.runtime.sendMessage(...)`；扩展重载后本脚本的上下文失效，
+  // 而 `setInterval(refreshMedia, 1500)` 还在跑 ⇒ 每 1.5 秒抛一次
+  // `Uncaught Error: Extension context invalidated`，刷满控制台。
+  //
+  // 现在：先查上下文，再走 `sendMessage` 守卫。失效的那一次会 `die()`，
+  // 把定时器和悬浮球一起清掉 —— 报错只可能出现在退役的那一瞬间。
+  if (!contextOk()) {
+    die("扩展已更新，刷新页面生效");
+    return;
+  }
   const local = collectFileLinks();
-  chrome.runtime.sendMessage({ op: "page-links", items: local }, () => void chrome.runtime.lastError);
-  chrome.runtime.sendMessage({ op: "media-list" }, (reply) => {
-    if (chrome.runtime.lastError) {
+  sendMessage({ op: "page-links", items: local });
+  sendMessage({ op: "media-list" }, (reply, lastError) => {
+    if (!alive) return;
+    if (lastError || !reply) {
+      // 拿不到后台的清单就退回"只显示页面里的链接"，不是空列表。
       state.items = local;
       render();
       return;
@@ -951,7 +1189,9 @@ function runHostAction(ev) {
   return false;
 }
 
-chrome.runtime.onMessage.addListener((msg) => {
+guarded(() =>
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!alive) return;
   if (!msg) return;
   if (msg.op === "job-accepted") {
     markActivity();
@@ -1028,7 +1268,8 @@ chrome.runtime.onMessage.addListener((msg) => {
     state.tab = state.active.size > 0 ? "active" : "recent";
     render();
   }
-});
+})
+);
 
 window.addEventListener("resize", () => {
   if (!host) return;
@@ -1043,24 +1284,31 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !state.collapsed) closePanel();
 });
 
-chrome.storage.local.get(["lastPong"], (values) => {
+storageGet(["lastPong"], (values) => {
+  if (!alive) return;
   state.hostReady = !!values.lastPong;
   render();
 });
-chrome.storage.onChanged.addListener(() => {
-  chrome.storage.local.get(["lastPong"], (values) => {
-    state.hostReady = !!values.lastPong;
-    render();
-  });
-});
+guarded(() =>
+  chrome.storage.onChanged.addListener(() => {
+    if (!alive) return;
+    storageGet(["lastPong"], (values) => {
+      if (!alive) return;
+      state.hostReady = !!values.lastPong;
+      render();
+    });
+  })
+);
 
 window.addEventListener("click", onWindowClick, true);
 window.addEventListener("message", onPageHookMessage);
-setInterval(updateIdle, 1000);
+// **两个周期任务都必须走 `guardedInterval`**：裸 `setInterval` 在扩展重载后
+// 会继续触发，而那时 `chrome.runtime` 已失效 —— 就是用户截图里每 1.5 秒刷一次的错。
+guardedInterval(updateIdle, 1000);
 render();
 refreshMedia();
-setInterval(refreshMedia, 1500);
-chrome.runtime.sendMessage({ op: "wake" }, () => void chrome.runtime.lastError);
+guardedInterval(refreshMedia, 1500);
+sendMessage({ op: "wake" });
 
 // ---------------------------------------------------------------- A2 / A3
 // Alt+点击链接 → 交给 dlm（不抢普通点击）。站点黑名单来自扩展设置（options.html），
@@ -1071,14 +1319,17 @@ chrome.runtime.sendMessage({ op: "wake" }, () => void chrome.runtime.lastError);
   const KEY = "siteBlock";
   let blocked = [];
   try {
-    chrome.storage.local.get([KEY], (got) => {
+    storageGet([KEY], (got) => {
       blocked = Array.isArray(got && got[KEY]) ? got[KEY] : [];
     });
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && changes[KEY]) {
-        blocked = Array.isArray(changes[KEY].newValue) ? changes[KEY].newValue : [];
-      }
-    });
+    guarded(() =>
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (!alive) return;
+        if (area === "local" && changes[KEY]) {
+          blocked = Array.isArray(changes[KEY].newValue) ? changes[KEY].newValue : [];
+        }
+      })
+    );
   } catch (err) {
     // 扩展被重载后旧内容脚本会失去上下文：这里静默即可，页面功能不受影响。
   }
@@ -1101,10 +1352,7 @@ chrome.runtime.sendMessage({ op: "wake" }, () => void chrome.runtime.lastError);
       e.preventDefault();
       e.stopPropagation();
       try {
-        chrome.runtime.sendMessage(
-          { op: "page-download", url: href, referer: location.href },
-          () => void chrome.runtime.lastError,
-        );
+        sendMessage({ op: "page-download", url: href, referer: location.href });
       } catch (err) {
         // 同上：上下文失效就什么都不做
       }
