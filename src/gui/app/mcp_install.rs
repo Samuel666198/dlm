@@ -8,9 +8,8 @@
 //!
 //! ## 直链是怎么来的（**没有**改发布流程）
 //!
-//! 更新清单 `latest.json` 里只有主包的 `url`/`sha256`，没有 MCP 那一份。本轮不去动它
-//! （改清单 = 改 `main` 分支 = 对外动作，得单独授权）。所以直链由清单里的**发行版号**
-//! 拼出来：
+//! 更新清单 `latest.json` 里只有主包的 `url`/`sha256`，没有 MCP 那一份。所以直链由
+//! 清单里的**发行版号**拼出来：
 //!
 //! ```text
 //! https://github.com/<owner>/<repo>/releases/download/v<rel>/dlm-mcp-<rel>-win-x64.zip
@@ -20,6 +19,19 @@
 //! 装之前先跑一次 `dlm-mcp.exe --version`，跑不起来或输出认不出版本就不装。
 //! 这挡不住"被替换成另一个能跑的 exe"，只挡得住"下到了坏包/截断的包/404 的 HTML"。
 //! 把清单加 `mcp_sha256` 记为后续项，动发布流程前先问用户。
+//!
+//! ## 本版没打包怎么办：回退到向下兼容的旧版（2026-11-18）
+//!
+//! 0.7.1 / 0.7.2 发布时都忘了附带 MCP 包（当时那份包是手工打的，没有脚本），
+//! 于是组件页「下载并安装」直接死在 404 上。两处补救：
+//!
+//! 1. **发布侧**：`packaging/build-mcp-package.ps1` 把这份包做成脚本，不再靠记性。
+//! 2. **客户端侧**：见 [`mcp_asset_candidates`] —— 本版 404 就退到同一个 minor 的
+//!    下一个补丁版。这能成立是因为兼容性是**单向**的：`dlm-mcp` 只要求界面
+//!    `api >= 本程序的 REQUIRED_API`，而接口是加法演进的，**旧桥接配新界面永远可用**。
+//!
+//! 注意回退**只对 404 生效**：网络错误、解压失败、不可写都立刻上报 ——
+//! 那些换版本重试没有意义，只会让人多等几轮。
 //!
 //! ## 副作用全部走 [`Host`]
 //!
@@ -66,12 +78,19 @@ pub(crate) enum McpInstallOutcome {
     Installed {
         version: String,
         path: String,
+        /// 装的是**回退版本**（本发行版没带 MCP 包）。
+        ///
+        /// 为什么值得单独标记：用户该知道"这个包里没有它，我装的是近一个兼容版本"，
+        /// 否则下次看到版本号对不上会以为装错了。
+        fell_back: bool,
     },
     /// 清单里的发行版号拼不出直链。
     UnknownRelease(String),
-    /// 这个发行版没带 MCP 包（404）。
+    /// 这个发行版**以及它向下的几个补丁版**都没带 MCP 包（404）。
     NoAsset {
         url: String,
+        /// 试过哪些版本。界面上要说清"试到哪儿为止"，别让用户以为还能自动搞定。
+        tried: Vec<String>,
     },
     DownloadFailed(String),
     ExtractFailed(String),
@@ -95,14 +114,34 @@ impl McpInstallOutcome {
     /// 给用户看的一句话。**每种失败都要说清"下一步做什么"**，不能只说失败了。
     pub(crate) fn message(&self) -> String {
         match self {
-            McpInstallOutcome::Installed { version, path } => {
-                format!("已安装 dlm-mcp {version}（{path}）")
+            McpInstallOutcome::Installed {
+                version,
+                path,
+                fell_back,
+            } => {
+                if *fell_back {
+                    format!(
+                        "已安装 dlm-mcp {version}（{path}）—— 本版没有附带 MCP 包，\
+                         装的是近一个兼容版本（接口是加法演进的，旧桥接配新界面可用）"
+                    )
+                } else {
+                    format!("已安装 dlm-mcp {version}（{path}）")
+                }
             }
             McpInstallOutcome::UnknownRelease(rel) => {
                 format!("更新清单里的发行版号 `{rel}` 拼不出下载地址，请用「打开发布页」手动下载")
             }
-            McpInstallOutcome::NoAsset { url } => {
-                format!("这个发行版没有附带 MCP 包（404）。可以去发布页手动下载：{url}")
+            McpInstallOutcome::NoAsset { url, tried } => {
+                if tried.len() <= 1 {
+                    format!("这个发行版没有附带 MCP 包（404）。可以去发布页手动下载：{url}")
+                } else {
+                    format!(
+                        "这个发行版和它向下的 {} 个补丁版（{}）都没有附带 MCP 包。\
+                         可以去发布页手动下载：{url}",
+                        tried.len(),
+                        tried.join(" / ")
+                    )
+                }
             }
             McpInstallOutcome::DownloadFailed(err) => {
                 format!("下载失败：{err}。检查网络或代理后重试")
@@ -292,8 +331,53 @@ pub(crate) fn download_suppressed() -> bool {
     std::env::var_os("DLM_NO_MCP_DOWNLOAD").is_some()
 }
 
+/// 回退最多往下降几个补丁版。
+///
+/// 为什么要有个上限：每次回退都是一次真正的 HTTP 往返，网络差的时候会让人以为
+/// 程序卡住。3 个（含本版）足够覆盖"这一版忘了打包、上一版有"的情形。
+const MCP_FALLBACK_SPAN: u32 = 3;
+
+/// 装的时候按顺序试哪些版本。
+///
+/// ## 为什么可以回退（2026-11-18 用户报「这个发行版没有附带 MCP 包（404）」）
+///
+/// 兼容性是**单向**的：`dlm-mcp` 只要求「界面 api >= 本程序的 REQUIRED_API」
+/// （见 `src/bin/dlm-mcp.rs` 的 `check_compat`），而接口是**加法演进**的 ——
+/// 所以**旧桥接配新界面永远可用**，只是用不上新工具。反方向才危险，而回退
+/// 只会往下走，不会拿到"更新"的东西。
+///
+/// 于是规则很简单：先试本版；本版 404 就退到同一个 minor 的下一个补丁版，
+/// 最多退 [`MCP_FALLBACK_SPAN`] 个。**不跨 minor**：跨 minor 意味着桥接协议
+/// 可能真变过，与其猜，不如让用户去发布页手动挑。
+///
+/// 返回空 `Vec` 表示版本号形状就不对（调用方据此回 [`McpInstallOutcome::UnknownRelease`]）。
+pub(crate) fn mcp_asset_candidates(release: &str) -> Vec<String> {
+    let rel = release.trim();
+    // 先过一遍成形校验：与 `mcp_asset_url` 用同一把尺子，别的形状一律不认。
+    if mcp_asset_url(rel).is_none() {
+        return Vec::new();
+    }
+    let mut parts: Vec<&str> = rel.split('.').collect();
+    let Some(last) = parts.pop().and_then(|p| p.parse::<u32>().ok()) else {
+        return vec![rel.to_string()];
+    };
+    let prefix = parts.join(".");
+    let mut out = Vec::new();
+    for patch in (0..=last).rev() {
+        out.push(format!("{prefix}.{patch}"));
+        if out.len() as u32 >= MCP_FALLBACK_SPAN {
+            break;
+        }
+    }
+    out
+}
+
 /// 装一次。`work_root` 是临时目录（调用方给，失败留痕便于排查），
 /// `dest_dir` 是 GUI 所在目录。
+///
+/// 内部会按 [`mcp_asset_candidates`] 依次尝试：**只有 404 才继续往下退**，
+/// 别的失败（网络、解压、写入）立刻停下 —— 那种情况换版本重试没有意义，
+/// 只会让用户多等三轮。
 pub(crate) fn install_release(
     release: &str,
     work_root: &Path,
@@ -304,20 +388,72 @@ pub(crate) fn install_release(
     if suppressed {
         return McpInstallOutcome::Suppressed;
     }
-    let Some(url) = mcp_asset_url(release) else {
+    let candidates = mcp_asset_candidates(release);
+    if candidates.is_empty() {
         return McpInstallOutcome::UnknownRelease(release.to_string());
-    };
+    }
 
     if let Err(err) = std::fs::create_dir_all(work_root) {
         return McpInstallOutcome::DownloadFailed(format!("建临时目录失败：{err}"));
     }
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_url = String::new();
+    for candidate in &candidates {
+        let outcome = install_one(candidate, work_root, dest_dir, host);
+        match outcome {
+            // 这一版没带包：退到下一个补丁版。
+            McpInstallOutcome::NoAsset { url, .. } => {
+                last_url = url;
+                tried.push(candidate.clone());
+            }
+            McpInstallOutcome::Installed {
+                version,
+                path,
+                fell_back: _,
+            } => {
+                return McpInstallOutcome::Installed {
+                    version,
+                    path,
+                    fell_back: candidate != release.trim(),
+                };
+            }
+            // 其它失败：换版本重试没有意义，原样上报。
+            other => return other,
+        }
+    }
+    McpInstallOutcome::NoAsset {
+        url: last_url,
+        tried,
+    }
+}
+
+/// 试**一个**具体版本。404 由调用方解读为"退到下一版"。
+fn install_one(
+    release: &str,
+    work_root: &Path,
+    dest_dir: &Path,
+    host: &dyn Host,
+) -> McpInstallOutcome {
+    let Some(url) = mcp_asset_url(release) else {
+        return McpInstallOutcome::UnknownRelease(release.to_string());
+    };
+
     let zip = work_root.join("dlm-mcp.zip");
     let staging = work_root.join("staging");
+    // 每轮清一次：上一轮解压出来的 exe 留着，会让人误以为这一轮也下到了东西。
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_file(&zip);
 
     match host.fetch(&url, &zip) {
         Ok(0) => return McpInstallOutcome::DownloadFailed("下载到 0 字节".to_string()),
         Ok(_) => {}
-        Err(FetchError::NotFound) => return McpInstallOutcome::NoAsset { url },
+        Err(FetchError::NotFound) => {
+            return McpInstallOutcome::NoAsset {
+                url,
+                tried: Vec::new(),
+            };
+        }
         Err(FetchError::Other(err)) => return McpInstallOutcome::DownloadFailed(err),
     }
 
@@ -340,6 +476,7 @@ pub(crate) fn install_release(
         Ok(()) => McpInstallOutcome::Installed {
             version,
             path: target.display().to_string(),
+            fell_back: false,
         },
         Err(PlaceError::PermissionDenied(err)) => McpInstallOutcome::PermissionDenied(err),
         Err(PlaceError::Other(err)) => McpInstallOutcome::WriteFailed(err),
@@ -365,6 +502,10 @@ mod tests {
         put_binary: bool,
         probe: Option<String>,
         place: Result<(), PlaceError>,
+        /// 这些版本号的直链一律 404（模拟"那几版忘了打包 MCP"）。
+        ///
+        /// 别的错误由 `fetch` 字段统一给，用来区分"该继续回退"与"该立刻停"。
+        missing: Vec<&'static str>,
     }
 
     impl Default for FakeHost {
@@ -375,12 +516,16 @@ mod tests {
                 put_binary: true,
                 probe: Some("0.7.0".to_string()),
                 place: Ok(()),
+                missing: Vec::new(),
             }
         }
     }
 
     impl Host for FakeHost {
-        fn fetch(&self, _url: &str, dest: &Path) -> Result<u64, FetchError> {
+        fn fetch(&self, url: &str, dest: &Path) -> Result<u64, FetchError> {
+            if self.missing.iter().any(|v| url.contains(v)) {
+                return Err(FetchError::NotFound);
+            }
             if self.fetch.is_ok() {
                 std::fs::write(dest, b"PK fake zip").unwrap();
             }
@@ -442,6 +587,7 @@ mod tests {
             McpInstallOutcome::Installed {
                 version: "0.7.0".to_string(),
                 path: dest.join(MCP_BINARY).display().to_string(),
+                fell_back: false,
             }
         );
         assert!(
@@ -463,8 +609,13 @@ mod tests {
         };
         let out = install_release("0.7.0", &work, &dest, false, &host);
         match &out {
-            McpInstallOutcome::NoAsset { url } => {
+            McpInstallOutcome::NoAsset { url, tried } => {
                 assert!(url.contains("dlm-mcp-0.7.0-win-x64.zip"), "{url}");
+                assert_eq!(
+                    tried.as_slice(),
+                    ["0.7.0".to_string()],
+                    "0.7.0 已经是最低补丁版"
+                );
             }
             other => panic!("404 要单独认出：{other:?}"),
         }
@@ -581,6 +732,7 @@ mod tests {
             McpInstallOutcome::UnknownRelease("bad".into()),
             McpInstallOutcome::NoAsset {
                 url: "https://example.invalid/x.zip".into(),
+                tried: vec!["0.7.2".into()],
             },
             McpInstallOutcome::DownloadFailed("timeout".into()),
             McpInstallOutcome::ExtractFailed("bad zip".into()),
@@ -602,5 +754,97 @@ mod tests {
                 .contains("手动放"),
             "不可写要给出替代动作"
         );
+    }
+
+    /// **回退候选的规则**：本版优先，然后同一个 minor 往下退，最多 3 个。
+    ///
+    /// 这条钉的是"退到哪儿为止"。不跨 minor 是刻意的：跨 minor 意味着桥接协议可能
+    /// 真变过，与其猜，不如让用户去发布页手动挑。
+    #[test]
+    fn the_fallback_candidates_walk_down_the_same_minor_only() {
+        assert_eq!(
+            mcp_asset_candidates("0.7.2"),
+            vec![
+                "0.7.2".to_string(),
+                "0.7.1".to_string(),
+                "0.7.0".to_string()
+            ],
+            "0.7.2 应当先试自己，再连续退两个补丁版"
+        );
+        // 补丁号为 0 时没有更低的同 minor 版本，只试自己。
+        assert_eq!(mcp_asset_candidates("0.7.0"), vec!["0.7.0".to_string()]);
+        // 补丁号很大也只试 3 个，不会打十几个 404 让人干等。
+        assert_eq!(
+            mcp_asset_candidates("1.4.99"),
+            vec![
+                "1.4.99".to_string(),
+                "1.4.98".to_string(),
+                "1.4.97".to_string()
+            ]
+        );
+        // 形状不对的版本号不产生候选（拼不出直链）。
+        assert!(mcp_asset_candidates("").is_empty());
+        assert!(mcp_asset_candidates("bad").is_empty());
+        assert!(mcp_asset_candidates("https://evil.invalid/x.zip").is_empty());
+    }
+
+    /// **本版没带 MCP 包时，真的会退到上一个补丁版并装上**。
+    ///
+    /// 这是用户 2026-11-18 报的那个 404 的直接回归：0.7.1 / 0.7.2 发布时都忘了
+    /// 带 MCP 包，而旧代码只认本版，于是「下载并安装」直接死在一个红色提示上。
+    ///
+    /// 兼容性依据见 `mcp_asset_candidates` 的文档：接口是加法演进的，
+    /// 旧桥接配新界面可用，所以往下退是安全的。
+    #[test]
+    fn a_missing_asset_falls_back_to_an_older_patch_and_installs_it() {
+        let work = tmp_dir("fb-work");
+        let dest = tmp_dir("fb-dest");
+        let host = FakeHost {
+            // 只有 0.7.2 这一版没打包
+            missing: vec!["dlm-mcp-0.7.2-win-x64.zip"],
+            probe: Some("0.7.1".to_string()),
+            ..FakeHost::default()
+        };
+        let out = install_release("0.7.2", &work, &dest, false, &host);
+        assert!(out.installed(), "应当退到 0.7.1 并装上：{out:?}");
+        match &out {
+            McpInstallOutcome::Installed {
+                version, fell_back, ..
+            } => {
+                assert_eq!(version, "0.7.1");
+                assert!(
+                    *fell_back,
+                    "装的是回退版本，必须标记出来 —— 否则用户看到版本号对不上会以为装错了"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(dest.join(MCP_BINARY).is_file(), "回退也要真的落盘");
+        // 提示语要说清"本版没带包、装的是兼容版本"。
+        let msg = out.message();
+        assert!(msg.contains("没有附带 MCP 包"), "{msg}");
+        assert!(msg.contains("兼容"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// **网络错误不许触发回退** —— 换版本重试没有意义，只会让人多等三轮。
+    #[test]
+    fn a_network_error_stops_instead_of_silently_retrying_older_versions() {
+        let work = tmp_dir("net-work");
+        let dest = tmp_dir("net-dest");
+        let host = FakeHost {
+            fetch: Err(FetchError::Other("connection refused".into())),
+            ..FakeHost::default()
+        };
+        let out = install_release("0.7.2", &work, &dest, false, &host);
+        assert!(
+            matches!(out, McpInstallOutcome::DownloadFailed(_)),
+            "网络错误要立刻上报，不能当成 404 继续退：{out:?}"
+        );
+        assert!(!dest.join(MCP_BINARY).exists());
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }

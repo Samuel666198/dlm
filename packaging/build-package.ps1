@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Version = '',
     # 发行版版本：用户感知的「软件版本」。缺省跟内核版本一致。
     [string]$Release = '',
@@ -111,3 +111,15 @@ Write-Output "zip=$Zip"
 Write-Output "bytes=$size"
 Write-Output "sha256=$($hash.Hash.ToLower())"
 Write-Output "latest=$latestPath"
+
+# 主包里**不含** dlm-mcp（它是可选的桥接，走单独下载）。这一行是 2026-11-18 的教训：
+# 0.7.1 / 0.7.2 发布时都忘了打 MCP 包，组件页「下载并安装」直接 404。
+# 客户端有回退（见 src/gui/app/mcp_install.rs），但发布侧不该指望它。
+$mcpZip = Join-Path $Out "dlm-mcp-$Release-win-x64.zip"
+if (Test-Path $mcpZip) {
+    Write-Output "mcp=$mcpZip"
+}
+else {
+    Write-Warning "还没有 dlm-mcp-$Release-win-x64.zip —— 发布前记得跑："
+    Write-Warning "  powershell -File packaging/build-mcp-package.ps1"
+}
