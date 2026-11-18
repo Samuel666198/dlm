@@ -1,11 +1,11 @@
 {
-    "release":  "0.7.1",
+    "release":  "0.7.2",
     "core":  "0.1.0",
     "extension":  "0.2.16",
-    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.1/dlm-0.7.1-win-x64.zip",
-    "sha256":  "14752685735c9e6f92ded4d2def3560078379cb2f024ae2681c1a9faf9b0d000",
-    "size":  12051721,
-    "notes":  "界面精致度第三轮：四层表面与字号阶梯（层次感）、行选中色减淡、搜索框位置、删顶部上下文动作条、批量操作改底部悬浮岛、设置代理页溢出与「窗口」分组聚合、新建任务与站点抓取改回主区屏、右栏滑入与侧栏收起过渡。修复：浏览器扩展在扩展重载后刷「Extension context invalidated」（content script 加存活守卫）；扩展版本上报失败后不再永久丢失；右键菜单六项接线、批量删除二次确认。",
+    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.2/dlm-0.7.2-win-x64.zip",
+    "sha256":  "f2c09960302dcbd7695584d0558c0361b01ef6e6d401d4d938ee9eb4b465ced7",
+    "size":  12066964,
+    "notes":  "修复 Agent 接入页排版：长说明不再顶出窗口右缘（原来按钮和说明并排塞在同一个横向布局里，横向布局不会换行），并整理成与其它设置页一致的卡片（命令行 / MCP 服务器两块），「已复制」改为显示在按钮上。此外本版延续 0.7.1 的全部改动。",
     "min_core":  "0.1.0",
-    "published_at":  "2026-11-18T07:06:39Z"
+    "published_at":  "2026-11-18T07:43:37Z"
 }
