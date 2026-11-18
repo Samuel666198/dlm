@@ -1,4 +1,4 @@
-﻿# 打 `dlm-mcp` 的单独发布包。
+# 打 `dlm-mcp` 的单独发布包。
 #
 # ## 为什么要有这个脚本
 #
@@ -81,9 +81,16 @@ Download Manager MCP 桥接 $Release —— 让 Agent（Codex / Claude 等）往
 
     {
       "mcpServers": {
-        "dlm": { "command": "dlm-mcp.exe" }
+        "dlm": { "command": "C:\\Tool\\dlm\\bin\\dlm-mcp.exe" }
       }
     }
+
+**`command` 必须是这个 exe 的绝对路径。** MCP 客户端是用
+`Command::new(command)` 起进程的，裸文件名（`dlm-mcp.exe`）只在它恰好位于 PATH
+上时才找得到 —— 否则客户端起不动它，界面会报
+「Host 尚未注册该 stdio Server 的工具，请检查启动日志后重试」。
+不知道装在哪就右键这个 exe 看属性；或者干脆用 设置 → Agent 接入 里的
+「复制 MCP 配置」，那里填的就是本机绝对路径。
 
 ## 四个工具
 

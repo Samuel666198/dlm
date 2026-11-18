@@ -1158,7 +1158,12 @@ fn agent_body(
                     *copied = Some("MCP");
                 }
             });
-            agent_hint(ui, "粘到 MCP 客户端的配置文件里即可。");
+            agent_hint(
+                ui,
+                "粘到 MCP 客户端的配置文件里即可。路径已经填成本机的绝对路径 —— \
+                 客户端要能直接找到这个 exe，写裸文件名它起不动，界面只会报\
+                 「Host 尚未注册该 stdio Server 的工具」。",
+            );
             agent_code_block(ui, &snippet);
         } else {
             agent_head(ui, "MCP 服务器", |ui| {
@@ -1235,11 +1240,49 @@ pub(crate) fn agent_cli_line() -> String {
     "dlm --url <下载链接> --out-dir \"<目录>\"".to_string()
 }
 
-/// MCP 客户端要的那段配置。路径先给占位符：真正的路径只有本机知道，
-/// 而写死一个 `C:\Users\xxx` 只会让每个用户都要手改。
+/// MCP 客户端配置里那个 `command` 该写什么。
+///
+/// ## 必须是绝对路径（2026-11-18 用户实测：Host 注册不到工具）
+///
+/// 原来这里写的是裸名字 `dlm-mcp.exe`。但 MCP 客户端是用
+/// `Command::new(<command>)` 去起子进程的 —— 裸名字只在它**恰好在 PATH 上**时
+/// 才解析得到。`dlm-mcp.exe` 装在程序目录里，不在 PATH，于是：
+///
+/// - 客户端起不动这个进程
+/// - 界面报「Host 尚未注册该 stdio Server 的工具，请检查启动日志后重试」
+///
+/// 实测对照（同一台机器、同一个 exe）：
+/// - `dlm-mcp.exe` → 系统找不到指定的文件
+/// - `E:\Tool\dlm\bin\dlm-mcp.exe` → `initialize` / `tools/list` 正常应答
+///
+/// 所以这里取「与 dlm-gui 同目录」的绝对路径 —— 那正是组件页安装 MCP 的落点。
+/// 拿不到当前 exe 路径时才退回裸名字（那种环境下也没有更好的选择）。
+fn mcp_command() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(mcp_install::MCP_BINARY)))
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| mcp_install::MCP_BINARY.to_string())
+}
+
+/// MCP 客户端要的那段配置。
+///
+/// 走 `serde_json` 而不是手拼字符串：**Windows 路径里的反斜杠必须转义成 `\\`**，
+/// 手拼极容易漏（漏了就是一粘就坏的 JSON，而用户不会怀疑是我们生成的）。
 pub(crate) fn agent_mcp_snippet() -> String {
-    "{\n  \"mcpServers\": {\n    \"dlm\": {\n      \"command\": \"dlm-mcp.exe\"\n    }\n  }\n}"
-        .to_string()
+    mcp_snippet_for(&mcp_command())
+}
+
+/// 由给定的 `command` 生成配置文本。抽出来是为了能对**任意路径**（含反斜杠、
+/// 含空格）做用例，不必依赖跑用例时真实的 exe 路径。
+pub(crate) fn mcp_snippet_for(command: &str) -> String {
+    let value = serde_json::json!({
+        "mcpServers": {
+            "dlm": { "command": command }
+        }
+    });
+    // `to_string_pretty` 对 `Value` 不会失败；真失败了也不该让设置页崩。
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| String::new())
 }
 
 /// 本机有没有 `dlm-mcp.exe`（与 GUI 同目录）。
@@ -1542,6 +1585,63 @@ mod tests {
         assert!(
             narrow <= 240.5,
             "窄容器里说明排到了 {narrow:.1}pt，没有换行"
+        );
+    }
+
+    /// **MCP 配置里必须是绝对路径，不能是裸文件名**（2026-11-18 用户实测）。
+    ///
+    /// 客户端用 `Command::new(<command>)` 起进程，裸名字只在 PATH 上才解析得到；
+    /// `dlm-mcp.exe` 装在程序目录里、不在 PATH ⇒ 起不动 ⇒ 界面报
+    /// 「Host 尚未注册该 stdio Server 的工具」。
+    ///
+    /// 实测对照（同机同 exe）：裸名字「系统找不到指定的文件」；
+    /// 完整路径 `initialize` / `tools/list` 正常应答。
+    #[test]
+    fn the_mcp_snippet_carries_an_absolute_path_the_host_can_spawn() {
+        // Windows 路径里的反斜杠必须转义成 \\ —— 手拼最容易漏这一处。
+        let cmd = r"E:\Tool\dlm\bin\dlm-mcp.exe";
+        let snippet = mcp_snippet_for(cmd);
+
+        assert!(
+            snippet.contains(r"E:\\Tool\\dlm\\bin\\dlm-mcp.exe"),
+            "配置里的路径必须转义反斜杠：{snippet}"
+        );
+        // 粘到客户端里不能一粘就坏：必须是合法 JSON，且解析回来等于原路径。
+        let parsed: serde_json::Value = serde_json::from_str(&snippet)
+            .unwrap_or_else(|e| panic!("MCP 配置不是合法 JSON（{e}）：{snippet}"));
+        assert_eq!(
+            parsed["mcpServers"]["dlm"]["command"].as_str(),
+            Some(cmd),
+            "command 解析回来必须与原路径一致"
+        );
+
+        // 反面保险：绝不能退化成裸名字 —— 那正是这条用例要挡的形态。
+        assert_ne!(
+            parsed["mcpServers"]["dlm"]["command"].as_str(),
+            Some("dlm-mcp.exe"),
+            "裸文件名在 PATH 上找不到，Host 注册不到工具"
+        );
+
+        // 带空格的安装路径也要能用（例如装在 Program Files）。
+        let spaced = r"C:\Program Files\dlm\bin\dlm-mcp.exe";
+        let parsed: serde_json::Value = serde_json::from_str(&mcp_snippet_for(spaced)).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["dlm"]["command"].as_str(),
+            Some(spaced)
+        );
+
+        // **走真实接线**：上面测的是"给定路径怎么拼字符串"，测不到"路径是怎么取的"。
+        // 变异验证：把 `mcp_command()` 改回返回裸名字，只有这一段会红 ——
+        // 少了它就是又一次假绿（上一轮动画的假绿就是这么来的）。
+        let real: serde_json::Value = serde_json::from_str(&agent_mcp_snippet())
+            .unwrap_or_else(|e| panic!("设置页生成的配置不是合法 JSON：{e}"));
+        let cmd = real["mcpServers"]["dlm"]["command"]
+            .as_str()
+            .expect("command 必须是字符串");
+        assert!(cmd.ends_with("dlm-mcp.exe"), "{cmd}");
+        assert!(
+            std::path::Path::new(cmd).is_absolute(),
+            "设置页复制出去的 MCP 配置里必须是绝对路径，实际是 {cmd:?} —— 客户端起不动裸名字"
         );
     }
 }
