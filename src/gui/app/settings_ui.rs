@@ -874,11 +874,32 @@ impl App {
         }
     }
 
-    /// 「Agent 接入」页头：两段可复制的配置 + 一句说明。
+    /// 「Agent 接入」页：两段可复制的配置 + 说明。
     ///
     /// 判据是"CLI 命令现在就能用、MCP 配置没装就置灰"。置灰不是偷懒：
     /// 把一段指向不存在程序的配置交给用户，比不提供更糟。
+    ///
+    /// ## 2026-11-18 重排（用户报了"右边溢出 + 版式乱"）
+    ///
+    /// 两个现象，一个根因：**`ui.horizontal` 给子元素的可用宽度是无限的，
+    /// 里面的 `label` 因此永不换行**。原来把「去『组件』页安装」按钮和一句
+    /// 二十多字的说明塞进同一个 horizontal，必然顶出卡片右缘。
+    ///
+    /// 所以这一页现在只守两条规则：
+    /// 1. **长文案一律独占一行**（纵向上下文里 `label` 会按可用宽度折行），
+    ///    横向行里只放短标题 + 按钮 —— 那两样再长也长不过一行。
+    /// 2. 用与其它设置页**相同的卡片外观**（`surface` 底 + 细描边 + 内边距），
+    ///    不再是一排裸控件飘在页面上。
     fn agent_panel(&mut self, ui: &mut egui::Ui) {
+        // 复制动作先记在局部变量里，出了闭包再写回 `self`
+        // （闭包里同时借 `self` 和 `ui` 过不了借用检查）。
+        let mut copied: Option<&'static str> = None;
+        let mut go_component = false;
+
+        // 「已复制」显示在各自按钮上，所以先取一份快照给内容函数用。
+        let cli_copied = self.agent_copied.as_deref() == Some("命令行");
+        let mcp_copied = self.agent_copied.as_deref() == Some("MCP");
+
         ui.label(
             egui::RichText::new("Agent 接入")
                 .size(12.5)
@@ -886,77 +907,32 @@ impl App {
                 .color(theme::ink()),
         );
         ui.label(
-            egui::RichText::new("让人或 Agent 都能下：命令行一直可用；MCP 需要另外装 dlm-mcp。")
-                .size(10.5)
-                .color(theme::ink_3()),
+            egui::RichText::new(
+                "命令行一直可用；MCP 要另外装 dlm-mcp —— 它会自己去找 dlm-gui 写的端点文件，\
+                 不必把 token 抄进配置。",
+            )
+            .size(10.5)
+            .color(theme::ink_3()),
         );
-        ui.label(
-            egui::RichText::new("dlm-mcp 自己去找 dlm-gui 写的端点文件，不用把 token 抄进配置。")
-                .size(10.5)
-                .color(theme::ink_3()),
-        );
-        ui.add_space(6.0);
+        ui.add_space(10.0);
 
-        // CLI：一行命令，复制即用。
-        let cli = agent_cli_line();
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                egui::vec2(300.0, 44.0),
-                egui::Label::new(
-                    egui::RichText::new(&cli)
-                        .size(11.0)
-                        .monospace()
-                        .color(theme::ink_2()),
-                ),
-            );
-            if ui.button("复制").clicked() {
-                ui.ctx().copy_text(cli.clone());
-                self.agent_copied = Some("cli".to_string());
-            }
-        });
-        ui.add_space(6.0);
-
-        // MCP：一段 JSON。没装 dlm-mcp 时置灰。
         let available = mcp_available(&std::env::current_exe().ok(), |p| p.exists());
-        let snippet = agent_mcp_snippet();
-        ui.horizontal(|ui| {
-            if available {
-                if ui.button("复制 MCP 配置").clicked() {
-                    ui.ctx().copy_text(snippet.clone());
-                    self.agent_copied = Some("mcp".to_string());
-                }
-                ui.label(
-                    egui::RichText::new("粘到 MCP 客户端配置里即可")
-                        .size(10.5)
-                        .color(theme::ink_3()),
-                );
-            } else {
-                ui.add_enabled(false, egui::Button::new("复制 MCP 配置"));
-                ui.label(
-                    egui::RichText::new("没找到 dlm-mcp.exe：先装那一份（它与 dlm-gui 同目录）")
-                        .size(10.5)
-                        .color(theme::ink_3()),
-                );
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui.button("去「组件」页安装").clicked() {
-                        // 安装流程只在组件页有一份：两处各写一遍必然有一处落后。
-                        self.settings_category = Category::Component;
-                    }
-                    ui.label(
-                        egui::RichText::new("在那一页点「下载并安装」，装完这里就能复制配置")
-                            .size(10.5)
-                            .color(theme::ink_3()),
-                    );
-                });
-            }
-        });
-        if let Some(what) = &self.agent_copied {
-            ui.label(
-                egui::RichText::new(format!("已复制（{what}）"))
-                    .size(10.5)
-                    .color(theme::ok()),
-            );
+        agent_body(
+            ui,
+            available,
+            cli_copied,
+            mcp_copied,
+            &mut copied,
+            &mut go_component,
+        );
+
+        // 出了闭包再动状态。
+        if let Some(what) = copied {
+            self.agent_copied = Some(what.to_string());
+        }
+        if go_component {
+            // 安装流程只在组件页有一份：两处各写一遍必然有一处落后。
+            self.settings_category = Category::Component;
         }
         ui.add_space(8.0);
     }
@@ -1119,6 +1095,137 @@ fn component_card(
                 egui::RichText::new(&row.hint)
                     .size(10.5)
                     .color(theme::ink_3()),
+            );
+        });
+}
+
+// ---------------------------------------------------------------------------
+// Agent 页的排版积木
+//
+// 这一页 2026-11-18 重排过一次，原因见 `App::agent_panel` 的文档：
+// **`ui.horizontal` 里的 `label` 不换行**，长文案并排就必然溢出。
+// 下面三个函数就是"安全用法"的唯一出口 —— 想让长文案出现在这一页，必须走它们。
+// ---------------------------------------------------------------------------
+
+/// Agent 页的**卡片内容**（不含页头标题）。
+///
+/// 抽成自由函数是为了能被用例直接量：把它放进一个已知宽度的 `Ui` 里排一遍，
+/// 看 `ui.min_rect()` 有没有超过给定宽度，就能钉住"长文案不溢出"这件事。
+/// 挂在 `App` 上的方法拿不到这种测量（要构造整个 App 与一帧 UI）。
+fn agent_body(
+    ui: &mut egui::Ui,
+    mcp_installed: bool,
+    cli_shows_copied: bool,
+    mcp_shows_copied: bool,
+    copied: &mut Option<&'static str>,
+    go_component: &mut bool,
+) {
+    // ---------------- 命令行 ----------------
+    let cli = agent_cli_line();
+    agent_card(ui, |ui| {
+        agent_head(ui, "命令行", |ui| {
+            let label = if cli_shows_copied {
+                "已复制"
+            } else {
+                "复制命令"
+            };
+            if ui.button(label).clicked() {
+                ui.ctx().copy_text(cli.clone());
+                *copied = Some("命令行");
+            }
+        });
+        agent_hint(
+            ui,
+            "现在就能用，不需要装别的东西。把尖括号里的两处换成你自己的。",
+        );
+        agent_code_block(ui, &cli);
+    });
+
+    ui.add_space(8.0);
+
+    // ---------------- MCP ----------------
+    let snippet = agent_mcp_snippet();
+    agent_card(ui, |ui| {
+        if mcp_installed {
+            agent_head(ui, "MCP 服务器", |ui| {
+                let label = if mcp_shows_copied {
+                    "已复制"
+                } else {
+                    "复制 MCP 配置"
+                };
+                if ui.button(label).clicked() {
+                    ui.ctx().copy_text(snippet.clone());
+                    *copied = Some("MCP");
+                }
+            });
+            agent_hint(ui, "粘到 MCP 客户端的配置文件里即可。");
+            agent_code_block(ui, &snippet);
+        } else {
+            agent_head(ui, "MCP 服务器", |ui| {
+                // 置灰而不是藏起来：让人看见「这个能力存在、缺什么」。
+                ui.add_enabled(false, egui::Button::new("复制 MCP 配置"));
+            });
+            agent_hint(
+                ui,
+                "还没装 dlm-mcp.exe（它要和 dlm-gui 放在同一个目录）。\
+                 装好之后，这里的配置就能直接复制了。",
+            );
+            // 按钮与说明**分两行**：并排就一定溢出（见 `agent_hint` 的文档）。
+            if ui.button("去「组件」页安装").clicked() {
+                *go_component = true;
+            }
+            ui.add_space(4.0);
+            agent_hint(ui, "在那一页点「下载并安装」。");
+        }
+    });
+}
+
+/// 一块设置卡：与 `render_row` 同一套外观（`surface` 底 + 细描边 + 内边距）。
+fn agent_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(theme::surface())
+        .stroke(egui::Stroke::new(theme::STROKE, theme::line_soft()))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, body);
+}
+
+/// 卡片标题行：左边短标题，右边一个按钮。
+///
+/// **两边都必须是短的。** 这是 `horizontal` 里唯一安全的用法 —— 横向布局给子元素
+/// 的可用宽度是无限的，里面任何需要折行的文本都会直接顶出卡片右缘。
+/// 长的解释一律改用 [`agent_hint`] 放到下一行（纵向上下文才会折行）。
+fn agent_head(ui: &mut egui::Ui, title: &str, button: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).size(12.5).color(theme::ink()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            button(ui);
+        });
+    });
+}
+
+/// 卡片里的一句解释。**独占一行**，因此会按可用宽度自动折行。
+fn agent_hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(10.5).color(theme::ink_3()));
+}
+
+/// 等宽配置块：独占一整行，按可用宽度折行。
+///
+/// 用 `.wrap()` 显式声明，而不是指望默认样式：万一外层样式被改过，
+/// 这里也不会退化成"一行到底、顶出卡片"。
+fn agent_code_block(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(theme::sunken())
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .size(10.5)
+                        .monospace()
+                        .color(theme::ink_2()),
+                )
+                .wrap(),
             );
         });
 }
@@ -1361,5 +1468,80 @@ mod tests {
         assert_eq!(settings_row_text_width(2000.0), 320.0);
         // 极窄也不塌成 0。
         assert_eq!(settings_row_text_width(200.0), 220.0);
+    }
+
+    /// 把一段布局放进**已知宽度**的 `Ui` 里排一遍，返回它实际占的宽度。
+    ///
+    /// `min_rect()` 是这一帧所有已排布内容的包围盒 —— 只要里面有东西不肯换行，
+    /// 这个宽度就会超过给它的宽度。
+    fn laid_out_width(width: f32, build: impl FnOnce(&mut egui::Ui)) -> f32 {
+        let ctx = egui::Context::default();
+        let mut got = 0.0;
+        // 字体要等第一帧才装好，`run_ui` 就是那一帧。
+        let mut warm = ctx.run_ui(egui::RawInput::default(), |_| {});
+        warm.textures_delta.clear();
+        // `build` 是 FnOnce，而 `run_ui` 的回调会被当成 FnMut 借用 —— 用 Option 取一次。
+        let mut once = Some(build);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1200.0, 3000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.allocate_ui(egui::vec2(width, 2000.0), |ui| {
+                    if let Some(f) = once.take() {
+                        f(ui);
+                    }
+                    got = ui.min_rect().width();
+                });
+            },
+        );
+        out.textures_delta.clear();
+        got
+    }
+
+    /// **Agent 接入页的长文案必须换行，不许顶出右缘**（用户 2026-11-18 截图）。
+    ///
+    /// 病根只有一条：`ui.horizontal` 给子元素的可用宽度是无限的，里面的 `label`
+    /// 于是永不换行。旧代码把「去『组件』页安装」按钮和一句二十多字的说明塞进
+    /// 同一个 horizontal，必然溢出。
+    ///
+    /// 所以这条按**多种宽度**量：设置窗随主窗缩放，窄窗才是最容易暴露的地方。
+    /// 变异验证：把任一长句改回 horizontal 并排，对应宽度立刻变红。
+    #[test]
+    fn the_agent_page_wraps_long_text_instead_of_overflowing() {
+        // 从很窄到常规，覆盖设置窗被主窗压小的情形。
+        for width in [220.0f32, 280.0, 360.0, 440.0, 560.0] {
+            for mcp_installed in [false, true] {
+                let got = laid_out_width(width, |ui| {
+                    let mut copied = None;
+                    let mut go = false;
+                    agent_body(ui, mcp_installed, false, false, &mut copied, &mut go);
+                });
+                assert!(
+                    got <= width + 0.5,
+                    "宽度 {width}（mcp_installed={mcp_installed}）时内容排到了 {got:.1}pt —— 长文案没有换行"
+                );
+            }
+        }
+
+        // 反面保险：万一哪天这两个长句被改短到根本不需要换行，这条用例就测不出东西了。
+        // 先确认它们在这个宽度下**确实**需要多行，否则上面那组断言是空的。
+        let longest = "还没装 dlm-mcp.exe（它要和 dlm-gui 放在同一个目录）。\
+                       装好之后，这里的配置就能直接复制了。";
+        let one_line = laid_out_width(f32::INFINITY, |ui| agent_hint(ui, longest));
+        let narrow = laid_out_width(240.0, |ui| agent_hint(ui, longest));
+        assert!(
+            one_line > 240.0,
+            "这段说明只有 {one_line:.1}pt 宽，在 240pt 里一行就放得下 —— \
+             那「会不会溢出」这件事已经测不到了，换一句更长的"
+        );
+        assert!(
+            narrow <= 240.5,
+            "窄容器里说明排到了 {narrow:.1}pt，没有换行"
+        );
     }
 }
