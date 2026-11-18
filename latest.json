@@ -1,11 +1,11 @@
 {
-    "release":  "0.7.0",
+    "release":  "0.7.1",
     "core":  "0.1.0",
     "extension":  "0.2.16",
-    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.0/dlm-0.7.0-win-x64.zip",
-    "sha256":  "c2387480e4c4750aec43925ab753016f647ef620534a32569fd16e093790f1ab",
-    "size":  12020681,
-    "notes":  "界面第二轮重做：左栏可收起、详情改右栏、列表批量选择与右键菜单、命令面板分四组、设置八分类（含浏览器扩展页与版本一览）、站点抓取三步、明暗主题。修掉 0.6.1 四个缺陷，并把整份界面接进无障碍树（accesskit）。",
+    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.1/dlm-0.7.1-win-x64.zip",
+    "sha256":  "14752685735c9e6f92ded4d2def3560078379cb2f024ae2681c1a9faf9b0d000",
+    "size":  12051721,
+    "notes":  "界面精致度第三轮：四层表面与字号阶梯（层次感）、行选中色减淡、搜索框位置、删顶部上下文动作条、批量操作改底部悬浮岛、设置代理页溢出与「窗口」分组聚合、新建任务与站点抓取改回主区屏、右栏滑入与侧栏收起过渡。修复：浏览器扩展在扩展重载后刷「Extension context invalidated」（content script 加存活守卫）；扩展版本上报失败后不再永久丢失；右键菜单六项接线、批量删除二次确认。",
     "min_core":  "0.1.0",
-    "published_at":  "2026-11-15T05:08:13Z"
+    "published_at":  "2026-11-18T07:06:39Z"
 }
