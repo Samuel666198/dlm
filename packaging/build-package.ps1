@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = '',
     # 发行版版本：用户感知的「软件版本」。缺省跟内核版本一致。
     [string]$Release = '',
