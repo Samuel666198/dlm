@@ -1,11 +1,11 @@
 {
-    "release":  "0.7.2",
+    "release":  "0.7.3",
     "core":  "0.1.0",
     "extension":  "0.2.16",
-    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.2/dlm-0.7.2-win-x64.zip",
-    "sha256":  "f2c09960302dcbd7695584d0558c0361b01ef6e6d401d4d938ee9eb4b465ced7",
-    "size":  12066964,
-    "notes":  "修复 Agent 接入页排版：长说明不再顶出窗口右缘（原来按钮和说明并排塞在同一个横向布局里，横向布局不会换行），并整理成与其它设置页一致的卡片（命令行 / MCP 服务器两块），「已复制」改为显示在按钮上。此外本版延续 0.7.1 的全部改动。",
+    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.3/dlm-0.7.3-win-x64.zip",
+    "sha256":  "aa67acd871c474f44adba3528c3de201bdcd258fea286722d2b710c375dfbbe0",
+    "size":  12067449,
+    "notes":  "MCP 两处修复：(1) 本版没附带 MCP 包时会自动回退到同 minor 的旧补丁版并装上（接口加法演进，旧桥接配新界面可用），不再直接报 404；(2) 「复制 MCP 配置」改为给出本机绝对路径 —— 原来写的是裸文件名 dlm-mcp.exe，MCP 客户端只在它位于 PATH 上时才找得到，否则起不动进程，界面会报「Host 尚未注册该 stdio Server 的工具」。同时 Agent 接入页排版改为卡片式。本版同时发布 dlm-mcp-0.7.3-win-x64.zip。",
     "min_core":  "0.1.0",
-    "published_at":  "2026-11-18T07:43:37Z"
+    "published_at":  "2026-11-18T08:29:37Z"
 }
