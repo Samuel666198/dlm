@@ -1608,3 +1608,37 @@ fn task_view(id: &str) -> TaskView {
         category: "other",
     }
 }
+
+/// **窗口图标与托盘同源**：都来自 `packaging/make-icon.py` 烘出的同一份画。
+///
+/// 窗口图标用 64×64（系统会按 DPI 缩放，源像素大一点更清楚），托盘用 32×32；
+/// 两者必须是同一张图的两个分辨率，不能一个是新手绘、一个是旧手绘。
+/// 托盘那一侧的立体判据见 `tray.rs` 的 `the_tray_icon_pixels_are_the_baked_asset`。
+#[test]
+fn the_window_icon_comes_from_the_same_baked_asset() {
+    let icon = super::window_icon();
+    assert_eq!(icon.width, 64, "窗口图标用 64×64");
+    assert_eq!(icon.height, 64);
+    assert_eq!(
+        icon.rgba.len(),
+        (64 * 64 * 4) as usize,
+        "IconData 必须是 width*height*4 字节"
+    );
+
+    let px = |x: usize, y: usize| -> &[u8] {
+        let i = (y * 64 + x) * 4;
+        &icon.rgba[i..i + 4]
+    };
+    assert_eq!(px(0, 0)[3], 0, "squircle 之外必须透明");
+
+    // 与新图标的三支箭结构对齐（判据理由见 tray.rs 同名用例）。
+    let cream = |c: &[u8]| c[0] > 200 && c[1] > 180 && c[2] > 160;
+    assert!(cream(px(64 * 30 / 100, 64 * 32 / 100)), "左上应是第二支箭");
+    assert!(cream(px(64 * 70 / 100, 64 * 32 / 100)), "右上应是第三支箭");
+    let gap = px(64 * 40 / 100, 64 * 40 / 100);
+    assert!(
+        !cream(gap),
+        "两支箭之间应是背景色，实际 {gap:?} —— 单箭头的形态"
+    );
+    assert!(cream(px(32, 32)), "中心应是中间那支箭的杆");
+}

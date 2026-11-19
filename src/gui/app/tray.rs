@@ -133,57 +133,28 @@ impl Tray {
     }
 }
 
-/// 生成 32×32 的托盘图标：陶土橙圆角方块 + 白色下箭头。
+/// 托盘图标：32×32 的原始 RGBA 像素，由 `packaging/make-icon.py` 从源图烘出。
 ///
-/// 与 `theme::accent()` 同色，保证托盘与窗口是同一套视觉。
+/// 与 exe 资源段里的 `dlm.ico`、窗口图标是**同一份画**。以前这里是手写循环画的
+/// （圆角方块 + 白箭头），换新图标后手绘版和真图标会长得不一样 —— 托盘里一个样、
+/// 任务栏里另一个样，比"图标不好看"更难解释。所以三处改成共用一份像素。
+///
+/// 为什么是裸 RGBA 而不是 PNG：项目没有引入图片解码依赖（`Cargo.lock` 里连 `png`
+/// 都没有）。运行时解码要么加一个 crate，要么把像素烘进仓库 —— 选后者，与
+/// `updater` 直接调 `powershell` 解压是同一个取舍：不为一件事拖进依赖树。
+const TRAY_ICON_SIZE: u32 = 32;
+const TRAY_ICON_RGBA: &[u8] = include_bytes!("../../../assets/icon/dlm-32.rgba");
+
+/// 尺寸写在两个地方就必须对得上。对不上的话 `Icon::from_rgba` 只在**运行时**报错，
+/// 而那是托盘 —— 用户看到的是"没有图标"，不是一条错误。用编译期断言挡住。
+const _: () = assert!(
+    TRAY_ICON_RGBA.len() == (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize,
+    "dlm-32.rgba 字节数必须等于 32*32*4；跑 packaging/make-icon.py 重新生成"
+);
+
 pub fn make_icon() -> Icon {
-    const SIZE: u32 = 32;
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-
-    let accent = [0xC0u8, 0x63, 0x40, 0xFF];
-    let white = [0xFFu8, 0xFF, 0xFF, 0xFF];
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let i = ((y * SIZE + x) * 4) as usize;
-            // 圆角半径 7：四角裁掉。
-            let r = 7i32;
-            let in_corner = |x: i32, y: i32| -> bool {
-                let dx = if x < r {
-                    r - x
-                } else if x > SIZE as i32 - 1 - r {
-                    x - (SIZE as i32 - 1 - r)
-                } else {
-                    0
-                };
-                let dy = if y < r {
-                    r - y
-                } else if y > SIZE as i32 - 1 - r {
-                    y - (SIZE as i32 - 1 - r)
-                } else {
-                    0
-                };
-                dx * dx + dy * dy > r * r
-            };
-            if in_corner(x as i32, y as i32) {
-                continue;
-            }
-            rgba[i..i + 4].copy_from_slice(&accent);
-
-            // 白色下箭头：竖杆 + 三角头。
-            let cx = SIZE as i32 / 2;
-            let in_shaft = (x as i32 - cx).abs() <= 1 && (9..=18).contains(&(y as i32));
-            let in_head = {
-                let dy = y as i32 - 17;
-                (0..=6).contains(&dy) && (x as i32 - cx).abs() <= 6 - dy
-            };
-            if in_shaft || in_head {
-                rgba[i..i + 4].copy_from_slice(&white);
-            }
-        }
-    }
-
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("32x32 RGBA 一定合法")
+    Icon::from_rgba(TRAY_ICON_RGBA.to_vec(), TRAY_ICON_SIZE, TRAY_ICON_SIZE)
+        .expect("尺寸已由编译期断言保证，不会失败")
 }
 impl Tray {
     /// 收进托盘时给个提示。
@@ -210,7 +181,7 @@ pub fn should_notify(now_secs: u64, last_secs: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_notify;
+    use super::{TRAY_ICON_RGBA, TRAY_ICON_SIZE, should_notify};
 
     #[test]
     fn the_hint_is_throttled_to_once_a_minute() {
@@ -218,5 +189,74 @@ mod tests {
         assert!(!should_notify(1_059, 1_000), "60 秒内不重复");
         assert!(should_notify(1_060, 1_000));
         assert!(!should_notify(5, 100), "时钟回拨也不 panic");
+    }
+
+    /// 托盘图标必须是**烘进来的那份像素**，不是手绘的。
+    ///
+    /// 2026-11-19 换了新图标（三支箭汇成一支）。原先 `make_icon()` 是手写循环画的
+    /// 圆角方块 + 白箭头；换图后如果只改了 `dlm.ico` 而漏了这里，任务栏里是新图标、
+    /// 托盘里还是旧的手绘箭头 —— 同一个程序两个样子。
+    ///
+    /// 期望值取自实测（跑完 `packaging/make-icon.py` 后读出来的真实像素）：
+    /// 四角透明、中心奶白（中间那支箭的杆）、左侧陶土橙（背景）。
+    #[test]
+    fn the_tray_icon_pixels_are_the_baked_asset() {
+        const S: u32 = TRAY_ICON_SIZE;
+        let px = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * S + x) * 4) as usize;
+            [
+                TRAY_ICON_RGBA[i],
+                TRAY_ICON_RGBA[i + 1],
+                TRAY_ICON_RGBA[i + 2],
+                TRAY_ICON_RGBA[i + 3],
+            ]
+        };
+
+        assert_eq!(TRAY_ICON_RGBA.len(), (S * S * 4) as usize);
+        assert_eq!(
+            px(0, 0)[3],
+            0,
+            "squircle 之外必须透明，否则任务栏上是一个白方块"
+        );
+        let center = px(S / 2, S / 2);
+        assert!(
+            center[0] > 200 && center[1] > 180 && center[2] > 160,
+            "中心应是箭杆的奶白色，实际 {center:?}"
+        );
+        let bg = px(S / 6, S / 2);
+        assert!(
+            bg[3] > 200 && bg[0] > 150 && bg[0] > bg[1] && bg[1] > bg[2],
+            "左侧应是陶土橙背景（R>G>B），实际 {bg:?}"
+        );
+
+        // **三支箭的结构判据**（这条才能区分新旧图标）：
+        // 新图标左上、右上各有一支箭，中段空隙是背景色。
+        // 旧的手绘版只有一支居中箭头 —— 那两个位置都会是背景，所以这三点一起断言，
+        // 换成旧图标（或任何"单箭头"画法）必然挂。
+        let cream = |c: [u8; 4]| c[0] > 200 && c[1] > 180 && c[2] > 160;
+        let left = px(S * 30 / 100, S * 32 / 100);
+        let right = px(S * 70 / 100, S * 32 / 100);
+        let gap = px(S * 40 / 100, S * 40 / 100);
+        assert!(cream(left), "左上应是第二支箭的奶白色，实际 {left:?}");
+        assert!(cream(right), "右上应是第三支箭的奶白色，实际 {right:?}");
+        assert!(
+            !cream(gap),
+            "两支箭之间应是背景色（R>G>B），实际 {gap:?} —— 这是单箭头/纯色块的形态"
+        );
+        assert!(
+            gap[3] > 200 && gap[0] > gap[1] && gap[1] > gap[2],
+            "空隙是陶土橙背景，实际 {gap:?}"
+        );
+
+        // 奶白像素太少说明图标根本没画上去（全透明或纯色块也会在这里挂）。
+        let mut light = 0;
+        for y in 0..S {
+            for x in 0..S {
+                if cream(px(x, y)) {
+                    light += 1;
+                }
+            }
+        }
+        assert!(light > 20, "奶白色像素只有 {light} 个，图标可能没画上");
     }
 }

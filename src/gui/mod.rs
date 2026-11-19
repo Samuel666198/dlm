@@ -1043,51 +1043,23 @@ pub(crate) fn discard_reply() -> Sender<std::result::Result<String, String>> {
     tx
 }
 
-/// 窗口图标：与托盘同一份像素。
+/// 窗口图标：与托盘、exe 资源段**同一份画**。
 ///
-/// `egui::IconData` 要 RGBA 与尺寸；`tray_icon::Icon` 不暴露像素，所以这里
-/// 重新生成一份（32×32，成本可忽略）。
+/// 像素由 `packaging/make-icon.py` 从源图烘出。这里用 64×64 而不是托盘的 32×32：
+/// 窗口图标会被系统按 DPI 缩放，源像素大一点在 125%/150% 缩放下更清楚。
+const WINDOW_ICON_SIZE: u32 = 64;
+const WINDOW_ICON_RGBA: &[u8] = include_bytes!("../../assets/icon/dlm-64.rgba");
+
+/// 同托盘那条断言：字节数与尺寸对不上要**编译期**就失败。
+const _: () = assert!(
+    WINDOW_ICON_RGBA.len() == (WINDOW_ICON_SIZE * WINDOW_ICON_SIZE * 4) as usize,
+    "dlm-64.rgba 字节数必须等于 64*64*4；跑 packaging/make-icon.py 重新生成"
+);
+
 fn window_icon() -> eframe::egui::IconData {
-    const SIZE: u32 = 32;
-    let accent = [0xC0u8, 0x63, 0x40, 0xFF];
-    let white = [0xFFu8, 0xFF, 0xFF, 0xFF];
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let i = ((y * SIZE + x) * 4) as usize;
-            let r = 7i32;
-            let dx = if (x as i32) < r {
-                r - x as i32
-            } else if x as i32 > SIZE as i32 - 1 - r {
-                x as i32 - (SIZE as i32 - 1 - r)
-            } else {
-                0
-            };
-            let dy = if (y as i32) < r {
-                r - y as i32
-            } else if y as i32 > SIZE as i32 - 1 - r {
-                y as i32 - (SIZE as i32 - 1 - r)
-            } else {
-                0
-            };
-            if dx * dx + dy * dy > r * r {
-                continue;
-            }
-            rgba[i..i + 4].copy_from_slice(&accent);
-            let cx = SIZE as i32 / 2;
-            let in_shaft = (x as i32 - cx).abs() <= 1 && (9..=18).contains(&(y as i32));
-            let in_head = {
-                let d = y as i32 - 17;
-                (0..=6).contains(&d) && (x as i32 - cx).abs() <= 6 - d
-            };
-            if in_shaft || in_head {
-                rgba[i..i + 4].copy_from_slice(&white);
-            }
-        }
-    }
     eframe::egui::IconData {
-        rgba,
-        width: SIZE,
-        height: SIZE,
+        rgba: WINDOW_ICON_RGBA.to_vec(),
+        width: WINDOW_ICON_SIZE,
+        height: WINDOW_ICON_SIZE,
     }
 }
