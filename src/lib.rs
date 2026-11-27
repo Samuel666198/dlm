@@ -2,6 +2,7 @@ pub mod actions;
 pub mod cli;
 pub mod consts;
 pub mod engine;
+pub mod failure;
 pub mod fetch;
 pub mod grab;
 pub mod gui;

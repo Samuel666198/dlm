@@ -755,9 +755,12 @@ pub fn run_with_limiter(
     // 名字还没定（`None`）时也按"不是网页"处理 —— 缺名字时宁可拦下来问一句。
     let target_name = task.name.as_deref().unwrap_or("");
     if task.flags & crate::consts::FLAG_ALLOW_HTML == 0 && looks_like_html(&headers, target_name) {
-        bail!(
-            "这个地址返回的是网页（text/html），不是文件 —— 多半是视频页、BV 号或分享链接。\n如果确实要下载这个网页，请加 --allow-html"
-        );
+        return Err(crate::failure::Failure::new(
+            crate::json_out::Code::NotAFile,
+            "该地址返回的是网页（text/html），不是文件，通常是视频页或分享链接。",
+        )
+        .with_hint("若确实需要保存该网页，加 --allow-html；若目标是视频，改用 --video。")
+        .into());
     }
 
     let facts = facts_from_response(

@@ -54,13 +54,13 @@ fn main() -> ExitCode {
                 println!(
                     "{}",
                     dlm::json_out::to_line(&dlm::json_out::err(
-                        dlm::json_out::Code::Internal,
+                        code_of(&err),
                         format!("{err:#}"),
                         None,
                     ))
                 );
             } else {
-                eprintln!("dlm 跑不起来：{err:#}");
+                eprintln!("{}", dlm::failure::format_human(&err));
             }
             DOWNLOAD_FAILED
         }
@@ -108,13 +108,13 @@ fn dispatch() -> Result<u8> {
                         println!(
                             "{}",
                             dlm::json_out::to_line(&dlm::json_out::err(
-                                dlm::json_out::Code::Internal,
+                                code_of(&err),
                                 format!("{err:#}"),
                                 None,
                             ))
                         );
                     } else {
-                        eprintln!("dlm 跑不起来：{err:#}");
+                        eprintln!("{}", dlm::failure::format_human(&err));
                     }
                     DOWNLOAD_FAILED
                 }
@@ -188,6 +188,16 @@ fn dispatch() -> Result<u8> {
         }
     }
     Ok(code)
+}
+
+/// 失败对应的错误码：**界面与 `--json` 同一个源**。
+///
+/// 以前 `--json` 那条路写死 `INTERNAL`，而界面说"网页不是文件" ——
+/// 同一个失败两种说法，排查时对不上号（2026-11-28 用户要的就是"错误码+解释"）。
+fn code_of(err: &anyhow::Error) -> dlm::json_out::Code {
+    dlm::failure::find(err)
+        .map(|f| f.code)
+        .unwrap_or(dlm::json_out::Code::Internal)
 }
 
 /// 结果行 + 退出码。**这一层是把"有没有下完"折成码的唯一位置**（**E20⑦**：非零档的判据只有 `!ok`，

@@ -228,7 +228,14 @@ pub fn parse_progress(line: &str) -> Option<f64> {
 /// 跑一遍视频下载。返回给 `main` 的退出码（0 成功，1 失败）。
 pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: bool) -> Result<u8> {
     let Some(tool) = find_ytdlp() else {
-        bail!(missing_hint());
+        return Err(crate::failure::Failure::new(
+            crate::json_out::Code::ToolMissing,
+            "未找到 yt-dlp，无法下载视频。",
+        )
+        .with_hint(
+            "安装 yt-dlp（winget install yt-dlp 或 pip install yt-dlp），或把它放到 dlm.exe 同目录，或用环境变量 DLM_YTDLP 指定路径。",
+        )
+        .into());
     };
 
     // ① 元信息：先有名字，日志和落点才说得清。

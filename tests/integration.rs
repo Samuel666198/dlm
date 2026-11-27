@@ -6823,8 +6823,8 @@ fn the_binary_maps_ok_to_the_exit_code_and_quiet_to_never_installing_the_sink() 
     );
     let se = stderr_of(&err);
     assert!(
-        se.contains("跑不起来"),
-        "那支的措辞要说\"跑不起来\"，与 `ok = false` 分得开：{se}"
+        se.starts_with("错误 [") && se.contains("]："),
+        "`Err` 那一支要说成「错误 [CODE]：…」，与 `ok = false` 分得开：{se}"
     );
     assert!(
         !se.contains("Seeded"),
@@ -6879,11 +6879,11 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
         es.contains("--sha256"),
         "那句话还得点名是哪一格写错了，否则用户没法改：{es}"
     );
-    for engine_wording in ["校验不符", "sha256 不符", "跑不起来", "下载未完成"] {
+    for engine_wording in ["校验不符", "sha256 不符", "错误 [", "下载未完成"] {
         assert!(
             !es.contains(engine_wording) && !so.contains(engine_wording),
             "两条流里出现 {engine_wording:?} 就说明这趟已经走进了引擎\
-             （前两个是引擎的校验结论，`跑不起来` 是 `main` 的 `Err` 那一支，`下载未完成` 是结果行）：\
+             （前两个是引擎的校验结论，`错误 [` 是 `main` 的 `Err` 那一支，`下载未完成` 是结果行）：\
              stderr：{es}，stdout：{so}"
         );
     }
@@ -6928,7 +6928,7 @@ fn the_binary_holds_a_malformed_argument_at_the_parameter_tier() -> anyhow::Resu
         ec.contains("参数写错了") && ec.contains("--connections"),
         "参数层措辞 + 点名那一格，两条都要在：{ec}"
     );
-    for engine_wording in ["跑不起来", "至少要是 1"] {
+    for engine_wording in ["错误 [", "至少要是 1"] {
         assert!(
             !ec.contains(engine_wording) && !stdout_of(&conns).contains(engine_wording),
             "出现 {engine_wording:?} 就说明这一格是被引擎拦下的，不是 CLI（E23 附记① 的更正就落在这里）：{ec}"
@@ -8689,11 +8689,11 @@ fn the_binary_prints_slow_retry_rounds_when_every_worker_shot_is_refused() -> an
         so.contains("重试到顶"),
         "那句说明要指名「重试到顶」，这是封顶那一支的专属措辞：{so}"
     );
-    for banned in ["参数写错了", "跑不起来"] {
+    for banned in ["参数写错了", "错误 ["] {
         assert!(
             !so.contains(banned) && !se.contains(banned),
             "两条流里出现 {banned:?} 就说明档位不对：`参数写错了` 是参数层（E26/C3），\
-             `跑不起来` 是 `main` 的 `Err` 那一支（那意味着连试探都没成功，本发要量的形状根本没发生）。\
+             `错误 [` 是 `main` 的 `Err` 那一支（那意味着连试探都没成功，本发要量的形状根本没发生）。\
              stderr：{se}"
         );
     }
@@ -11717,14 +11717,29 @@ fn a_web_page_is_refused_unless_html_is_allowed() -> anyhow::Result<()> {
     };
 
     // ① 默认：拒绝，并且话说清楚（要提"网页"，也要给出退路）
-    let err = probe::run(&page, &client, PROBE_READ_BYTES)
-        .expect_err("HTML 响应默认必须被拒")
-        .to_string();
-    eprintln!("拒绝原文：{err}");
-    assert!(err.contains("网页"), "要说清是网页不是文件：{err}");
+    let err = probe::run(&page, &client, PROBE_READ_BYTES).expect_err("HTML 响应默认必须被拒");
+    // 现在失败是「码 + 说明 + 处理」三段：说明走 Display，建议走 `Failure.hint`。
+    let human = dlm::failure::format_human(&err);
+    eprintln!("拒绝原文：{human}");
+    let failure = dlm::failure::find(&err).expect("网页拦截必须带错误码，不许只有一句白话");
+    assert_eq!(
+        failure.code,
+        dlm::json_out::Code::NotAFile,
+        "网页拦截该用 NOT_A_FILE"
+    );
     assert!(
-        err.contains("--allow-html"),
-        "要给出退路，否则用户不知道怎么继续：{err}"
+        failure.message.contains("网页"),
+        "要说清是网页不是文件：{}",
+        failure.message
+    );
+    let hint = failure.hint.as_deref().unwrap_or("");
+    assert!(
+        hint.contains("--allow-html"),
+        "要给出退路，否则用户不知道怎么继续：{hint:?}"
+    );
+    assert!(
+        human.contains("[NOT_A_FILE]"),
+        "人看的输出也要带码：{human}"
     );
 
     // ② 显式允许：照常试探成功

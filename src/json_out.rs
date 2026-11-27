@@ -26,6 +26,10 @@ pub enum Code {
     NotFound,
     Busy,
     Internal,
+    /// 外部依赖不在（yt-dlp / ffmpeg）。视频下载用得上。
+    ToolMissing,
+    /// 响应是网页而不是文件（视频页、分享链接常见）。
+    NotAFile,
 }
 
 impl Code {
@@ -40,11 +44,13 @@ impl Code {
             Code::NotFound => "NOT_FOUND",
             Code::Busy => "BUSY",
             Code::Internal => "INTERNAL",
+            Code::ToolMissing => "TOOL_MISSING",
+            Code::NotAFile => "NOT_A_FILE",
         }
     }
 
     /// 当前全部错误码 —— 测试拿它防漏写。
-    pub const ALL: [Code; 9] = [
+    pub const ALL: [Code; 11] = [
         Code::BadUrl,
         Code::NoSuchDir,
         Code::DiskFull,
@@ -54,6 +60,8 @@ impl Code {
         Code::NotFound,
         Code::Busy,
         Code::Internal,
+        Code::ToolMissing,
+        Code::NotAFile,
     ];
 }
 
