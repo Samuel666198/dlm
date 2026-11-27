@@ -247,6 +247,8 @@ function submitPage(url, referer, hls, tab) {
   cookieHeader(url).then((cookie) => {
     const task = { op: "download", url, referer: referer || url, cookie };
     if (hls) task.hls = true;
+    // 视频页：让桌面端按视频任务派发（`--video` → yt-dlp），而不是去下一个网页。
+    if (isVideoPage(url)) task.video = true;
     if (tab != null) task.tab = tab;
     submitTask(task);
   });
@@ -263,6 +265,37 @@ const FILE_LINK_RE =
 // 右键指向的 URL，按 tab 记着。Chrome 对「用 JS 触发下载的按钮」既不给 linkUrl
 // 也不给 srcUrl，只能靠 content.js 在 contextmenu 时上报（见那边的注释）。
 const contextTargets = new Map();
+
+/// 这个地址看起来是**视频页**吗（而不是一个文件）。
+///
+/// 与 Rust 侧 `video::looks_like_video_page` 用同一份站点表：扩展负责在
+/// **投递那一刻**打标记（`video: true`），桌面端负责按这个标记派发 `--video`。
+/// 两边判断不一致的话，会出现"扩展以为是视频、桌面端当普通文件下"这种最难查的错。
+const VIDEO_PAGE_HOSTS = [
+  "bilibili.com",
+  "b23.tv",
+  "youtube.com",
+  "youtu.be",
+  "douyin.com",
+  "iesdouyin.com",
+  "xiaohongshu.com",
+  "xhslink.com",
+  "vimeo.com",
+  "twitch.tv",
+  "dailymotion.com",
+  "ixigua.com",
+];
+
+/// 直链视频文件不算"视频页"：那种地址交给普通下载更好（分段 + 续传）。
+const DIRECT_VIDEO_EXT = [".mp4", ".mkv", ".flv", ".webm", ".mov", ".m4v"];
+
+function isVideoPage(url) {
+  const lower = String(url || "").trim().toLowerCase();
+  if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false;
+  const path = lower.split("?")[0].split("#")[0];
+  if (DIRECT_VIDEO_EXT.some((ext) => path.endsWith(ext))) return false;
+  return VIDEO_PAGE_HOSTS.some((host) => lower.includes(host));
+}
 
 /// 探一个 URL 的大小：
 /// 1. 先 HEAD 看 `Content-Length`；

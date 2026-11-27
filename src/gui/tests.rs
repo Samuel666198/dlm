@@ -2243,3 +2243,28 @@ fn a_video_task_is_dispatched_with_the_video_flag() {
         "视频任务必须带 --video，否则下回来的是网页：{video:?}"
     );
 }
+
+/// **`/api/add` 收下 video 标记**，而且只认真正的布尔 true。
+///
+/// 判错有两个方向：把普通文件当视频（白等 yt-dlp）、把视频当普通文件
+/// （下回来一个网页）。所以字符串 "true"、数字 1 一律不算 —— 不靠猜。
+#[test]
+fn add_fields_only_accept_a_real_boolean_video_flag() {
+    use crate::gui::http::parse_add_fields;
+
+    let base = r#"{"url":"https://www.bilibili.com/video/BV1","name":"BV1.mp4"}"#;
+    let plain = parse_add_fields(base.as_bytes()).expect("基础入参要能过");
+    assert!(!plain.video, "没给就是普通下载");
+
+    let with_true = base.replace('}', r#","video":true}"#);
+    let yes = parse_add_fields(with_true.as_bytes()).expect("带 video:true 要能过");
+    assert!(yes.video, "扩展明确说是视频，就得是视频");
+
+    let with_string = base.replace('}', r#","video":"true"}"#);
+    let no = parse_add_fields(with_string.as_bytes()).expect("非布尔也不该报错");
+    assert!(!no.video, "字符串 true 不算");
+
+    let with_one = base.replace('}', r#","video":1}"#);
+    let no2 = parse_add_fields(with_one.as_bytes()).expect("数字也不该报错");
+    assert!(!no2.video, "数字 1 不算");
+}

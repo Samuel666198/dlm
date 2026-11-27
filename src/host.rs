@@ -437,6 +437,9 @@ impl Host {
         let referer = text("referer");
         let cookie = text("cookie");
         let hls = value.get("hls").and_then(Value::as_bool).unwrap_or(false);
+        // 视频任务：交给 yt-dlp（`--video`）。与 `--hls` 互斥 —— 视频站的分片
+        // 由 yt-dlp 自己挑，宿主不该再塞一个播放列表假设进去。
+        let video = value.get("video").and_then(Value::as_bool).unwrap_or(false);
 
         // B10：无 Cookie 且队列可达 ⇒ 交给队列（队列的落点是 `dlm-gui --out-dir`）。
         // 带 Cookie 的下载仍走 B2 直连：队列不存 Cookie。
@@ -450,15 +453,15 @@ impl Host {
         // 2026-11-27 修的就是这里：以前 `cookie.is_none() && !hls` 才进队列，
         // 于是**带 Cookie 的下载（几乎全部真实下载）**只能走直连，桌面端永远看不见。
         // 现在 Cookie 跟着请求一起进队列，由 GUI 加密落盘（见 gui::secrets）。
-        let note = if !hls {
-            let mut outcome = self.try_queue(url, name, referer, cookie);
+        let note = if !hls && !video {
+            let mut outcome = self.try_queue(url, name, referer, cookie, false);
             // 队列不可达 ⇒ 先把桌面端拉起来，再试一次（用户 2026-11-27 的决定）。
             // 拉不起来（冷却中 / 没有 exe / 超时）就直接走下面的降级分支 ——
             // **不能因为窗口起不来就把这次下载丢了**。
             if let QueueOutcome::Unavailable(_) = &outcome
                 && self.ensure_gui()
             {
-                outcome = self.try_queue(url, name, referer, cookie);
+                outcome = self.try_queue(url, name, referer, cookie, false);
             }
             match outcome {
                 QueueOutcome::Queued(id) => {
@@ -468,6 +471,34 @@ impl Host {
                         "id": id,
                         "name": name.map(str::to_string).unwrap_or_else(|| derive_name(url)),
                         "tab": value.get("tab").and_then(Value::as_i64),
+                    }))
+                    .expect("json! serializable");
+                }
+                QueueOutcome::Rejected(message) => return error(&message),
+                QueueOutcome::TimedOut => return error("队列响应超时，未重复下载"),
+                QueueOutcome::Unavailable(detail) => DirectNote {
+                    reason: DIRECT_QUEUE_DOWN,
+                    detail: Some(detail),
+                },
+            }
+        } else if video {
+            // 视频任务也先试队列（队列里的任务带 `video` 标记，派发时加 `--video`）——
+            // 这样"下载了但桌面端看不见"的老毛病不会在视频上重演。
+            let mut outcome = self.try_queue(url, name, referer, cookie, true);
+            if let QueueOutcome::Unavailable(_) = &outcome
+                && self.ensure_gui()
+            {
+                outcome = self.try_queue(url, name, referer, cookie, true);
+            }
+            match outcome {
+                QueueOutcome::Queued(id) => {
+                    return serde_json::to_vec(&json!({
+                        "op": "accepted",
+                        "mode": "queue",
+                        "id": id,
+                        "name": name.map(str::to_string).unwrap_or_else(|| derive_name(url)),
+                        "tab": value.get("tab").and_then(Value::as_i64),
+                        "video": true,
                     }))
                     .expect("json! serializable");
                 }
@@ -566,6 +597,11 @@ impl Host {
         }
         if hls {
             args.push("--hls".into());
+        }
+        // 视频任务在直连那支也要带 `--video`：否则队列不可用、降级直连之后，
+        // 同一个地址又会被当成普通文件去下 —— 用户看到的是"刚才还能下，现在下回来一个网页"。
+        if !hls && value.get("video").and_then(Value::as_bool).unwrap_or(false) {
+            args.push("--video".into());
         }
 
         let mut command = Command::new(&self.config.dlm_exe);
@@ -897,6 +933,7 @@ impl Host {
         name: Option<&str>,
         referer: Option<&str>,
         cookie: Option<&str>,
+        video: bool,
     ) -> QueueOutcome {
         let Some(path) = &self.config.gui_endpoint else {
             return QueueOutcome::Unavailable("no-endpoint");
@@ -928,6 +965,7 @@ impl Host {
             "name": name,
             "referer": referer,
             "start_at": null,
+            "video": video,
             // 走本机回环 + token，与其它控制口同一条防线；GUI 收到后立刻 DPAPI 加密，
             // 明文不会落到 queue.json 里（见 gui::secrets 的模块注释）。
             "cookie": cookie,

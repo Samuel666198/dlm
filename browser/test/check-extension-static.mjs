@@ -176,6 +176,34 @@ if (/msg\.op === "probe-size"/.test(bgSrc)) {
   }
 }
 
+// 10) 视频站表：扩展（投递时打标记）与 Rust（识别视频页）必须是**同一份**。
+//
+// 两边漂移的后果最难查：扩展以为是视频 → 桌面端当普通文件下 → 又下回来一个网页，
+// 而两边的用例各自都是绿的。所以这里直接比对两边的站点表。
+const videoRs = readFileSync(join(here, "..", "..", "src", "video.rs"), "utf8");
+const rsHosts = [...(videoRs.match(/const HOSTS: \[&str; \d+\] = \[([\s\S]*?)\];/) || [null, ""])[1]
+  .matchAll(/"([^"]+)"/g)]
+  .map((m) => m[1]);
+const jsHosts = [...(bgSrc.match(/const VIDEO_PAGE_HOSTS = \[([\s\S]*?)\];/) || [null, ""])[1]
+  .matchAll(/"([^"]+)"/g)]
+  .map((m) => m[1]);
+if (!rsHosts.length) {
+  failures.push("src/video.rs 里找不到视频站表（HOSTS）—— 判定漂移检查失效");
+} else if (!jsHosts.length) {
+  failures.push(`${sw} 里找不到 VIDEO_PAGE_HOSTS —— 扩展不会给视频页打标记`);
+} else {
+  const onlyRs = rsHosts.filter((h) => !jsHosts.includes(h));
+  const onlyJs = jsHosts.filter((h) => !rsHosts.includes(h));
+  if (onlyRs.length || onlyJs.length) {
+    failures.push(
+      `视频站表两边不一致：只在 Rust（${onlyRs.join(",") || "无"}）/ 只在扩展（${onlyJs.join(",") || "无"}）`,
+    );
+  }
+}
+if (!/if \(isVideoPage\(url\)\) task\.video = true;/.test(bgSrc)) {
+  failures.push(`${sw} 没有在投递时设置 task.video = true（视频页会被当普通文件下）`);
+}
+
 if (failures.length) {
   console.error("extension static check FAILED");
   for (const f of failures) console.error(`- ${f}`);

@@ -128,6 +128,7 @@ if ($Node) {
     # takeover.js 本身无 chrome 依赖、导出 module.exports，所以直接 require 进来逐个分支打。
     Invoke-Gate -Name 'takeover' -Note 'verify-takeover.mjs' -Body { & $Node browser/test/verify-takeover.mjs }
 Invoke-Gate -Name 'ctx-target' -Note 'verify-context-target.mjs' -Body { & $Node browser/test/verify-context-target.mjs }
+Invoke-Gate -Name 'video-page' -Note 'verify-video-page.mjs' -Body { & $Node browser/test/verify-video-page.mjs }
 }
 else {
     $script:Results += [pscustomobject]@{ Gate = 'extension'; Result = 'SKIP'; Detail = 'node not found' }

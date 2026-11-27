@@ -352,6 +352,10 @@ pub(crate) struct AddFields {
     pub referer: Option<String>,
     pub start_at: Option<u64>,
     pub on_complete: Option<String>,
+    /// 这是不是一个**视频任务**（交给 yt-dlp，而不是当普通文件分段下）。
+    ///
+    /// 由扩展判断页面是不是视频站后带上；缺省 false 就是老行为。
+    pub video: bool,
     /// 浏览器带来的 Cookie。只有 `/api/add` 这条路会真的带上它
     /// （`/api/agent/add` 与界面上的入口都是 `None`）。
     pub cookie: Option<String>,
@@ -391,6 +395,10 @@ pub(crate) fn parse_add_fields(body: &[u8]) -> Result<AddFields, String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // 视频标记：只承认真正的布尔 true。字符串 "true"/1 一律当没给 ——
+    // 这里判断错会让一个普通文件走 yt-dlp，反过来会让视频下回来一个网页，
+    // 两个方向都不该靠猜。
+    let video = value.get("video").and_then(Value::as_bool).unwrap_or(false);
 
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
@@ -408,6 +416,7 @@ pub(crate) fn parse_add_fields(body: &[u8]) -> Result<AddFields, String> {
         referer,
         start_at,
         on_complete,
+        video,
         cookie,
     })
 }
@@ -422,9 +431,7 @@ pub(crate) fn send_add(tx: &Sender<Ticket>, fields: AddFields) -> Vec<u8> {
             referer: fields.referer,
             start_at: fields.start_at,
             on_complete: fields.on_complete,
-            // `/api/add` 还不支持视频任务（浏览器来的都是直链）；要支持得先给
-            // `AddFields` 加字段，别在这里偷偷默认成 true。
-            video: false,
+            video: fields.video,
             cookie: fields.cookie,
             reply,
         })
