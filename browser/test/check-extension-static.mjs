@@ -147,6 +147,35 @@ if (contentSrc && !/\.test\(url\.pathname \+ url\.search\)/.test(contentSrc)) {
   failures.push("content.js 的链接识别没有带上 url.search（识别能力会退化）");
 }
 
+// 9) 文件大小探测：内容脚本问、后台答，且**必须限流**。
+//
+// 为什么要有这条：探测是"对第三方站点发请求"，一旦没有上限，展开一次就是几十个
+// 请求，既慢又像在打人家服务器。8 条是用户那栏默认可见的数量。
+if (!/op: "probe-size"/.test(contentSrc)) {
+  failures.push("content.js 没有发 probe-size（悬浮菜单不会显示文件大小）");
+}
+if (!/msg\.op === "probe-size"/.test(bgSrc)) {
+  failures.push(`${sw} 没有处理 probe-size`);
+}
+// 限流必须**在 requestSizes 函数体内**：别的地方出现 slice(0, 8) 不算数
+// （第一版就是这么写成假绿的 —— 拿 `ProbeSizeX` 也能通过 `/probeSize/` 那种松检查）。
+const reqStart = contentSrc.indexOf("function requestSizes(");
+const reqBody =
+  reqStart < 0 ? "" : contentSrc.slice(reqStart, contentSrc.indexOf("\n}", reqStart));
+if (!reqBody) {
+  failures.push("content.js 里找不到 requestSizes");
+} else if (!/slice\(0,\s*8\)/.test(reqBody)) {
+  failures.push("requestSizes 里没有 slice(0, 8) —— 展开一次会给站点打一堆请求");
+}
+if (/msg\.op === "probe-size"/.test(bgSrc)) {
+  if (!/async function probeSize\(/.test(bgSrc)) {
+    failures.push(`${sw} 收到 probe-size 却没有 probeSize 实现（要有函数定义，不能只有调用）`);
+  }
+  if (!/probeSize\(url\)/.test(bgSrc)) {
+    failures.push(`${sw} 没有真的调用 probeSize(url)`);
+  }
+}
+
 if (failures.length) {
   console.error("extension static check FAILED");
   for (const f of failures) console.error(`- ${f}`);

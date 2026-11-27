@@ -463,6 +463,8 @@ const STYLE = `
   .linkinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .url { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 11px/1.35 ui-monospace, Consolas, monospace; color: var(--ink); }
   .host { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 9px/1.3 ui-monospace, Consolas, monospace; color: var(--muted); }
+      /* 文件大小：与 host 同一行节奏，等宽数字，右对齐更好扫 */
+      .size { font: 9px/1.3 ui-monospace, Consolas, monospace; color: var(--muted); font-variant-numeric: tabular-nums; }
   .dl { flex: 0 0 auto; border: 0; background: var(--accent-soft); color: var(--accent); padding: 0 9px; }
   .dl:hover { background: var(--accent); color: var(--accent-ink); }
   .empty, .note { font-size: 11px; color: var(--muted); padding: 8px 2px; }
@@ -877,6 +879,42 @@ function canResume(item) {
   return !!item.url && (item.canceled || item.failed);
 }
 
+// ---- 文件大小（用户：悬浮菜单增加显示文件大小）------------------------------
+//
+// 只能问后台：内容脚本发 HEAD 会被 CORS 挡（站点不给 Access-Control-Allow-Origin），
+// 而扩展进程有 `<all_urls>` 权限，不受这条限制。
+//
+// 三个约束：
+// · 一次最多探 **8 个**（看不见的不探），失败的记 `null` 显示「—」且**不重试**；
+// · 已经探过的记在 `sizeCache` 里，滚动/重绘不再重复请求；
+// · 探测期间先占位（`sizeProbing`），避免同一帧里重复入队。
+const sizeCache = new Map();
+const sizeProbing = new Set();
+
+function requestSizes(urls) {
+  const want = urls
+    .filter((u) => !sizeCache.has(u) && !sizeProbing.has(u))
+    .slice(0, 8);
+  if (!want.length) return;
+  for (const u of want) sizeProbing.add(u);
+  sendMessage({ op: "probe-size", urls: want }, (reply) => {
+    for (const u of want) sizeProbing.delete(u);
+    if (!reply || !reply.ok || !reply.sizes) return;
+    for (const u of want) {
+      const got = reply.sizes[u];
+      sizeCache.set(u, typeof got === "number" && got > 0 ? got : null);
+    }
+    scheduleRender();
+  });
+}
+
+/// 大小这一格：没探过就是空（别显示 0），探过但拿不到是「—」。
+function sizeLabel(url) {
+  if (!sizeCache.has(url)) return "";
+  const value = sizeCache.get(url);
+  return value ? fmtBytes(value) : "—";
+}
+
 function renderLinks() {
   const box = shadow.getElementById("dlm-list");
   box.replaceChildren();
@@ -889,6 +927,8 @@ function renderLinks() {
     info.appendChild(url);
     const hostLabel = hostOf(item.url);
     if (hostLabel) info.appendChild(el("span", "host", hostLabel));
+    const sizeText = sizeLabel(item.url);
+    if (sizeText) info.appendChild(el("span", "size", sizeText));
     row.appendChild(info);
     const btn = el("button", "dl", "下载");
     btn.type = "button";
@@ -899,6 +939,8 @@ function renderLinks() {
   }
   shadow.getElementById("dlm-links-count").textContent = String(state.items.length);
   shadow.getElementById("dlm-links-empty").hidden = state.items.length > 0;
+  // 只探**看得见的前 8 条**（列表本身可能几十条）。
+  requestSizes(state.items.slice(0, 8).map((it) => it.url));
 }
 
 function renderConfirm() {

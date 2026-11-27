@@ -264,6 +264,38 @@ const FILE_LINK_RE =
 // 也不给 srcUrl，只能靠 content.js 在 contextmenu 时上报（见那边的注释）。
 const contextTargets = new Map();
 
+/// 探一个 URL 的大小：
+/// 1. 先 HEAD 看 `Content-Length`；
+/// 2. 有些站点对 HEAD 回 405 或不给长度 ⇒ 退回 `Range: bytes=0-0`，读 `Content-Range` 的总长。
+/// 3. 都拿不到就给 `null`（界面显示「—」），**不重试** —— 展开一次最多 8 个请求，
+///    对同一个失败地址反复打没有意义。
+async function probeSize(url) {
+  try {
+    const head = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(5000),
+    });
+    const len = Number(head.headers.get("content-length"));
+    if (Number.isFinite(len) && len > 0) return len;
+  } catch (err) {
+    /* 有些站点直接拒绝 HEAD，往下走 Range 那条 */
+  }
+  try {
+    const part = await fetch(url, {
+      headers: { Range: "bytes=0-0" },
+      signal: AbortSignal.timeout(5000),
+    });
+    const range = part.headers.get("content-range") || "";
+    const total = Number(range.split("/").pop());
+    if (Number.isFinite(total) && total > 0) return total;
+    const len = Number(part.headers.get("content-length"));
+    if (Number.isFinite(len) && len > 0) return len;
+  } catch (err) {
+    /* 拿不到就认了 */
+  }
+  return null;
+}
+
 chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "dlm-download",
@@ -327,6 +359,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, message: String(err) });
     }
     return true;
+  }
+  if (msg && msg.op === "probe-size") {
+    // **必须在后台做**：`host_permissions: <all_urls>` 让扩展进程能跨域取头部，
+    // 而内容脚本发同样的请求会被 CORS 挡掉（大多站点不给 Access-Control-Allow-Origin）。
+    const urls = Array.isArray(msg.urls) ? msg.urls.slice(0, 8) : [];
+    (async () => {
+      const sizes = {};
+      for (const url of urls) {
+        sizes[url] = await probeSize(url);
+      }
+      sendResponse({ ok: true, sizes });
+    })();
+    return true; // 异步回
   }
   if (msg && msg.op === "context-target") {
     const tabId = sender.tab && sender.tab.id;
