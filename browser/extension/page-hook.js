@@ -15,7 +15,13 @@
     }
     if (!/^https?:$/i.test(url.protocol)) return null;
     const named = a.hasAttribute("download");
-    if (!named && !url.pathname.toLowerCase().endsWith(".m3u8") && !FILE_RE.test(url.pathname)) return null;
+    // pathname + search：文件名也可能出现在查询串里（`/play?id=1&f=a.mp4`）。
+    if (
+      !named &&
+      !url.pathname.toLowerCase().endsWith(".m3u8") &&
+      !FILE_RE.test(url.pathname + url.search)
+    )
+      return null;
     return url.href;
   }
 

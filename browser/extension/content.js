@@ -59,9 +59,21 @@ function die(reason) {
       const ball = shadow.getElementById("dlm-ball");
       if (ball) {
         ball.textContent = "⟳";
-        ball.title = reason || "扩展已更新，刷新页面生效";
-        ball.style.opacity = "0.45";
-        ball.style.pointerEvents = "none";
+        ball.title = reason || "扩展已更新，点一下刷新本页";
+        // 不压到 0.45 那么淡：这个是"要用户做点什么"的状态，
+        // 太淡会让人以为球坏了，然后就再也不看这里。
+        ball.style.opacity = "0.65";
+        // 退役之后球本身已经没有功能了，与其把点击也关掉、留个死球，
+        // 不如让它变成"点一下刷新本页"的入口 —— 刷新是用户主动点的。
+        ball.style.pointerEvents = "auto";
+        ball.style.cursor = "pointer";
+        ball.onclick = () => {
+          try {
+            location.reload();
+          } catch (_) {
+            /* 刷新失败就算了，别在退役路径上再抛一次 */
+          }
+        };
       }
       const ver = shadow.getElementById("dlm-ver");
       if (ver) ver.textContent = "需刷新";
@@ -1028,7 +1040,9 @@ function collectFileLinks() {
       continue;
     }
     if (!/^https?:$/i.test(url.protocol)) continue;
-    if (!FILE_LINK_RE.test(url.pathname)) continue;
+    // 判据是 pathname + **search**：`/download?id=9&name=x.zip` 这种把文件名放在
+    // 查询串里的链接，只看 pathname 会永远认不出来 —— 用户说的"检测退化"就是这类。
+    if (!FILE_LINK_RE.test(url.pathname + url.search)) continue;
     if (seen.has(url.href)) continue;
     seen.add(url.href);
     out.push({ url: url.href, kind: "file" });
@@ -1081,7 +1095,7 @@ function refreshMedia() {
 function downloadKind(a, url) {
   if (a.hasAttribute("download")) return "file";
   if (url.pathname.toLowerCase().endsWith(".m3u8")) return "hls";
-  if (FILE_LINK_RE.test(url.pathname)) return "file";
+  if (FILE_LINK_RE.test(url.pathname + url.search)) return "file";
   return null;
 }
 

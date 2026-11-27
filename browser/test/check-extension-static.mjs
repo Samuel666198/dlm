@@ -126,6 +126,27 @@ if (!/contextTargets\.get\s*\(/.test(bgSrc)) {
   failures.push(`${sw} 收了 context-target 却从不在 onClicked 里取用`);
 }
 
+// 8) 链接识别必须带上查询串。
+//
+// 只看 `url.pathname` 时，`/download?id=9&name=x.zip` 这类链接永远认不出来。
+// 用户 2026-11-27 报"检测能力退化"，这就是其中一个真实原因（不是正则被裁了）。
+// 所以任何一处 `.test(url.pathname)` 都必须改成 `.test(url.pathname + url.search)`。
+const hookPath = join(ext, "page-hook.js");
+const hookSrc = existsSync(hookPath) ? readFileSync(hookPath, "utf8") : "";
+for (const [name, src] of [
+  ["content.js", contentSrc],
+  [sw, bgSrc],
+  ["page-hook.js", hookSrc],
+]) {
+  if (!src) continue;
+  if (/\.test\(\s*url\.pathname\s*\)/.test(src)) {
+    failures.push(`${name} 里有只测 url.pathname 的识别判据 —— 查询串带文件名的链接会漏掉`);
+  }
+}
+if (contentSrc && !/\.test\(url\.pathname \+ url\.search\)/.test(contentSrc)) {
+  failures.push("content.js 的链接识别没有带上 url.search（识别能力会退化）");
+}
+
 if (failures.length) {
   console.error("extension static check FAILED");
   for (const f of failures) console.error(`- ${f}`);
