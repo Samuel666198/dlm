@@ -213,6 +213,9 @@ pub struct App {
     pub(super) palette_scroll_to_sel: bool,
     /// 上一帧命令面板的 `(上边, 下边)`，给用例断言"没有冲出视口"用。
     pub(super) palette_last_rect: Option<(f32, f32)>,
+    /// 上一帧绘制时有没有读到「滚到选中项」的标志。用例靠它钉住那类
+    /// 「帧内自我清除」的 bug（标志永远是假，界面却不报错）。
+    pub(super) palette_scroll_seen: bool,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
@@ -353,6 +356,7 @@ impl App {
             palette_sel: 0,
             palette_scroll_to_sel: false,
             palette_last_rect: None,
+            palette_scroll_seen: false,
             palette_take_focus: false,
             start_hidden: 0,
             clipboard_hit: None,

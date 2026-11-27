@@ -154,6 +154,16 @@ impl App {
         let mut chosen: Option<&'static str> = None;
         let mut close = false;
 
+        // **在绘制之前**把"要滚到选中项"这个标志取出来（take = 读并且清）。
+        //
+        // 踩过的坑：第一版是在键盘处理里置真、然后**同一帧末尾**无条件清掉，
+        // 于是绘制时它永远是假 —— 滚动一次都没发生过，而所有用例都是绿的
+        // （用例只断言"面板没超出视口"，管不到"滚没滚"）。
+        // 这是靠真界面自动化按方向键截图才发现的。现在改成"帧尾置真、帧首消费"。
+        let scroll_to_sel = std::mem::take(&mut self.palette_scroll_to_sel);
+        // 让用例能看见"这一帧确实读到了标志" —— 上面那个 bug 就是它一直是假。
+        self.palette_scroll_seen = scroll_to_sel;
+
         // **不要传 `.open(&mut close)`**：egui 把这个 bool 的初值当成"窗口是否打开"，
         // 初值 `false` 会让它每帧直接跳过绘制 —— 快捷键明明触发了，面板却不出现
         // （0.6.0 发布版就是这个症状）。面板本来没有标题栏，也就没有X按钮需要这个参数。
@@ -241,7 +251,7 @@ impl App {
                                 );
                             });
                             // 键盘挪动之后必须把选中项滚进视野，否则"看不见自己在选第几条"。
-                            if selected && self.palette_scroll_to_sel {
+                            if selected && scroll_to_sel {
                                 resp.scroll_to_me(Some(egui::Align::Center));
                             }
                             if resp.clicked() {
@@ -282,8 +292,8 @@ impl App {
             self.palette_sel = (self.palette_sel + hits.len() - 1) % hits.len();
             self.palette_scroll_to_sel = true;
         }
-        // 这一帧的绘制已经用过了，清掉 —— 免得不按键也每帧都往中间拽。
-        self.palette_scroll_to_sel = false;
+        // 这里**不要**清 `palette_scroll_to_sel`：它是给**下一帧**用的。
+        // （清在这里就是上面注释里那个 bug：同一帧置真、同一帧清掉。）
         if enter
             && chosen.is_none()
             && let Some(cmd) = hits.get(self.palette_sel)

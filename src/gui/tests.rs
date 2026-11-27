@@ -1877,3 +1877,52 @@ fn palette_height_is_clamped_to_the_viewport() {
         "极小窗口也要有个下限，别塌成一条缝"
     );
 }
+
+/// **「滚到选中项」的标志必须活到下一帧的绘制**。
+///
+/// 第一版把这个标志在键盘处理里置真、又在**同一帧末尾**无条件清掉：
+/// 绘制时它永远是假，方向键把选中项挪出视野后，列表一动不动 ——
+/// 而所有用例照样绿（它们只断言"面板没超出视口"，管不到"滚没滚"）。
+///
+/// 这个 bug 是真界面自动化按方向键截图才发现的。
+/// 这里必须**喂真的 ArrowDown 事件**：手动置标志测不出来 ——
+/// 那样帧首 take 就能读到，帧尾再清也不影响这一帧（第一版用例就写错了）。
+#[test]
+fn the_palette_scroll_flag_survives_into_the_next_frame() {
+    let (mut app, dir) = test_app("palette-scroll-flag", vec![]);
+    let ctx = egui::Context::default();
+    app.palette_open = true;
+    app.palette_query.clear();
+
+    // 帧 1：空跑，把标志清干净
+    let mut output = ctx.run_ui(frame_input_sized(900.0, 420.0), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    assert!(!app.palette_scroll_seen, "没按方向键时不该要求滚动");
+
+    // 帧 2：真的按一次方向键 —— 标志在这一帧**末尾**被置真
+    let mut input = frame_input_sized(900.0, 420.0);
+    input.events.push(egui::Event::Key {
+        key: egui::Key::ArrowDown,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    let mut output = ctx.run_ui(input, |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+
+    // 帧 3：不按键。绘制时**必须**读到上一次留下的标志
+    let mut output = ctx.run_ui(frame_input_sized(900.0, 420.0), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    assert!(
+        app.palette_scroll_seen,
+        "方向键之后的那一帧没读到「滚到选中项」—— 标志被同一帧清掉了，\
+         选中项会走到看不见的地方"
+    );
+    assert!(
+        !app.palette_scroll_to_sel,
+        "读到之后要消费掉（take），否则每帧都往中间拽"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
