@@ -177,9 +177,74 @@ pub fn reveal_plan(mode: RevealMode, file: &Path) -> ActionPlan {
     }
 }
 
+/// 打开/选中一个**可能还不存在**的落点。
+///
+/// 为什么不能直接用 [`reveal_plan`] 的 `Select`：`explorer.exe /select,<文件>`
+/// 要求文件真的存在。任务还在排队（或刚建任务、文件尚未落盘）时，explorer
+/// 会退回到"文档"或上一次打开的窗口 —— 用户看到的就是「打开所在文件夹不精准」。
+///
+/// 所以：文件在 ⇒ 选中它；文件不在 ⇒ 打开它的父目录（父目录也不在就再往上一层）。
+pub fn reveal_plan_for(mode: RevealMode, file: &Path) -> ActionPlan {
+    if file.exists() {
+        return reveal_plan(mode, file);
+    }
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        if d.exists() {
+            return reveal_plan(RevealMode::Open, d);
+        }
+        dir = d.parent();
+    }
+    // 连父目录都不存在：交给 explorer 的默认行为，总比不动强。
+    reveal_plan(RevealMode::Open, file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **落点还不存在时，打开文件夹不能退到"文档"**（用户报的「打开所在文件夹不精准」）。
+    ///
+    /// `explorer.exe /select,<不存在>` 会落到某个默认位置，所以文件不在时要改成
+    /// 打开父目录；父目录也没有就再往上一层。
+    #[test]
+    fn revealing_a_missing_target_opens_its_folder_instead() {
+        let dir = std::env::temp_dir().join(format!("dlm-reveal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+        // 1) 文件存在 ⇒ 仍然是"选中它"
+        let existing = dir.join("sub").join("a.bin");
+        std::fs::write(&existing, b"x").unwrap();
+        let plan = reveal_plan_for(RevealMode::Select, &existing);
+        assert_eq!(plan.program, PathBuf::from("explorer.exe"));
+        assert_eq!(plan.args.len(), 1);
+        let arg = plan.args[0].to_string_lossy().to_string();
+        assert!(arg.starts_with("/select,"), "文件在就该选中它，实际：{arg}");
+
+        // 2) 文件不存在但父目录在 ⇒ 打开父目录（**不带 /select, **）
+        let missing = dir.join("sub").join("not-yet.bin");
+        let plan = reveal_plan_for(RevealMode::Select, &missing);
+        assert_eq!(plan.args.len(), 1);
+        let arg = plan.args[0].to_string_lossy().to_string();
+        assert!(
+            !arg.starts_with("/select,"),
+            "文件不在时不许再 /select,（会退到默认位置），实际：{arg}"
+        );
+        assert_eq!(
+            PathBuf::from(&arg),
+            dir.join("sub"),
+            "应当打开缺失文件的父目录"
+        );
+
+        // 3) 连父目录都没有 ⇒ 继续往上找已存在的层，不许给 explorer 一个空路径
+        let deep = dir.join("nope").join("deeper").join("x.bin");
+        let plan = reveal_plan_for(RevealMode::Select, &deep);
+        let arg = plan.args[0].to_string_lossy().to_string();
+        assert_eq!(PathBuf::from(&arg), dir, "应当一路退到最近存在的目录");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn hibernate_parses_and_plans_shutdown_h() {

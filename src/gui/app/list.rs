@@ -297,6 +297,7 @@ impl App {
             theme::line_soft(),
         );
 
+        self.row_w = rect.width();
         let cols = columns(rect);
         let name_rect = cols.name;
         let size_rect = cols.size;
@@ -375,7 +376,9 @@ impl App {
             self.selected = Some(task.id.clone());
         }
         let mut menu_action: Option<RowMenuAction> = None;
+        let mut menu_opened = false;
         response.context_menu(|ui| {
+            menu_opened = true;
             ui.set_min_width(180.0);
             // `row_menu_ui` 带 `#[must_use]`：这里若把它丢掉，门禁（clippy -D warnings）
             // 就会以 `unused_must_use` 失败 —— 0.7.0 的六个死按钮就是这么来的。
@@ -384,6 +387,9 @@ impl App {
                 menu_action = picked;
             }
         });
+        if menu_opened {
+            self.context_menu_for = Some(task.id.clone());
+        }
         match menu_action {
             Some(RowMenuAction::Resume) => self.send(crate::gui::Ticket::Resume(task.id.clone())),
             Some(RowMenuAction::Pause) => self.send(crate::gui::Ticket::Pause(task.id.clone())),
@@ -423,7 +429,7 @@ impl App {
     }
 
     /// 表头。返回 `true` 表示点了全选框。
-    fn thead(&self, ui: &mut egui::Ui, visible: &[String]) -> bool {
+    fn thead(&mut self, ui: &mut egui::Ui, visible: &[String]) -> bool {
         let all_on = batch::all_selected(&self.batch, visible);
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), theme::THEAD_H),
@@ -446,6 +452,7 @@ impl App {
         let size_rect = cols.size;
         let progress_rect = cols.progress;
         let status_rect = cols.status;
+        self.thead_w = rect.width();
 
         let font = egui::FontId::proportional(10.5);
         let ink = theme::ink_3();

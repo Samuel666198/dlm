@@ -219,6 +219,11 @@ pub struct App {
     pub(super) palette_scroll_seen: bool,
     /// 外部进程的下载（浏览器直连 / HLS）：队列里没有记录，靠扫 `.dlm.json` 发现。
     pub(super) externals: Vec<crate::queue::External>,
+    /// 上一帧哪个任务的行菜单打开了。给用例定位"右键为什么不灵"用。
+    pub(super) context_menu_for: Option<String>,
+    /// 表头 / 行各自拿到的宽度。用例靠它证明"两边排布同源"。
+    pub(super) thead_w: f32,
+    pub(super) row_w: f32,
     /// 下次允许再扫目录的时刻（别每帧都 read_dir）。
     pub(super) externals_next_at: Option<std::time::Instant>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
@@ -363,6 +368,9 @@ impl App {
             palette_last_rect: None,
             palette_scroll_seen: false,
             externals: Vec::new(),
+            context_menu_for: None,
+            thead_w: 0.0,
+            row_w: 0.0,
             externals_next_at: None,
             palette_take_focus: false,
             start_hidden: 0,

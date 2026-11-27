@@ -22,7 +22,7 @@
 use eframe::egui;
 
 use super::App;
-use crate::actions::{RevealMode, reveal_plan};
+use crate::actions::RevealMode;
 use crate::gui::app::list::{eta_text, fmt_bytes, speed_text};
 use crate::gui::app::theme;
 use crate::gui::snapshot::TaskView;
@@ -181,7 +181,9 @@ impl App {
         if crate::actions::shell_suppressed() {
             return;
         }
-        let plan = reveal_plan(mode, std::path::Path::new(&task.path));
+        // 用 `reveal_plan_for`：文件可能还没落盘（排队中），那时 `explorer /select,`
+        // 会退到某个默认位置 —— 就是用户说的"打开所在文件夹不精准"。
+        let plan = crate::actions::reveal_plan_for(mode, std::path::Path::new(&task.path));
         if let Err(err) = crate::actions::execute(&plan) {
             eprintln!("dlm-gui: 打开落点失败：{err:#}");
         }

@@ -1968,3 +1968,137 @@ fn the_externals_strip_shows_foreign_downloads_only() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **右键菜单必须在行的任何位置都能出来，与右栏开没开无关**。
+///
+/// 用户 2026-11-27 报「右键菜单只会在右侧栏打开时触发」。物理右键在无头模式下
+/// 被策略禁掉，所以这里直接喂 `PointerButton::Secondary` 事件来定位：
+/// 在**名称区 / 中段 / 右侧空白**三处各点一次，分别在不打开与打开右栏两种状态下。
+///
+/// 这条用例的价值在于"哪一处失灵"是打印出来的，不是猜的。
+#[test]
+fn right_click_opens_the_row_menu_anywhere_on_the_row() {
+    let (mut app, dir) = test_app("ctx-menu", vec![task_view_named("a.bin", TaskStatus::Done)]);
+    let ctx = egui::Context::default();
+
+    // 先跑两帧让布局稳定（首帧还在测量）
+    for _ in 0..2 {
+        let mut out = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+    }
+
+    let right_click = |ctx: &egui::Context, app: &mut super::app::App, pos: egui::Pos2| {
+        let mut input = frame_input();
+        input.events.push(egui::Event::PointerMoved(pos));
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let mut out = ctx.run_ui(input, |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+        app.context_menu_for.take()
+    };
+
+    // 行大致在 y≈100（工具条 50 + 表头）；x 从侧栏 212 之后开始。
+    // 三个位置分别代表：名称区、中段（进度条）、右侧空白。
+    let probes = [
+        ("名称区", egui::pos2(320.0, 100.0)),
+        ("中段", egui::pos2(620.0, 100.0)),
+        ("右侧空白", egui::pos2(870.0, 100.0)),
+    ];
+
+    let mut closed_failures = Vec::new();
+    for (label, pos) in probes {
+        // 每次先关掉右栏，再右键
+        app.selected = None;
+        let mut out = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+        if right_click(&ctx, &mut app, pos).is_none() {
+            closed_failures.push(label);
+        }
+    }
+    assert!(
+        closed_failures.is_empty(),
+        "右栏关着时，这些位置右键没出菜单：{closed_failures:?}"
+    );
+
+    let mut open_failures = Vec::new();
+    for (label, pos) in probes {
+        app.selected = Some("a.bin".to_string());
+        let mut out = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+        if right_click(&ctx, &mut app, pos).is_none() {
+            open_failures.push(label);
+        }
+    }
+    assert!(
+        open_failures.is_empty(),
+        "右栏打开时，这些位置右键没出菜单：{open_failures:?}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// **表头与行必须拿到同样的宽度**，否则列一定错位（图 2 里表头压到右栏底下就是它）。
+///
+/// 两者都调 `columns(rect)`，错位只可能来自"传进去的 rect 不同"。
+/// 这条用例把两个宽度直接比出来 —— 不是靠看截图。
+///
+/// **踩过的坑**：第一版跑出来两个都是 908（"通过"），因为测试里**时间不前进**，
+/// 右栏的滑入动画（`animate_bool_with_time`）永远停在起点，宽度根本没缩小。
+/// 所以这里显式推进 `RawInput::time`，让动画真的走完再量。
+#[test]
+fn the_table_header_and_rows_share_the_same_width() {
+    let (mut app, dir) = test_app(
+        "thead-width",
+        vec![task_view_named("a.bin", TaskStatus::Done)],
+    );
+    let ctx = egui::Context::default();
+
+    let mut clock = 0.0f64;
+    let frame = |app: &mut super::app::App, clock: &mut f64| {
+        *clock += 0.2;
+        let mut input = frame_input();
+        input.time = Some(*clock);
+        let mut out = ctx.run_ui(input, |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+    };
+
+    for _ in 0..3 {
+        frame(&mut app, &mut clock);
+    }
+    let (closed_thead, closed_row) = (app.thead_w, app.row_w);
+    println!("右栏关闭: 表头宽 {closed_thead:.1} / 行宽 {closed_row:.1}");
+    assert!(
+        (closed_thead - closed_row).abs() <= 12.0,
+        "右栏关闭时表头宽 {closed_thead:.1} 与行宽 {closed_row:.1} 差太多"
+    );
+
+    app.selected = Some("a.bin".to_string());
+    // 右栏是滑入的：多跑几帧把动画走完
+    for _ in 0..12 {
+        frame(&mut app, &mut clock);
+    }
+    let (open_thead, open_row) = (app.thead_w, app.row_w);
+    println!("右栏打开: 表头宽 {open_thead:.1} / 行宽 {open_row:.1}");
+    assert!(
+        open_row < closed_row - 100.0,
+        "右栏打开后行宽应当明显变窄（关时 {closed_row:.1}，开时 {open_row:.1}）—— \
+         如果没变，说明这条用例没真正测到右栏占位"
+    );
+    assert!(
+        (open_thead - open_row).abs() <= 12.0,
+        "右栏打开时表头宽 {open_thead:.1} 与行宽 {open_row:.1} 差太多 —— \
+         表头没跟着右栏收窄，列头就会跑到抽屉底下"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
