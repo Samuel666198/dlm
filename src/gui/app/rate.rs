@@ -29,6 +29,13 @@ pub const MIN_WINDOW: Duration = Duration::from_millis(250);
 /// 每个任务留多少个速率点。60 个点 ≈ 按 UI 采样节奏画出最近一分钟的走势。
 pub const HISTORY_CAP: usize = 60;
 
+/// 长时序列的上限：**每个秒桶一个值**，4 小时够任何单个文件。
+///
+/// 为什么另存一条：`HISTORY_CAP` 那条只有最近 60 个采样点（≈15 秒），
+/// 下一个小时的文件的曲线会一直"看起来一样"——用户说「速度图尺度为整个下载」，
+/// 指的就是这个。
+pub const LONG_CAP: usize = 4 * 3600;
+
 /// 多久没有新字节就算"卡住"。15 秒比 HTTP 超时短得多：卡片式的站点经常
 /// 二三十秒才吐一块，15 秒既不会刷屏误报，也足够早。
 pub const STALL_AFTER: Duration = Duration::from_secs(15);
@@ -46,8 +53,15 @@ struct Sample {
 pub struct Rates {
     last: HashMap<String, Sample>,
     speed: HashMap<String, f64>,
-    /// 最近若干个速率点（老的在左），画曲线用。
+    /// 最近若干个速率点（老的在左），画"最近"走势用。
     history: HashMap<String, Vec<f64>>,
+    /// **长时序列**：每个秒桶一个值，覆盖整个下载（画曲线用）。
+    /// 最后一个元素是"当前这一秒"的滚动平均。
+    long: HashMap<String, Vec<f64>>,
+    /// 每个任务长时序列里最后一个值属于第几秒（从起点算起）。
+    long_bucket: HashMap<String, u64>,
+    /// 长时序列的起点（第一个有效样本的时刻）。
+    long_started: HashMap<String, Instant>,
     /// 最近一次 `delivered` **变大**的时刻；判断卡顿用。
     progress_at: HashMap<String, Instant>,
 }
@@ -63,6 +77,9 @@ impl Rates {
             self.speed.remove(id);
             // 停了就不再画曲线、也不再判卡顿：那两样都是"正在跑"的信息。
             self.history.remove(id);
+            self.long.remove(id);
+            self.long_bucket.remove(id);
+            self.long_started.remove(id);
             self.progress_at.remove(id);
             return;
         }
@@ -104,6 +121,22 @@ impl Rates {
         while series.len() > HISTORY_CAP {
             series.remove(0);
         }
+
+        // 长时序列：按"从起点算起的第几秒"分桶。
+        // 同一秒内的多个样本并成滚动平均 —— 曲线要的是走势，不是锯齿。
+        let started = *self.long_started.entry(id.to_string()).or_insert(now);
+        let secs = now.saturating_duration_since(started).as_secs();
+        let bucket = self.long_bucket.get(id).copied();
+        let long = self.long.entry(id.to_string()).or_default();
+        if bucket != Some(secs) || long.is_empty() {
+            long.push(smoothed);
+            self.long_bucket.insert(id.to_string(), secs);
+            while long.len() > LONG_CAP {
+                long.remove(0);
+            }
+        } else if let Some(last) = long.last_mut() {
+            *last = (*last + smoothed) / 2.0;
+        }
         self.last
             .insert(id.to_string(), Sample { at: now, delivered });
     }
@@ -134,6 +167,11 @@ impl Rates {
     /// 在跑任务的总速率。没有任务在跑时是 0。
     ///
     /// 只累加「已知速率」的任务：刚启动那一瞬间还没采到样的任务贡献 0，而不是被当成未知跳过整条。
+    /// 长时序列（每个秒桶一个值，覆盖整个下载）。
+    pub fn long_history(&self, id: &str) -> &[f64] {
+        self.long.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     pub fn total(&self) -> f64 {
         self.speed.values().sum()
     }
@@ -150,6 +188,48 @@ impl Rates {
 
 #[cfg(test)]
 mod tests {
+
+    /// **长时序列覆盖整个下载**，不是只有最近十几秒。
+    ///
+    /// 用户原话：「下载速度图尺度为整个下载，不要当前这样的」——
+    /// 短序列只有 `HISTORY_CAP = 60` 个点（≈15 秒），长任务的曲线一直是同一条。
+    #[test]
+    fn the_long_series_spans_the_whole_download() {
+        let mut rates = Rates::default();
+        let t0 = Instant::now();
+        // 第一枪只记基准，不出速率
+        rates.observe("t", 0, true, t0);
+        // 之后每秒推进 1 MiB
+        for sec in 1..=5u64 {
+            rates.observe("t", sec * 1_048_576, true, t0 + Duration::from_secs(sec));
+        }
+        let long = rates.long_history("t");
+        assert_eq!(long.len(), 5, "5 秒就是 5 个桶，实际 {long:?}");
+        assert!(
+            long.iter().all(|v| *v > 0.0),
+            "每秒都在下，不该有 0：{long:?}"
+        );
+        // 短序列只有最近一段，长序列能覆盖全量 —— 这正是两者的分工
+        assert!(rates.history("t").len() <= HISTORY_CAP);
+    }
+
+    /// 同一秒内的多个样本要并成一个桶（曲线要走势，不要锯齿）。
+    #[test]
+    fn samples_within_one_second_share_a_bucket() {
+        let mut rates = Rates::default();
+        let t0 = Instant::now();
+        rates.observe("t", 0, true, t0);
+        rates.observe("t", 262_144, true, t0 + Duration::from_millis(270));
+        rates.observe("t", 524_288, true, t0 + Duration::from_millis(540));
+        rates.observe("t", 786_432, true, t0 + Duration::from_millis(810));
+        assert_eq!(
+            rates.long_history("t").len(),
+            1,
+            "都还在第 0 秒里，只该有一个桶：{:?}",
+            rates.long_history("t")
+        );
+    }
+
     use super::*;
 
     fn at(ms: u64) -> Instant {

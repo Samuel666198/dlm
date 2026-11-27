@@ -959,6 +959,7 @@ fn the_drawer_renders_a_task_without_panicking() {
             &super::app::drawer::DrawerDiag {
                 speed: Some(1024.0),
                 history: vec![512.0, 1024.0, 768.0],
+                long: vec![512.0, 1024.0, 768.0],
                 stalled_secs: None,
             },
             "line 1\nline 2",
@@ -1060,6 +1061,7 @@ client error (Connect): tcp connect error: 目标计算机拒绝连接 (os error
             &DrawerDiag {
                 speed: None,
                 history: Vec::new(),
+                long: Vec::new(),
                 stalled_secs: None,
             },
             &long,

@@ -79,6 +79,7 @@ impl App {
         let diag = DrawerDiag {
             speed: self.speed_of(&task.id),
             history: self.rates.history(&task.id).to_vec(),
+            long: self.rates.long_history(&task.id).to_vec(),
             stalled_secs: self
                 .rates
                 .stalled(&task.id, std::time::Instant::now())
@@ -196,8 +197,11 @@ impl App {
 /// 各算一次的话，界面上会出现"速度 2 MiB/s 且卡住 20s"这种自相矛盾的组合。
 pub(crate) struct DrawerDiag {
     pub speed: Option<f64>,
-    /// 最近若干个速率点（老的在左）。
+    /// 最近若干个速率点（老的在左）。短窗口，供"刚才有多快"。
     pub history: Vec<f64>,
+    /// **长时序列**：每个秒桶一个值，覆盖整个下载。曲线用它画，
+    /// 否则长任务的曲线永远只有最近十几秒（用户：尺度要覆盖整个下载）。
+    pub long: Vec<f64>,
     /// 已经卡了多少秒（没过阈值为 `None`）。
     pub stalled_secs: Option<u64>,
 }
@@ -389,7 +393,7 @@ pub(crate) fn drawer_body(
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("速度曲线（瞬时）")
+                egui::RichText::new("速度曲线（整个下载）")
                     .size(10.5)
                     .color(theme::ink_3()),
             );
@@ -406,7 +410,13 @@ pub(crate) fn drawer_body(
                 egui::vec2(ui.available_width() - 16.0, 34.0),
                 egui::Sense::hover(),
             );
-            painter_spark(ui, rect, &diag.history, diag.stalled_secs.is_some());
+            // 用长时序列：X 轴从任务开始一直到现在。
+            let series = if diag.long.is_empty() {
+                &diag.history
+            } else {
+                &diag.long
+            };
+            painter_spark(ui, rect, series, diag.stalled_secs.is_some());
         });
         for note in notes {
             ui.horizontal(|ui| {
