@@ -91,6 +91,41 @@ pub fn missing_hint() -> String {
     .join("\n")
 }
 
+/// 这个地址看起来是**视频页**吗（而不是一个文件或普通网页）。
+///
+/// 用途只有一个：新建任务时把「作为视频下载」**预先勾上**，省得用户先失败一次
+/// 才知道要点它。所以判断要**宽松**（认站点），宁可多勾一次 —— 勾错了顶多是
+/// yt-dlp 报一句"不支持的站点"，而不勾的一边是下回来一个网页。
+///
+/// 不判断"是不是以 .mp4 结尾"：那正好是直链，不该走 yt-dlp。
+pub fn looks_like_video_page(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
+    }
+    // 直链视频文件：交给普通下载（分段/续传都更好用）。
+    const DIRECT: [&str; 6] = [".mp4", ".mkv", ".flv", ".webm", ".mov", ".m4v"];
+    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+    if DIRECT.iter().any(|ext| path.ends_with(ext)) {
+        return false;
+    }
+    const HOSTS: [&str; 12] = [
+        "bilibili.com",
+        "b23.tv",
+        "youtube.com",
+        "youtu.be",
+        "douyin.com",
+        "iesdouyin.com",
+        "xiaohongshu.com",
+        "xhslink.com",
+        "vimeo.com",
+        "twitch.tv",
+        "dailymotion.com",
+        "ixigua.com",
+    ];
+    HOSTS.iter().any(|host| lower.contains(host))
+}
+
 /// 问元信息用的参数。
 pub fn argv_info(url: &str) -> Vec<String> {
     vec![
@@ -342,6 +377,33 @@ mod tests {
             template.starts_with("D:/out"),
             "要落在指定目录里：{template}"
         );
+    }
+
+    /// **识别视频页**：为了"预先帮你勾上"，所以宽松 —— 但直链视频不能误判。
+    #[test]
+    fn video_pages_are_recognised_but_direct_links_are_not() {
+        // 常见的视频页（用户 2026-11-27 拿 BV 号来下就是这个形状）
+        assert!(looks_like_video_page(
+            "https://www.bilibili.com/video/BV1atse6EEfx"
+        ));
+        assert!(looks_like_video_page("https://b23.tv/abcd"));
+        assert!(looks_like_video_page("https://youtu.be/xyz"));
+        assert!(looks_like_video_page("https://www.douyin.com/video/1234"));
+        assert!(looks_like_video_page(
+            "https://www.bilibili.com/video/BV1atse6EEfx?spm_id_from=333.999"
+        ));
+
+        // **直链视频文件不该走 yt-dlp**：普通下载有分段与续传，比它好用
+        assert!(!looks_like_video_page("https://cdn.example.com/a.mp4"));
+        assert!(!looks_like_video_page(
+            "https://cdn.example.com/a.mp4?token=1"
+        ));
+        assert!(!looks_like_video_page("https://cdn.example.com/a.mkv"));
+
+        // 普通网页/文件、空串、非 http 一律不认
+        assert!(!looks_like_video_page("https://example.com/file.zip"));
+        assert!(!looks_like_video_page(""));
+        assert!(!looks_like_video_page("D:\\a.mp4"));
     }
 
     /// 缺依赖时的话必须说清三件事，否则用户只知道"失败了"。

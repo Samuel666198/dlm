@@ -97,6 +97,7 @@ impl App {
                     start_at: None,
                     on_complete: None,
                     // 批量/抓取入口不带凭证：这里只有 URL，没有浏览器的 cookie。
+                    video: false,
                     cookie: None,
                     reply: crate::gui::discard_reply(),
                 });

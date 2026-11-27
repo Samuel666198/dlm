@@ -159,6 +159,11 @@ pub(crate) enum Ticket {
         referer: Option<String>,
         start_at: Option<u64>,
         on_complete: Option<String>,
+        /// 这是一个**视频**任务：派发时给 `dlm` 加 `--video`（走 yt-dlp）。
+        ///
+        /// 视频站的地址不是"一个文件"，分段/续传对它没有意义 —— 所以它不是一个参数，
+        /// 而是**任务的一种属性**，要跟队列一起落盘（重启后仍然知道该怎么下）。
+        video: bool,
         /// 浏览器带来的 HTTP Cookie。**只在内存里走这一趟**，
         /// 落盘立刻换成 DPAPI 密文（见 [`secrets`]），绝不写进 `queue.json`。
         cookie: Option<String>,

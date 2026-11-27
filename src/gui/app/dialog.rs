@@ -12,6 +12,10 @@ pub struct AddForm {
     pub url: String,
     pub name: String,
     pub referer: String,
+    /// 「作为视频下载」：勾上就交给 yt-dlp（`--video`），不走分段下载。
+    pub video: bool,
+    /// 用户动过这个勾选框没有 —— 动过就不再自动帮他勾/取消（别抢用户的意思）。
+    pub video_touched: bool,
     pub error: Option<String>,
     /// 打开弹窗时只把焦点给 URL 框一次，不要在每帧都抢焦点。
     pub focused: bool,
@@ -91,6 +95,39 @@ impl App {
                         .desired_width(f32::INFINITY),
                 );
 
+                ui.add_space(12.0);
+                // 「作为视频下载」：视频页地址走 yt-dlp。
+                //
+                // 自动帮用户勾上（识别到视频站时），但他一动手就不再抢 ——
+                // 自动纠正到"替用户做决定"就是另一种烦人。
+                if !self.add_form.video_touched {
+                    let looks = crate::video::looks_like_video_page(&self.add_form.url);
+                    if looks {
+                        self.add_form.video = true;
+                    }
+                }
+                let mut video = self.add_form.video;
+                if ui
+                    .checkbox(&mut video, "作为视频下载（yt-dlp，支持 B 站/YouTube 等）")
+                    .changed()
+                {
+                    self.add_form.video = video;
+                    self.add_form.video_touched = true;
+                }
+                if self.add_form.video {
+                    let ready = crate::video::find_ytdlp().is_some();
+                    ui.label(
+                        egui::RichText::new(if ready {
+                            "将调用本机的 yt-dlp；标题与体积由它提供。".to_string()
+                        } else {
+                            "没找到 yt-dlp —— 装一个（winget install yt-dlp）或放到 dlm.exe 同目录。"
+                                .to_string()
+                        })
+                        .size(10.5)
+                        .color(if ready { theme::ink_3() } else { theme::warn() }),
+                    );
+                }
+
                 if let Some(err) = &self.add_form.error {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(err).size(11.5).color(theme::bad()));
@@ -143,6 +180,7 @@ impl App {
                 },
                 start_at: None,
                 on_complete: None,
+                video: self.add_form.video,
                 cookie: None,
                 reply: crate::gui::discard_reply(),
             });

@@ -159,6 +159,7 @@ impl App {
                 start_at: None,
                 on_complete: None,
                 // Agent 票据没有凭证可带：它拿到的是 URL，不是浏览器的 cookie。
+                video: false,
                 cookie: None,
                 reply,
             });

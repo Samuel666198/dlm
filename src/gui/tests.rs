@@ -220,6 +220,7 @@ fn retry_decision_stops_at_whichever_limit_runs_out_first() {
 #[test]
 fn task_view_carries_the_retry_attempt_count() {
     let task = Task {
+        video: false,
         id: "1".into(),
         url: "https://example.com/a.bin".into(),
         name: "a.bin".into(),
@@ -247,6 +248,7 @@ fn task_view_carries_the_retry_attempt_count() {
 #[test]
 fn child_args_carry_the_completion_action_and_the_quota_slice() {
     let mut task = Task {
+        video: false,
         id: "1".into(),
         url: "https://example.com/a.bin".into(),
         name: "a.bin".into(),
@@ -303,6 +305,7 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
 #[test]
 fn a_secret_task_passes_a_switch_but_never_the_value() {
     let mut task = Task {
+        video: false,
         id: "1".into(),
         url: "https://example.com/a.bin".into(),
         name: "a.bin".into(),
@@ -359,6 +362,7 @@ fn a_secret_task_passes_a_switch_but_never_the_value() {
 #[test]
 fn e18_connections_and_speed_reach_the_child_argv() {
     let task = Task {
+        video: false,
         id: "1".into(),
         url: "https://example.com/a.bin".into(),
         name: "a.bin".into(),
@@ -485,6 +489,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
 
     // 同一个 tuning 既喂给子进程参数，又决定 host 预算 —— 一个来源。
     let task = Task {
+        video: false,
         id: "1".into(),
         url: "https://example.com/a.bin".into(),
         name: "a.bin".into(),
@@ -529,6 +534,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
 #[test]
 fn rules_override_the_child_out_dir_and_connections() {
     let task = Task {
+        video: false,
         id: "1".into(),
         url: "https://x.example/releases/a.zip".into(),
         name: "a.zip".into(),
@@ -575,6 +581,7 @@ fn rules_override_the_child_out_dir_and_connections() {
 
     // 没命中的 URL 仍走全局设置：规则不能变成"所有任务都套第一条"。
     let other = Task {
+        video: false,
         url: "https://x.example/other/a.zip".into(),
         ..task.clone()
     };
@@ -601,6 +608,7 @@ fn rules_override_the_child_out_dir_and_connections() {
 #[test]
 fn a_pinned_dir_outranks_a_later_rule() {
     let task = Task {
+        video: false,
         id: "1".into(),
         url: "https://x.example/releases/a.zip".into(),
         name: "a.zip".into(),
@@ -856,6 +864,7 @@ fn endpoint_file_contains_the_port_and_token() {
 
 fn task_view_named(name: &str, status: TaskStatus) -> TaskView {
     let task = Task {
+        video: false,
         id: name.to_string(),
         url: "https://example.com/a.bin".into(),
         name: name.to_string(),
@@ -1741,6 +1750,7 @@ fn a_task_view_carries_the_covered_intervals_from_the_state_file() {
     .unwrap();
 
     let task = Task {
+        video: false,
         id: "1".into(),
         url: "https://example.com/a.bin".into(),
         name: "a.bin".into(),
@@ -2183,4 +2193,53 @@ fn long_file_names_keep_their_tail_when_elided() {
     let cn = "这是一个特别长的中文文件名字用来测试省略逻辑.zip";
     let out = elide_middle(cn, 16);
     assert!(out.ends_with(".zip"), "中文名也要留住扩展名：{out}");
+}
+
+/// **视频任务派发时带 `--video`**，普通任务不带。
+///
+/// 这条守住的是"界面里那个勾选框真的一路走到了命令行"：
+/// `Ticket::Add` → `queue::Task.video`（落盘）→ `child_args`。
+/// 中间任何一环丢了，用户在界面上勾了也白勾 —— 而且失败得很晚（下回来一个网页）。
+#[test]
+fn a_video_task_is_dispatched_with_the_video_flag() {
+    let mut task = Task {
+        video: false,
+        id: "1-0".to_string(),
+        url: "https://www.bilibili.com/video/BV1atse6EEfx".to_string(),
+        name: "BV1atse6EEfx.mp4".to_string(),
+        referer: None,
+        status: TaskStatus::Queued,
+        pid: None,
+        exit_code: None,
+        log: std::path::PathBuf::from("x.log"),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        dir: None,
+        total_len: None,
+        delivered: None,
+        needs_secret: false,
+    };
+
+    let plain: Vec<String> = child_args(&task, None, &RuntimeTuning::default())
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        !plain.iter().any(|a| a == "--video"),
+        "普通任务不该带 --video：{plain:?}"
+    );
+
+    task.video = true;
+    let video: Vec<String> = child_args(&task, None, &RuntimeTuning::default())
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        video.iter().any(|a| a == "--video"),
+        "视频任务必须带 --video，否则下回来的是网页：{video:?}"
+    );
 }

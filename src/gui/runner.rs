@@ -123,6 +123,7 @@ fn apply(
             referer,
             start_at,
             on_complete,
+            video,
             cookie,
             reply,
         } => {
@@ -169,6 +170,10 @@ fn apply(
                 &config.log_dir,
             ) {
                 Ok(task) => {
+                    // 视频任务：这条属性跟着队列一起落盘，重启后仍然知道"该怎么下"。
+                    if video && let Some(t) = store.find_mut(&task.id) {
+                        t.video = true;
+                    }
                     // 带凭证的下载：**只在这里**把明文换成密文，然后立刻丢掉明文。
                     // 队列里只留 `needs_secret` 这个事实（见 queue.rs 该字段的注释）。
                     if let Some(cookie) = cookie.as_deref() {
@@ -386,6 +391,8 @@ pub(crate) fn child_args(
 ) -> Vec<std::ffi::OsString> {
     let (dir, connections) = plan_for_task(task, tuning);
     let mut args: Vec<std::ffi::OsString> = vec![
+        // 视频任务：交给 yt-dlp（`--video` 与分段那条路互斥，多给的
+        // `--connections`/`--out-name` 它不看，留着也不影响）。
         "--url".into(),
         task.url.clone().into(),
         "--out-dir".into(),
@@ -410,6 +417,10 @@ pub(crate) fn child_args(
     }
     // 凭证**绝不走 argv**：进程列表（tasklist / Process Explorer）对本机所有用户可见，
     // 写进命令行等于把 cookie 广播出去。所以只给开关，真值走 stdin。
+    // 视频任务：`--video` 让 dlm 走 yt-dlp 那条路（见 `src/video.rs`）。
+    if task.video {
+        args.push("--video".into());
+    }
     if task.needs_secret {
         args.push("--cookie-stdin".into());
     }

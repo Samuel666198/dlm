@@ -422,6 +422,9 @@ pub(crate) fn send_add(tx: &Sender<Ticket>, fields: AddFields) -> Vec<u8> {
             referer: fields.referer,
             start_at: fields.start_at,
             on_complete: fields.on_complete,
+            // `/api/add` 还不支持视频任务（浏览器来的都是直链）；要支持得先给
+            // `AddFields` 加字段，别在这里偷偷默认成 true。
+            video: false,
             cookie: fields.cookie,
             reply,
         })

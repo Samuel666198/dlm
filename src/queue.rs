@@ -36,6 +36,12 @@ impl TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
+    /// 视频任务（派发时加 `--video`，交给 yt-dlp）。
+    ///
+    /// `serde(default)` 是**必须的**：0.7.5 及更早的 `queue.json` 没有这一位，
+    /// 没有默认值就会整个队列读不出来（用户的下载历史全丢）。
+    #[serde(default)]
+    pub video: bool,
     pub id: String,
     pub url: String,
     pub name: String,
@@ -384,6 +390,8 @@ impl QueueStore {
         let task = Task {
             id: id.clone(),
             url: url.to_string(),
+            // 新建任务默认不是视频任务；界面/宿主要求视频时再打标记。
+            video: false,
             name: stored_name,
             referer: referer.filter(|s| !s.trim().is_empty()),
             status: TaskStatus::Queued,
@@ -669,6 +677,25 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// **旧队列文件必须还能读**（0.7.5 及更早没有 `video` 这一位）。
+    ///
+    /// 这条不是"顺手加的"：`queue.json` 是用户的下载历史。加字段忘了 `serde(default)`
+    /// 会让整个文件读不出来 —— 用户看到的是"任务全没了"，而且旧版本也回不去。
+    #[test]
+    fn an_old_queue_without_the_video_flag_still_loads() {
+        let old = r#"{"next_id":3,"quota":null,"tasks":[{"id":"1-0","url":"https://x/a.bin","name":"a.bin","referer":null,"status":"queued","pid":null,"exit_code":null,"log":"a.log","created_at":1,"updated_at":1,"start_at":null,"hold_until":null,"on_complete":null,"attempts":0,"dir":null,"total_len":null,"delivered":null}]}"#;
+        let mut store: QueueFile = serde_json::from_str(old).expect("旧格式必须还能读");
+        assert_eq!(store.tasks.len(), 1);
+        assert!(!store.tasks[0].video, "没有这一位就是普通下载");
+
+        // 新格式带上 true，并且能原样回来
+        store.tasks[0].video = true;
+        let text = serde_json::to_string(&store).expect("序列化");
+        let back: QueueFile = serde_json::from_str(&text).expect("反序列化");
+        assert!(back.tasks[0].video, "视频标记要能落盘再读回来");
+    }
+
     use super::*;
 
     /// 合并后的总字节数：重叠不能被重复计。
