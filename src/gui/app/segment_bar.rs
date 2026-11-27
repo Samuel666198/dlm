@@ -67,6 +67,41 @@ pub fn spans(total: u64, segments: &[(u64, u64)], width: f32) -> Vec<(f32, f32)>
 }
 
 /// 画到给定的轨道矩形里。没有分段信息时什么都不画（轨道本身由调用方画）。
+/// **还没下的区间**（覆盖集的补集）。
+///
+/// 这是「缺口地图」的数据源：用户看着三百多段铺出来的条只会觉得"糊成一团"，
+/// 而他要看的其实是**哪里还缺**。所以详情里的条改成"默认画满、只标缺口"。
+///
+/// 口径与 [`spans`] 一致：闭区间、相邻合并、越界裁剪、写反的摆正。
+pub fn gaps(total: u64, segments: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<(u64, u64)> = segments
+        .iter()
+        .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+        .filter(|(s, _)| *s < total)
+        .map(|(s, e)| (s, e.min(total - 1)))
+        .collect();
+    rows.sort_unstable();
+
+    let mut out = Vec::new();
+    let mut cursor = 0u64;
+    for (s, e) in rows {
+        if s > cursor {
+            out.push((cursor, s - 1));
+        }
+        cursor = cursor.max(e.saturating_add(1));
+        if cursor >= total {
+            break;
+        }
+    }
+    if cursor < total {
+        out.push((cursor, total - 1));
+    }
+    out
+}
+
 /// 覆盖集有没有**空洞**（也就是"还有哪一段没下"）。
 ///
 /// 列表里的进度条只有在有空洞时才画成分段 —— 否则一百多个相邻段会显示成一串碎块，
@@ -100,6 +135,34 @@ pub fn has_holes(total: u64, segments: &[(u64, u64)]) -> bool {
     reach + 1 < total
 }
 
+/// **缺口地图**：整条默认涂成"已覆盖"的浅色，只把**还没下**的区间标出来。
+///
+/// 为什么不再画"一段一段"的覆盖块：三百多段挤在 300px 上，每段 2px，缝隙被吃掉，
+/// 看起来就是一条实线（用户原话「糊成一团」）。而他要看的信息其实是"哪里还缺"。
+pub fn draw_gaps(ui: &egui::Ui, track: egui::Rect, task: &TaskView) {
+    let Some(total) = task.total_len.filter(|t| *t > 0) else {
+        return;
+    };
+    let painter = ui.painter();
+    // 底 = "已经有的部分"
+    painter.rect_filled(track, 2.0, theme::accent_soft());
+    let scale = f64::from(track.width()) / total as f64;
+    for (from, to) in gaps(total, &task.segments) {
+        let x0 = track.left() + (from as f64 * scale) as f32;
+        let x1 = track.left() + ((to + 1) as f64 * scale) as f32;
+        // 缺得再窄也要看得见：1.5pt 是"这条缝存在"的最小可读宽度。
+        let width = (x1 - x0).max(MIN_SPAN);
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(x0, track.top()),
+                egui::vec2(width.min(track.right() - x0), track.height()),
+            ),
+            1.0,
+            theme::track(),
+        );
+    }
+}
+
 pub fn draw(ui: &egui::Ui, track: egui::Rect, task: &TaskView) {
     let Some(total) = task.total_len else {
         return;
@@ -125,6 +188,30 @@ pub fn draw(ui: &egui::Ui, track: egui::Rect, task: &TaskView) {
 
 #[cfg(test)]
 mod tests {
+
+    /// **缺口地图**：补集必须正好是"还没下"的那几段。
+    #[test]
+    fn gaps_are_exactly_the_uncovered_ranges() {
+        use super::gaps;
+        // 什么都没下 ⇒ 整条都是缺口
+        assert_eq!(gaps(100, &[]), vec![(0, 99)]);
+        // 全覆盖 ⇒ 没有缺口
+        assert_eq!(gaps(100, &[(0, 99)]), vec![]);
+        // 中间缺一截
+        assert_eq!(gaps(100, &[(0, 29), (50, 99)]), vec![(30, 49)]);
+        // 两头都缺
+        assert_eq!(gaps(100, &[(20, 79)]), vec![(0, 19), (80, 99)]);
+        // 相邻段合并后仍是连续 ⇒ 没有缺口
+        assert_eq!(gaps(100, &[(0, 49), (50, 99)]), vec![]);
+        // 重叠不算缺口
+        assert_eq!(gaps(100, &[(0, 59), (40, 99)]), vec![]);
+        // 写反的区间要摆正
+        assert_eq!(gaps(100, &[(99, 0)]), vec![]);
+        // 越界的段被裁掉，缺口只算到 total-1
+        assert_eq!(gaps(100, &[(0, 499)]), vec![]);
+        // total=0 没意义，不许 panic
+        assert_eq!(gaps(0, &[(0, 10)]), vec![]);
+    }
 
     /// 列表进度条只在**真有空洞**时才分段（用户 2026-11-27 的决定）。
     #[test]

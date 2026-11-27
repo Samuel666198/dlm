@@ -877,6 +877,44 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// 已经花了多久（墙钟时间，**含排队与暂停**）。
+///
+/// 进行中 = 现在 - 创建时刻；已完成/失败 = 更新时刻 - 创建时刻。
+/// 之所以不叫"下载时长"：队列里拿不到"纯下载"的时间，内核也没有回报它 ——
+/// 标签写「用时」是在说实话，写成"下载时长"就是在猜。
+pub fn elapsed_text(task: &TaskView, now: u64) -> String {
+    let end = if task.status == "running" || task.status == "queued" {
+        now
+    } else {
+        task.updated_at
+    };
+    let secs = end.saturating_sub(task.created_at);
+    if secs == 0 {
+        return "—".to_string();
+    }
+    fmt_eta(secs)
+}
+
+/// **平均速度**：已下字节 / 用时。与「瞬时速度」是两件事，界面上必须分开写。
+///
+/// 瞬时速度回答"现在多快"，平均速度回答"整体快不快" ——
+/// 抢带宽、被限速、中途暂停过，两者能差一倍。
+pub fn avg_speed_text(task: &TaskView, now: u64) -> String {
+    let Some(delivered) = task.delivered.filter(|d| *d > 0) else {
+        return "—".to_string();
+    };
+    let end = if task.status == "running" || task.status == "queued" {
+        now
+    } else {
+        task.updated_at
+    };
+    let secs = end.saturating_sub(task.created_at);
+    if secs == 0 {
+        return "—".to_string();
+    }
+    fmt_speed(delivered as f64 / secs as f64)
+}
+
 /// 速度：**只看采样器给的速率**，采样器没给出数就显示「—」。
 ///
 /// 三条判据（对应 `rate::Rates` 的测试）：

@@ -2104,3 +2104,48 @@ fn the_table_header_and_rows_share_the_same_width() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **用时与平均速度**（用户：剩余时间右边加"实际用时"；原来的速度改平均速度）。
+///
+/// 两件事要说清：
+/// 1. 用时是**墙钟时间**，含排队与暂停 —— 队列里拿不到"纯下载"的时间，内核也没回报；
+/// 2. 进行中用 `now`，已完成/失败用 `updated_at`，否则已完成的任务用时会一直涨。
+#[test]
+fn elapsed_and_average_speed_use_wall_clock_not_instantaneous() {
+    use super::app::list::{avg_speed_text, elapsed_text};
+
+    let mut task = task_view_named("a.bin", TaskStatus::Running);
+    task.created_at = 1_000;
+    task.updated_at = 1_090;
+    task.delivered = Some(10 * 1_048_576);
+
+    // 进行中：拿 now 算
+    assert_eq!(elapsed_text(&task, 1_120), "2 分", "1120-1000 = 120 秒");
+    // 已完成：拿 updated_at 算，与 now 无关
+    task.status = "done".to_string();
+    assert_eq!(
+        elapsed_text(&task, 9_999),
+        "1 分 30 秒",
+        "已完成的任务不能用 now，否则用时会一直涨"
+    );
+    // 平均速度 = 已下 / 用时（10 MiB / 90 秒）
+    let avg = avg_speed_text(&task, 9_999);
+    assert!(avg.ends_with("/s"), "平均速度要有单位：{avg}");
+    assert!(
+        avg.starts_with("113") || avg.starts_with("114"),
+        "10 MiB / 90s ≈ 116508 B/s，实际 {avg}"
+    );
+
+    // 边界：还没下到东西 / 时间为 0 ⇒ 都给「—」，不许显示 0 B/s 或 inf
+    task.delivered = None;
+    assert_eq!(avg_speed_text(&task, 9_999), "—");
+    task.delivered = Some(1024);
+    task.created_at = 5_000;
+    task.updated_at = 5_000;
+    assert_eq!(
+        elapsed_text(&task, 5_000),
+        "—",
+        "零秒不给 0 秒，给一个破折号"
+    );
+    assert_eq!(avg_speed_text(&task, 5_000), "—");
+}

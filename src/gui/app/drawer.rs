@@ -23,7 +23,7 @@ use eframe::egui;
 
 use super::App;
 use crate::actions::RevealMode;
-use crate::gui::app::list::{eta_text, fmt_bytes, speed_text};
+use crate::gui::app::list::{avg_speed_text, elapsed_text, eta_text, fmt_bytes, speed_text};
 use crate::gui::app::theme;
 use crate::gui::snapshot::TaskView;
 
@@ -306,13 +306,20 @@ pub(crate) fn drawer_body(
         });
     });
 
-    // ---- 速度 / 剩余 ----
+    // ---- 平均速度 / 剩余 / 用时 ----
+    //
+    // 这里显示**平均速度**（已下字节 / 用时），不是瞬时速度：
+    // 瞬时值放到下面的曲线上，两处各回答一个问题（"现在多快" vs "整体快不快"）。
+    // 抢带宽 / 被限速 / 中途暂停过时两者能差一倍，混成一个数就是在骗人。
+    let now = crate::queue::now_secs();
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
-        kv(ui, "速度", &speed_text(task, diag.speed));
+        kv(ui, "平均", &avg_speed_text(task, now));
         ui.add_space(18.0);
         kv(ui, "剩余", &eta_text(task, diag.speed));
+        ui.add_space(18.0);
+        kv(ui, "用时", &elapsed_text(task, now));
     });
 
     if task.attempts > 0 {
@@ -367,8 +374,8 @@ pub(crate) fn drawer_body(
                 egui::Sense::hover(),
             );
             let track = rect.shrink2(egui::vec2(0.0, 3.0));
-            ui.painter().rect_filled(track, 2.0, theme::track());
-            super::segment_bar::draw(ui, track, task);
+            // 缺口地图：默认画满，只标"还没下"的区间（用户：分段「糊成一团」）。
+            super::segment_bar::draw_gaps(ui, track, task);
         });
     }
 
@@ -382,9 +389,15 @@ pub(crate) fn drawer_body(
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("最近速度")
+                egui::RichText::new("速度曲线（瞬时）")
                     .size(10.5)
                     .color(theme::ink_3()),
+            );
+            ui.label(
+                egui::RichText::new(speed_text(task, diag.speed))
+                    .size(10.5)
+                    .monospace()
+                    .color(theme::ink_2()),
             );
         });
         ui.horizontal(|ui| {
@@ -419,17 +432,25 @@ pub(crate) fn drawer_body(
             ui.add_space(16.0);
             ui.label(egui::RichText::new(label).size(10.5).color(theme::ink_3()));
         });
+        // B4：不再截断成 `C:\…\x`，改成**横向滚动**看全文（用户要的）。
+        // 路径与 URL 都可能很长，省略号会把人最想确认的那一截吃掉。
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(elide(value, 46))
-                        .size(11.0)
-                        .monospace()
-                        .color(theme::ink_2()),
-                )
-                .sense(egui::Sense::click()),
-            );
+            egui::ScrollArea::horizontal()
+                .id_salt(("drawer-scroll", label))
+                .max_width(ui.available_width() - 16.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(value)
+                                .size(11.0)
+                                .monospace()
+                                .color(theme::ink_2()),
+                        )
+                        .sense(egui::Sense::click())
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                });
         });
         ui.add_space(8.0);
     }
