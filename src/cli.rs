@@ -32,7 +32,7 @@ use anyhow::Context;
 use clap::Parser;
 
 use crate::actions::CompletionAction;
-use crate::consts::{FLAG_ADD_ONLY, FLAG_HLS, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
+use crate::consts::{FLAG_ADD_ONLY, FLAG_ALLOW_HTML, FLAG_HLS, FLAG_IGNORE_MTIME, FLAG_KEEP_STATE};
 use crate::engine::Config;
 use crate::task::Task;
 
@@ -337,6 +337,15 @@ pub struct Cli {
         help = "把 URL 当作 HLS 播放列表，顺序下载分片并合并（不做 DASH/DRM/嗅探）"
     )]
     hls: bool,
+    /// 明确允许下载"看起来是网页"的响应（`Content-Type: text/html`）。
+    ///
+    /// 默认不允许：视频页 / BV 号 / 分享链接拿到的就是 HTML，闷头下回来是一个网页。
+    /// 与其让人事后发现文件打不开，不如当场说清楚。
+    #[arg(
+        long,
+        help = "允许下载返回 text/html 的地址（默认拒绝，避免把网页当文件下回来）"
+    )]
+    allow_html: bool,
     #[arg(
         long,
         value_name = "ACTION",
@@ -436,6 +445,9 @@ impl Cli {
         }
         if self.hls {
             flags |= FLAG_HLS;
+        }
+        if self.allow_html {
+            flags |= FLAG_ALLOW_HTML;
         }
         let cookies = if self.cookie_stdin {
             cookies_from_stdin(&mut std::io::stdin())?

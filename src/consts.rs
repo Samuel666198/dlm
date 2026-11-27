@@ -17,3 +17,9 @@ pub const FLAG_IGNORE_MTIME: u32 = 1 << 1;
 pub const FLAG_KEEP_STATE: u32 = 1 << 2;
 /// B3a：`--hls`，把 URL 当作 HLS 播放列表（只影响这一次运行的分流，不参与续传比对）。
 pub const FLAG_HLS: u32 = 1 << 3;
+/// `--allow-html`：明确允许下载"看起来是网页"的响应。
+///
+/// 默认**不**允许：用户拿视频页/BV 号/分享链接来时，服务器返回的就是 `text/html`，
+/// 闷头下回来是一个网页（2026-11-27 用户报的「用 dlm 下载还是有问题」就是这个）。
+/// 与其让他事后发现文件打不开，不如当场说清楚。
+pub const FLAG_ALLOW_HTML: u32 = 1 << 4;

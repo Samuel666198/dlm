@@ -154,13 +154,37 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Request, RequestBuilder, Response};
 use reqwest::header::{
-    ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG, HeaderMap,
-    HeaderName, HeaderValue, LAST_MODIFIED, RANGE, REFERER,
+    ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE,
+    ETAG, HeaderMap, HeaderName, HeaderValue, LAST_MODIFIED, RANGE, REFERER,
 };
 
 use crate::rate::RateLimiter;
 use crate::resume::ProbeFacts;
 use crate::task::{Task, authority_has_userinfo, canonical_http_authority, url_is_https};
+
+/// 这个响应是不是"网页"而不是文件。
+///
+/// 判据只有两条，都故意保守：
+/// 1. `Content-Type` 是 html 系（含 `application/xhtml`）；
+/// 2. **落点名字也不像网页** —— 用户真要下 `x.html` 时那是他的目标，不该拦。
+///
+/// 拦它的理由：视频页、BV 号、分享短链回的常常是 `text/html`（2026-11-27 用户报
+/// 「用 dlm 下载还是有问题」就是这么来的：下回来一个打不开的"视频"）。
+/// 与其让人事后发现，不如当场说清楚，并给 `--allow-html` 这条退路。
+pub fn looks_like_html(headers: &HeaderMap, name: &str) -> bool {
+    let Some(ctype) = header_text(headers, CONTENT_TYPE) else {
+        return false;
+    };
+    let ctype = ctype.to_ascii_lowercase();
+    let is_html = ctype.starts_with("text/html") || ctype.starts_with("application/xhtml");
+    if !is_html {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    ![".html", ".htm", ".xhtml", ".mhtml", ".shtml"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
 
 /// 试探之后关于远端文件**此刻**的事实 + 已取回的预读字节。
 ///
@@ -727,6 +751,15 @@ pub fn run_with_limiter(
         bail!("试探请求被服务器拒绝：HTTP {status}");
     }
 
+    // 网页不是文件：拦在这里，别让它下回来变成一个人打不开的"视频"。
+    // 名字还没定（`None`）时也按"不是网页"处理 —— 缺名字时宁可拦下来问一句。
+    let target_name = task.name.as_deref().unwrap_or("");
+    if task.flags & crate::consts::FLAG_ALLOW_HTML == 0 && looks_like_html(&headers, target_name) {
+        bail!(
+            "这个地址返回的是网页（text/html），不是文件 —— 多半是视频页、BV 号或分享链接。\n如果确实要下载这个网页，请加 --allow-html"
+        );
+    }
+
     let facts = facts_from_response(
         status,
         range.is_some(),
@@ -1049,6 +1082,51 @@ fn read_bounded(
 
 #[cfg(test)]
 mod tests {
+
+    /// **网页不是文件**：视频页/分享链接回的是 text/html，默认要拦住。
+    #[test]
+    fn an_html_response_is_not_treated_as_a_file() {
+        use super::looks_like_html;
+        let mut h = HeaderMap::new();
+
+        // 没有 Content-Type：不敢假设是网页
+        assert!(!looks_like_html(&h, "a.mp4"));
+
+        h.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        assert!(
+            looks_like_html(&h, "BV1atse6EEfx"),
+            "视频页给的名字不带扩展名"
+        );
+        assert!(
+            looks_like_html(&h, "a.mp4"),
+            "叫 .mp4 但回的是 HTML，更要拦"
+        );
+        assert!(
+            !looks_like_html(&h, "page.html"),
+            "用户真要下网页时不该拦（名字就是 .html）"
+        );
+        assert!(!looks_like_html(&h, "PAGE.HTM"), "大小写不该影响判断");
+
+        // xhtml 也属于 html 系
+        h.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/xhtml+xml"),
+        );
+        assert!(looks_like_html(&h, "doc"));
+
+        // 真正的二进制类型不拦
+        h.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        assert!(!looks_like_html(&h, "a.bin"));
+        h.insert(CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+        assert!(!looks_like_html(&h, "a.mp4"));
+    }
+
     use super::*;
 
     fn task_with(url: &str, data_file: Option<&str>) -> Task {

@@ -11671,3 +11671,74 @@ fn gui_agent_add_waits_for_a_ticket_instead_of_enqueueing() -> anyhow::Result<()
 
     Ok(())
 }
+
+// ------------------------------------------------ 网页不是文件（2026-11-27）
+
+/// **默认不许把网页当文件下回来。**
+///
+/// 用户报「用 dlm 下载还是有问题」：视频页 / BV 号 / 分享短链回的常常是
+/// `Content-Type: text/html`，闷头下回来就是一个打不开的"视频"。
+/// 现在默认拒绝并说清楚；`--allow-html` 是那条退路。
+///
+/// 这里用自带的裸 TCP 服务器（不借用 harness 的那台 Node 夹具）：
+/// 就两条响应，一条给"拒绝"验一次，一条给"允许"验一次。
+#[test]
+fn a_web_page_is_refused_unless_html_is_allowed() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let body = b"<html><body>this is a video page, not a file</body></html>".to_vec();
+    let server = {
+        let body = body.clone();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nAccept-Ranges: none\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(&body);
+            }
+        })
+    };
+
+    let client = harness::client()?;
+    let page = Task {
+        url: format!("http://127.0.0.1:{port}/BV1atse6EEfx"),
+        name: Some("BV1atse6EEfx.mp4".into()),
+        ..harness::blank_task()
+    };
+
+    // ① 默认：拒绝，并且话说清楚（要提"网页"，也要给出退路）
+    let err = probe::run(&page, &client, PROBE_READ_BYTES)
+        .expect_err("HTML 响应默认必须被拒")
+        .to_string();
+    eprintln!("拒绝原文：{err}");
+    assert!(err.contains("网页"), "要说清是网页不是文件：{err}");
+    assert!(
+        err.contains("--allow-html"),
+        "要给出退路，否则用户不知道怎么继续：{err}"
+    );
+
+    // ② 显式允许：照常试探成功
+    let allowed = Task {
+        flags: page.flags | dlm::consts::FLAG_ALLOW_HTML,
+        ..page.clone()
+    };
+    let r = probe::run(&allowed, &client, PROBE_READ_BYTES)?;
+    assert_eq!(
+        r.facts.total_len,
+        body.len() as u64,
+        "允许之后就是普通下载，长度按服务器报的算"
+    );
+
+    server.join().ok();
+    Ok(())
+}
