@@ -328,6 +328,41 @@ pub(crate) fn drawer_body(
         });
     }
 
+    // ---- 分段（覆盖集）----
+    //
+    // 与上面那条进度是**同一份数据的两种看法**：进度答"到哪了"，这格答"怎么走到这的"
+    // —— 中间有没有空洞、是不是几段并行在推。数据来自断点文件，
+    // 最多每 5 秒刷新一次（`STATE_SAVE_MAX_INTERVAL_SECS`），所以标题里把精度写明，
+    // 别让人以为这是实时连接图。
+    //
+    // 没有覆盖集时整格不出现：画一条空轨道只会让人以为"进度丢了"。
+    if !task.segments.is_empty() {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(egui::RichText::new("分段").size(10.5).color(theme::ink_3()));
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "断点里 {} 个区间 · 每 5 秒刷新",
+                    task.segments.len()
+                ))
+                .size(10.0)
+                .color(theme::ink_3()),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width() - 16.0, 12.0),
+                egui::Sense::hover(),
+            );
+            let track = rect.shrink2(egui::vec2(0.0, 3.0));
+            ui.painter().rect_filled(track, 2.0, theme::track());
+            super::segment_bar::draw(ui, track, task);
+        });
+    }
+
     // ---- 诊断：曲线 + 两行注脚（0.6.0 阶段 4-4）----
     //
     // 只在"在跑"时画：暂停/完成的任务没有曲线也没有卡顿可言，

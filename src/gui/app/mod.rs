@@ -39,6 +39,7 @@ pub mod mcp_install;
 pub mod palette;
 /// 速率采样：列表「速度」列与状态栏「总速度」都从这里来。
 mod rate;
+pub mod segment_bar;
 pub mod settings_spec;
 pub mod settings_ui;
 pub mod shortcuts;

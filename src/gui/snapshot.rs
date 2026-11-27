@@ -128,6 +128,14 @@ pub struct TaskView {
     pub progress: f64,
     pub total_len: Option<u64>,
     pub delivered: Option<u64>,
+    /// 已确认的覆盖区间（闭区间，字节偏移），来自断点文件的 `segments`。
+    ///
+    /// 空 = 没有分段信息（还没开始、或断点文件还没落过盘），界面要说"暂无分段信息"，
+    /// 不许画一条假装满的条。
+    ///
+    /// 最多每 5 秒刷新一次（`STATE_SAVE_MAX_INTERVAL_SECS`）—— 这是**覆盖集**，
+    /// 不是"此刻几条连接各自下到哪"。
+    pub segments: Vec<(u64, u64)>,
     pub created_at: u64,
     pub updated_at: u64,
     pub start_at: Option<u64>,
@@ -144,6 +152,9 @@ impl TaskView {
         // 否则界面上显示的进度与详情里的路径会对着两个不同目录说话。
         let dir = task.dir_in(out_dir);
         let (mut total, _) = queue::progress(dir, &task.name);
+        let segments = queue::segments(dir, &task.name)
+            .map(|(_, rows)| rows)
+            .unwrap_or_default();
         let delivered = queue::delivered(dir, &task.name);
         if total.is_none() && task.status == TaskStatus::Done {
             total = delivered;
@@ -172,6 +183,7 @@ impl TaskView {
             progress,
             total_len: total,
             delivered,
+            segments,
             created_at: task.created_at,
             updated_at: task.updated_at,
             start_at: task.start_at,

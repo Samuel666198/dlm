@@ -1667,6 +1667,7 @@ fn task_view(id: &str) -> TaskView {
         hold_until: None,
         on_complete: None,
         attempts: 0,
+        segments: Vec::new(),
         category: "other",
     }
 }
@@ -1703,4 +1704,62 @@ fn the_window_icon_comes_from_the_same_baked_asset() {
         "两支箭之间应是背景色，实际 {gap:?} —— 单箭头的形态"
     );
     assert!(cream(px(32, 32)), "中心应是中间那支箭的杆");
+}
+
+/// **分段数据真的接到了界面上**：断点文件 → `TaskView::segments`。
+///
+/// 这条钉的是「接线」而不是「几何」（几何有 `segment_bar::tests`）。
+/// 接线断掉时界面不会红、不会报错，只是那条分段条**永远不出现** ——
+/// 所以必须有东西证明它真的被填进去了。
+#[test]
+fn a_task_view_carries_the_covered_intervals_from_the_state_file() {
+    use crate::queue;
+
+    let dir = std::env::temp_dir().join(format!("dlm-seg-view-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 断点文件的命名由 queue::state_path 决定，别自己拼 —— 那是它的实现细节。
+    let state = queue::state_path(&dir, "a.bin");
+    std::fs::write(
+        &state,
+        r#"{"v":1,"validator":{"total_len":1000},"segments":[{"start":0,"end":99},{"start":300,"end":399},{"start":700,"end":999}]}"#,
+    )
+    .unwrap();
+
+    let task = Task {
+        id: "1".into(),
+        url: "https://example.com/a.bin".into(),
+        name: "a.bin".into(),
+        referer: None,
+        status: TaskStatus::Paused,
+        dir: None,
+        pid: None,
+        exit_code: None,
+        log: dir.join("a.log"),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+        needs_secret: false,
+    };
+    let view = TaskView::from_task(&task, &dir);
+    assert_eq!(
+        view.segments,
+        vec![(0, 99), (300, 399), (700, 999)],
+        "断点里的覆盖集必须原样进到界面视图里"
+    );
+    assert_eq!(view.total_len, Some(1000), "归一化要用同一个总长");
+
+    // 没有断点文件时必须老实给空 —— 界面靠它决定"画分段条"还是"说暂无"，
+    // 给它一个假的满条比不给更糟。
+    std::fs::remove_file(&state).unwrap();
+    let view = TaskView::from_task(&task, &dir);
+    assert!(view.segments.is_empty(), "没有断点就不许编出分段");
+
+    let _ = std::fs::remove_dir_all(dir);
 }

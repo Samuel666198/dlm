@@ -479,32 +479,59 @@ pub fn delivered(out_dir: &Path, name: &str) -> Option<u64> {
     })
 }
 
+/// 读断点文件，解析成 JSON。没有文件 / 读不动 / 不是 JSON 一律 `None`。
+fn read_state(out_dir: &Path, name: &str) -> Option<serde_json::Value> {
+    let text = fs::read_to_string(state_path(out_dir, name)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// 从断点读 `(total_len, delivered)`；没有/坏文件交 `(None, None)`。
 pub fn progress(out_dir: &Path, name: &str) -> (Option<u64>, Option<u64>) {
-    let Ok(text) = fs::read_to_string(state_path(out_dir, name)) else {
-        return (None, None);
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Some(v) = read_state(out_dir, name) else {
         return (None, None);
     };
     let total = v
         .get("validator")
         .and_then(|x| x.get("total_len"))
         .and_then(|x| x.as_u64());
-    let delivered = v.get("segments").and_then(|x| x.as_array()).map(|rows| {
-        rows.iter()
-            .filter_map(|row| {
-                let start = row.get("start")?.as_u64()?;
-                let end = row.get("end")?.as_u64()?;
-                if end >= start {
-                    Some(end - start + 1)
-                } else {
-                    None
-                }
-            })
-            .sum::<u64>()
-    });
+    let delivered =
+        interval_rows(&v).map(|rows| rows.iter().map(|(start, end)| end - start + 1).sum::<u64>());
     (total, delivered)
+}
+
+/// 断点文件里的已确认覆盖集，形如 `[(start, end), ...]`（**闭区间**，两端都算）。
+///
+/// 这是「分段情况」的数据来源：以前 `progress()` 把这张表求和成一个百分比就扔了，
+/// 于是界面上只能看到"走到哪了"，看不到"哪几段下完了、中间空了多宽"。
+///
+/// 精度受落盘节奏限制 —— 覆盖集最多每 `STATE_SAVE_MAX_INTERVAL_SECS`（5 秒）写一次，
+/// 所以这是**覆盖集**而不是"此刻几条连接各自下到哪"。后者只在引擎内存里。
+fn interval_rows(v: &serde_json::Value) -> Option<Vec<(u64, u64)>> {
+    let rows = v.get("segments").and_then(|x| x.as_array())?;
+    let out: Vec<(u64, u64)> = rows
+        .iter()
+        .filter_map(|row| {
+            let start = row.get("start")?.as_u64()?;
+            let end = row.get("end")?.as_u64()?;
+            (end >= start).then_some((start, end))
+        })
+        .collect();
+    Some(out)
+}
+
+/// 读断点里的 `(total_len, 覆盖集)`；没有 total 或没有文件交 `None`。
+///
+/// 与 [`progress`] 分开而不是复用它：`progress` 在 `total_len` 缺失时仍然会给出
+/// `delivered`（界面对那种残缺文件有既有行为），而画分段条**没有总长就没法归一化**，
+/// 只能老实说"没有分段信息"。
+pub fn segments(out_dir: &Path, name: &str) -> Option<(u64, Vec<(u64, u64)>)> {
+    let v = read_state(out_dir, name)?;
+    let total = v
+        .get("validator")
+        .and_then(|x| x.get("total_len"))
+        .and_then(|x| x.as_u64())
+        .filter(|t| *t > 0)?;
+    Some((total, interval_rows(&v)?))
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
@@ -617,6 +644,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(progress(&dir, "a.bin"), (Some(100), Some(20)));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `segments()` 是「看得见分段」的数据入口：把断点里的覆盖集**原样**交出来。
+    ///
+    /// 以前这条信息只被 `progress()` 求和成一个百分比就扔了 —— 界面上因此只能显示
+    /// "走到哪了"，看不到"哪几段下完了、中间空了多宽"。
+    #[test]
+    fn segments_surfaces_the_covered_intervals() {
+        let (dir, _store) = temp_queue("segments");
+        let state = state_path(&dir, "a.bin");
+        fs::write(
+            &state,
+            r#"{"v":1,"validator":{"total_len":100},"segments":[{"start":0,"end":9},{"start":20,"end":29},{"start":50,"end":99}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            segments(&dir, "a.bin"),
+            Some((100, vec![(0, 9), (20, 29), (50, 99)])),
+            "三个区间要原样交出来，不能只剩一个总数"
+        );
+
+        // 写反的区间不许 panic，也不许反过来吞掉整条数据。
+        fs::write(
+            &state,
+            r#"{"v":1,"validator":{"total_len":10},"segments":[{"start":5,"end":2},{"start":0,"end":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(segments(&dir, "a.bin"), Some((10, vec![(0, 1)])));
+
+        // 没有 total_len 就没法归一化 —— 老实交 None，让界面说"暂无分段信息"。
+        fs::write(
+            &state,
+            r#"{"v":1,"validator":{},"segments":[{"start":0,"end":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(segments(&dir, "a.bin"), None);
+
+        // 没有断点文件同理。
+        let _ = fs::remove_file(&state);
+        assert_eq!(segments(&dir, "a.bin"), None);
+
         let _ = fs::remove_dir_all(dir);
     }
 

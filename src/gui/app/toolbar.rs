@@ -293,6 +293,7 @@ mod tests {
             hold_until: None,
             on_complete: None,
             attempts: 0,
+            segments: Vec::new(),
             category: "other",
         }
     }

@@ -691,18 +691,24 @@ fn draw_progress(ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
     );
     painter.rect_filled(track_rect, 99.0, theme::track());
 
-    let pct = (task.progress / 100.0).clamp(0.0, 1.0) as f32;
-    if pct > 0.0 {
-        let fill = egui::Rect::from_min_size(
-            track_rect.min,
-            egui::vec2(track_rect.width() * pct, track_h),
-        );
-        let color = if task.status == "done" {
-            theme::ok()
-        } else {
-            theme::accent()
-        };
-        painter.rect_filled(fill, 99.0, color);
+    // 有覆盖集就画**分段条**：一眼能看出"哪几段下完了、中间空多宽"。
+    // 没有就当普通进度条 —— 不许用百分比画一条假的分段。
+    if task.segments.is_empty() {
+        let pct = (task.progress / 100.0).clamp(0.0, 1.0) as f32;
+        if pct > 0.0 {
+            let fill = egui::Rect::from_min_size(
+                track_rect.min,
+                egui::vec2(track_rect.width() * pct, track_h),
+            );
+            let color = if task.status == "done" {
+                theme::ok()
+            } else {
+                theme::accent()
+            };
+            painter.rect_filled(fill, 99.0, color);
+        }
+    } else {
+        super::segment_bar::draw(ui, track_rect, task);
     }
 
     let label = if task.progress > 0.0 {
@@ -1008,6 +1014,7 @@ mod tests {
             hold_until: None,
             on_complete: None,
             attempts: 0,
+            segments: Vec::new(),
             category: "other",
         }
     }
