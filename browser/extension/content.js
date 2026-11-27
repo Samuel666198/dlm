@@ -437,7 +437,7 @@ const STYLE = `
   .bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
   .meta { display: flex; flex-wrap: wrap; gap: 8px; font: 10px/1.3 ui-monospace, Consolas, monospace; color: var(--muted); }
   .actions { display: flex; justify-content: flex-end; margin-top: 7px; }
-  .ghost, .primary, .dl {
+  .ghost, .primary, .dl, .copy {
     border-radius: 7px; font: 500 11px/1 inherit; cursor: pointer; min-height: 30px; padding: 0 10px;
   }
   .ghost { border: 1px solid var(--line); background: var(--card); color: var(--muted); }
@@ -467,6 +467,10 @@ const STYLE = `
       .size { font: 9px/1.3 ui-monospace, Consolas, monospace; color: var(--muted); font-variant-numeric: tabular-nums; }
   .dl { flex: 0 0 auto; border: 0; background: var(--accent-soft); color: var(--accent); padding: 0 9px; }
   .dl:hover { background: var(--accent); color: var(--accent-ink); }
+  /* 复制是兜底动作：比「下载」弱一档，不抢主按钮 */
+  .copy { border: 0; background: transparent; color: var(--muted); padding: 0 7px; }
+  .copy:hover { background: var(--page); color: var(--ink); }
+  .copy:disabled { opacity: 0.6; cursor: default; }
   .empty, .note { font-size: 11px; color: var(--muted); padding: 8px 2px; }
   .note { color: var(--danger); }
   .pf { display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; border-top: 1px solid var(--line); background: var(--page); }
@@ -516,6 +520,7 @@ function ensureWidget() {
           <div id="dlm-confirm-src" class="ask-src"></div>
           <div id="dlm-confirm-list" class="ask-list" hidden></div>
           <div class="ask-actions">
+            <button id="dlm-confirm-copy" class="ghost" type="button" hidden>复制链接</button>
             <button id="dlm-confirm-no" class="ghost" type="button">取消</button>
             <button id="dlm-confirm-yes" class="primary" type="button">下载</button>
           </div>
@@ -716,7 +721,13 @@ function sendDownload(url, kind, fromPage) {
         if (fromPage) {
           window.location.assign(url);
         } else {
-          state.finished.unshift({ name: fileName(url), ok: false, code: null, message: "投递失败" });
+          state.finished.unshift({
+            name: fileName(url),
+            ok: false,
+            code: null,
+            message: "投递失败",
+            url,
+          });
           state.finished = state.finished.slice(0, 3);
           render();
         }
@@ -862,6 +873,14 @@ function renderFinished() {
       if (item.kind) resume.dataset.resumeKind = item.kind;
       row.appendChild(resume);
     }
+    // 兜底：投递失败的那一行给"复制链接"。
+    // 这一格是为「点了下载没反应」准备的退路 —— 至少能把地址拿走，别把人堵死。
+    if (!item.ok && item.url) {
+      const copy = el("button", "copy", "复制链接");
+      copy.type = "button";
+      copy.dataset.copyUrl = item.url;
+      row.appendChild(copy);
+    }
     box.appendChild(row);
   }
   shadow.getElementById("dlm-recent-count").textContent = String(state.finished.length);
@@ -877,6 +896,52 @@ function canResume(item) {
   if (!item || item.ok) return false;
   if (item.queue) return true;
   return !!item.url && (item.canceled || item.failed);
+}
+
+// ---- 复制链接（兜底）------------------------------------------------------
+//
+// 用户 2026-11-27：「顺便给网页插件做个兜底，不仅可以下载还可以选择复制下载链接」。
+// 为什么要有：桌面端没开、宿主连不上、或者站点要求登录时，把链接交出去是
+// 唯一还能做点什么的动作 —— 用户可以丢给别的工具、或者自己贴进浏览器的地址栏。
+//
+// 两级实现：`navigator.clipboard` 在非安全上下文（http 页面）里是 undefined，
+// 所以留一条 `execCommand("copy")` 的老路。
+function copyText(text) {
+  return new Promise((resolve) => {
+    const fallback = () => {
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.left = "-9999px";
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand("copy");
+        area.remove();
+        resolve(!!ok);
+      } catch (err) {
+        resolve(false);
+      }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => resolve(true), fallback);
+      return;
+    }
+    fallback();
+  });
+}
+
+/// 点完给个"已复制"的就地反馈：不弹 toast，也不占版面。
+function flashCopied(btn) {
+  if (!btn) return;
+  const label = btn.textContent;
+  btn.textContent = "已复制";
+  btn.disabled = true;
+  setTimeout(() => {
+    btn.textContent = label;
+    btn.disabled = false;
+  }, 1200);
 }
 
 // ---- 文件大小（用户：悬浮菜单增加显示文件大小）------------------------------
@@ -935,6 +1000,12 @@ function renderLinks() {
     btn.dataset.dlUrl = item.url;
     btn.dataset.dlKind = item.kind;
     row.appendChild(btn);
+    // 兜底：桌面端没开、宿主连不上、或站点要登录时，至少能把链接交出去。
+    const copy = el("button", "copy", "复制");
+    copy.type = "button";
+    copy.title = "复制下载链接";
+    copy.dataset.copyUrl = item.url;
+    row.appendChild(copy);
     box.appendChild(row);
   }
   shadow.getElementById("dlm-links-count").textContent = String(state.items.length);
@@ -952,6 +1023,8 @@ function renderConfirm() {
   const title = shadow.getElementById("dlm-confirm-title");
 
   // 批量形态（右键「下载本页所有链接」）：把清单摆出来，别让用户盲点。
+  const copyBtnBatch = shadow.getElementById("dlm-confirm-copy");
+  copyBtnBatch.hidden = true;
   if (Array.isArray(pending.items)) {
     const total = pending.items.length;
     title.textContent = "用 dlm 下载这 " + total + " 个链接？";
@@ -978,6 +1051,9 @@ function renderConfirm() {
   }
 
   // 单个文件形态：保持原样。
+  const copyBtn = shadow.getElementById("dlm-confirm-copy");
+  copyBtn.hidden = false;
+  copyBtn.dataset.copyUrl = pending.url;
   title.textContent = "用 dlm 下载这个文件？";
   list.hidden = true;
   list.textContent = "";
@@ -1302,6 +1378,24 @@ function runHostAction(ev) {
       (it) => (data.queue && it.queue === data.queue) || (data.resumeUrl && it.url === data.resumeUrl)
     );
     if (index >= 0) resumeJob(state.finished[index], index);
+    return true;
+  }
+  if (data.copyUrl) {
+    const btn = el.closest ? el.closest("[data-copy-url]") : el;
+    copyText(data.copyUrl).then((ok) => {
+      if (ok) {
+        flashCopied(btn);
+      } else {
+        state.finished.unshift({
+          name: fileName(data.copyUrl),
+          ok: false,
+          code: null,
+          message: "复制失败，请手动选中链接",
+        });
+        state.finished = state.finished.slice(0, 3);
+        render();
+      }
+    });
     return true;
   }
   if (data.dlUrl) {

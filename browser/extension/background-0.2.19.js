@@ -255,16 +255,17 @@ function submitPage(url, referer, hls, tab) {
   return true;
 }
 
-function installMenu() {
-  // 页面链接识别用的扩展名表 —— **与 content.js 的 FILE_LINK_RE 必须逐字一致**
-// （check-extension-static.mjs 会卡这条）。注入到页面里的脚本通过
-// `args: [FILE_LINK_RE.source]` 拿到同一份，所以行为不会走样。
-const FILE_LINK_RE =
-  /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab|pdf|docx?|xlsx?|pptx?|txt|md|epub|mobi|csv|exe|msi|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4[av]|mp3|flac|wav|aac|ogg|opus|wma|jpg|jpeg|png|gif|bmp|webp|svg|tiff?|heic|ts|bin)(?:$|[?#])/i;
-
-// 右键指向的 URL，按 tab 记着。Chrome 对「用 JS 触发下载的按钮」既不给 linkUrl
-// 也不给 srcUrl，只能靠 content.js 在 contextmenu 时上报（见那边的注释）。
-const contextTargets = new Map();
+// ---------------------------------------------------------------------------
+// 这几样必须在**模块顶层**。
+//
+// 踩过的坑（2026-11-27 用户报「插件能拦截下载，但点下载没反应、桌面端也没显示」）：
+// 它们第一次被插进了 `installMenu()` 的函数体里，于是成了**函数内局部声明** ——
+// `submitPage` 里那句 `isVideoPage(url)` 抛 ReferenceError，后面的 `submitTask(task)`
+// 再也不执行，任务根本没发出去；同一处的 `probeSize` 也让"显示文件大小"整个哑掉。
+// 静态检查与 `node --check` 都看不出这种错：语法完全合法。
+// 现在由 `browser/test/verify-sw-download.mjs` 真的把 SW 跑起来、发一条
+// `page-download`、断言 native 端口收到了 `op: "download"` —— 才叫测得着。
+// ---------------------------------------------------------------------------
 
 /// 这个地址看起来是**视频页**吗（而不是一个文件）。
 ///
@@ -328,6 +329,17 @@ async function probeSize(url) {
   }
   return null;
 }
+
+function installMenu() {
+  // 页面链接识别用的扩展名表 —— **与 content.js 的 FILE_LINK_RE 必须逐字一致**
+// （check-extension-static.mjs 会卡这条）。注入到页面里的脚本通过
+// `args: [FILE_LINK_RE.source]` 拿到同一份，所以行为不会走样。
+const FILE_LINK_RE =
+  /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab|pdf|docx?|xlsx?|pptx?|txt|md|epub|mobi|csv|exe|msi|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4[av]|mp3|flac|wav|aac|ogg|opus|wma|jpg|jpeg|png|gif|bmp|webp|svg|tiff?|heic|ts|bin)(?:$|[?#])/i;
+
+// 右键指向的 URL，按 tab 记着。Chrome 对「用 JS 触发下载的按钮」既不给 linkUrl
+// 也不给 srcUrl，只能靠 content.js 在 contextmenu 时上报（见那边的注释）。
+const contextTargets = new Map();
 
 chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({

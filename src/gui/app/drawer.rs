@@ -364,10 +364,20 @@ pub(crate) fn drawer_body(
             // "文字说 353 段、图上像一整条"的自相矛盾（2026-11-27 用户问过这事）。
             let raw = task.segments.len();
             let blocks = crate::queue::merged_count(&task.segments);
+            // 有缺口就把"还缺几处"说出来：光看图只知道"有缝"，不知道有几条。
+            let holes = task
+                .total_len
+                .map(|t| super::segment_bar::gaps(t, &task.segments).len())
+                .unwrap_or(0);
             let caption = if blocks == raw {
                 format!("断点里 {raw} 个区间 · 每 5 秒刷新")
             } else {
                 format!("断点里 {raw} 段，合并后 {blocks} 块 · 每 5 秒刷新")
+            };
+            let caption = if holes > 0 {
+                format!("{caption} · 还有 {holes} 处缺口")
+            } else {
+                caption
             };
             ui.label(
                 egui::RichText::new(caption)
@@ -377,13 +387,16 @@ pub(crate) fn drawer_body(
         });
         ui.horizontal(|ui| {
             ui.add_space(theme::SPACE_4);
+            // 用户 2026-11-27：「右侧栏的进度条可以略微大一些，这样显示分块进度更加清晰」。
+            // 12pt 的条里只有 6pt 是轨道，几百个分块在上面等于看不见 —— 加到 22pt。
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width() - 16.0, 12.0),
+                egui::vec2(ui.available_width() - 16.0, 22.0),
                 egui::Sense::hover(),
             );
-            let track = rect.shrink2(egui::vec2(0.0, 3.0));
-            // 缺口地图：默认画满，只标"还没下"的区间（用户：分段「糊成一团」）。
-            super::segment_bar::draw_gaps(ui, track, task);
+            let track = rect.shrink2(egui::vec2(0.0, 2.0));
+            ui.painter().rect_filled(track, 3.0, theme::track());
+            // **分块**照旧画：已下的是实心块，没下的是空隙（用户要的就是这个）。
+            super::segment_bar::draw(ui, track, task);
         });
     }
 

@@ -859,30 +859,23 @@ fn draw_progress(ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
     );
     painter.rect_filled(track_rect, 99.0, theme::track());
 
-    // 列表只画**整体进度**：连续下完的就是一条实心条。
+    // 列表**只画整体进度**，永远不分块。
     //
-    // 只有真的存在"还没下的段"时才画成分段 —— 否则一百多个相邻段会铺成一串碎块，
-    // 看着像进度条坏了。分块的细节留给右侧详情（用户 2026-11-27 的决定）。
-    let show_segments = !task.segments.is_empty()
-        && task
-            .total_len
-            .is_some_and(|t| super::segment_bar::has_holes(t, &task.segments));
-    if !show_segments {
-        let pct = (task.progress / 100.0).clamp(0.0, 1.0) as f32;
-        if pct > 0.0 {
-            let fill = egui::Rect::from_min_size(
-                track_rect.min,
-                egui::vec2(track_rect.width() * pct, track_h),
-            );
-            let color = if task.status == "done" {
-                theme::ok()
-            } else {
-                theme::accent()
-            };
-            painter.rect_filled(fill, 99.0, color);
-        }
-    } else {
-        super::segment_bar::draw(ui, track_rect, task);
+    // 用户 2026-11-27：「左侧标记的那个进度条不显示分块，直接显示整体百分比进度；
+    // 右侧栏的显示分块」。列表一行只有 52pt、进度条不到 400pt 宽，
+    // 几百个分块铺在这里只会变成一串碎点 —— 分块的细节归右侧详情。
+    let pct = (task.progress / 100.0).clamp(0.0, 1.0) as f32;
+    if pct > 0.0 {
+        let fill = egui::Rect::from_min_size(
+            track_rect.min,
+            egui::vec2(track_rect.width() * pct, track_h),
+        );
+        let color = if task.status == "done" {
+            theme::ok()
+        } else {
+            theme::accent()
+        };
+        painter.rect_filled(fill, 99.0, color);
     }
 
     let label = if task.progress > 0.0 {

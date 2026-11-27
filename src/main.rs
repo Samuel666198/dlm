@@ -93,7 +93,15 @@ fn dispatch() -> Result<u8> {
     // 视频站的 URL 不是"一个文件"，硬塞进分段下载没有意义。
     if is_video {
         return Ok(
-            match dlm::video::run(&task.url, &task.dir, quiet, wants_json) {
+            // 把 `--out-name` 也交给视频这条：队列按这个名字认领文件，
+            // 让 yt-dlp 按标题自己起名会变成"下完了但桌面端认不出"。
+            match dlm::video::run(
+                &task.url,
+                &task.dir,
+                task.name.as_deref(),
+                quiet,
+                wants_json,
+            ) {
                 Ok(code) => code,
                 Err(err) => {
                     if wants_json {

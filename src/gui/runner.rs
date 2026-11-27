@@ -137,6 +137,13 @@ fn apply(
             } else {
                 rule_root.clone()
             };
+            // 视频任务：名字要**先钉成视频容器**。yt-dlp 强制合并成 mp4，
+            // 而队列按这个名字认领文件 —— 名字对不上，下完了也显示不出来。
+            let name = if video {
+                crate::video::force_out_name(&name)
+            } else {
+                name
+            };
             let dated = crate::gui::naming::render_template(
                 &tuning.rename_template,
                 &name,

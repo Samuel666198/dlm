@@ -139,9 +139,33 @@ pub fn argv_info(url: &str) -> Vec<String> {
     ]
 }
 
+/// 视频任务的落点名字：队列是按 `task.name` 找文件的，所以这个名字必须**确定**。
+///
+/// 踩过的坑：第一版这里只给 `%(title)s.%(ext)s`，yt-dlp 按标题自己起名，
+/// 而队列按 `--out-name` 找 —— 下完了桌面端却认不出文件，看着就是"视频下载无效"。
+pub fn force_out_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "video.mp4".to_string();
+    }
+    // 强制合并成 mp4，所以没扩展名（或扩展名不是视频容器）时补 `.mp4`。
+    let lower = trimmed.to_ascii_lowercase();
+    const VIDEO_EXT: [&str; 6] = [".mp4", ".mkv", ".webm", ".mov", ".flv", ".m4v"];
+    if VIDEO_EXT.iter().any(|ext| lower.ends_with(ext)) {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.mp4")
+    }
+}
+
 /// 下载用的参数：先选最好的视频+音频再合并成 mp4。
-pub fn argv_download(url: &str, dir: &Path) -> Vec<String> {
-    let template = dir.join("%(title)s.%(ext)s");
+///
+/// `name` 给了就**钉死**输出文件名（队列要靠它认领文件）；没给才退回标题。
+pub fn argv_download(url: &str, dir: &Path, name: Option<&str>) -> Vec<String> {
+    let template = match name {
+        Some(n) => dir.join(force_out_name(n)),
+        None => dir.join("%(title)s.%(ext)s"),
+    };
     vec![
         "-f".into(),
         "bv*+ba/b".into(),
@@ -151,6 +175,8 @@ pub fn argv_download(url: &str, dir: &Path) -> Vec<String> {
         "--newline".into(),
         "-o".into(),
         template.display().to_string(),
+        // 钉死名字时 yt-dlp 仍可能给"临时后缀"，加这两条让它最后一定落到模板上。
+        "--force-overwrites".into(),
         "--".into(),
         url.to_string(),
     ]
@@ -200,7 +226,7 @@ pub fn parse_progress(line: &str) -> Option<f64> {
 }
 
 /// 跑一遍视频下载。返回给 `main` 的退出码（0 成功，1 失败）。
-pub fn run(url: &str, dir: &Path, quiet: bool, wants_json: bool) -> Result<u8> {
+pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: bool) -> Result<u8> {
     let Some(tool) = find_ytdlp() else {
         bail!(missing_hint());
     };
@@ -227,14 +253,43 @@ pub fn run(url: &str, dir: &Path, quiet: bool, wants_json: bool) -> Result<u8> {
     // ② 下载：进度逐行读出来。
     let mut child = Command::new(&tool);
     child
-        .args(argv_download(url, dir))
+        .args(argv_download(url, dir, name))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
     crate::proc::no_window(&mut child);
+    // 让 Python 的 stdio 一律 UTF-8。
+    //
+    // 实测（2026-11-27）：yt-dlp 的 stdout 被接成管道时，Python 按系统本地编码
+    // （中文 Windows 上是 GBK）写进度行；一旦输出里有它编码不了的东西就
+    // `ERROR: Unable to download video: [Errno 22] Invalid argument`，
+    // **整个下载被打断**，只留一个 1024 字节的 `.part`。中文标题是国内站点的常态，
+    // 所以这不是边角情况 —— 用户报的「视频下载无效」有一半是它。
+    child
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
     let mut child = child
         .spawn()
         .with_context(|| format!("启动 yt-dlp 失败（{}）", tool.display()))?;
+
+    // stderr 必须**真的读出来**：只 pipe 不读有两个后果 ——
+    // ① 管道缓冲区（约 64 KiB）填满后 yt-dlp 会阻塞在 write 上，下载假死；
+    // ② 失败时手里一句原因都没有，只能报个退出码（2026-11-27 就是这样，退出码 120 无从查起）。
+    let stderr_tail = child.stderr.take().map(|pipe| {
+        std::thread::spawn(move || {
+            let mut kept: Vec<String> = Vec::new();
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                kept.push(line);
+                if kept.len() > 20 {
+                    kept.remove(0);
+                }
+            }
+            kept
+        })
+    });
 
     let mut last_pct: Option<f64> = None;
     if let Some(stdout) = child.stdout.take() {
@@ -255,7 +310,14 @@ pub fn run(url: &str, dir: &Path, quiet: bool, wants_json: bool) -> Result<u8> {
     }
 
     if !status.success() {
-        bail!("yt-dlp 下载失败（退出码 {:?}）", status.code());
+        let tail = stderr_tail
+            .and_then(|h| h.join().ok())
+            .map(|lines| lines.join("\n"))
+            .unwrap_or_default();
+        if tail.trim().is_empty() {
+            bail!("yt-dlp 下载失败（退出码 {:?}）", status.code());
+        }
+        bail!("yt-dlp 下载失败（退出码 {:?}）：\n{}", status.code(), tail);
     }
     if wants_json {
         println!(
@@ -266,17 +328,28 @@ pub fn run(url: &str, dir: &Path, quiet: bool, wants_json: bool) -> Result<u8> {
                 "ext": meta.ext,
                 "filesize": meta.filesize,
                 "dir": dir.display().to_string(),
+                "path": dir.join(name.map(force_out_name).unwrap_or_else(|| format!("{}.{}", meta.title, meta.ext)))
+                    .display().to_string(),
             })))
         );
     } else if !quiet {
-        println!("下载已完成  目标目录：{}", dir.display());
+        match name {
+            Some(n) => println!(
+                "下载已完成  目标：{}",
+                dir.join(force_out_name(n)).display()
+            ),
+            None => println!("下载已完成  目标目录：{}", dir.display()),
+        }
     }
     Ok(0)
 }
 
 fn spawn_capture(tool: &Path, args: &[String]) -> Result<std::process::Output> {
     let mut cmd = Command::new(tool);
-    cmd.args(args).stdin(Stdio::null());
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
     crate::proc::no_window(&mut cmd);
     cmd.output()
         .with_context(|| format!("启动 yt-dlp 失败（{}）", tool.display()))
@@ -332,6 +405,47 @@ mod tests {
         assert!(parse_info("不是 json").is_err());
     }
 
+    /// **视频任务的输出名必须确定**（用户 2026-11-27 报「视频下载功能无效」）。
+    ///
+    /// 队列按 `task.name` 认领文件；yt-dlp 默认按标题自己起名 —— 名字对不上，
+    /// 下完了桌面端也认不出，看着就是「无效」。所以这里把名字钉死。
+    #[test]
+    fn the_video_output_name_is_pinned_so_the_queue_can_claim_it() {
+        // 有扩展名：原样保留
+        assert_eq!(force_out_name("BV1atse6EEfx.mp4"), "BV1atse6EEfx.mp4");
+        assert_eq!(force_out_name("影片.mkv"), "影片.mkv");
+        // 没有扩展名（视频页 URL 推出来的名字通常这样）：补 mp4
+        assert_eq!(force_out_name("BV1atse6EEfx"), "BV1atse6EEfx.mp4");
+        // 空名字也得有个能落地的名字
+        assert_eq!(force_out_name("   "), "video.mp4");
+
+        // 参数里真的用上了这个名字，而且不再是 %(title)s 模板
+        let pinned = Path::new("D:/out");
+        let argv = argv_download("https://example.com/v/1", pinned, Some("BV1"));
+        let template = argv
+            .iter()
+            .position(|a| a == "-o")
+            .map(|i| argv[i + 1].clone())
+            .expect("-o 必须有值");
+        assert!(template.ends_with("BV1.mp4"), "输出名要被钉死：{template}");
+        assert!(
+            !template.contains("%(title)s"),
+            "钉死名字时不该再留标题模板：{template}"
+        );
+
+        // 没给名字（命令行直下）才退回标题模板
+        let free = argv_download("https://example.com/v/1", pinned, None);
+        let free_template = free
+            .iter()
+            .position(|a| a == "-o")
+            .map(|i| free[i + 1].clone())
+            .unwrap();
+        assert!(
+            free_template.contains("%(title)s"),
+            "没给名字就该按标题：{free_template}"
+        );
+    }
+
     /// 进度解析：只认 `[download] xx%`，别把别的行当进度。
     #[test]
     fn progress_only_comes_from_download_percentage_lines() {
@@ -361,7 +475,7 @@ mod tests {
         assert_eq!(info[info.len() - 2], "--", "URL 前的 -- 不能少");
 
         let dir = Path::new("D:/out");
-        let dl = argv_download("https://example.com/v/1", dir);
+        let dl = argv_download("https://example.com/v/1", dir, None);
         assert_eq!(dl.last().unwrap(), "https://example.com/v/1");
         assert_eq!(dl[dl.len() - 2], "--");
         let template = dl
