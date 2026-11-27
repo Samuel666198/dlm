@@ -9316,6 +9316,211 @@ fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// **暂停之后「继续」必须真的接着下**（2026-11-27 用户报的"一直显示在排队"）。
+///
+/// 根因：暂停时把子进程从 `children` 里移除并 kill，但**没归还 host 连接预算** ——
+/// 真正的归还在"子进程退出"那条路，而那条路再也看不到它。默认 `connections=8` 且
+/// `per_host=8` ⇒ 继续时 `used + want <= per_host` 变成 `8 + 8 <= 8` = 假
+/// ⇒ 派发循环跳过它、又没有别的任务 ⇒ 永远排队，直到重启程序。
+///
+/// 所以判据不是"状态字段变成了 running"这种内部细节，而是**真的又起了一个子进程**：
+/// 假 dlm 每被调用一次就把计数文件加一，恢复成功必然多一次。
+#[test]
+fn resuming_a_paused_task_actually_starts_it_again() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-pause-resume")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let counter = dir.path().join("calls.txt");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-pause-token";
+    let base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                fake_dlm_str(),
+                "--concurrency",
+                "1",
+                "--headless",
+                "--token",
+                token,
+            ])
+            .env("DLM_FAKE_COUNTER", &counter)
+            // 让子进程挂住，好让"暂停"抢到窗口；不挂住的话它秒退，暂停永远来不及。
+            .env("DLM_FAKE_SLEEP_MS", "9000")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let add: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{base}/api/add?t={token}"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({"url": "https://example.invalid/pause.bin", "name": "pause.bin"})
+                    .to_string(),
+            )
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(add["ok"], true, "{add}");
+    let id = add["id"].as_str().context("add 应有 id")?.to_string();
+
+    // 假 dlm 每被调用一次就把计数文件加一；文件可能还不存在，读不到按 0 算。
+    let counter_value = || -> u32 {
+        std::fs::read_to_string(&counter)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    };
+    // 等计数涨到至少 n：`spawn()` 返回不代表子进程已经执行到写计数那一行，
+    // 直接读会撞上"还没写"，那是用例的竞态而不是被测行为。
+    let wait_counter = |n: u32| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if counter_value() >= n {
+                return;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "假 dlm 的调用计数在 10 秒内没到 {n}（实际 {}）",
+                counter_value()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+
+    let status_of = |id: &str| -> anyhow::Result<String> {
+        let text = client
+            .get(format!("{base}/api/tasks?t={token}"))
+            .send()?
+            .text()?;
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        Ok(tasks
+            .iter()
+            .find(|t| t["id"] == id)
+            .and_then(|t| t["status"].as_str())
+            .unwrap_or("")
+            .to_string())
+    };
+
+    // 1) 等它真的跑起来
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if status_of(&id)? == "running" {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("任务没有跑起来，状态={}", status_of(&id)?);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // 1b) 等第一条子进程**真的跑起来**（写过计数），再谈暂停 —— 否则暂停可能
+    //     抢在它执行之前把它杀掉，"起了几次"就变成掷骰子。
+    wait_counter(1);
+
+    // 2) 暂停
+    let paused: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{base}/api/pause?t={token}"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "id": id }).to_string())
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(paused["ok"], true, "{paused}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(status_of(&id)?, "paused");
+
+    // 3) 继续 —— 这里就是原来会永远卡住的地方
+    let resumed: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{base}/api/resume?t={token}"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "id": id }).to_string())
+            .send()?
+            .text()?,
+    )?;
+    assert_eq!(resumed["ok"], true, "{resumed}");
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let st = status_of(&id)?;
+        if st == "running" {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "「继续」之后 8 秒仍是 {st} —— 暂停没归还 host 连接预算，\
+                 默认 connections=8 + per_host=8 会把派发永久挡住"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // 4) 真的又起了一次子进程（而不是只把状态改成 running）
+    //
+    // 这里**必须轮询**：`status = running` 是在 `Command::spawn()` 返回后立刻置的，
+    // 而那一刻子进程可能还没执行到第一行（更别说写计数文件）。全量并行跑用例时
+    // 机器一忙，读一次就会读到"文件不存在"—— 那是用例自己的竞态，不是被测行为。
+    wait_counter(2);
+    assert_eq!(
+        counter_value(),
+        2,
+        "暂停 + 继续应当让子进程恰好起两次（继续之后必须有第二次）"
+    );
+
+    Ok(())
+}
+
 /// **2026-11-27 的主修复，端到端版**：浏览器带 Cookie 的下载进队列，且明文不落盘。
 ///
 /// 覆盖四件事，缺一条这个修复就不算成立：

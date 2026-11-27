@@ -477,6 +477,32 @@ impl HostGate {
             crate::gui::host_budget::release(&mut self.usage, &host, want);
         }
     }
+
+    /// 预算对账：把「已经不在了、但预算还挂在账上」的条目归还掉。
+    ///
+    /// 为什么必须有这一步：`take()` 在派发前记账，而 `give_back()` 只在**子进程退出**
+    /// 那条路里调用（`tick` 的 reap）。可是暂停 / 删除任务会**先把子进程从 `children`
+    /// 移除再 kill** —— 退出那条路从此再也看不到它，这笔预算就永远挂着。
+    ///
+    /// 后果不是"稍微少用一点额度"：默认 `connections = 8` 且 `per_host = 8` 时，
+    /// 一次暂停就把这个 host 的额度吃满，之后**同 host 的任何任务**都过不了
+    /// `can_start(8 + 8 <= 8)` ⇒ 全部永远排队（2026-11-27 用户报的那个 bug）。
+    ///
+    /// 用「每轮对账」而不是「在暂停分支里补一句 give_back」：漏记账的路不止一条
+    /// （暂停、删除、将来新增的路径），而对账只有这一处，对每条路都成立。
+    pub fn reconcile(&mut self, still_running: impl Fn(&str) -> bool) -> bool {
+        let stale: Vec<String> = self
+            .per_task
+            .keys()
+            .filter(|id| !still_running(id))
+            .cloned()
+            .collect();
+        let changed = !stale.is_empty();
+        for id in stale {
+            self.give_back(&id);
+        }
+        changed
+    }
 }
 
 fn tick(
@@ -487,6 +513,13 @@ fn tick(
     tuning: &RuntimeTuning,
 ) -> bool {
     let mut changed = false;
+
+    // 0) 预算对账：暂停/删除会先把子进程从 `children` 移除，于是「子进程退出」那条
+    //    归还路径再也看不到它们 —— 每轮对账一次，把这类漏账收回来。
+    //    （详见 `HostGate::reconcile` 的注释：默认 connections=8 + per_host=8 时，
+    //    一次暂停足以把整个 host 的额度永久吃满。）
+    changed |= state.gate.reconcile(|id| children.contains_key(id));
+
     // 1) 采样：按覆盖量增量记配额。先采再 reap，子进程退出前最后一截也算得到。
     // 0.6.0：每个任务从**自己的**落点读进度（规则可能把它指到别的盘）。
     let running: Vec<(String, String, std::path::PathBuf)> = store

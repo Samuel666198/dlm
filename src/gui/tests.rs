@@ -1763,3 +1763,40 @@ fn a_task_view_carries_the_covered_intervals_from_the_state_file() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// **暂停/删除后必须把 host 连接预算还回来**（2026-11-27 用户报的「继续后一直排队」）。
+///
+/// 默认 `connections = 8` 且 `per_host = 8`：一个任务就把这个 host 的额度吃满。
+/// 暂停会把子进程从 `children` 移除，于是「子进程退出」那条归还路径再也看不到它 ——
+/// 不靠每轮对账收回来，这个 host 就永久废掉，**任何**同 host 任务都起不来。
+#[test]
+fn a_finished_or_paused_task_had_to_return_its_host_budget() {
+    let mut gate = super::runner::HostGate::new(8);
+    gate.take("t-1", "https://example.com/a.bin", 8);
+    assert!(
+        !gate.allows("https://example.com/b.bin", 8),
+        "8 + 8 > 8：额度吃满时同 host 起不来第二单（这就是 bug 的前提）"
+    );
+
+    // 任务已经不在 children 里（暂停会先移出再 kill）⇒ 对账要把它收回
+    let changed = gate.reconcile(|_| false);
+    assert!(changed, "有漏账就该报告变化，好让调用方落盘");
+    assert!(
+        gate.allows("https://example.com/b.bin", 8),
+        "归还之后同 host 必须能再派 —— 否则就是用户看到的「永远排队」"
+    );
+
+    // 还在跑的绝不能被对账误收
+    gate.take("t-2", "https://example.com/c.bin", 8);
+    assert!(!gate.reconcile(|id| id == "t-2"), "还在跑的条目不该被回收");
+    assert!(
+        !gate.allows("https://example.com/d.bin", 8),
+        "t-2 仍占着额度，这里必须还是假"
+    );
+
+    // 别的 host 不受影响（对账是按条目还，不是清空整张表）
+    assert!(
+        gate.allows("https://other.example/x.bin", 8),
+        "不同 host 各算各的"
+    );
+}

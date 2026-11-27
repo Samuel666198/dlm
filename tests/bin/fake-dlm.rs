@@ -10,6 +10,8 @@
 //! - `DLM_FAKE_CODES`：逗号分隔的退出码序列，第 N 次调用取第 N 项；用完之后一直取最后一项。
 //! - 参数里带 `--out-dir` 时，按第几次调用写一个同名的空文件，让 `done` 那一支有落点可查
 //!   （P2 的 reveal 只对 `done` 放行，需要一个真存在的文件）。
+//! - `DLM_FAKE_SLEEP_MS`：退出前先睡这么多毫秒。用来造"一个还在跑的任务"，
+//!   好让用例能在它跑着的时候暂停 —— 否则 `fake-dlm` 秒退，暂停永远抢不到时机。
 //!
 //! 退出码 0/1/2/3 与 README「退出码」一节同义，本程序只是把它们按剧本发出去。
 
@@ -46,6 +48,14 @@ fn main() {
         let name = arg_value("--out-name").unwrap_or_else(|| "fake.bin".to_string());
         let _ = fs::create_dir_all(&out_dir);
         let _ = fs::write(std::path::Path::new(&out_dir).join(name), b"FAKE");
+    }
+
+    // 挂住一会儿：给"暂停"留出窗口（见文件头 DLM_FAKE_SLEEP_MS）。
+    if let Ok(ms) = env::var("DLM_FAKE_SLEEP_MS")
+        && let Ok(ms) = ms.trim().parse::<u64>()
+        && ms > 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 
     // 让 `--quiet` 之类的参数照收不误：本程序不解析，只是不因多余参数失败。
