@@ -2433,3 +2433,34 @@ fn the_table_header_and_rows_compute_the_same_column_positions() {
     }
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **设置里的代理必须真的传到下载子进程**（2026-11-27 实测漏过一次）。
+///
+/// 那次的表现：把代理填成一个必然拒绝连接的端口，下载照样成功 —— 因为
+/// `proxy::env_pairs` 定义了却**一次都没被调用**，`dlm.exe` 子进程完全不知道有代理。
+/// 这条用例钉的是"派发前把环境变量组好"这一步。
+#[test]
+fn the_proxy_setting_reaches_the_download_child() {
+    use super::runner::child_env;
+
+    // 没配代理 ⇒ 一个变量都不设。
+    // 不许设成空串：那会让 reqwest 以为"要走一个空代理"，比不设更糟。
+    let plain = child_env(&RuntimeTuning::default());
+    assert!(plain.is_empty(), "没配代理时不该设任何代理变量：{plain:?}");
+
+    let tuning = RuntimeTuning {
+        proxy: crate::proxy::parse_proxy("http://127.0.0.1:7890").expect("写法合法"),
+        ..RuntimeTuning::default()
+    };
+    let env = child_env(&tuning);
+    let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    for want in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        assert!(names.contains(&want), "缺 {want}：{names:?}");
+        let value = env
+            .iter()
+            .find(|(k, _)| k == want)
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert!(value.contains("127.0.0.1:7890"), "{want} 的值不对：{value}");
+    }
+}

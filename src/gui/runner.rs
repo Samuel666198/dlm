@@ -391,6 +391,14 @@ fn note_in_log(path: &std::path::Path, message: &str) {
     }
 }
 
+/// 派发子进程时要设的环境变量。**目前只有代理**。
+///
+/// 单独成函数是为了能被用例钉住：这条线断过一次（`env_pairs` 定义了但没人调），
+/// 而"断了"的表现是"设置里填了代理却不生效"，从界面上看不出来。
+pub(crate) fn child_env(tuning: &RuntimeTuning) -> Vec<(String, String)> {
+    crate::proxy::env_pairs(tuning.proxy.as_ref())
+}
+
 pub(crate) fn child_args(
     task: &Task,
     quota_slice: Option<u64>,
@@ -758,6 +766,11 @@ fn tick(
         crate::proc::no_window(&mut command);
         command
             .args(child_args(&task, quota_slice, tuning))
+            // 代理走环境变量交给子进程 —— `dlm.exe` 里建 client 的地方有十几处，
+            // 让 reqwest 自己读环境是唯一不会漏的路（`proxy::env_pairs` 的注释就是这么写的，
+            // 但这里**原先一次都没调用过**：设置里填了代理，下载完全不走它。
+            // 2026-11-27 实测：把代理填成一个必然拒绝连接的端口，下载照样成功）。
+            .envs(child_env(tuning))
             .stdin(if cookie.is_some() {
                 Stdio::piped()
             } else {
