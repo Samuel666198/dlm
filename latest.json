@@ -1,11 +1,11 @@
 {
-    "release":  "0.7.3",
+    "release":  "0.7.4",
     "core":  "0.1.0",
     "extension":  "0.2.16",
-    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.3/dlm-0.7.3-win-x64.zip",
-    "sha256":  "aa67acd871c474f44adba3528c3de201bdcd258fea286722d2b710c375dfbbe0",
-    "size":  12067449,
-    "notes":  "MCP 两处修复：(1) 本版没附带 MCP 包时会自动回退到同 minor 的旧补丁版并装上（接口加法演进，旧桥接配新界面可用），不再直接报 404；(2) 「复制 MCP 配置」改为给出本机绝对路径 —— 原来写的是裸文件名 dlm-mcp.exe，MCP 客户端只在它位于 PATH 上时才找得到，否则起不动进程，界面会报「Host 尚未注册该 stdio Server 的工具」。同时 Agent 接入页排版改为卡片式。本版同时发布 dlm-mcp-0.7.3-win-x64.zip。",
+    "url":  "https://github.com/Samuel666198/dlm/releases/download/v0.7.4/dlm-0.7.4-win-x64.zip",
+    "sha256":  "9d2150f6ec2c3609a81a126cfb27365a1324262f1ea422acfb5ba03a49b5ae1d",
+    "size":  12446802,
+    "notes":  "浏览器下载终于会出现在桌面端了\n\n· 修复：浏览器插件带 Cookie 的下载不再被甩到独立进程 —— 以前它们根本不出现在窗口里\n· 修复：桌面端没运行时，扩展会明确告诉你「已交给独立进程」，不再静默\n· 修复：接管浏览器下载开着时会下两份（只登记不取消）\n· 新增：看得见分段 —— 列表行与详情都能看到哪几段已下完、中间空多宽\n· 新增：浏览器下载的凭证用 DPAPI 加密落盘，绝不进 queue.json 与日志\n· 换新图标\n\n浏览器扩展需要重新加载一次才会用上新代码。",
     "min_core":  "0.1.0",
-    "published_at":  "2026-11-18T08:29:37Z"
+    "published_at":  "2026-11-27T08:21:22Z"
 }
