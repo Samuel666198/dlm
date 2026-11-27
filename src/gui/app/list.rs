@@ -20,6 +20,15 @@ const PAD: f32 = 16.0;
 
 /// 进度条至少这么宽才有信息量（再窄就只剩一条线）。
 const COL_PROGRESS_MIN: f32 = 64.0;
+/// 文件名前面的类型图标尺寸与它到文字的间距。
+///
+/// 表头「文件名」的起点也按这一份让位 —— 否则行里的文字会比表头右移 19pt，
+/// 看起来就是"表头与列错位"（图 2 那张截图里就是这么回事：列坐标其实一致）。
+const NAME_ICON: f32 = 13.0;
+const NAME_GAP: f32 = 6.0;
+/// 文件名文字相对列左缘的缩进。
+const NAME_TEXT_INSET: f32 = NAME_ICON + NAME_GAP;
+
 /// 勾选框中心距行左边的距离。列排布从它右边开始，所以文件名列要跟着让。
 const NAME_MIN: f32 = 150.0;
 
@@ -168,6 +177,13 @@ struct Columns {
     speed: Option<egui::Rect>,
     eta: Option<egui::Rect>,
     status: egui::Rect,
+}
+
+/// 探针：把某一行的列坐标摊平成 (name.left, size.right, status.left)。
+/// 只给用例用，生产路径上是个纯计算（没有副作用）。
+fn cols_probe(rect: egui::Rect) -> (f32, f32, f32) {
+    let cols = columns(rect);
+    (cols.name.left(), cols.size.right(), cols.status.left())
 }
 
 /// 按可用宽度排出这一行的各列位置。
@@ -400,6 +416,12 @@ impl App {
         );
 
         self.row_w = rect.width();
+        self.row_cols = (
+            rect.left(),
+            cols_probe(rect).0,
+            cols_probe(rect).1,
+            cols_probe(rect).2,
+        );
         let cols = columns(rect);
         let name_rect = cols.name;
         let size_rect = cols.size;
@@ -519,13 +541,13 @@ impl App {
         }
     }
 
-    fn draw_name(&self, ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
+    fn draw_name(&mut self, ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
         let painter = ui.painter();
         // 主名：去掉分类前缀。
         let name = task.name.rsplit('/').next().unwrap_or(&task.name);
 
         // 文件类型图标（用户：文件名前用图标显示类型），尺寸与侧栏那一套一致。
-        let icon_side = 13.0;
+        let icon_side = NAME_ICON;
         let icon_rect = egui::Rect::from_min_size(
             egui::pos2(rect.left(), rect.center().y - 8.0 - icon_side / 2.0 - 4.0),
             egui::vec2(icon_side, icon_side),
@@ -537,7 +559,8 @@ impl App {
             theme::ink_3(),
         );
 
-        let name_left = rect.left() + icon_side + 6.0;
+        let name_left = rect.left() + NAME_TEXT_INSET;
+        self.row_name_x = name_left;
         let budget = chars_for_width(rect.right() - name_left);
         painter.text(
             egui::pos2(name_left, rect.top() + rect.height() / 2.0 - 8.0),
@@ -581,11 +604,21 @@ impl App {
         let progress_rect = cols.progress;
         let status_rect = cols.status;
         self.thead_w = rect.width();
+        self.thead_cols = (
+            rect.left(),
+            cols_probe(rect).0,
+            cols_probe(rect).1,
+            cols_probe(rect).2,
+        );
+        // 标签的 x 只算一次：既拿去画，也记进探针 —— 探针必须是**实参**。
+        // （第一版探针自己又算了一遍，于是用例测的是探针、不是代码，变异打不红。）
+        let name_label_x = name_rect.left() + NAME_TEXT_INSET;
+        self.thead_name_x = name_label_x;
 
-        let font = egui::FontId::proportional(10.5);
+        let font = egui::FontId::proportional(theme::FONT_LABEL);
         let ink = theme::ink_3();
         painter.text(
-            name_rect.left_center(),
+            egui::pos2(name_label_x, name_rect.center().y),
             egui::Align2::LEFT_CENTER,
             "文件名",
             font.clone(),

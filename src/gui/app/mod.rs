@@ -230,6 +230,13 @@ pub struct App {
     /// 表头 / 行各自拿到的宽度。用例靠它证明"两边排布同源"。
     pub(super) thead_w: f32,
     pub(super) row_w: f32,
+    /// 表头 / 行各自算出来的列坐标 (name.left, size.right, status.left)。
+    /// 宽度相同但**原点**不同的可能性正是 H3 要查的。
+    pub(super) thead_cols: (f32, f32, f32, f32),
+    pub(super) row_cols: (f32, f32, f32, f32),
+    /// 「文件名」这两处**文字起点**：表头标签的 x 与行内文字的 x。
+    pub(super) thead_name_x: f32,
+    pub(super) row_name_x: f32,
     /// 下次允许再扫目录的时刻（别每帧都 read_dir）。
     pub(super) externals_next_at: Option<std::time::Instant>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
@@ -378,6 +385,10 @@ impl App {
             context_target: None,
             thead_w: 0.0,
             row_w: 0.0,
+            thead_cols: (0.0, 0.0, 0.0, 0.0),
+            row_cols: (0.0, 0.0, 0.0, 0.0),
+            thead_name_x: 0.0,
+            row_name_x: 0.0,
             externals_next_at: None,
             palette_take_focus: false,
             start_hidden: 0,

@@ -2373,3 +2373,63 @@ fn the_row_menu_survives_a_right_click_with_the_drawer_closed() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **表头与行算出来的列坐标必须一模一样**（H3「表头与列错位」的判据）。
+///
+/// 之前只比了宽度（相等），那是**不够的**：`columns()` 是按 `rect.left()/right()`
+/// 定位的，宽度一样而**原点**不同，列照样会整体错位。
+/// 这条比四个实数：矩形的左边界、文件名列左缘、大小列右缘、状态列左缘。
+#[test]
+fn the_table_header_and_rows_compute_the_same_column_positions() {
+    let (mut app, dir) = test_app(
+        "thead-cols",
+        vec![task_view_named("a.bin", TaskStatus::Done)],
+    );
+    let ctx = egui::Context::default();
+    let mut clock = 0.0f64;
+    let frame = |app: &mut super::app::App, clock: &mut f64| {
+        *clock += 0.2;
+        let mut input = frame_input();
+        input.time = Some(*clock);
+        let mut out = ctx.run_ui(input, |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+    };
+
+    for drawer_open in [false, true] {
+        app.selected = if drawer_open {
+            Some("a.bin".to_string())
+        } else {
+            None
+        };
+        for _ in 0..8 {
+            frame(&mut app, &mut clock);
+        }
+        let (tl, tn, ts, tt) = app.thead_cols;
+        let (rl, rn, rs, rt) = app.row_cols;
+        println!(
+            "drawer_open={drawer_open}: 表头 左{tl:.1} 名{tn:.1} 大小{ts:.1} 状态{tt:.1} / 行 左{rl:.1} 名{rn:.1} 大小{rs:.1} 状态{rt:.1}"
+        );
+        // 列坐标一致还不够：**列内文字的起点**也要对齐。
+        // 图 2 那张截图里"表头与列错位"，其实是行里的文件名被类型图标右推了 19pt
+        // 而表头标签没跟着移 —— 列坐标一直是对的。
+        assert!(
+            (app.thead_name_x - app.row_name_x).abs() <= 0.5,
+            "「文件名」文字起点不一致：表头 {:.1} / 行 {:.1} —— 行里让了图标的位置，表头也要让",
+            app.thead_name_x,
+            app.row_name_x
+        );
+        for (name, a, b) in [
+            ("矩形左边界", tl, rl),
+            ("文件名列左缘", tn, rn),
+            ("大小列右缘", ts, rs),
+            ("状态列左缘", tt, rt),
+        ] {
+            assert!(
+                (a - b).abs() <= 1.0,
+                "drawer_open={drawer_open} 时「{name}」表头 {a:.1} 与行 {b:.1} 差了 {:.1}pt —— 列一定错位",
+                (a - b).abs()
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(dir);
+}
