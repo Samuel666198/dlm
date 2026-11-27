@@ -254,7 +254,17 @@ function submitPage(url, referer, hls, tab) {
 }
 
 function installMenu() {
-  chrome.contextMenus.removeAll(() => {
+  // 页面链接识别用的扩展名表 —— **与 content.js 的 FILE_LINK_RE 必须逐字一致**
+// （check-extension-static.mjs 会卡这条）。注入到页面里的脚本通过
+// `args: [FILE_LINK_RE.source]` 拿到同一份，所以行为不会走样。
+const FILE_LINK_RE =
+  /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab|pdf|docx?|xlsx?|pptx?|txt|md|epub|mobi|csv|exe|msi|apk|dmg|pkg|deb|rpm|mp4|mkv|avi|mov|webm|m4[av]|mp3|flac|wav|aac|ogg|opus|wma|jpg|jpeg|png|gif|bmp|webp|svg|tiff?|heic|ts|bin)(?:$|[?#])/i;
+
+// 右键指向的 URL，按 tab 记着。Chrome 对「用 JS 触发下载的按钮」既不给 linkUrl
+// 也不给 srcUrl，只能靠 content.js 在 contextmenu 时上报（见那边的注释）。
+const contextTargets = new Map();
+
+chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "dlm-download",
       title: "Download with dlm",
@@ -318,6 +328,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     return true;
   }
+  if (msg && msg.op === "context-target") {
+    const tabId = sender.tab && sender.tab.id;
+    if (tabId != null) {
+      contextTargets.set(tabId, {
+        url: typeof msg.url === "string" ? msg.url : "",
+        pageUrl: typeof msg.pageUrl === "string" ? msg.pageUrl : "",
+        kind: msg.kind === "hls" ? "hls" : "file",
+      });
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (msg && msg.op === "batch-add") {
+    // 只有用户在二次确认里点了「下载」才会到这里。
+    const tabId = sender.tab && sender.tab.id;
+    const pageUrl = (sender.tab && sender.tab.url) || "";
+    const items = Array.isArray(msg.items) ? msg.items.slice(0, 50) : [];
+    let submitted = 0;
+    for (const item of items) {
+      if (!item || typeof item.url !== "string") continue;
+      submitPage(
+        item.url,
+        pageUrl,
+        item.kind === "hls" || /\.m3u8(?:$|[?#])/i.test(item.url),
+        tabId,
+      );
+      submitted += 1;
+    }
+    sendResponse({ ok: true, count: submitted });
+    return true;
+  }
   if (msg && msg.op === "page-links") {
     const tabId = sender.tab && sender.tab.id;
     const items = Array.isArray(msg.items) ? msg.items : [];
@@ -357,24 +398,64 @@ function downloadPageLinks(tab) {
   isBlocked(pageUrl, (blocked) => {
     if (blocked) return;
     chrome.scripting.executeScript(
-      { target: { tabId: tab.id }, func: () => Array.from(document.links, (a) => a.href) },
+      {
+        target: { tabId: tab.id },
+        // 注入到页面里跑：正则的 source 作为参数传进来，所以两边用的是同一份表，
+        // 不会出现「后台一套、页面一套」的走样。
+        func: (pattern) => {
+          const re = new RegExp(pattern, "i");
+          const files = [];
+          const seen = new Set();
+          let others = 0;
+          for (const a of document.querySelectorAll("a[href]")) {
+            let url = null;
+            try {
+              url = new URL(a.getAttribute("href"), location.href);
+            } catch {
+              continue;
+            }
+            if (!/^https?:$/i.test(url.protocol)) continue;
+            if (seen.has(url.href)) continue;
+            seen.add(url.href);
+            // 判据是 pathname + search：`/download?id=1&name=x.zip` 这种把文件名
+            // 放在查询串里的链接，只看 pathname 会漏掉（用户报的"检测退化"之一）。
+            if (re.test(url.pathname + url.search)) {
+              files.push({
+                url: url.href,
+                kind: /\.m3u8(?:$|[?#])/i.test(url.href) ? "hls" : "file",
+              });
+              if (files.length >= 50) break;
+            } else {
+              others += 1;
+            }
+          }
+          return { files, others };
+        },
+        args: [FILE_LINK_RE.source],
+      },
       (results) => {
-        const all = (results && results[0] && results[0].result) || [];
+        const out = (results && results[0] && results[0].result) || {};
         let pageHost = "";
-        try { pageHost = new URL(pageUrl).hostname; } catch (err) { pageHost = ""; }
-        const seen = new Set();
-        const picked = [];
-        for (const href of all) {
-          if (!/^https?:\/\//i.test(href)) continue;
-          let host = "";
-          try { host = new URL(href).hostname; } catch (err) { continue; }
-          if (host !== pageHost) continue;
-          if (seen.has(href)) continue;
-          seen.add(href);
-          picked.push(href);
-          if (picked.length >= 50) break;
+        try {
+          pageHost = new URL(pageUrl).hostname;
+        } catch (err) {
+          pageHost = "";
         }
-        for (const href of picked) submitPage(href, pageUrl, /\.m3u8(?:$|[?#])/i.test(href), tab.id);
+        const files = (out.files || []).filter((item) => {
+          try {
+            return new URL(item.url).hostname === pageHost;
+          } catch (err) {
+            return false;
+          }
+        });
+        // **不直接入队**：先把清单交给页面里的确认层，用户点了「下载」才提交。
+        // 旧版本这里直接 submitPage 循环，一次误点就是 50 条垃圾任务。
+        chrome.tabs.sendMessage(tab.id, {
+          op: "show-batch-confirm",
+          items: files,
+          skipped: out.others || 0,
+          domain: pageHost,
+        });
       },
     );
   });
@@ -386,7 +467,11 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     return;
   }
   if (info.menuItemId !== "dlm-download") return;
-  const url = info.linkUrl || info.srcUrl;
+  // 顺序有讲究：Chrome 直接给的优先；它给不出来时（用 JS 触发下载的按钮，
+  // 既不是 link 也不是 image/video/audio）才用 content.js 记下的那个。
+  const remembered =
+    (tab && contextTargets.get(tab.id)) || { url: "", pageUrl: "", kind: "file" };
+  const url = info.linkUrl || info.srcUrl || remembered.url;
   if (!url) return;
   const hls = /\.m3u8(?:$|[?#])/i.test(url);
   submitPage(url, info.pageUrl || (tab && tab.url) || url, hls, tab && tab.id);

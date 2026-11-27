@@ -412,6 +412,10 @@ const STYLE = `
   .ask-name { font-size: 12px; color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .ask-src { font: 10px/1.4 ui-monospace, Consolas, monospace; color: var(--muted); margin-top: 4px; }
   .ask-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 9px; }
+      /* 批量确认的清单：限定高度可滚动，别把悬浮球撑成一整屏。 */
+      .ask-list { max-height: 150px; overflow: auto; margin: 6px 0 2px; }
+      .ask-list div { font-size: 11px; line-height: 1.5; color: var(--ink-2, #555); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .ask-list .more { color: var(--muted); }
   .active { border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: var(--page); margin-bottom: 8px; }
   .active:last-child { margin-bottom: 0; }
   .rowhead { display: flex; align-items: baseline; gap: 8px; }
@@ -493,9 +497,10 @@ function ensureWidget() {
       </div>
       <div class="body">
         <div id="dlm-confirm" class="ask" hidden>
-          <div class="ask-title">用 dlm 下载这个文件？</div>
+          <div id="dlm-confirm-title" class="ask-title">用 dlm 下载这个文件？</div>
           <div id="dlm-confirm-name" class="ask-name"></div>
           <div id="dlm-confirm-src" class="ask-src"></div>
+          <div id="dlm-confirm-list" class="ask-list" hidden></div>
           <div class="ask-actions">
             <button id="dlm-confirm-no" class="ghost" type="button">取消</button>
             <button id="dlm-confirm-yes" class="primary" type="button">下载</button>
@@ -888,9 +893,43 @@ function renderConfirm() {
   const box = shadow.getElementById("dlm-confirm");
   box.hidden = !state.confirm;
   if (!state.confirm) return;
-  shadow.getElementById("dlm-confirm-name").textContent = state.confirm.name;
+  const pending = state.confirm;
+  const list = shadow.getElementById("dlm-confirm-list");
+  const title = shadow.getElementById("dlm-confirm-title");
+
+  // 批量形态（右键「下载本页所有链接」）：把清单摆出来，别让用户盲点。
+  if (Array.isArray(pending.items)) {
+    const total = pending.items.length;
+    title.textContent = "用 dlm 下载这 " + total + " 个链接？";
+    shadow.getElementById("dlm-confirm-name").textContent = pending.skipped
+      ? "另有 " + pending.skipped + " 个非文件链接未选中"
+      : "";
+    shadow.getElementById("dlm-confirm-src").textContent = pending.domain || "";
+    list.hidden = false;
+    list.textContent = "";
+    const shown = pending.items.slice(0, 10);
+    for (const item of shown) {
+      const row = document.createElement("div");
+      row.textContent = fileName(item.url);
+      row.title = item.url;
+      list.appendChild(row);
+    }
+    if (total > shown.length) {
+      const more = document.createElement("div");
+      more.className = "more";
+      more.textContent = "…还有 " + (total - shown.length) + " 条";
+      list.appendChild(more);
+    }
+    return;
+  }
+
+  // 单个文件形态：保持原样。
+  title.textContent = "用 dlm 下载这个文件？";
+  list.hidden = true;
+  list.textContent = "";
+  shadow.getElementById("dlm-confirm-name").textContent = pending.name;
   shadow.getElementById("dlm-confirm-src").textContent =
-    state.confirm.domain + " · " + (state.confirm.kind === "hls" ? "HLS" : "文件");
+    pending.domain + " · " + (pending.kind === "hls" ? "HLS" : "文件");
 }
 
 function renderTabs() {
@@ -1178,7 +1217,12 @@ function runHostAction(ev) {
     case "dlm-confirm-yes": {
       const pending = state.confirm;
       state.confirm = null;
-      if (pending) sendDownload(pending.url, pending.kind, false);
+      // 批量：二次确认过了才真的提交（用户要求「下载所有链接需要二次确认」）。
+      if (pending && Array.isArray(pending.items)) {
+        sendMessage({ op: "batch-add", items: pending.items });
+      } else if (pending) {
+        sendDownload(pending.url, pending.kind, false);
+      }
       markActivity();
       render();
       return true;
@@ -1211,10 +1255,83 @@ function runHostAction(ev) {
   return false;
 }
 
+// ---- 右键指向的是哪个链接 ------------------------------------------------
+//
+// 为什么需要这一段：Chrome 的 `contextMenus.onClicked` 对「用 JS 触发下载的按钮」
+// 既不给 `linkUrl` 也不给 `srcUrl`，菜单项拿不到 URL 就只能哑掉 ——
+// 用户看到的就只剩「下载本页所有链接」那一条。
+//
+// 用「右键时主动上报」而不是「后台来问」：不需要 sendResponse 往返，
+// 也没有"元素已经变了"的时机问题（contextmenu 一定早于菜单点击）。
+
+function urlUnderPointer(start) {
+  let el = start;
+  for (let depth = 0; el && depth < 6; depth += 1, el = el.parentElement) {
+    if (el.href && /^https?:/i.test(el.href)) return el.href;
+    for (const attr of [
+      "data-url",
+      "data-href",
+      "data-download-url",
+      "data-file",
+      "src",
+      "href",
+    ]) {
+      const value = el.getAttribute && el.getAttribute(attr);
+      if (!value) continue;
+      try {
+        const abs = new URL(value, location.href);
+        if (/^https?:$/i.test(abs.protocol)) return abs.href;
+      } catch {
+        /* 不是 URL 就继续往上找 */
+      }
+    }
+  }
+  return "";
+}
+
+document.addEventListener(
+  "contextmenu",
+  (event) => {
+    if (!alive) return;
+    const url = urlUnderPointer(event.target);
+    sendMessage({
+      op: "context-target",
+      url: url || "",
+      pageUrl: location.href,
+      kind: /\.m3u8(?:$|[?#])/i.test(url || "") ? "hls" : "file",
+    });
+  },
+  true,
+);
+
 guarded(() =>
   chrome.runtime.onMessage.addListener((msg) => {
     if (!alive) return;
   if (!msg) return;
+  if (msg.op === "show-batch-confirm") {
+    // 右键「下载本页所有链接」：**先给用户看清单**，点了「下载」才提交。
+    const items = Array.isArray(msg.items) ? msg.items : [];
+    if (!items.length) {
+      state.finished.unshift({ name: "本页没找到可下载的文件链接", ok: false });
+      state.finished = state.finished.slice(0, 3);
+      state.collapsed = false;
+      state.tab = "recent";
+      markActivity();
+      render();
+      return;
+    }
+    state.confirm = {
+      items,
+      skipped: msg.skipped || 0,
+      domain: msg.domain || location.host,
+      kind: "file",
+    };
+    state.collapsed = false;
+    state.tab = "active";
+    markActivity();
+    render();
+    return;
+  }
   if (msg.op === "job-accepted") {
     markActivity();
     if (msg.mode === "queue") {

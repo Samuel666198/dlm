@@ -81,11 +81,56 @@ if (/pendingTakeover\.set/.test(bgSrc)) {
   failures.push(`${sw} 里找不到 pendingTakeover.set（接管登记不见了）`);
 }
 
+// 5) 两份扩展名表必须逐字一致。
+//
+// background 会把 FILE_LINK_RE.source 注入到页面里跑，所以复制了一份。复制就会走样：
+// 只改一边时，右键「下载本页所有链接」和页面悬浮球的识别结果会不一样，
+// 而且两边都不会报错 —— 用户只会觉得"有时候能认出来有时候不行"。
+const fileLinkRe = (src) => {
+  const m = src.match(/const FILE_LINK_RE =\s*(\/.+?\/i)/);
+  return m ? m[1] : null;
+};
+const reInContent = fileLinkRe(contentSrc);
+const reInBg = fileLinkRe(bgSrc);
+if (!reInContent) {
+  failures.push("content.js 里找不到 FILE_LINK_RE");
+} else if (!reInBg) {
+  failures.push(`${sw} 里找不到 FILE_LINK_RE（页面链接识别会两套表）`);
+} else if (reInContent !== reInBg) {
+  failures.push("content.js 与 " + sw + " 的 FILE_LINK_RE 不一致 —— 两边识别结果会不同");
+}
+
+// 6) 「下载本页所有链接」必须**先确认再入队**。
+//
+// 2026-11-27 之前 downloadPageLinks 直接 for 循环 submitPage：一次误点就是几十条任务，
+// 而且它当时抓的是 document.links 全量、**完全不过扩展名**。
+// 现在要求：函数体内出现确认层消息，且**不出现** submitPage —— 提交只走 batch-add。
+const fnStart = bgSrc.indexOf("function downloadPageLinks(");
+if (fnStart < 0) {
+  failures.push(`${sw} 里找不到 downloadPageLinks`);
+} else {
+  const fnBody = bgSrc.slice(fnStart, bgSrc.indexOf("\n}\n", fnStart));
+  if (!/show-batch-confirm/.test(fnBody)) {
+    failures.push("downloadPageLinks 没有走确认层（show-batch-confirm）—— 会直接开始下载");
+  }
+  if (/submitPage\s*\(/.test(fnBody)) {
+    failures.push("downloadPageLinks 里直接 submitPage —— 批量下载必须等用户确认");
+  }
+}
+
+// 7) 右键要认得"用 JS 触发下载的按钮"。
+if (!/context-target/.test(contentSrc) || !/context-target/.test(bgSrc)) {
+  failures.push("右键目标上报（context-target）没接上：按钮上右键会只剩「下载本页所有链接」");
+}
+if (!/contextTargets\.get\s*\(/.test(bgSrc)) {
+  failures.push(`${sw} 收了 context-target 却从不在 onClicked 里取用`);
+}
+
 if (failures.length) {
   console.error("extension static check FAILED");
   for (const f of failures) console.error(`- ${f}`);
   process.exit(1);
 }
 console.log(
-  `extension static check ok: version=${manifest.version}, sw=${sw}, suffix-regex 双份一致, direct-reason ${directTokens.length} 个对齐, 接管收网在位`,
+  `extension static check ok: version=${manifest.version}, sw=${sw}, suffix-regex 双份一致, direct-reason ${directTokens.length} 个对齐, 接管收网在位, 批量下载先确认, 右键目标上报在位`,
 );
