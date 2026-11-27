@@ -237,6 +237,7 @@ fn task_view_carries_the_retry_attempt_count() {
         attempts: 1,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
     let view = TaskView::from_task(&task, Path::new("D:/dl"));
     assert_eq!(view.attempts, 1);
@@ -263,6 +264,7 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
         attempts: 0,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
     let plain: Vec<String> = child_args(&task, None, &RuntimeTuning::default())
         .into_iter()
@@ -293,6 +295,61 @@ fn child_args_carry_the_completion_action_and_the_quota_slice() {
     );
 }
 
+/// **凭证绝不进 argv**：进程列表（`tasklist` / 进程资源管理器）对本机所有用户可见，
+/// 把 cookie 写进命令行等于向全机广播。
+///
+/// 所以带凭证的任务在 argv 上只多一个开关 `--cookie-stdin`，真值由 runner 写进
+/// 子进程的 stdin（`cli.rs` 那边早就有 `--cookie-stdin`，一行都没改）。
+#[test]
+fn a_secret_task_passes_a_switch_but_never_the_value() {
+    let mut task = Task {
+        id: "1".into(),
+        url: "https://example.com/a.bin".into(),
+        name: "a.bin".into(),
+        referer: None,
+        status: TaskStatus::Queued,
+        dir: None,
+        pid: None,
+        exit_code: None,
+        log: "a.log".into(),
+        created_at: 0,
+        updated_at: 0,
+        start_at: None,
+        hold_until: None,
+        on_complete: None,
+        attempts: 0,
+        total_len: None,
+        delivered: None,
+        needs_secret: true,
+    };
+    let with_secret: Vec<String> = child_args(&task, None, &RuntimeTuning::default())
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        with_secret.iter().any(|s| s == "--cookie-stdin"),
+        "带凭证的任务必须让子进程从 stdin 读：{with_secret:?}"
+    );
+    assert!(
+        // 注意不能写成 `contains("--cookie")`：`--cookie-stdin` 自己会命中它。
+        // 要拦的是「值」和那个**收值**的 `--cookie`，不是拒绝 stdin 那个开关。
+        !with_secret
+            .iter()
+            .any(|s| s == "--cookie" || s.contains("sid=")),
+        "argv 里出现了凭证或 --cookie（会把值写进命令行）：{with_secret:?}"
+    );
+
+    task.needs_secret = false;
+    let plain: Vec<String> = child_args(&task, None, &RuntimeTuning::default())
+        .into_iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        !plain.iter().any(|s| s == "--cookie-stdin"),
+        "没凭证就不该要 stdin（子进程否则会等一个永远不来的 EOF）：{plain:?}"
+    );
+}
+
 /// **E18**：设置里的连接数与限速必须真的出现在子进程 argv 上。
 ///
 /// 这条用例存在的理由：`connections`/`max_speed` 曾经能改能存盘，但 `child_args`
@@ -319,6 +376,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         attempts: 0,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
 
     let argv = |tuning: &RuntimeTuning| -> Vec<String> {
@@ -444,6 +502,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         attempts: 0,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
     let argv: Vec<String> = child_args(&task, None, &tuning)
         .into_iter()
@@ -487,6 +546,7 @@ fn rules_override_the_child_out_dir_and_connections() {
         attempts: 0,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
     let tuning = RuntimeTuning {
         out_dir: std::path::PathBuf::from("D:/dl"),
@@ -558,6 +618,7 @@ fn a_pinned_dir_outranks_a_later_rule() {
         attempts: 0,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
     let tuning = RuntimeTuning {
         out_dir: std::path::PathBuf::from("D:/dl"),
@@ -812,6 +873,7 @@ fn task_view_named(name: &str, status: TaskStatus) -> TaskView {
         attempts: 0,
         total_len: None,
         delivered: None,
+        needs_secret: false,
     };
     TaskView::from_task(&task, std::path::Path::new("D:/dl"))
 }

@@ -293,7 +293,6 @@ function fmtBytes(bytes) {
 // 桌面端窗口里**，所以必须在这里说出来 —— 否则用户看到的是"扩展有进度、软件里没有"。
 // 键必须与 src/host.rs 的 DIRECT_* 常量逐字一致（静态检查会核对两侧）。
 const DIRECT_REASON_TEXT = {
-  "cookie": "独立进程下载（带登录凭证），桌面端不显示",
   "hls": "独立进程下载（流媒体），桌面端不显示",
   "queue-unavailable": "桌面端未运行，已交给独立进程",
 };

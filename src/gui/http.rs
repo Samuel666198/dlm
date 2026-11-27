@@ -352,6 +352,9 @@ pub(crate) struct AddFields {
     pub referer: Option<String>,
     pub start_at: Option<u64>,
     pub on_complete: Option<String>,
+    /// 浏览器带来的 Cookie。只有 `/api/add` 这条路会真的带上它
+    /// （`/api/agent/add` 与界面上的入口都是 `None`）。
+    pub cookie: Option<String>,
 }
 
 /// 解析并校验入参。校验规则与 `/api/add` 以前内联的那份完全一致。
@@ -380,6 +383,14 @@ pub(crate) fn parse_add_fields(body: &[u8]) -> Result<AddFields, String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // 空串当成"没带"：扩展在没有 cookie 的站点上会回一个空串（见 background 的
+    // `cookieHeader`），那不叫有凭证，不该因此建一个需要解密的密文文件。
+    let cookie = value
+        .get("cookie")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
@@ -397,6 +408,7 @@ pub(crate) fn parse_add_fields(body: &[u8]) -> Result<AddFields, String> {
         referer,
         start_at,
         on_complete,
+        cookie,
     })
 }
 
@@ -410,6 +422,7 @@ pub(crate) fn send_add(tx: &Sender<Ticket>, fields: AddFields) -> Vec<u8> {
             referer: fields.referer,
             start_at: fields.start_at,
             on_complete: fields.on_complete,
+            cookie: fields.cookie,
             reply,
         })
         .is_err()

@@ -97,6 +97,7 @@ impl App {
                 referer: None,
                 start_at: None,
                 on_complete: None,
+                cookie: None,
                 reply: crate::gui::discard_reply(),
             });
             self.clipboard_hit = None;

@@ -123,6 +123,7 @@ fn apply(
             referer,
             start_at,
             on_complete,
+            cookie,
             reply,
         } => {
             // E1/E2：落点名字在**建任务这一刻**定下来（模板 + 同名处理），
@@ -168,6 +169,22 @@ fn apply(
                 &config.log_dir,
             ) {
                 Ok(task) => {
+                    // 带凭证的下载：**只在这里**把明文换成密文，然后立刻丢掉明文。
+                    // 队列里只留 `needs_secret` 这个事实（见 queue.rs 该字段的注释）。
+                    if let Some(cookie) = cookie.as_deref() {
+                        let dir = crate::gui::secrets::dir_for(&config.queue);
+                        if let Err(err) = crate::gui::secrets::put(&dir, &task.id, cookie) {
+                            // 存不下就别建任务：否则派发时必然因为"取不到凭证"失败，
+                            // 用户会看到一条注定失败的任务，还得自己猜原因。
+                            eprintln!("dlm-gui: store secret failed: {err}");
+                            store.remove(&task.id);
+                            let _ = reply.send(Err("凭证保存失败，任务未建立".to_string()));
+                            return false;
+                        }
+                        if let Some(t) = store.find_mut(&task.id) {
+                            t.needs_secret = true;
+                        }
+                    }
                     let _ = reply.send(Ok(task.id));
                     true
                 }
@@ -347,6 +364,21 @@ pub(crate) fn quota_slice(available: u64, free_slots: usize) -> Option<u64> {
 /// 落点同理：`--out-dir` 用**这条任务自己的**目录（规则命中的那条），
 /// 不是全局 `out_dir`。之前这里收一个 `out_dir` 参数，调用方传的都是全局值，
 /// 接规则时就会变成"清点/判重按规则目录算，实际下载落在全局目录"。
+/// 往任务日志里追加一行说明，让用户点开日志能看到失败原因。
+///
+/// 队列的任务模型里没有"错误信息"字段（状态 + `exit_code` + 日志文件就是全部），
+/// 所以新出现的失败理由只能写进日志 —— 这比为了一句提示去改队列格式划算。
+fn note_in_log(path: &std::path::Path, message: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "dlm-gui: {message}");
+    }
+}
+
 pub(crate) fn child_args(
     task: &Task,
     quota_slice: Option<u64>,
@@ -375,6 +407,11 @@ pub(crate) fn child_args(
     if let Some(referer) = &task.referer {
         args.push("--referer".into());
         args.push(referer.into());
+    }
+    // 凭证**绝不走 argv**：进程列表（tasklist / Process Explorer）对本机所有用户可见，
+    // 写进命令行等于把 cookie 广播出去。所以只给开关，真值走 stdin。
+    if task.needs_secret {
+        args.push("--cookie-stdin".into());
     }
     if let Some(action) = &task.on_complete {
         args.push("--on-complete".into());
@@ -500,6 +537,8 @@ fn tick(
             match verdict {
                 FinishVerdict::Done => {
                     task.status = TaskStatus::Done;
+                    // 任务真的结束了，凭证不再需要 —— 留在盘上只是多一份可被攻击的密文。
+                    crate::gui::secrets::remove(&crate::gui::secrets::dir_for(&config.queue), &id);
                     if tuning.scan_after_done {
                         crate::gui::scan::spawn_scan(
                             &queue::target_path(task.dir_in(&tuning.out_dir), &task.name),
@@ -517,6 +556,8 @@ fn tick(
                 FinishVerdict::Fail => {
                     task.status = TaskStatus::Failed;
                     task.hold_until = None;
+                    // 最终失败同样删：重试额度已经用完，不会再派发了。
+                    crate::gui::secrets::remove(&crate::gui::secrets::dir_for(&config.queue), &id);
                 }
             }
             task.exit_code = code;
@@ -635,14 +676,51 @@ fn tick(
             }
         };
         let baseline = store.delivered(&task_dir, &task.name).unwrap_or(0);
+        // 带凭证的任务：派发前把密文解出来。解不开 = 凭证失效（换了 Windows 用户、
+        // 换了机器，或文件被删/被改）。**必须让任务明确失败** —— 悄悄当成"没有 cookie"
+        // 继续下，用户最后拿到的会是一个登录页的 HTML 或一个 403，比直接说"凭证没了"难懂得多。
+        let cookie = if task.needs_secret {
+            match crate::gui::secrets::take(&crate::gui::secrets::dir_for(&config.queue), &task.id)
+            {
+                Some(cookie) => Some(cookie),
+                None => {
+                    eprintln!("dlm-gui: secret missing for task {}", task.id);
+                    if let Some(t) = store.find_mut(&task.id) {
+                        t.status = TaskStatus::Failed;
+                        t.pid = None;
+                        t.updated_at = now;
+                    }
+                    note_in_log(
+                        &task.log,
+                        "凭证已失效（可能换了 Windows 用户或换了机器），请从浏览器重新发送这个下载",
+                    );
+                    changed = true;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         let mut command = Command::new(&config.dlm_exe);
         command
             .args(child_args(&task, quota_slice, tuning))
-            .stdin(Stdio::null())
+            .stdin(if cookie.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
         match command.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
+                // 写完立刻关掉管道（drop），子进程那边读到一个 EOF 才会往下走。
+                // 写失败不当致命错：子进程可能一启动就退了，让它按自己的错误码结束。
+                if let Some(cookie) = cookie.as_deref()
+                    && let Some(mut pipe) = child.stdin.take()
+                {
+                    use std::io::Write;
+                    let _ = pipe.write_all(cookie.as_bytes());
+                }
                 let pid = child.id();
                 children.insert(task.id.clone(), child);
                 // 记下这一单占了这个 host 几条，结束时按同数归还。

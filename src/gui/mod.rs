@@ -15,6 +15,7 @@ pub mod http;
 pub mod naming;
 pub mod runner;
 pub mod scan;
+pub mod secrets;
 pub mod settings;
 pub mod snapshot;
 pub mod speed_schedule;
@@ -158,6 +159,9 @@ pub(crate) enum Ticket {
         referer: Option<String>,
         start_at: Option<u64>,
         on_complete: Option<String>,
+        /// 浏览器带来的 HTTP Cookie。**只在内存里走这一趟**，
+        /// 落盘立刻换成 DPAPI 密文（见 [`secrets`]），绝不写进 `queue.json`。
+        cookie: Option<String>,
         reply: Sender<std::result::Result<String, String>>,
     },
     Pause(String),

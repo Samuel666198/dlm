@@ -9316,6 +9316,169 @@ fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// **2026-11-27 的主修复，端到端版**：浏览器带 Cookie 的下载进队列，且明文不落盘。
+///
+/// 覆盖四件事，缺一条这个修复就不算成立：
+/// 1. `/api/add` 收得下 cookie，任务建得出来
+/// 2. `queue.json` 里 `needs_secret` 是 true —— 队列知道"这条要凭证"
+/// 3. `queue.json` 里**搜不到** cookie 明文
+/// 4. 密文文件在 `secrets/<id>.bin`，且它里面也搜不到明文
+///
+/// 用未来的 `start_at` 把任务钉在 Queued，不让它派发：否则假 dlm 秒退 ⇒ 任务 Done
+/// ⇒ 按设计密文被删掉，用例就会和一个正确的行为赛跑。
+#[test]
+fn gui_encrypts_a_browser_cookie_instead_of_writing_it_plain() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-cookie")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-cookie-token";
+    let gui_base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue path utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out dir utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log dir utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                fake_dlm_str(),
+                "--concurrency",
+                "1",
+                "--headless",
+                "--token",
+                token,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{gui_base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    const SECRET: &str = "sessionid=NEEDLE-7f3a91; csrftoken=zzz";
+    let far_future = dlm::queue::now_secs() + 3600;
+    let resp = client
+        .post(format!("{gui_base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "url": "https://example.invalid/secret.bin",
+                "name": "secret.bin",
+                "cookie": SECRET,
+                "start_at": far_future,
+            })
+            .to_string(),
+        )
+        .send()?;
+    let reply: serde_json::Value = serde_json::from_str(&resp.text()?)?;
+    assert_eq!(reply["ok"], true, "带 cookie 的入队必须成功：{reply}");
+    let id = reply["id"].as_str().context("回执里要有 id")?.to_string();
+
+    // 2) 队列知道这条任务要凭证
+    //
+    // 队列文件是**延迟落盘**的（保存有节流），刚建完任务时它可能还不存在 ——
+    // 读一次就断言会稳定地读到 os error 2，而不是在读一个真问题。
+    let queue_text = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&queue) {
+                break text;
+            }
+            if Instant::now() > deadline {
+                panic!("queue.json 迟迟没有落盘：{}", queue.display());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let queue_json: serde_json::Value = serde_json::from_str(&queue_text)?;
+    let task = queue_json["tasks"]
+        .as_array()
+        .context("queue.json 里应有 tasks")?
+        .iter()
+        .find(|t| t["id"] == id.as_str())
+        .context("队列里找不到刚建的任务")?;
+    assert_eq!(
+        task["needs_secret"], true,
+        "队列必须记住这条任务要凭证：{task}"
+    );
+
+    // 3) 队列文件里没有明文（这条是本用例的核心）
+    assert!(
+        !queue_text.contains("NEEDLE-7f3a91"),
+        "queue.json 里出现了 cookie 明文 —— 加密链路漏了"
+    );
+
+    // 4) 密文文件在，且里面也没有明文
+    eprintln!("[dbg] 5 queue ok");
+    let secret_file = dir.path().join("secrets").join(format!("{id}.bin"));
+    assert!(
+        secret_file.exists(),
+        "密文文件不存在：{}",
+        secret_file.display()
+    );
+    let blob = std::fs::read(&secret_file)?;
+    assert!(!blob.is_empty(), "密文是空的");
+    let leaked = blob.windows(14).any(|w| w == b"NEEDLE-7f3a91");
+    assert!(!leaked, "密文文件里出现了 cookie 明文");
+
+    // 顺手扫整个数据目录：除了密文本身，任何地方都不该有这串。
+    for entry in std::fs::read_dir(dir.path())?.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && let Ok(text) = std::fs::read(&path)
+        {
+            assert!(
+                !text.windows(14).any(|w| w == b"NEEDLE-7f3a91"),
+                "{} 里出现了 cookie 明文",
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// P3：单实例复用。
 ///
 /// 起第一个 `dlm-gui`（写端点文件），再起第二个用**同一个端点文件** ⇒ 第二个应当立刻退出 0，

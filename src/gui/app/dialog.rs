@@ -143,6 +143,7 @@ impl App {
                 },
                 start_at: None,
                 on_complete: None,
+                cookie: None,
                 reply: crate::gui::discard_reply(),
             });
             self.add_form = AddForm::default();

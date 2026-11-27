@@ -50,7 +50,6 @@ struct GuiEndpoint {
 /// 2026-11-27 的故障就是没有这个东西：带 Cookie 的下载悄悄走了直连，
 /// 用户看到扩展里有进度、桌面端什么都没有，无从判断。
 pub const DIRECT_HLS: &str = "hls";
-pub const DIRECT_COOKIE: &str = "cookie";
 pub const DIRECT_QUEUE_DOWN: &str = "queue-unavailable";
 
 /// 直连的说明。`reason` 是稳定标记（扩展按它分支、用例按它断言），
@@ -410,8 +409,11 @@ impl Host {
         // 所以下面每一条直连路径都带一个 `DirectNote` 回去，由扩展转述。
         //
         // 每条直连路径都对应一个 `DirectNote`（两条分支都产出，所以这里不是 Option）。
-        let note = if cookie.is_none() && !hls {
-            match self.try_queue(url, name, referer) {
+        // 2026-11-27 修的就是这里：以前 `cookie.is_none() && !hls` 才进队列，
+        // 于是**带 Cookie 的下载（几乎全部真实下载）**只能走直连，桌面端永远看不见。
+        // 现在 Cookie 跟着请求一起进队列，由 GUI 加密落盘（见 gui::secrets）。
+        let note = if !hls {
+            match self.try_queue(url, name, referer, cookie) {
                 QueueOutcome::Queued(id) => {
                     return serde_json::to_vec(&json!({
                         "op": "accepted",
@@ -430,9 +432,10 @@ impl Host {
                 },
             }
         } else {
-            // HLS 比 Cookie 是更硬的理由：将来队列支持凭证了，HLS 仍然进不去。
+            // HLS 仍然只能直连：队列没有 --hls，也不能把不可续传的分片序列
+            // 伪装成一个可续传的普通文件。
             DirectNote {
-                reason: if hls { DIRECT_HLS } else { DIRECT_COOKIE },
+                reason: DIRECT_HLS,
                 detail: None,
             }
         };
@@ -716,7 +719,13 @@ impl Host {
         }
     }
 
-    fn try_queue(&self, url: &str, name: Option<&str>, referer: Option<&str>) -> QueueOutcome {
+    fn try_queue(
+        &self,
+        url: &str,
+        name: Option<&str>,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> QueueOutcome {
         let Some(path) = &self.config.gui_endpoint else {
             return QueueOutcome::Unavailable("no-endpoint");
         };
@@ -747,6 +756,9 @@ impl Host {
             "name": name,
             "referer": referer,
             "start_at": null,
+            // 走本机回环 + token，与其它控制口同一条防线；GUI 收到后立刻 DPAPI 加密，
+            // 明文不会落到 queue.json 里（见 gui::secrets 的模块注释）。
+            "cookie": cookie,
         });
         let response = client
             .post(format!(
@@ -1234,24 +1246,37 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// **2026-11-27 改写了这条用例。**
+    ///
+    /// 它以前叫 `host_keeps_cookie_downloads_on_the_direct_path`，断言
+    /// 「带 Cookie 必须直连，且不许碰队列端点」—— 也就是说，**它把这次要修的 bug
+    /// 当成了规格**：正因为带 Cookie 的下载被挡在队列外，桌面端才什么都看不见。
+    ///
+    /// 规矩没有变，只是适用的对象换了：**HLS 仍然不许进队列**（队列没有 `--hls`，
+    /// 也不能把不可续传的分片序列伪装成一个可续传的普通文件）。
+    /// 保留原用例里那个有价值的「端点一次都没被连」探针，只是换到 HLS 身上。
     #[test]
-    fn host_keeps_cookie_downloads_on_the_direct_path() {
+    fn host_keeps_hls_downloads_off_the_queue_endpoint() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let dir = std::env::temp_dir().join(format!("dlm-b10-cookie-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dlm-b3b-hls-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let mut host = Host::new(HostConfig {
             gui_endpoint: Some(endpoint_file(&dir, port)),
             ..config(&dir)
         });
-        let reply: Value = serde_json::from_slice(&host.handle(
-            br#"{"op":"download","url":"https://example.invalid/a.bin","cookie":"sid=1"}"#,
-        ))
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/a.m3u8","hls":true}"#),
+        )
         .unwrap();
-        assert_eq!(reply["mode"], "direct", "带 Cookie 必须直连：{reply}");
+        assert_eq!(reply["mode"], "direct", "HLS 必须直连：{reply}");
+        assert_eq!(reply["reason"], DIRECT_HLS, "{reply}");
         listener.set_nonblocking(true).unwrap();
-        assert!(listener.accept().is_err(), "带 Cookie 时不许碰队列端点");
+        assert!(
+            listener.accept().is_err(),
+            "HLS 时不许碰队列端点（队列没有 --hls）"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1397,13 +1422,90 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+    /// 起一个会把**请求正文**记下来的桩：断言 cookie 真的随请求进了 GUI。
+    ///
+    /// 只回一个 `{"ok":true}` 是不够的 —— 那样测不出 cookie 有没有被带上去，
+    /// 而"带上去"正是这次修复的全部内容。
+    fn capture_stub(
+        response: &'static str,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::Mutex<String>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // reqwest 的头与正文可能分两个包到达；读到超时为止再拼起来。
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+                .unwrap();
+            let mut acc = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(_) => break,
+                }
+                if acc.contains("\r\n\r\n") && acc.len() > acc.find("\r\n\r\n").unwrap() + 4 {
+                    break;
+                }
+            }
+            *sink.lock().unwrap() = acc;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+        });
+        (port, seen, handle)
+    }
+
+    /// **2026-11-27 的修复本体**：带 Cookie 的下载必须进队列。
+    ///
+    /// 以前的条件是 `cookie.is_none() && !hls` 才走队列，于是**几乎全部真实下载**
+    /// （浏览器每次都带 cookie）都走了直连，桌面端窗口永远看不到它们。
+    #[test]
+    fn a_cookie_download_goes_into_the_queue_with_its_cookie() {
+        let dir = std::env::temp_dir().join(format!("dlm-cookie-queue-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (port, seen, handle_thread) = capture_stub(r#"{"ok":true,"id":"t-9"}"#);
+        let mut cfg = config(&dir);
+        cfg.gui_endpoint = Some(endpoint_file(&dir, port));
+        let mut host = Host::new(cfg);
+
+        let reply: Value = serde_json::from_slice(&host.handle(
+            br#"{"op":"download","url":"https://example.invalid/c.bin","cookie":"sid=abc123"}"#,
+        ))
+        .unwrap();
+        handle_thread.join().unwrap();
+
+        assert_eq!(
+            reply["mode"], "queue",
+            "带 cookie 的下载必须进队列，否则桌面端又看不见了：{reply}"
+        );
+        assert_eq!(reply["id"], "t-9");
+        let request = seen.lock().unwrap().clone();
+        assert!(
+            request.contains("sid=abc123"),
+            "cookie 必须随请求交给 GUI（它负责加密落盘），实际请求：{request}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// **直连必须说明原因** —— 2026-11-27 那条故障的回归守卫。
     ///
     /// 直连是起一个独立的 `dlm.exe`，桌面端窗口完全看不见它。回复里没有 `reason` 的话，
     /// 扩展只能静默，用户看到的就是"扩展里有进度、软件里什么都没有"，无从判断。
-    ///
-    /// 这条用例钉两件事：排队失败时给 `queue-unavailable` + 细原因；
-    /// 而"按规则就走直连"（cookie / hls）时不能误报成队列故障 —— 那会把人引去修队列。
     #[test]
     fn a_direct_download_says_why_it_is_not_in_the_window() {
         let dir = std::env::temp_dir().join(format!("dlm-direct-note-{}", std::process::id()));
@@ -1425,28 +1527,36 @@ mod tests {
             "细原因要能区分「没配端点」和「端点文件丢了」：{reply}"
         );
 
-        // 带 Cookie：走直连是**按规则**，不是队列坏了。误报会把排查带偏。
+        // 带 Cookie 也一样：队列不可达时照样降级直连，但理由只能是"队列不可达"。
+        // 报成 cookie 会把人引去查一个其实没坏的东西。
         let mut host = Host::new(config(&dir));
         let reply: Value = serde_json::from_slice(&host.handle(
             br#"{"op":"download","url":"https://example.invalid/c.bin","cookie":"sid=abc"}"#,
         ))
         .unwrap();
         assert_eq!(reply["mode"], "direct", "{reply}");
-        assert_eq!(reply["reason"], DIRECT_COOKIE, "{reply}");
+        assert_eq!(reply["reason"], DIRECT_QUEUE_DOWN, "{reply}");
 
-        // HLS 同理，而且它是比 Cookie 更硬的理由。
-        let mut host = Host::new(config(&dir));
+        // HLS：**队列开着也不进队列** —— 队列没有 --hls，也不能把分片序列伪装成
+        // 一个可续传的普通文件。这条要证明是"按规则直连"，不是"队列坏了"。
+        let (port, handle_thread) = one_shot_stub(r#"{"ok":true,"id":"t-1"}"#);
+        let mut cfg = config(&dir);
+        cfg.gui_endpoint = Some(endpoint_file(&dir, port));
+        let mut host = Host::new(cfg);
         let reply: Value = serde_json::from_slice(
             &host.handle(br#"{"op":"download","url":"https://example.invalid/d.m3u8","hls":true}"#),
         )
         .unwrap();
+        // 桩**不许 join**：HLS 根本不会去连，那个线程会永远卡在 accept() 上，
+        // join 就是死锁。直接丢掉句柄 —— 用例结束进程也就退了。
+        drop(handle_thread);
         assert_eq!(reply["mode"], "direct", "{reply}");
         assert_eq!(reply["reason"], DIRECT_HLS, "{reply}");
 
         // 反过来：真进了队列就不许有 reason —— 那会让人以为它不在窗口里。
         let dir2 = dir.join("queued");
         fs::create_dir_all(&dir2).unwrap();
-        let (port, handle_thread) = one_shot_stub(r#"{"ok":true,"id":"t-1"}"#);
+        let (port, handle_thread) = one_shot_stub(r#"{"ok":true,"id":"t-2"}"#);
         let mut cfg = config(&dir2);
         cfg.gui_endpoint = Some(endpoint_file(&dir2, port));
         let mut host = Host::new(cfg);

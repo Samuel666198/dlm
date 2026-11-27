@@ -67,6 +67,13 @@ pub struct Task {
     pub dir: Option<PathBuf>,
     pub total_len: Option<u64>,
     pub delivered: Option<u64>,
+    /// 这条任务带凭证（HTTP Cookie），密文在 `gui::secrets` 里，**这里只记事实**。
+    ///
+    /// 为什么是 bool 而不是把 cookie 塞进结构体：[`crate::state`] 立过「口令不进文件、
+    /// 靠结构里没有这个字段保证」。队列要重启后还能续传，所以密文必须落盘，
+    /// 但字段留成 bool，`queue.json` 里就永远不可能出现凭证本身。
+    #[serde(default)]
+    pub needs_secret: bool,
 }
 
 impl Task {
@@ -392,6 +399,8 @@ impl QueueStore {
             dir,
             total_len: None,
             delivered: None,
+            // 凭证由建任务的那一方（HTTP 入口）随后补上：它才知道这次请求带没带 cookie。
+            needs_secret: false,
         };
         self.tasks.push(task.clone());
         Ok(task)

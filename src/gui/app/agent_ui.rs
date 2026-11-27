@@ -158,6 +158,8 @@ impl App {
                 referer,
                 start_at: None,
                 on_complete: None,
+                // Agent 票据没有凭证可带：它拿到的是 URL，不是浏览器的 cookie。
+                cookie: None,
                 reply,
             });
             // 回执到了才把票据置成 Approved（见模块注释：Agent 在轮询这个状态）。
