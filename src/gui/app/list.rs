@@ -233,21 +233,114 @@ impl App {
             batch::toggle_all(&mut self.batch, &visible_ids);
         }
 
-        if rows.is_empty() {
+        // 外部下载（浏览器直连 / HLS）作为**只读行**接在任务后面：
+        // 它们本来就不是队列任务，所以不计入任何计数，也不参与筛选。
+        let outsider = self.externals.clone();
+
+        if rows.is_empty() && outsider.is_empty() {
             self.empty_state(ui);
             return;
         }
 
+        let total_rows = rows.len() + outsider.len();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show_rows(ui, theme::ROW_H, rows.len(), |ui, range| {
+            .show_rows(ui, theme::ROW_H, total_rows, |ui, range| {
                 for i in range {
-                    self.row(ui, &rows[i]);
+                    if i < rows.len() {
+                        self.row(ui, &rows[i]);
+                    } else {
+                        Self::external_row(ui, &outsider[i - rows.len()]);
+                    }
                 }
             });
 
         // 悬浮岛**最后画**：它要盖在列表上面，而且不参与布局（列表位置不动）。
         self.batch_island(ui, &visible_ids);
+    }
+
+    /// 一行**外部下载**（浏览器直连 / HLS）：与任务行同高同列，但没有勾选框、
+    /// 没有右键菜单 —— 它不由队列控制，暂停/续传都无从谈起。
+    ///
+    /// 状态列里放一枚「外部」胶囊：这是用户要的标签，也是"为什么这条点不动"的解释。
+    fn external_row(ui: &mut egui::Ui, item: &crate::queue::External) {
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), theme::ROW_H),
+            egui::Sense::hover(),
+        );
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let cols = columns(rect);
+        let painter = ui.painter();
+
+        // 名字（左）—— 与任务行同一起点，列才对得齐。
+        painter.text(
+            cols.name.left_center(),
+            egui::Align2::LEFT_CENTER,
+            &item.name,
+            egui::FontId::proportional(12.5),
+            theme::ink(),
+        );
+
+        // 大小（右对齐）
+        painter.text(
+            cols.size.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            fmt_bytes(item.total),
+            egui::FontId::proportional(11.0),
+            theme::ink_2(),
+        );
+
+        // 进度：整体一条（外部行不画分段 —— 分块细节留给详情）
+        let track_h = 4.0;
+        let track = egui::Rect::from_min_size(
+            egui::pos2(cols.progress.left(), rect.center().y - track_h / 2.0),
+            egui::vec2((cols.progress.width() - 34.0 - 8.0).max(20.0), track_h),
+        );
+        painter.rect_filled(track, 99.0, theme::track());
+        let pct = (item.percent() / 100.0).clamp(0.0, 1.0);
+        if pct > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_size(track.min, egui::vec2(track.width() * pct, track_h)),
+                99.0,
+                theme::accent_soft(),
+            );
+        }
+
+        // 百分比：与任务行同一位置、同字号，这样两行的进度列读起来一致。
+        painter.text(
+            egui::pos2(cols.progress.right(), rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0}%", item.percent()),
+            egui::FontId::monospace(11.0),
+            theme::ink_2(),
+        );
+
+        // 「外部」胶囊 —— 与状态列里那些胶囊同一套画法（圆角到底 + 居中文案）。
+        let galley = painter.layout_no_wrap(
+            "外部".to_string(),
+            egui::FontId::proportional(11.0),
+            theme::ink_3(),
+        );
+        let pill = egui::Rect::from_min_size(
+            egui::pos2(cols.status.left(), rect.center().y - 19.0 / 2.0),
+            egui::vec2((galley.size().x + 20.0).min(cols.status.width()), 19.0),
+        );
+        painter.rect_filled(pill, 99.0, theme::surface_3());
+        painter.text(
+            pill.center(),
+            egui::Align2::CENTER_CENTER,
+            "外部",
+            egui::FontId::proportional(11.0),
+            theme::ink_3(),
+        );
+
+        // 悬停说明：这条为什么在这儿、为什么点不动。
+        response.on_hover_text(format!(
+            "{}\n外部进程在下载（浏览器直连 / HLS），不在队列里 —— 桌面端只读，不能暂停或续传。",
+            item.path.display()
+        ));
     }
 
     /// 一行任务。

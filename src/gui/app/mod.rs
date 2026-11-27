@@ -539,7 +539,7 @@ impl App {
             "open-out-dir" => {
                 // 与「打开文件」走同一个闸门：门禁与自动化里弹资源管理器会把测试机的
                 // 桌面弄脏（而且没人关）。
-                let dir = self.settings.effective_out_dir();
+                let dir = self.out_dir_now();
                 let plan = crate::actions::reveal_plan(crate::actions::RevealMode::Open, &dir);
                 if crate::actions::shell_suppressed() {
                     eprintln!(
@@ -593,6 +593,20 @@ impl App {
     /// 从 [`eframe::App::ui`] 里抽出来只为一个理由：`eframe::Frame` 在测试里造不出来，
     /// 而"整帧画一遍不 panic"是这一层唯一能自动化的硬检查 —— 工具条的自绘按钮、
     /// 上下文动作条、状态栏的限速菜单都只在这条路上被走到。
+    /// **任务真正写到哪里**：设置里的落点优先，否则用命令行 `--out-dir`。
+    ///
+    /// 必须与 runner 的 `RuntimeTuning::out_dir` 用**同一套规则**
+    /// （`gui::RuntimeTuning::from_settings_with`）。踩过的坑：外部下载的扫描
+    /// 一开始用的是 `Settings::effective_out_dir()`（没设就退回 `~/Downloads`），
+    /// 于是"任务写在 `--out-dir` 指定的目录、外部下载却去 Downloads 里找"——
+    /// 界面上一条外部行都不出现，而所有用例都是绿的（用例里两者恰好相同）。
+    fn out_dir_now(&self) -> std::path::PathBuf {
+        self.settings
+            .out_dir
+            .clone()
+            .unwrap_or_else(|| self.default_out_dir.clone())
+    }
+
     /// 扫一次落点目录，刷新「外部下载」。
     ///
     /// **每 2 秒最多一次**：这是每帧都会走到的路，`read_dir` 一个满是文件的
@@ -609,7 +623,7 @@ impl App {
         }
         self.externals_next_at = Some(now + std::time::Duration::from_secs(2));
 
-        let dir = self.settings.effective_out_dir();
+        let dir = self.out_dir_now();
         let known: std::collections::HashSet<String> =
             self.tasks().into_iter().map(|t| t.name).collect();
         self.externals = externals::without_known(crate::queue::externals(&dir), &known);
@@ -687,14 +701,10 @@ impl App {
                 .show(ui, |ui| self.clipboard_hint_bar(ui));
         }
 
-        // 外部下载（不属于队列那些）：每 2 秒扫一次落点目录，有就贴一条只读的带子。
+        // 外部下载（不属于队列那些）：每 2 秒扫一次落点目录。
+        // **不再是一条独立的横带**（用户说那样很丑）——它们现在作为只读行
+        // 接在任务列表后面，见 `list::list`。
         self.refresh_externals();
-        if !self.externals.is_empty() {
-            let items = self.externals.clone();
-            egui::Panel::top("externals")
-                .show_separator_line(false)
-                .show(ui, |ui| externals::strip(ui, &items));
-        }
 
         // 更新：把手动检查的结果收进槽里（非阻塞）。
         self.drain_update(&ctx);

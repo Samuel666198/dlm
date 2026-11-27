@@ -583,6 +583,8 @@ pub struct External {
     pub total: u64,
     pub delivered: u64,
     pub segments: Vec<(u64, u64)>,
+    /// 它的落点（`<out_dir>/<name>`）。行上用来做悬浮提示。
+    pub path: PathBuf,
 }
 
 impl External {
@@ -635,6 +637,7 @@ pub fn externals(out_dir: &Path) -> Vec<External> {
             total,
             delivered,
             segments,
+            path: out_dir.join(name),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
