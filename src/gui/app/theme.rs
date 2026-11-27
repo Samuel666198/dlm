@@ -19,7 +19,7 @@ pub const STATUS_H: f32 = 32.0;
 /// E19：剪贴板提示条高度。只在有命中时占位，所以这个数只影响那一条。
 pub const CLIPBOARD_HINT_H: f32 = 32.0;
 /// 左侧分类栏宽度（D6：保留）。
-pub const SIDEBAR_W: f32 = 212.0;
+pub const SIDEBAR_W: f32 = 184.0;
 
 /// 侧栏收起后的宽度：只留一条图标。
 ///

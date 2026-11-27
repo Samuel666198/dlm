@@ -2151,3 +2151,36 @@ fn elapsed_and_average_speed_use_wall_clock_not_instantaneous() {
     );
     assert_eq!(avg_speed_text(&task, 5_000), "—");
 }
+
+/// **文件名中间省略**（用户：图4 那些超长文件名把「大小」列顶开了）。
+///
+/// 关键是**尾巴要留住**：扩展名和 `(1)` 这种重名序号在结尾，正是"这是哪个文件"
+/// 的判据。旧的 `elide(name, 46)` 写死字数，右栏一打开列变窄就直接压到下一列上。
+#[test]
+fn long_file_names_keep_their_tail_when_elided() {
+    use super::app::list::elide_middle;
+
+    // 短名字一个字都不动
+    assert_eq!(elide_middle("a.bin", 30), "a.bin");
+    assert_eq!(
+        elide_middle("Inkling-2-Mini.gguf", 30),
+        "Inkling-2-Mini.gguf"
+    );
+
+    // 长名字：中间省略，但扩展名与序号必须还在
+    let long = "Inkling-2-Mini-UD-IQ3_XXS (1).gguf";
+    let out = elide_middle(long, 20);
+    assert!(out.contains('…'), "该省略：{out}");
+    assert!(out.ends_with(".gguf"), "尾巴（扩展名）必须留住：{out}");
+    assert!(out.starts_with("Inkling"), "开头也该留一点：{out}");
+    assert!(out.chars().count() <= 20, "不能超预算：{out}");
+
+    // 极小的预算也不许 panic，且仍然带省略号
+    let tiny = elide_middle(long, 3);
+    assert!(tiny.contains('…'), "{tiny}");
+
+    // 全中文名字同样适用
+    let cn = "这是一个特别长的中文文件名字用来测试省略逻辑.zip";
+    let out = elide_middle(cn, 16);
+    assert!(out.ends_with(".zip"), "中文名也要留住扩展名：{out}");
+}

@@ -504,18 +504,34 @@ impl App {
         let painter = ui.painter();
         // 主名：去掉分类前缀。
         let name = task.name.rsplit('/').next().unwrap_or(&task.name);
+
+        // 文件类型图标（用户：文件名前用图标显示类型），尺寸与侧栏那一套一致。
+        let icon_side = 13.0;
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.center().y - 8.0 - icon_side / 2.0 - 4.0),
+            egui::vec2(icon_side, icon_side),
+        );
+        super::icons::draw_icon(
+            painter,
+            super::icons::for_category(task.category),
+            icon_rect,
+            theme::ink_3(),
+        );
+
+        let name_left = rect.left() + icon_side + 6.0;
+        let budget = chars_for_width(rect.right() - name_left);
         painter.text(
-            rect.left_top() + egui::vec2(0.0, rect.height() / 2.0 - 8.0),
+            egui::pos2(name_left, rect.top() + rect.height() / 2.0 - 8.0),
             egui::Align2::LEFT_CENTER,
-            elide(name, 46),
+            elide_middle(name, budget),
             egui::FontId::proportional(12.5),
             theme::ink(),
         );
-        // 副标题：host 或落点目录。
+        // 副标题：host 或落点目录（与主名左对齐，所以也要让出图标宽度）。
         painter.text(
-            rect.left_top() + egui::vec2(0.0, rect.height() / 2.0 + 8.0),
+            egui::pos2(name_left, rect.top() + rect.height() / 2.0 + 8.0),
             egui::Align2::LEFT_CENTER,
-            elide(&host_of(&task.url), 56),
+            elide(&host_of(&task.url), budget.max(8)),
             egui::FontId::proportional(11.0),
             theme::ink_3(),
         );
@@ -999,6 +1015,34 @@ fn elide(s: &str, max: usize) -> String {
     let kept: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
 }
+/// **中间省略**：保留开头和结尾，只吃掉中间。
+///
+/// 为什么不用尾省略：长文件名的**信息在两端** —— 开头是名字，结尾是扩展名与 `(1)`
+/// 这种重名序号。`Inkling-2-Mini-UD-IQ3_XXS (1).gguf` 尾巴被吃掉就看不出它是 gguf、
+/// 也分不清是不是重复下载。
+pub fn elide_middle(name: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let budget = max_chars.max(8);
+    if chars.len() <= budget {
+        return name.to_string();
+    }
+    // 尾部多留一点（扩展名 + 序号通常比开头短，但更要紧）。
+    let tail = (budget / 2).max(4).min(chars.len() - 1);
+    let head = budget.saturating_sub(tail + 1);
+    let left: String = chars[..head].iter().collect();
+    let right: String = chars[chars.len() - tail..].iter().collect();
+    format!("{left}…{right}")
+}
+
+/// 一行最多放得下几个字符（按列宽估算）。
+///
+/// 不再写死 46：右栏一打开列就窄了，写死的字数会直接顶到下一列上
+/// （用户 2026-11-27 的截图就是这样）。
+fn chars_for_width(width: f32) -> usize {
+    let per_char = 7.2; // 12.5px 字号下的经验平均值
+    ((width - 4.0).max(40.0) / per_char).floor() as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RowMenuAction, columns, row_menu_items};
