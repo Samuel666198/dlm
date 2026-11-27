@@ -31,6 +31,7 @@ pub mod components;
 pub mod diagnose;
 pub mod dialog;
 pub mod drawer;
+pub mod externals;
 pub mod fonts;
 pub mod grab_ui;
 pub mod icons;
@@ -216,6 +217,10 @@ pub struct App {
     /// 上一帧绘制时有没有读到「滚到选中项」的标志。用例靠它钉住那类
     /// 「帧内自我清除」的 bug（标志永远是假，界面却不报错）。
     pub(super) palette_scroll_seen: bool,
+    /// 外部进程的下载（浏览器直连 / HLS）：队列里没有记录，靠扫 `.dlm.json` 发现。
+    pub(super) externals: Vec<crate::queue::External>,
+    /// 下次允许再扫目录的时刻（别每帧都 read_dir）。
+    pub(super) externals_next_at: Option<std::time::Instant>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
@@ -357,6 +362,8 @@ impl App {
             palette_scroll_to_sel: false,
             palette_last_rect: None,
             palette_scroll_seen: false,
+            externals: Vec::new(),
+            externals_next_at: None,
             palette_take_focus: false,
             start_hidden: 0,
             clipboard_hit: None,
@@ -578,6 +585,28 @@ impl App {
     /// 从 [`eframe::App::ui`] 里抽出来只为一个理由：`eframe::Frame` 在测试里造不出来，
     /// 而"整帧画一遍不 panic"是这一层唯一能自动化的硬检查 —— 工具条的自绘按钮、
     /// 上下文动作条、状态栏的限速菜单都只在这条路上被走到。
+    /// 扫一次落点目录，刷新「外部下载」。
+    ///
+    /// **每 2 秒最多一次**：这是每帧都会走到的路，`read_dir` 一个满是文件的
+    /// Downloads 目录不适合每帧做。
+    ///
+    /// 队列里已有的同名任务要排掉 —— 那可能就是 GUI 自己在下，
+    /// 断点文件当然也在。不然同一个文件会同时出现在两处。
+    fn refresh_externals(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(next) = self.externals_next_at
+            && now < next
+        {
+            return;
+        }
+        self.externals_next_at = Some(now + std::time::Duration::from_secs(2));
+
+        let dir = self.settings.effective_out_dir();
+        let known: std::collections::HashSet<String> =
+            self.tasks().into_iter().map(|t| t.name).collect();
+        self.externals = externals::without_known(crate::queue::externals(&dir), &known);
+    }
+
     pub(super) fn ui_frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
@@ -648,6 +677,15 @@ impl App {
             egui::Panel::top("clipboard-hint")
                 .exact_size(theme::CLIPBOARD_HINT_H)
                 .show(ui, |ui| self.clipboard_hint_bar(ui));
+        }
+
+        // 外部下载（不属于队列那些）：每 2 秒扫一次落点目录，有就贴一条只读的带子。
+        self.refresh_externals();
+        if !self.externals.is_empty() {
+            let items = self.externals.clone();
+            egui::Panel::top("externals")
+                .show_separator_line(false)
+                .show(ui, |ui| externals::strip(ui, &items));
         }
 
         // 更新：把手动检查的结果收进槽里（非阻塞）。

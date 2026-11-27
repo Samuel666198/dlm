@@ -551,6 +551,96 @@ pub fn merged_count(rows: &[(u64, u64)]) -> usize {
     count
 }
 
+/// 覆盖集的**合并后总字节数**（口径与 [`merged_count`] 一致）。
+pub fn merged_len(rows: &[(u64, u64)]) -> u64 {
+    let mut sorted: Vec<(u64, u64)> = rows
+        .iter()
+        .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+        .collect();
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted.sort_unstable();
+    let mut total = 0u64;
+    let (mut start, mut reach) = sorted[0];
+    for (s, e) in sorted.into_iter().skip(1) {
+        if s > reach.saturating_add(1) {
+            total = total.saturating_add(reach - start + 1);
+            start = s;
+        }
+        reach = reach.max(e);
+    }
+    total.saturating_add(reach - start + 1)
+}
+
+/// 一次**外部进程**留下的下载（浏览器直连、HLS 之类）。
+///
+/// 桌面端队列里没有它的记录，但断点文件 `<落点>/<名>.dlm.json` 还在，
+/// 所以可以被动发现 —— 只读展示，不提供暂停/续传（那是队列任务的语义）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct External {
+    pub name: String,
+    pub total: u64,
+    pub delivered: u64,
+    pub segments: Vec<(u64, u64)>,
+}
+
+impl External {
+    pub fn percent(&self) -> f32 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        ((self.delivered as f64 / self.total as f64) * 100.0).clamp(0.0, 100.0) as f32
+    }
+}
+
+/// 扫落点目录，找出外部进程正在下/下了一半的任务。
+///
+/// 只认 `*.dlm.json`（dlm 自己的断点），坏文件与没有 total 的跳过；
+/// 结果按名字排序，顺序稳定（不然界面每次刷新都在跳）。
+pub fn externals(out_dir: &Path) -> Vec<External> {
+    let Ok(entries) = fs::read_dir(out_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(name) = file.strip_suffix(".dlm.json") else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(total) = v
+            .get("validator")
+            .and_then(|x| x.get("total_len"))
+            .and_then(|x| x.as_u64())
+            .filter(|t| *t > 0)
+        else {
+            continue;
+        };
+        let segments = interval_rows(&v).unwrap_or_default();
+        let delivered = merged_len(&segments).min(total);
+        out.push(External {
+            name: name.to_string(),
+            total,
+            delivered,
+            segments,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// 读断点里的 `(total_len, 覆盖集)`；没有 total 或没有文件交 `None`。
 ///
 /// 与 [`progress`] 分开而不是复用它：`progress` 在 `total_len` 缺失时仍然会给出
@@ -577,6 +667,57 @@ fn tmp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 合并后的总字节数：重叠不能被重复计。
+    #[test]
+    fn merged_len_does_not_double_count_overlaps() {
+        assert_eq!(merged_len(&[]), 0);
+        assert_eq!(merged_len(&[(0, 9)]), 10, "闭区间 0..=9 是 10 字节");
+        assert_eq!(merged_len(&[(0, 9), (10, 19)]), 20, "紧邻合成 0..=19");
+        assert_eq!(merged_len(&[(0, 9), (5, 14)]), 15, "重叠只算一次：0..=14");
+        assert_eq!(merged_len(&[(0, 9), (20, 29)]), 20, "断开各算各的");
+        assert_eq!(merged_len(&[(9, 0)]), 10, "写反的区间摆正后照算");
+    }
+
+    /// **外部下载要能被发现**（浏览器直连、HLS 那些不进队列的）。
+    ///
+    /// 判据只看落点目录里的 `*.dlm.json`：那是 dlm 自己的断点，里面有 total 与覆盖集，
+    /// 所以不需要改宿主、也不需要让 CLI 写队列。
+    #[test]
+    fn externals_are_discovered_from_breakpoint_files() {
+        let dir = std::env::temp_dir().join(format!("dlm-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 一个正经的断点：总长 1000，已覆盖 0..=99 与 500..=599
+        fs::write(
+            dir.join("movie.mp4.dlm.json"),
+            serde_json::json!({
+                "validator": { "total_len": 1000 },
+                "segments": [ {"start": 0, "end": 99}, {"start": 500, "end": 599} ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // 坏文件、没有 total 的文件、普通文件：都不许算进来
+        fs::write(dir.join("broken.bin.dlm.json"), b"not json").unwrap();
+        fs::write(
+            dir.join("nototal.bin.dlm.json"),
+            serde_json::json!({ "segments": [] }).to_string(),
+        )
+        .unwrap();
+        fs::write(dir.join("plain.txt"), b"hello").unwrap();
+
+        let list = externals(&dir);
+        assert_eq!(list.len(), 1, "只该认出那一个正经断点：{list:?}");
+        let one = &list[0];
+        assert_eq!(one.name, "movie.mp4", "名字要去掉 .dlm.json 后缀");
+        assert_eq!(one.total, 1000);
+        assert_eq!(one.delivered, 200, "两段各 100 字节");
+        assert!((one.percent() - 20.0).abs() < 1e-6);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// 覆盖集的合并计数：碎行要按"视觉上几块"来数。
     #[test]

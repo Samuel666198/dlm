@@ -1926,3 +1926,45 @@ fn the_palette_scroll_flag_survives_into_the_next_frame() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
+/// **外部下载要能在界面上露出来，且不能把队列任务混进去**。
+///
+/// 2026-11-27 用户问「插件请求的按理桌面端该有记录吧」：只有 GUI 自己派发的任务才进
+/// `queue.json`，浏览器直连与 HLS 都不在。它们的断点文件是共用的（`<落点>/<名>.dlm.json`），
+/// 所以能被动发现 —— 但必须排掉队列里已有的同名任务，否则同一个文件会出现在两处。
+#[test]
+fn the_externals_strip_shows_foreign_downloads_only() {
+    use crate::queue::External;
+
+    let foreign = |name: &str| External {
+        name: name.to_string(),
+        total: 1000,
+        delivered: 250,
+        segments: vec![(0, 249)],
+    };
+
+    let known: std::collections::HashSet<String> = ["queued.mp4".to_string()].into_iter().collect();
+    let kept = super::app::externals::without_known(
+        vec![foreign("queued.mp4"), foreign("outside.mp4")],
+        &known,
+    );
+    assert_eq!(kept.len(), 1, "队列里已有的必须排掉");
+    assert_eq!(kept[0].name, "outside.mp4");
+    assert!((kept[0].percent() - 25.0).abs() < 1e-6, "250/1000");
+
+    // 真有外部下载时，这一帧要画得出来（含段落条），且不许把状态冲掉
+    let (mut app, dir) = test_app(
+        "externals-strip",
+        vec![task_view_named("a.bin", TaskStatus::Done)],
+    );
+    app.externals = vec![foreign("outside.mp4")];
+    // 把"下次扫描"推到很远的将来：否则这一帧会去扫**真实的** Downloads 目录，
+    // 用例结果就跟着开发机的文件状态变了。
+    app.externals_next_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(600));
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(frame_input(), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    assert_eq!(app.externals.len(), 1, "渲染不该把外部列表冲掉");
+
+    let _ = fs::remove_dir_all(dir);
+}
