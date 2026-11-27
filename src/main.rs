@@ -79,6 +79,8 @@ fn dispatch() -> Result<u8> {
     let wants_json = cli.wants_json();
     let quiet = cli.quiet();
     let no_start = cli.no_start();
+    // 视频那条路要在 `into_task()` 之前读：它会消费 Cli。
+    let is_video = cli.video();
     // R19：完成后动作也是"消费 Cli 之前"取走的一格；它不进 Task/Config，也不参与续传比对。
     let action = cli.action().cloned();
     let mut cfg = cli.into_config();
@@ -86,6 +88,31 @@ fn dispatch() -> Result<u8> {
         Ok(task) => task,
         Err(err) => return Ok(parameter_error(&err, wants_json)),
     };
+
+    // 视频下载走 yt-dlp，与引擎那条路**完全分开**（不共用探测/分段/续传）：
+    // 视频站的 URL 不是"一个文件"，硬塞进分段下载没有意义。
+    if is_video {
+        return Ok(
+            match dlm::video::run(&task.url, &task.dir, quiet, wants_json) {
+                Ok(code) => code,
+                Err(err) => {
+                    if wants_json {
+                        println!(
+                            "{}",
+                            dlm::json_out::to_line(&dlm::json_out::err(
+                                dlm::json_out::Code::Internal,
+                                format!("{err:#}"),
+                                None,
+                            ))
+                        );
+                    } else {
+                        eprintln!("dlm 跑不起来：{err:#}");
+                    }
+                    DOWNLOAD_FAILED
+                }
+            },
+        );
+    }
 
     if no_start {
         // **E20④**：全树生产代码没有任何地方读 bit0，引擎文档明写"本函数不看这一位"，

@@ -337,6 +337,15 @@ pub struct Cli {
         help = "把 URL 当作 HLS 播放列表，顺序下载分片并合并（不做 DASH/DRM/嗅探）"
     )]
     hls: bool,
+    /// 走视频下载：把 URL 交给 yt-dlp（视频站的页面地址在这里才有出路）。
+    ///
+    /// 与 `--allow-html` 是两件事：那个是"我知道这是网页，就要下网页"，
+    /// 这个是"这是视频页，我要视频"。
+    #[arg(
+        long,
+        help = "把 URL 交给 yt-dlp 下视频（需要本机有 yt-dlp；带 DASH/HLS 的站点用它）"
+    )]
+    video: bool,
     /// 明确允许下载"看起来是网页"的响应（`Content-Type: text/html`）。
     ///
     /// 默认不允许：视频页 / BV 号 / 分享链接拿到的就是 HTML，闷头下回来是一个网页。
@@ -406,6 +415,10 @@ impl Cli {
     /// "只是不想看进度行"就变成"请求变了，从头下"。
     pub fn wants_json(&self) -> bool {
         self.json
+    }
+
+    pub fn video(&self) -> bool {
+        self.video
     }
 
     pub fn quiet(&self) -> bool {

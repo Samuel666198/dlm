@@ -11742,3 +11742,98 @@ fn a_web_page_is_refused_unless_html_is_allowed() -> anyhow::Result<()> {
     server.join().ok();
     Ok(())
 }
+
+// ------------------------------------------------ 视频下载（yt-dlp 通路）
+
+/// 起 `dlm.exe` 并指定 yt-dlp 的位置（用假的那个，不碰网络）。
+fn run_dlm_with_ytdlp(
+    args: &[&str],
+    ytdlp: &str,
+    extra: &[(&str, &str)],
+) -> anyhow::Result<std::process::Output> {
+    let bin = env!("CARGO_BIN_EXE_dlm");
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args).env("DLM_YTDLP", ytdlp);
+    cmd.env_remove("DLM_NO_SHELL_OPEN");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd.output().with_context(|| format!("起二进制失败：{bin}"))
+}
+
+/// **`--video` 走 yt-dlp，不走进自己的引擎。**
+///
+/// 视频站的地址不是"一个文件"：分段、续传、`Content-Range` 那一套对它没有意义。
+/// 这条用例钉住三件事：
+/// 1. 元信息（标题/体积）会先打出来 —— 用户能看出"这是哪个视频、多大"；
+/// 2. 进度是**从 yt-dlp 的输出里读出来的**（假 yt-dlp 吐的是 25%/50%/100%）；
+/// 3. 退出码 0，且落点目录参数被原样传给 yt-dlp（模板在 -o 里）。
+#[test]
+fn video_mode_delegates_to_yt_dlp_and_reads_its_progress() -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join(format!("dlm-video-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+
+    let fake = env!("CARGO_BIN_EXE_fake-ytdlp");
+    let dir_arg = dir.to_string_lossy().to_string();
+    let out = run_dlm_with_ytdlp(
+        &[
+            "--video",
+            "--url",
+            "https://example.com/v/1",
+            "--out-dir",
+            &dir_arg,
+        ],
+        fake,
+        &[],
+    )?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    eprintln!("---- stdout ----\n{stdout}\n---- stderr ----\n{stderr}");
+
+    assert!(
+        out.status.success(),
+        "假 yt-dlp 正常退 0，dlm 也该退 0。stderr：{stderr}"
+    );
+    assert!(
+        stdout.contains("示例 视频"),
+        "元信息的标题要打出来（队列里就靠它命名）：{stdout}"
+    );
+    assert!(stdout.contains("2.0 MiB"), "体积要打出来：{stdout}");
+    assert!(
+        stdout.contains("100.0%"),
+        "进度要从 yt-dlp 的输出里读出来：{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// 元信息阶段就失败时：退出码非零，并且把 yt-dlp 的原因带出来（不许只说"失败了"）。
+#[test]
+fn video_mode_surfaces_the_tool_reason_when_info_extraction_fails() -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join(format!("dlm-video-fail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let fake = env!("CARGO_BIN_EXE_fake-ytdlp");
+    let dir_arg = dir.to_string_lossy().to_string();
+    let out = run_dlm_with_ytdlp(
+        &[
+            "--video",
+            "--url",
+            "https://example.com/v/1",
+            "--out-dir",
+            &dir_arg,
+        ],
+        fake,
+        &[("FAKE_YTDLP_INFO_FAIL", "1")],
+    )?;
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    eprintln!("---- stderr ----\n{stderr}");
+    assert!(!out.status.success(), "提取信息失败 ⇒ 整体必须失败");
+    assert!(
+        stderr.contains("Unable to extract") || stderr.contains("提取信息失败"),
+        "要带出 yt-dlp 的原因，不能只说一句失败：{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}

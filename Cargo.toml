@@ -34,3 +34,11 @@ name = "fake-dlm"
 path = "tests/bin/fake-dlm.rs"
 test = false
 bench = false
+
+# 集成测试用的假 yt-dlp：`--dump-single-json` 交元信息，否则吐几行进度。
+# 有了它，"视频下载"这条路可以**不碰网络**地端到端验。
+[[bin]]
+name = "fake-ytdlp"
+path = "tests/bin/fake-ytdlp.rs"
+test = false
+bench = false

@@ -22,3 +22,4 @@ pub mod state;
 pub mod store;
 pub mod task;
 pub mod updater;
+pub mod video;
