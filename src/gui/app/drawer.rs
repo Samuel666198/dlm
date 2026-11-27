@@ -244,11 +244,11 @@ pub(crate) fn drawer_body(
 
     ui.painter()
         .rect_filled(ui.max_rect(), 0.0, theme::surface());
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_3);
 
     // ---- 标题 + 关闭 ----
     ui.horizontal(|ui| {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_4);
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(elide(&task.name, 34))
@@ -259,7 +259,7 @@ pub(crate) fn drawer_body(
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(host_of(&task.url))
-                    .size(11.0)
+                    .size(theme::FONT_SECONDARY)
                     .color(theme::ink_3()),
             );
         });
@@ -267,7 +267,7 @@ pub(crate) fn drawer_body(
         // 并排两个 × 都关同一个东西。改成右栏之后没有标题栏了，就由这里提供唯一那个。
         // 用 `×`（U+00D7）而不是 `✕`（U+2715）：后者在 Microsoft YaHei 里没有字形。
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_2);
             if ui
                 .add(egui::Button::new(egui::RichText::new("×").size(15.0)).frame(false))
                 .on_hover_text("关闭详情")
@@ -277,24 +277,24 @@ pub(crate) fn drawer_body(
             }
         });
     });
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_2);
+    // 靠留白分层，不画线（只保留下面那条主分隔）
+    ui.add_space(theme::SPACE_2);
 
     // ---- 进度 ----
     ui.horizontal(|ui| {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_4);
         ui.label(
             egui::RichText::new(format!("{:.0}%", task.progress))
                 .size(20.0)
                 .monospace()
                 .color(theme::accent()),
         );
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_2);
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(status_label(&task.status))
-                    .size(12.0)
+                    .size(theme::FONT_BODY)
                     .color(theme::ink()),
             );
             ui.label(
@@ -303,7 +303,7 @@ pub(crate) fn drawer_body(
                     fmt_bytes(task.delivered.unwrap_or(0)),
                     task.total_len.map_or("?".to_string(), fmt_bytes)
                 ))
-                .size(11.0)
+                .size(theme::FONT_SECONDARY)
                 .monospace()
                 .color(theme::ink_3()),
             );
@@ -316,27 +316,27 @@ pub(crate) fn drawer_body(
     // 瞬时值放到下面的曲线上，两处各回答一个问题（"现在多快" vs "整体快不快"）。
     // 抢带宽 / 被限速 / 中途暂停过时两者能差一倍，混成一个数就是在骗人。
     let now = crate::queue::now_secs();
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_2);
     ui.horizontal(|ui| {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_4);
         kv(ui, "平均", &avg_speed_text(task, now));
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_4);
         kv(ui, "剩余", &eta_text(task, diag.speed));
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_4);
         kv(ui, "用时", &elapsed_text(task, now));
     });
 
     if task.attempts > 0 {
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_2);
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_4);
             kv(ui, "重试", &format!("第 {} 次", task.attempts));
         });
     }
     if let Some(action) = &task.on_complete {
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_2);
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_4);
             kv(ui, "完成后", action);
         });
     }
@@ -350,11 +350,15 @@ pub(crate) fn drawer_body(
     //
     // 没有覆盖集时整格不出现：画一条空轨道只会让人以为"进度丢了"。
     if !task.segments.is_empty() {
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_2);
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new("分段").size(10.5).color(theme::ink_3()));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_4);
+            ui.label(
+                egui::RichText::new("分段")
+                    .size(theme::FONT_LABEL)
+                    .color(theme::ink_3()),
+            );
+            ui.add_space(theme::SPACE_2);
             // 文字必须说"视觉上几块"：断点里存的是调度器的原始行，几百段很常见，
             // 而相邻的那些在下面的条上是**连着的一整块**。只报原始行数就会出现
             // "文字说 353 段、图上像一整条"的自相矛盾（2026-11-27 用户问过这事）。
@@ -372,7 +376,7 @@ pub(crate) fn drawer_body(
             );
         });
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_4);
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width() - 16.0, 12.0),
                 egui::Sense::hover(),
@@ -389,23 +393,23 @@ pub(crate) fn drawer_body(
     // 留一块空白比画一条平线更诚实。
     if task.status == "running" {
         let notes = super::diagnose::notes(task.attempts, diag.stalled_secs);
-        ui.add_space(10.0);
+        ui.add_space(theme::SPACE_2);
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_4);
             ui.label(
                 egui::RichText::new("速度曲线（整个下载）")
-                    .size(10.5)
+                    .size(theme::FONT_LABEL)
                     .color(theme::ink_3()),
             );
             ui.label(
                 egui::RichText::new(speed_text(task, diag.speed))
-                    .size(10.5)
+                    .size(theme::FONT_LABEL)
                     .monospace()
                     .color(theme::ink_2()),
             );
         });
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_4);
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width() - 16.0, 34.0),
                 egui::Sense::hover(),
@@ -420,8 +424,8 @@ pub(crate) fn drawer_body(
         });
         for note in notes {
             ui.horizontal(|ui| {
-                ui.add_space(16.0);
-                ui.label(egui::RichText::new(note).size(10.5).color(
+                ui.add_space(theme::SPACE_4);
+                ui.label(egui::RichText::new(note).size(theme::FONT_LABEL).color(
                     if diag.stalled_secs.is_some() {
                         theme::warn()
                     } else {
@@ -432,20 +436,24 @@ pub(crate) fn drawer_body(
         }
     }
 
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_3);
+    // 同上
+    ui.add_space(theme::SPACE_2);
 
     // ---- 落点 / URL ----
     for (label, value) in [("落点", task.path.as_str()), ("URL", task.url.as_str())] {
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new(label).size(10.5).color(theme::ink_3()));
+            ui.add_space(theme::SPACE_4);
+            ui.label(
+                egui::RichText::new(label)
+                    .size(theme::FONT_LABEL)
+                    .color(theme::ink_3()),
+            );
         });
         // B4：不再截断成 `C:\…\x`，改成**横向滚动**看全文（用户要的）。
         // 路径与 URL 都可能很长，省略号会把人最想确认的那一截吃掉。
         ui.horizontal(|ui| {
-            ui.add_space(16.0);
+            ui.add_space(theme::SPACE_4);
             egui::ScrollArea::horizontal()
                 .id_salt(("drawer-scroll", label))
                 .max_width(ui.available_width() - 16.0)
@@ -453,7 +461,7 @@ pub(crate) fn drawer_body(
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(value)
-                                .size(11.0)
+                                .size(theme::FONT_SECONDARY)
                                 .monospace()
                                 .color(theme::ink_2()),
                         )
@@ -462,12 +470,12 @@ pub(crate) fn drawer_body(
                     );
                 });
         });
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_2);
     }
 
     // ---- 动作 ----
     ui.horizontal_wrapped(|ui| {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_4);
         if ui.button("打开文件").clicked() {
             actions.open_file = true;
         }
@@ -478,9 +486,9 @@ pub(crate) fn drawer_body(
             actions.copy_url = true;
         }
     });
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_2);
     ui.horizontal(|ui| {
-        ui.add_space(16.0);
+        ui.add_space(theme::SPACE_4);
         // 这里没有「重新下载」：队列按名字去重，同名再 Add 一次会被拒。
         // 真正的重下要么先删后加（两步之间有竞态），要么等队列支持"覆盖同名"；
         // 放一个点了就报错的按钮，比不放更糟。
@@ -490,14 +498,18 @@ pub(crate) fn drawer_body(
     });
 
     // ---- 日志尾巴 ----
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_3);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_2);
     ui.horizontal(|ui| {
-        ui.add_space(16.0);
-        ui.label(egui::RichText::new("日志").size(10.5).color(theme::ink_3()));
+        ui.add_space(theme::SPACE_4);
+        ui.label(
+            egui::RichText::new("日志")
+                .size(theme::FONT_LABEL)
+                .color(theme::ink_3()),
+        );
     });
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_1);
     // **不要包在 `ui.horizontal(...)` 里**：horizontal 的横轴是无限宽，label 于是永远不换行，
     // 一条长报错会把整个窗口撑变形（0.6.0 用户截图里那条 os error 10061 就是这么溢出的）。
     // 用 margin 做缩进，让 label 按抽屉宽度换行；外面再套竖向滚动，长日志在框内滚。
@@ -517,7 +529,7 @@ pub(crate) fn drawer_body(
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(text)
-                                .size(10.5)
+                                .size(theme::FONT_LABEL)
                                 .monospace()
                                 .color(theme::ink_2()),
                         )
@@ -541,7 +553,11 @@ pub(crate) fn read_log_tail(path: &std::path::Path, lines: usize) -> String {
 
 fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.vertical(|ui| {
-        ui.label(egui::RichText::new(key).size(10.5).color(theme::ink_3()));
+        ui.label(
+            egui::RichText::new(key)
+                .size(theme::FONT_LABEL)
+                .color(theme::ink_3()),
+        );
         ui.label(
             egui::RichText::new(value)
                 .size(11.5)

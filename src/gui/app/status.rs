@@ -63,7 +63,7 @@ impl App {
                 );
             }
 
-            ui.add_space(10.0);
+            ui.add_space(theme::SPACE_2);
             self.speed_limit_pill(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -104,18 +104,18 @@ impl App {
                 }
 
                 if let Some(q) = quota {
-                    ui.add_space(10.0);
+                    ui.add_space(theme::SPACE_2);
                     ui.label(
                         egui::RichText::new(format!(
                             "{}/{}",
                             crate::gui::app::list::fmt_bytes(q.used),
                             crate::gui::app::list::fmt_bytes(q.limit)
                         ))
-                        .size(11.0)
+                        .size(theme::FONT_SECONDARY)
                         .monospace()
                         .color(theme::ink_2()),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(theme::SPACE_1);
                     // 配额条：一条 78pt 的细轨。
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(78.0, 4.0), egui::Sense::hover());
@@ -136,12 +136,12 @@ impl App {
                             theme::accent(),
                         );
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(theme::SPACE_1);
                     ui.label(egui::RichText::new("配额").size(11.5).color(theme::ink_3()));
                 }
 
                 // 有新版 / 检查失败时，这里多一枚可点的标记。没更新的机器看不到任何东西。
-                ui.add_space(12.0);
+                ui.add_space(theme::SPACE_3);
                 self.update_badge(ui);
             });
         });

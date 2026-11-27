@@ -40,6 +40,43 @@ pub const RADIUS: f32 = 9.0;
 /// 描边宽度。
 pub const STROKE: f32 = 1.0;
 
+// ---- 间距与字号阶梯（0.8.x「现代化」那一步）--------------------------------
+//
+// 用户：「界面还是不够现代化」，并澄清「是在当前的界面风格上进行的」——
+// 所以这不是换一套视觉语言，而是把**散落的数字收成阶梯**：
+//
+// · 间距只留 4 / 8 / 12 / 16 四档（8pt 栅格 + 一档半格）。
+//   原来还散着 2 / 6 / 10 / 18，一屏里出现四种近似值，看起来"差一点点"，
+//   却又不整齐 —— 这就是"不现代"最主要的来源，比配色更明显。
+// · 字号只留三档：标签 10 / 次要 11.5 / 正文 12.5（大数字另算，见 drawer 里的 20）。
+//   原来有 9.5 / 10 / 10.5 / 11 / 11.5 / 12 / 13 七种，层级反而没了。
+// · 分割线只留一条主分隔（靠留白分层），抽屉里原来是三条。
+
+/// 半格：紧贴的小间距（图标与文字之间那种）。
+pub const SPACE_1: f32 = 4.0;
+/// 一格：同一块里行与行之间。
+pub const SPACE_2: f32 = 8.0;
+/// 两格：块与块之间。
+pub const SPACE_3: f32 = 12.0;
+/// 三格：大块之间 / 面板内边距。
+pub const SPACE_4: f32 = 16.0;
+
+/// 标签级：表头、注脚、单位。
+pub const FONT_LABEL: f32 = 10.0;
+/// 次要级：副标题、胶囊文字、说明。
+pub const FONT_SECONDARY: f32 = 11.5;
+/// 正文级：文件名、按钮、数值。
+pub const FONT_BODY: f32 = 12.5;
+
+// 阶梯的顺序在**编译期**就钉住：写错一个数直接编不过，不必等到跑用例。
+const _: () = assert!(SPACE_1 < SPACE_2);
+const _: () = assert!(SPACE_2 < SPACE_3);
+const _: () = assert!(SPACE_3 < SPACE_4);
+const _: () = assert!(FONT_LABEL < FONT_SECONDARY);
+const _: () = assert!(FONT_SECONDARY < FONT_BODY);
+const _: () = assert!(FONT_SECONDARY - FONT_LABEL >= 1.0);
+const _: () = assert!(FONT_BODY - FONT_SECONDARY >= 0.5);
+
 /// 窗口初始尺寸（point）。
 pub const WINDOW_DEFAULT: [f32; 2] = [1120.0, 700.0];
 /// 窗口最小尺寸（point）：再窄列表就放不下列了。
@@ -384,6 +421,25 @@ const RADIUS_U8: u8 = RADIUS as u8;
 
 #[cfg(test)]
 mod tests {
+
+    /// **间距与字号必须是阶梯，不是一堆近似值。**
+    ///
+    /// 这条挡的是"越改越花"：多一个 10.5 或 18，肉眼说不出哪里不对，
+    /// 但整屏会显得不整齐。加新尺寸前先想清楚它属于哪一档。
+    #[test]
+    fn spacing_and_type_follow_a_short_ladder() {
+        for (name, v) in [
+            ("SPACE_1", SPACE_1),
+            ("SPACE_2", SPACE_2),
+            ("SPACE_3", SPACE_3),
+            ("SPACE_4", SPACE_4),
+        ] {
+            assert_eq!(v % 4.0, 0.0, "{name} 必须是 4 的倍数（8pt 栅格）");
+        }
+        // 顺序与档距由模块顶部的 `const _: () = assert!(..)` 在编译期把关，
+        // 这里只查"是不是 4 的倍数"这条运行期也算得出的。
+    }
+
     use super::*;
 
     /// 相对亮度（WCAG）。

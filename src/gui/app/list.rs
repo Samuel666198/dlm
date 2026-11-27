@@ -673,7 +673,7 @@ impl App {
                 .size(11.5)
                 .color(theme::ink_2()),
         );
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_2);
         if ui.button("继续").clicked() {
             act = Some(BatchAction::Resume);
         }
@@ -740,17 +740,17 @@ impl App {
             ui.add_space(9.0);
             ui.label(
                 egui::RichText::new("队列是空的")
-                    .size(13.0)
+                    .size(theme::FONT_BODY)
                     .strong()
                     .color(theme::ink_2()),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_2);
             ui.label(
                 egui::RichText::new(
                     "点左上角「新建任务」，或在浏览器里右键链接交给 dlm。\n\
                      扩展会在页面上留一个悬浮球，随时能投递。",
                 )
-                .size(12.0)
+                .size(theme::FONT_BODY)
                 .color(theme::ink_3()),
             );
         });
