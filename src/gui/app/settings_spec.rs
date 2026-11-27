@@ -85,6 +85,12 @@ pub(crate) enum SettingKey {
     AutoCheckUpdate,
     WatchClipboard,
     SuppressAutoLaunch,
+    /// **不是**一个存盘的设置：只借设置页那一行放一个「导出诊断日志」按钮。
+    ///
+    /// 之所以混进来：设置页的每一行都由 `SettingSpec` 驱动，为了一个按钮
+    /// 另造一套行渲染不划算；而 `setting_control` 里对这个 key 走的是按钮分支，
+    /// 不会写进 `settings.json`（`key_string()` 返回空串，保存时跳过）。
+    ExportDiag,
 }
 
 /// 一条设置的静态描述。
@@ -333,6 +339,14 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "浏览器下载发现桌面端没开时只自动打开一次；关掉则每次都尝试打开",
     ),
     spec(
+        SettingKey::ExportDiag,
+        "",
+        Category::Advanced,
+        "排查",
+        "导出诊断日志",
+        "把版本/设置/队列摘要/最近任务日志/依赖探测写进一个文本文件，方便反馈",
+    ),
+    spec(
         SettingKey::AutoCheckUpdate,
         "auto_check_update",
         Category::Advanced,
@@ -382,7 +396,13 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        let spec_fields: BTreeSet<String> = SPECS.iter().map(|s| s.field.to_string()).collect();
+        // `field == ""` 的是**不是存盘项**的按钮行（如「导出诊断日志」）：
+        // 它不写 settings.json，自然也不该出现在"字段对账"里。
+        let spec_fields: BTreeSet<String> = SPECS
+            .iter()
+            .filter(|s| !s.field.is_empty())
+            .map(|s| s.field.to_string())
+            .collect();
 
         let missing: Vec<&String> = fields.difference(&spec_fields).collect();
         let extra: Vec<&String> = spec_fields.difference(&fields).collect();
@@ -394,8 +414,9 @@ mod tests {
             extra.is_empty(),
             "表里有不存在的设置项（拼错了字段名？）：{extra:?}"
         );
+        let persisted = SPECS.iter().filter(|s| !s.field.is_empty()).count();
         assert_eq!(
-            SPECS.len(),
+            persisted,
             fields.len(),
             "一个字段只能有一条：重复的条目会让界面上出现两个同名开关"
         );

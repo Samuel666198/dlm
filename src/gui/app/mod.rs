@@ -162,6 +162,9 @@ pub struct App {
     pub(super) draft: crate::gui::settings::Settings,
     /// 设置文件所在目录（`queue.json` 同级）。
     pub(super) settings_dir: std::path::PathBuf,
+    /// 上一次「导出诊断日志」的落点（成功才写）；失败时留原因。
+    pub(super) diag_path: Option<String>,
+    pub(super) diag_error: Option<String>,
     /// 落点的兜底目录（`--out-dir`，缺省是下载文件夹）。
     ///
     /// 设置里的「默认保存目录」优先；用户没设时才用它 —— 于是测试与便携用法
@@ -326,6 +329,8 @@ impl App {
             update_open: false,
             local,
             update_install_error: None,
+            diag_path: None,
+            diag_error: None,
             selected: None,
             rates: rate::Rates::default(),
             drawer_log: None,

@@ -10,6 +10,7 @@
 pub mod app;
 pub mod batch;
 pub mod clipboard;
+pub mod diag;
 pub mod host_budget;
 pub mod http;
 pub mod naming;

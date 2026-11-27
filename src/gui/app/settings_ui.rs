@@ -443,9 +443,129 @@ impl App {
         }
     }
 
+    /// 收集并写出诊断文本。**只写本机**，不上传。
+    ///
+    /// 收什么见 `crate::gui::diag` 的模块文档；这里只负责把 GUI 才知道的东西
+    /// （队列、日志目录、依赖探测）摊出来。
+    pub(super) fn export_diagnostics(&self) -> anyhow::Result<std::path::PathBuf> {
+        use crate::gui::diag;
+        use std::fmt::Write as _;
+
+        let mut sections: Vec<(String, String)> = Vec::new();
+
+        // ---- 环境 ----
+        let mut env = String::new();
+        let _ = writeln!(env, "release   : {}", crate::gui::RELEASE);
+        let _ = writeln!(env, "内核      : {}", env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(
+            env,
+            "平台      : {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        let _ = writeln!(env, "深色模式  : {}", crate::gui::app::theme::is_dark());
+        let _ = writeln!(
+            env,
+            "导出时间  : {}",
+            diag::file_name(crate::queue::now_secs())
+        );
+        sections.push(("环境".to_string(), env));
+
+        // ---- 设置（代理脱敏）----
+        let mut shown = self.settings.clone();
+        shown.proxy = diag::redact_proxy(&shown.proxy);
+        let json =
+            serde_json::to_string_pretty(&shown).unwrap_or_else(|e| format!("（序列化失败：{e}）"));
+        sections.push(("设置（settings.json，代理口令已脱敏）".to_string(), json));
+
+        // ---- 队列摘要 ----
+        let tasks = self.tasks();
+        let mut queue = String::new();
+        let _ = writeln!(queue, "共 {} 条", tasks.len());
+        for t in tasks.iter().take(40) {
+            let _ = writeln!(
+                queue,
+                "[{}] {}  total_len={:?}  delivered={:?}  分段={}  log={}",
+                t.status,
+                t.name,
+                t.total_len,
+                t.delivered,
+                t.segments.len(),
+                t.log
+            );
+        }
+        sections.push(("队列摘要".to_string(), queue));
+
+        // ---- 最近任务的日志尾部 ----
+        for t in tasks.iter().take(diag::MAX_TASKS) {
+            let path = std::path::PathBuf::from(&t.log);
+            let body = diag::tail(&path, diag::LOG_TAIL_LINES);
+            sections.push((format!("任务日志：{}（{}）", t.name, t.status), body));
+        }
+
+        // ---- 外部依赖 ----
+        let mut dep = String::new();
+        match crate::video::find_ytdlp() {
+            Some(p) => {
+                let _ = writeln!(dep, "yt-dlp : {}", p.display());
+            }
+            None => {
+                let _ = writeln!(dep, "yt-dlp : 没找到（视频下载会失败）");
+            }
+        }
+        let _ = writeln!(
+            dep,
+            "ffmpeg : {}",
+            if ffmpeg_on_path() {
+                "在 PATH 里"
+            } else {
+                "没找到（音视频合并会失败）"
+            }
+        );
+        sections.push(("外部依赖".to_string(), dep));
+
+        // ---- 更新日志 ----
+        let update_log = self.settings_dir.join("logs").join("update.log");
+        sections.push(("更新日志".to_string(), diag::tail(&update_log, 40)));
+
+        let text = diag::render(&sections);
+        let dir = diag::out_dir(&self.settings_dir);
+        let name = diag::file_name(crate::queue::now_secs());
+        diag::write(&dir, &name, &text).map_err(|e| anyhow::anyhow!("写诊断文件失败：{e}"))
+    }
+
     /// 一个设置项画成什么控件。**穷举 `match`**：加了键不画就编译不过。
     fn setting_control(&mut self, ui: &mut egui::Ui, key: SettingKey) {
         match key {
+            // 不是存盘项，只放一个按钮：把诊断文本写到本地并给出路径。
+            SettingKey::ExportDiag => {
+                if ui.button("导出诊断日志").clicked() {
+                    match self.export_diagnostics() {
+                        Ok(path) => {
+                            self.diag_path = Some(path.display().to_string());
+                            self.diag_error = None;
+                        }
+                        Err(err) => {
+                            self.diag_path = None;
+                            self.diag_error = Some(format!("{err:#}"));
+                        }
+                    }
+                }
+                if let Some(path) = &self.diag_path {
+                    ui.label(
+                        egui::RichText::new(format!("已导出：{path}"))
+                            .size(theme::FONT_LABEL)
+                            .color(theme::ink_3()),
+                    );
+                }
+                if let Some(err) = &self.diag_error {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .size(theme::FONT_LABEL)
+                            .color(theme::bad()),
+                    );
+                }
+            }
             SettingKey::OutDir => {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.out_dir_text)
@@ -1306,6 +1426,21 @@ pub(crate) fn mcp_available(
 }
 
 /// 设置面板一行都没画时，至少得让人看得出"有哪些分类"—— 这里只是给用例用的自查。
+/// `ffmpeg` 在不在 PATH 里（只看文件名，不看版本）。
+///
+/// 与 `video::find_ytdlp` 一样按 PATH 扫：**不调用它**，只回答"有没有"——
+/// 诊断包里"有没有"就够定位问题，跑一次 `ffmpeg -version` 反而慢。
+fn ffmpeg_on_path() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        ["ffmpeg.exe", "ffmpeg"]
+            .iter()
+            .any(|name| dir.join(name).is_file())
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn spec_count() -> usize {
     super::settings_spec::SPECS.len()
