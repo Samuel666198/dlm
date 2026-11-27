@@ -44,11 +44,29 @@ struct GuiEndpoint {
     token: String,
 }
 
+/// 直连（不进队列）的原因 —— 写进回复的 `reason`，让扩展能解释
+/// 「为什么这条下载不在桌面端窗口里」。
+///
+/// 2026-11-27 的故障就是没有这个东西：带 Cookie 的下载悄悄走了直连，
+/// 用户看到扩展里有进度、桌面端什么都没有，无从判断。
+pub const DIRECT_HLS: &str = "hls";
+pub const DIRECT_COOKIE: &str = "cookie";
+pub const DIRECT_QUEUE_DOWN: &str = "queue-unavailable";
+
+/// 直连的说明。`reason` 是稳定标记（扩展按它分支、用例按它断言），
+/// `detail` 是更细的机器可读原因（目前只有队列失败带）。
+#[derive(Debug, Clone, Copy)]
+struct DirectNote {
+    reason: &'static str,
+    detail: Option<&'static str>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum QueueOutcome {
     Queued(String),
     Rejected(String),
-    Unavailable,
+    /// 队列不可达。带上具体原因 —— 静默降级正是这一步要消灭的东西。
+    Unavailable(&'static str),
     TimedOut,
 }
 
@@ -290,7 +308,8 @@ impl Host {
         if let Some(obj) = redeliver.as_object_mut() {
             obj.insert("op".into(), Value::String("download".into()));
         }
-        let mut reply = self.download_direct(&redeliver);
+        // 「继续」是用户对一个**已知直连**任务的显式动作，不必再解释一遍为什么不在窗口里。
+        let mut reply = self.download_direct(&redeliver, None);
         // 在回执里补一句"这是重投，不是队列续传"，让扩展能显示不同文案。
         if let Ok(mut parsed) = serde_json::from_slice::<Value>(&reply)
             && let Some(obj) = parsed.as_object_mut()
@@ -385,7 +404,13 @@ impl Host {
         // B10：无 Cookie 且队列可达 ⇒ 交给队列（队列的落点是 `dlm-gui --out-dir`）。
         // 带 Cookie 的下载仍走 B2 直连：队列不存 Cookie。
         // B3b：HLS 强制直连 —— 队列没有 --hls，也不能把不可续传的 HLS 伪装成普通文件。
-        if cookie.is_none() && !hls {
+        //
+        // 2026-11-27：**走到直连必须说明原因**。直连是起一个独立的 `dlm.exe`，
+        // 桌面端窗口完全不知道它存在 —— 用户看到的就是"下载了，但软件里没有"。
+        // 所以下面每一条直连路径都带一个 `DirectNote` 回去，由扩展转述。
+        //
+        // 每条直连路径都对应一个 `DirectNote`（两条分支都产出，所以这里不是 Option）。
+        let note = if cookie.is_none() && !hls {
             match self.try_queue(url, name, referer) {
                 QueueOutcome::Queued(id) => {
                     return serde_json::to_vec(&json!({
@@ -399,10 +424,19 @@ impl Host {
                 }
                 QueueOutcome::Rejected(message) => return error(&message),
                 QueueOutcome::TimedOut => return error("队列响应超时，未重复下载"),
-                QueueOutcome::Unavailable => {}
+                QueueOutcome::Unavailable(detail) => DirectNote {
+                    reason: DIRECT_QUEUE_DOWN,
+                    detail: Some(detail),
+                },
             }
-        }
-        self.download_direct(value)
+        } else {
+            // HLS 比 Cookie 是更硬的理由：将来队列支持凭证了，HLS 仍然进不去。
+            DirectNote {
+                reason: if hls { DIRECT_HLS } else { DIRECT_COOKIE },
+                detail: None,
+            }
+        };
+        self.download_direct(value, Some(note))
     }
 
     /// 无条件走直连：起一个自己的 `dlm.exe`，落点是 `config.download_dir`。
@@ -411,7 +445,7 @@ impl Host {
     /// 否则落点会变成队列的 `--out-dir`，断点文件不在那里，续传就变成从头下。
     /// 拆成两个函数而不是加一个 bool 参数：两种意图（"按规则分流" vs "就要直连"）
     /// 在调用点一眼能分开，比 `download(v, true)` 好读。
-    fn download_direct(&mut self, value: &Value) -> Vec<u8> {
+    fn download_direct(&mut self, value: &Value, note: Option<DirectNote>) -> Vec<u8> {
         let text = |key: &str| {
             value
                 .get(key)
@@ -600,7 +634,7 @@ impl Host {
             });
         }
 
-        serde_json::to_vec(&json!({
+        let mut reply = json!({
             "op": "accepted",
             "request_id": value.get("request_id").cloned().unwrap_or(Value::Null),
             "mode": "direct",
@@ -613,8 +647,15 @@ impl Host {
             "referer": referer,
             "hls": hls,
             "log": log_path.to_string_lossy(),
-        }))
-        .expect("json! serializable")
+        });
+        // 只在"这条下载不在桌面端窗口里"时才写 reason；进了队列就不该有它。
+        if let Some(note) = note {
+            reply["reason"] = Value::String(note.reason.to_string());
+            if let Some(detail) = note.detail {
+                reply["detail"] = Value::String(detail.to_string());
+            }
+        }
+        serde_json::to_vec(&reply).expect("json! serializable")
     }
 
     fn cancel(&self, value: &Value) -> Vec<u8> {
@@ -677,13 +718,13 @@ impl Host {
 
     fn try_queue(&self, url: &str, name: Option<&str>, referer: Option<&str>) -> QueueOutcome {
         let Some(path) = &self.config.gui_endpoint else {
-            return QueueOutcome::Unavailable;
+            return QueueOutcome::Unavailable("no-endpoint");
         };
         let Ok(text) = fs::read_to_string(path) else {
-            return QueueOutcome::Unavailable;
+            return QueueOutcome::Unavailable("endpoint-missing");
         };
         let Ok(endpoint) = serde_json::from_str::<GuiEndpoint>(&text) else {
-            return QueueOutcome::Unavailable;
+            return QueueOutcome::Unavailable("endpoint-malformed");
         };
         let name = name
             .filter(|n| queue::validate_name(n).is_ok())
@@ -698,7 +739,7 @@ impl Host {
             Ok(client) => client,
             Err(err) => {
                 eprintln!("dlm-native-host: queue client failed: {err}");
-                return QueueOutcome::Unavailable;
+                return QueueOutcome::Unavailable("client-build");
             }
         };
         let body = json!({
@@ -720,7 +761,7 @@ impl Host {
                 let status = resp.status();
                 let text = resp.text().unwrap_or_default();
                 if status != reqwest::StatusCode::OK {
-                    return QueueOutcome::Unavailable;
+                    return QueueOutcome::Unavailable("http-error");
                 }
                 match serde_json::from_str::<Value>(&text) {
                     Ok(value) if value.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -741,11 +782,11 @@ impl Host {
                     Err(err) => QueueOutcome::Rejected(format!("队列响应无法解析：{err}")),
                 }
             }
-            Err(err) if err.is_connect() => QueueOutcome::Unavailable,
+            Err(err) if err.is_connect() => QueueOutcome::Unavailable("connect-refused"),
             Err(err) if err.is_timeout() => QueueOutcome::TimedOut,
             Err(err) => {
                 eprintln!("dlm-native-host: queue request failed: {err}");
-                QueueOutcome::Unavailable
+                QueueOutcome::Unavailable("request-failed")
             }
         }
     }
@@ -1355,5 +1396,71 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+    /// **直连必须说明原因** —— 2026-11-27 那条故障的回归守卫。
+    ///
+    /// 直连是起一个独立的 `dlm.exe`，桌面端窗口完全看不见它。回复里没有 `reason` 的话，
+    /// 扩展只能静默，用户看到的就是"扩展里有进度、软件里什么都没有"，无从判断。
+    ///
+    /// 这条用例钉两件事：排队失败时给 `queue-unavailable` + 细原因；
+    /// 而"按规则就走直连"（cookie / hls）时不能误报成队列故障 —— 那会把人引去修队列。
+    #[test]
+    fn a_direct_download_says_why_it_is_not_in_the_window() {
+        let dir = std::env::temp_dir().join(format!("dlm-direct-note-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        // 端点文件不存在 ⇒ 队列不可达，必须报出来，且细原因可区分。
+        let mut host = Host::new(config(&dir));
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/a.bin"}"#),
+        )
+        .unwrap();
+        assert_eq!(reply["mode"], "direct", "{reply}");
+        assert_eq!(
+            reply["reason"], DIRECT_QUEUE_DOWN,
+            "队列不可达必须说出来，否则用户以为下载进了窗口：{reply}"
+        );
+        assert_eq!(
+            reply["detail"], "no-endpoint",
+            "细原因要能区分「没配端点」和「端点文件丢了」：{reply}"
+        );
+
+        // 带 Cookie：走直连是**按规则**，不是队列坏了。误报会把排查带偏。
+        let mut host = Host::new(config(&dir));
+        let reply: Value = serde_json::from_slice(&host.handle(
+            br#"{"op":"download","url":"https://example.invalid/c.bin","cookie":"sid=abc"}"#,
+        ))
+        .unwrap();
+        assert_eq!(reply["mode"], "direct", "{reply}");
+        assert_eq!(reply["reason"], DIRECT_COOKIE, "{reply}");
+
+        // HLS 同理，而且它是比 Cookie 更硬的理由。
+        let mut host = Host::new(config(&dir));
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/d.m3u8","hls":true}"#),
+        )
+        .unwrap();
+        assert_eq!(reply["mode"], "direct", "{reply}");
+        assert_eq!(reply["reason"], DIRECT_HLS, "{reply}");
+
+        // 反过来：真进了队列就不许有 reason —— 那会让人以为它不在窗口里。
+        let dir2 = dir.join("queued");
+        fs::create_dir_all(&dir2).unwrap();
+        let (port, handle_thread) = one_shot_stub(r#"{"ok":true,"id":"t-1"}"#);
+        let mut cfg = config(&dir2);
+        cfg.gui_endpoint = Some(endpoint_file(&dir2, port));
+        let mut host = Host::new(cfg);
+        let reply: Value = serde_json::from_slice(
+            &host.handle(br#"{"op":"download","url":"https://example.invalid/e.bin"}"#),
+        )
+        .unwrap();
+        handle_thread.join().unwrap();
+        assert_eq!(reply["mode"], "queue", "{reply}");
+        assert!(
+            reply.get("reason").is_none(),
+            "进了队列就不该带 reason：{reply}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

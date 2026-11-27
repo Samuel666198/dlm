@@ -287,6 +287,23 @@ function fmtBytes(bytes) {
   return (i === 0 ? Math.round(value) : value.toFixed(1)) + " " + units[i];
 }
 
+// 直连（独立进程）原因的文案。
+//
+// 2026-11-27：宿主发现下载不能进队列时会回一个 `reason`。那些下载**不会出现在
+// 桌面端窗口里**，所以必须在这里说出来 —— 否则用户看到的是"扩展有进度、软件里没有"。
+// 键必须与 src/host.rs 的 DIRECT_* 常量逐字一致（静态检查会核对两侧）。
+const DIRECT_REASON_TEXT = {
+  "cookie": "独立进程下载（带登录凭证），桌面端不显示",
+  "hls": "独立进程下载（流媒体），桌面端不显示",
+  "queue-unavailable": "桌面端未运行，已交给独立进程",
+};
+
+/** 直连条目要显示的那句解释；进了队列或没有原因时返回 null。 */
+function directReasonText(entry) {
+  if (!entry || entry.mode !== "direct") return null;
+  return DIRECT_REASON_TEXT[entry.reason] || "独立进程下载，桌面端不显示";
+}
+
 function fmtEta(seconds) {
   if (!seconds || seconds <= 0) return "";
   const m = Math.floor(seconds / 60);
@@ -773,6 +790,12 @@ function renderActive() {
     if (entry.speed > 0) meta.appendChild(el("span", null, fmtBytes(entry.speed) + "/s"));
     if (entry.eta > 0) meta.appendChild(el("span", null, "剩余 " + fmtEta(entry.eta)));
     if (entry.error) meta.appendChild(el("span", null, entry.error));
+    const why = directReasonText(entry);
+    if (why) {
+      const note = el("span", null, why);
+      if (entry.detail) note.title = entry.detail;
+      meta.appendChild(note);
+    }
     row.appendChild(meta);
     const actions = el("div", "actions");
     const stop = el("button", "ghost", entry.stopping ? "停止中…" : "停止");
@@ -1214,6 +1237,10 @@ guarded(() =>
         url: msg.url,
         referer: msg.referer,
         kind: msg.hls ? "hls" : "file",
+        // 2026-11-27：直连 = 独立进程，桌面端看不见。原因留住，renderActive 里说出来。
+        mode: "direct",
+        reason: msg.reason || null,
+        detail: msg.detail || null,
       });
       state.collapsed = false;
       state.tab = "active";
