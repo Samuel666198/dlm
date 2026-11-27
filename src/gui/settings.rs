@@ -101,6 +101,21 @@ pub struct Settings {
     /// 关掉之后 `gui::run` **不再起检查线程**，一个外网请求都不发 ——
     /// 这是「设置里能关」的实际含义，不能只在界面上打个勾。
     pub auto_check_update: bool,
+
+    /// 抑制「重复自动拉起桌面端」：浏览器下载发现桌面端没开时，只自动打开一次，
+    /// 冷却窗口内不再反复拉起。**默认开**（用户 2026-11-27 的决定）。
+    ///
+    /// 关掉它 = 每次下载只要桌面端没开就去拉一次 —— 适合"我就希望它一直弹出来"的人。
+    /// 设为 true 时也不是"从不拉起"：窗口外（默认 5 分钟）照样会打开，
+    /// 抑制的是**反复**，不是**首次**。
+    #[serde(default = "default_true")]
+    pub suppress_auto_launch: bool,
+}
+
+/// `#[serde(default)]` 对 bool 的默认值是 `false`，而这里要的是 `true`
+/// （老配置文件缺这个字段时，必须落到"抑制重复拉起"，不能悄悄变成每次都拉）。
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -108,6 +123,7 @@ impl Default for Settings {
         Self {
             connections: 8,
             per_host_connections: 8,
+            suppress_auto_launch: true,
             out_dir: None,
             max_speed_kib: 0,
             speed_windows: Vec::new(),

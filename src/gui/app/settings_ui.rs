@@ -671,6 +671,9 @@ impl App {
             SettingKey::AutoCheckUpdate => {
                 ui.checkbox(&mut self.draft.auto_check_update, "");
             }
+            SettingKey::SuppressAutoLaunch => {
+                ui.checkbox(&mut self.draft.suppress_auto_launch, "");
+            }
             SettingKey::GrabTemplates => {
                 // 模板在抓取窗口里「存为模板」时写入，这里只报数（不在设置页编辑：
                 // 模板脱离站点域名就没意义，而设置页没有"当前起始页"这个上下文）。

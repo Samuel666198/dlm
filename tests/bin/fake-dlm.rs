@@ -12,6 +12,12 @@
 //!   （P2 的 reveal 只对 `done` 放行，需要一个真存在的文件）。
 //! - `DLM_FAKE_SLEEP_MS`：退出前先睡这么多毫秒。用来造"一个还在跑的任务"，
 //!   好让用例能在它跑着的时候暂停 —— 否则 `fake-dlm` 秒退，暂停永远抢不到时机。
+//! - **冒充桌面端**：把自己的可执行文件**复制并改名为 `fake-gui.exe`**，它就会写一个端点文件
+//!   然后退出。端口与令牌从**自己所在的目录**里的 `fake-gui.json` 读（`{"port":N,"token":"T"}`），
+//!   端点写到同目录的 `endpoint.json`。
+//!   这样"宿主自动拉起桌面端"那条路可以在**不弹真窗口**的前提下端到端测通。
+//!   为什么不用环境变量触发：测试是多线程并行的，环境变量是进程级的，
+//!   一个用例设了就会漏到别的用例里。按文件名认身份就没有这个问题。
 //! - `DLM_FAKE_CONSOLE_REPORT`：往里写一个 `1`/`0` —— 本进程**有没有被分配到控制台**。
 //!   用来钉"下载时不该弹出黑色终端窗口"：GUI 是 windows 子系统，若它起控制台子进程时
 //!   不加 `CREATE_NO_WINDOW`，Windows 就会分配一个新控制台，这里就会读到 `1`。
@@ -23,6 +29,21 @@ use std::fs;
 use std::io::ErrorKind;
 
 fn main() {
+    // 冒充桌面端：写端点文件就退出（见文件头"冒充桌面端"）。
+    if let Some(dir) = own_dir_named("fake-gui") {
+        if let Ok(spec) = fs::read_to_string(dir.join("fake-gui.json")) {
+            // spec 形如 {"port":12345,"token":"tok"}
+            let port = between(&spec, "\"port\":", ",").unwrap_or_else(|| "0".into());
+            let token = between(&spec, "\"token\":\"", "\"").unwrap_or_default();
+            let text = format!(
+                r#"{{"port":{port},"token":"{token}","pid":{}}}"#,
+                std::process::id()
+            );
+            let _ = fs::write(dir.join("endpoint.json"), text);
+        }
+        std::process::exit(0);
+    }
+
     let counter_path = env::var("DLM_FAKE_COUNTER").unwrap_or_default();
     let codes: Vec<i32> = env::var("DLM_FAKE_CODES")
         .unwrap_or_else(|_| "0".to_string())
@@ -98,4 +119,23 @@ fn has_console() -> bool {
 #[cfg(not(windows))]
 fn has_console() -> bool {
     false
+}
+
+/// 自己的可执行文件在某个目录里、且文件名的词干是 `stem` 时，返回那个目录。
+fn own_dir_named(stem: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_stem()?.to_string_lossy().to_lowercase();
+    if name == stem {
+        exe.parent().map(std::path::Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+/// 从一段扁平 JSON 里取两个标记之间的文本（够用就行，不引 serde）。
+fn between(text: &str, head: &str, tail: &str) -> Option<String> {
+    let start = text.find(head)? + head.len();
+    let rest = &text[start..];
+    let end = rest.find(tail)?;
+    Some(rest[..end].trim().to_string())
 }

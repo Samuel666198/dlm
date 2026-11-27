@@ -28,6 +28,10 @@ pub struct HostConfig {
     pub log_dir: PathBuf,
     /// B10：`dlm-gui` 写的端点文件；`None` = 不走队列。
     pub gui_endpoint: Option<PathBuf>,
+    /// 桌面端 exe（`dlm-gui.exe`）。队列不可达时用它把窗口拉起来（2026-11-27 的决定）。
+    pub gui_exe: PathBuf,
+    /// 数据目录（`%LOCALAPPDATA%\dlm`）：读 `settings.json`、写 `gui/autolaunch.stamp`。
+    pub data_dir: PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -36,6 +40,8 @@ struct ConfigFile {
     download_dir: Option<PathBuf>,
     log_dir: Option<PathBuf>,
     gui_endpoint: Option<PathBuf>,
+    gui_exe: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +57,28 @@ struct GuiEndpoint {
 /// 用户看到扩展里有进度、桌面端什么都没有，无从判断。
 pub const DIRECT_HLS: &str = "hls";
 pub const DIRECT_QUEUE_DOWN: &str = "queue-unavailable";
+
+/// 自动拉起桌面端之后的冷却窗口（秒）。窗口内不再重复拉起。
+pub const AUTOLAUNCH_COOLDOWN_SECS: u64 = 300;
+/// 拉起后等它把端点文件写好并应答的上限（秒）。实测冷启动 1–2 秒。
+pub const AUTOLAUNCH_WAIT_SECS: u64 = 8;
+
+/// 这次该不该自动拉起桌面端？（纯函数，好测）
+///
+/// - `suppress == false`（设置里关掉了"抑制重复拉起"）⇒ 每次都拉
+/// - `suppress == true` ⇒ 冷却窗口内不拉；**窗口外照拉** ——
+///   抑制的是"反复"，不是"首次"（用户 2026-11-27 明确要的是后者也发生）
+/// - 时间戳比现在还大（时钟回拨）⇒ 当成"很久以前"，照拉，别把用户永久锁死
+pub fn should_auto_launch(now: u64, last: Option<u64>, suppress: bool, cooldown: u64) -> bool {
+    if !suppress {
+        return true;
+    }
+    match last {
+        None => true,
+        Some(t) if t > now => true,
+        Some(t) => now.saturating_sub(t) >= cooldown,
+    }
+}
 
 /// 直连的说明。`reason` 是稳定标记（扩展按它分支、用例按它断言），
 /// `detail` 是更细的机器可读原因（目前只有队列失败带）。
@@ -97,6 +125,14 @@ impl HostConfig {
                 .map(|p| PathBuf::from(p).join("dlm/native-host/jobs"))
                 .unwrap_or_else(|| host_dir.join("jobs"))
         });
+        let gui_exe = file
+            .gui_exe
+            .unwrap_or_else(|| dlm_exe.with_file_name("dlm-gui.exe"));
+        let data_dir = file.data_dir.unwrap_or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join("dlm"))
+                .unwrap_or_else(|| host_dir.clone())
+        });
         let gui_endpoint = file.gui_endpoint.or_else(|| {
             std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("dlm/gui/endpoint.json"))
         });
@@ -105,6 +141,8 @@ impl HostConfig {
             download_dir,
             log_dir,
             gui_endpoint,
+            gui_exe,
+            data_dir,
         }
     }
 }
@@ -413,7 +451,16 @@ impl Host {
         // 于是**带 Cookie 的下载（几乎全部真实下载）**只能走直连，桌面端永远看不见。
         // 现在 Cookie 跟着请求一起进队列，由 GUI 加密落盘（见 gui::secrets）。
         let note = if !hls {
-            match self.try_queue(url, name, referer, cookie) {
+            let mut outcome = self.try_queue(url, name, referer, cookie);
+            // 队列不可达 ⇒ 先把桌面端拉起来，再试一次（用户 2026-11-27 的决定）。
+            // 拉不起来（冷却中 / 没有 exe / 超时）就直接走下面的降级分支 ——
+            // **不能因为窗口起不来就把这次下载丢了**。
+            if let QueueOutcome::Unavailable(_) = &outcome
+                && self.ensure_gui()
+            {
+                outcome = self.try_queue(url, name, referer, cookie);
+            }
+            match outcome {
                 QueueOutcome::Queued(id) => {
                     return serde_json::to_vec(&json!({
                         "op": "accepted",
@@ -718,6 +765,132 @@ impl Host {
         }
     }
 
+    /// 队列不可达时，尝试把桌面端**拉起来**（用户 2026-11-27 的决定：
+    /// 「下载需要打开 gui，没有打开先自动打开」）。
+    ///
+    /// 返回 `true` 表示"端点已经能应答了"，调用方应当**重试一次 `try_queue`**。
+    ///
+    /// 三段，每一段都有理由：
+    /// 1. **先判抑制**：冷却窗口内不再拉（默认 5 分钟，设置里可关掉抑制）。
+    /// 2. **先写时间戳再拉起**：拉失败也算"刚才试过"，否则 GUI 起不来时会被每次下载
+    ///    反复重试、反复拉起，把用户的屏幕刷成一串窗口。
+    /// 3. **等"新 pid"而不是等"文件存在"**：旧 `endpoint.json` 可能是上次崩溃留下的，
+    ///    只判存在会读到死端口，然后误判成"已经开着了"。
+    fn ensure_gui(&self) -> bool {
+        // 端点都没配（队列被配置关掉了）⇒ 拉起也无处可送，直接放弃。
+        // **先判这个再记账**：否则会把一次冷却额度花在"根本没尝试"上。
+        let Some(endpoint_path) = self.config.gui_endpoint.as_ref() else {
+            return false;
+        };
+        let stamp = self.config.data_dir.join("gui").join("autolaunch.stamp");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = read_stamp(&stamp);
+        if !should_auto_launch(
+            now,
+            last,
+            self.suppress_auto_launch(),
+            AUTOLAUNCH_COOLDOWN_SECS,
+        ) {
+            eprintln!("dlm-native-host: 冷却窗口内，本次不自动拉起桌面端");
+            return false;
+        }
+        if let Err(err) = write_stamp(&stamp, now) {
+            // 写不下也照拉：抑制不住顶多烦一点，比"该下的时候没下"轻。
+            eprintln!("dlm-native-host: 写自动拉起时间戳失败（照常拉起）：{err}");
+        }
+
+        // pid 单独用一个轻量函数读，不塞进 `GuiEndpoint`：那个结构体只负责
+        // "怎么连上去"，而 pid 是"是不是**新**进程"的判据，两者用途不同。
+        let before = endpoint_pid(endpoint_path);
+
+        if !self.config.gui_exe.exists() {
+            eprintln!(
+                "dlm-native-host: 找不到桌面端 {}，无法自动拉起",
+                self.config.gui_exe.display()
+            );
+            return false;
+        }
+        // 不等待、不接管：宿主自己很快会被浏览器收掉，GUI 必须活下来。
+        // （Windows 上子进程不因父进程退出而结束；GUI 也是单实例的，
+        //  万一已经有一份在跑，这份会自己打印 URL 后退出。）
+        match std::process::Command::new(&self.config.gui_exe).spawn() {
+            Ok(child) => {
+                // 立刻放掉句柄：我们不等它，也不 kill 它。
+                drop(child);
+            }
+            Err(err) => {
+                eprintln!("dlm-native-host: 拉起桌面端失败：{err}");
+                return false;
+            }
+        }
+        self.wait_for_queue(endpoint_path, before)
+    }
+
+    /// 轮询端点文件，直到出现一个**新**的 pid 并且 `/api/tasks` 能应答。
+    fn wait_for_queue(&self, endpoint_path: &Path, before: Option<u32>) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(AUTOLAUNCH_WAIT_SECS);
+        loop {
+            let after = endpoint_pid(endpoint_path);
+            let is_new = match (before, after) {
+                (Some(old), Some(new)) => old != new,
+                (None, Some(_)) => true,
+                // 旧文件里没有 pid 字段（很老的版本）⇒ 退化成"文件在就算新的"
+                (Some(_), None) => false,
+                (None, None) => false,
+            };
+            if is_new
+                && let Ok(text) = fs::read_to_string(endpoint_path)
+                && let Ok(endpoint) = serde_json::from_str::<GuiEndpoint>(&text)
+                && self.ping_queue(&endpoint)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    fn ping_queue(&self, endpoint: &GuiEndpoint) -> bool {
+        let Ok(client) = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
+            .build()
+        else {
+            return false;
+        };
+        client
+            .get(format!(
+                "http://127.0.0.1:{}/api/tasks?t={}",
+                endpoint.port, endpoint.token
+            ))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+    }
+
+    /// 设置里的「抑制重复自动拉起」。文件缺失 / 字段缺失一律按**开**（抑制），
+    /// 因为那正是默认值 —— 不能让"没配过"变成"每次都拉"。
+    fn suppress_auto_launch(&self) -> bool {
+        #[derive(Deserialize)]
+        struct One {
+            #[serde(default = "yes")]
+            suppress_auto_launch: bool,
+        }
+        fn yes() -> bool {
+            true
+        }
+        fs::read_to_string(self.config.data_dir.join("settings.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<One>(&text).ok())
+            .map(|one| one.suppress_auto_launch)
+            .unwrap_or(true)
+    }
+
     fn try_queue(
         &self,
         url: &str,
@@ -801,6 +974,28 @@ impl Host {
             }
         }
     }
+}
+
+/// 读自动拉起的时间戳；文件不在或读不懂都当"没拉过"。
+fn read_stamp(path: &Path) -> Option<u64> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get("last").and_then(Value::as_u64)
+}
+
+/// 写自动拉起的时间戳。目录不存在就建。
+fn write_stamp(path: &Path, now: u64) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, serde_json::json!({ "last": now }).to_string())
+}
+
+/// 端点文件里记录的 GUI pid（`None` = 文件不在 / 没有这个字段 / 读不懂）。
+fn endpoint_pid(path: &Path) -> Option<u32> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get("pid").and_then(Value::as_u64).map(|v| v as u32)
 }
 
 /// 把 dlm 的一行 stdout 分流：进度行转成 `op:"progress"`（每 400 ms 最多一发），其余写回任务日志。
@@ -902,6 +1097,10 @@ mod tests {
             download_dir: dir.join("dl"),
             log_dir: dir.join("logs"),
             gui_endpoint: None,
+            // 指到临时目录：自动拉起的时间戳绝不能写到真实的 %LOCALAPPDATA%，
+            // 否则跑一次用例就把用户机器上的冷却额度花掉了。
+            gui_exe: dir.join("dlm-gui.exe"),
+            data_dir: dir.to_path_buf(),
         }
     }
 
@@ -1464,6 +1663,113 @@ mod tests {
             .unwrap();
         });
         (port, seen, handle)
+    }
+
+    /// 自动拉起的判定规则（纯函数）。
+    ///
+    /// 语义要说清，否则实现时很容易做成"抑制 = 从不拉起"：
+    /// **抑制的是"反复"，不是"首次"**。
+    #[test]
+    fn auto_launch_is_suppressed_within_the_cooldown_only() {
+        // 从没拉过 ⇒ 拉
+        assert!(should_auto_launch(1_000, None, true, 300));
+        // 冷却窗口内 ⇒ 不拉
+        assert!(!should_auto_launch(1_100, Some(1_000), true, 300));
+        // 刚过窗口 ⇒ 拉
+        assert!(should_auto_launch(1_300, Some(1_000), true, 300));
+        // 关掉"抑制" ⇒ 窗口内也照拉
+        assert!(should_auto_launch(1_100, Some(1_000), false, 300));
+        // 时钟回拨（时间戳比现在还大）⇒ 当成很久以前，别把用户永久锁死
+        assert!(should_auto_launch(1_000, Some(99_999), true, 300));
+    }
+
+    /// 时间戳的读写：文件不在 / 内容坏掉都当"没拉过"。
+    #[test]
+    fn the_autolaunch_stamp_round_trips_and_tolerates_garbage() {
+        let dir = std::env::temp_dir().join(format!("dlm-stamp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("gui").join("autolaunch.stamp");
+
+        assert_eq!(read_stamp(&path), None, "文件不在就是没拉过");
+        write_stamp(&path, 12345).unwrap();
+        assert_eq!(read_stamp(&path), Some(12345));
+
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(
+            read_stamp(&path),
+            None,
+            "坏文件不许 panic，也不许当成最近拉过"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 端点文件里没有 pid（很老的版本写的）⇒ 不能当成"新进程起来了"。
+    #[test]
+    fn an_endpoint_without_a_pid_is_not_treated_as_new() {
+        let dir = std::env::temp_dir().join(format!("dlm-ep-pid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("endpoint.json");
+
+        fs::write(&path, r#"{"port":1,"token":"t"}"#).unwrap();
+        assert_eq!(endpoint_pid(&path), None);
+        fs::write(&path, r#"{"port":1,"token":"t","pid":4242}"#).unwrap();
+        assert_eq!(endpoint_pid(&path), Some(4242));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 无法拉起时（这里没有 gui.exe）必须**快速返回 false 并且已经记账** ——
+    /// 记账是关键：否则 GUI 起不来时每次下载都会再试一次，把屏幕刷成一串窗口。
+    #[test]
+    fn a_failed_autolaunch_still_burns_the_cooldown() {
+        let dir = std::env::temp_dir().join(format!("dlm-autolaunch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 端点文件先放着（内容能不能用无所谓，函数在拉不起来时会退出）。
+        // 注意必须**配进 config**：`ensure_gui` 在没有端点时会直接放弃、不记账。
+        let ep = endpoint_file(&dir, 1);
+        let host = Host::new(HostConfig {
+            gui_endpoint: Some(ep),
+            ..config(&dir)
+        });
+        // gui_exe 指向一个不存在的路径（测试脚手架就是 dir/dlm-gui.exe）
+        assert!(!host.ensure_gui(), "没有 gui.exe 时必须说没拉起来");
+
+        let stamp = dir.join("gui").join("autolaunch.stamp");
+        assert!(
+            read_stamp(&stamp).is_some(),
+            "失败也要记账，否则会被每次下载反复重试"
+        );
+
+        // 再来一次：冷却窗口内必须直接放弃，不再尝试
+        let before = read_stamp(&stamp);
+        assert!(!host.ensure_gui());
+        assert_eq!(read_stamp(&stamp), before, "冷却窗口内不该刷新时间戳");
+
+        // 关掉抑制之后，即使窗口内也该再试一次。
+        //
+        // 这里用"戳被刷新"当"真的试过"的证据：先把戳改到一个远古值，调用后它应当变成
+        // 当前时间。为什么不用 assert_ne 比原值 —— 三次调用都发生在同一秒里，
+        // 时间戳本来就一样，比不出差别（第一版就是这么写错的）。
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"suppress_auto_launch": false}"#,
+        )
+        .unwrap();
+        write_stamp(&stamp, 1).unwrap();
+        let host2 = Host::new(HostConfig {
+            gui_endpoint: Some(dir.join("endpoint.json")),
+            ..config(&dir)
+        });
+        assert!(!host2.ensure_gui(), "仍然起不来，但不该是「被抑制」挡住的");
+        assert!(
+            read_stamp(&stamp).is_some_and(|t| t > 1),
+            "关掉抑制后应当越过冷却闸、重新尝试并刷新时间戳"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// **2026-11-27 的修复本体**：带 Cookie 的下载必须进队列。

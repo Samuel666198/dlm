@@ -9316,6 +9316,121 @@ fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// **桌面端没开时，浏览器下载要把桌面端拉起来再进队列**（2026-11-27 的决定：
+/// 「下载需要打开 gui，没有打开先自动打开」）。
+///
+/// 这条走的是**真宿主进程**：`dlm-native-host.exe` 收到一帧 `download`，
+/// 发现队列不可达 ⇒ 拉起 `gui_exe` ⇒ 等它的端点文件 ⇒ 重试 `/api/add`。
+///
+/// `gui_exe` 是假 dlm 的副本改名成 `fake-gui.exe`（见它文件头）：它只写一个端点文件就退出，
+/// 所以这条用例**不会弹出一个真的窗口**，但它把宿主的完整分支都走了一遍。
+#[test]
+fn a_browser_download_launches_the_desktop_app_when_it_is_not_running() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    // 1) 冒充桌面端的 HTTP 口：GET /api/tasks 答 []，POST /api/add 答 ok。
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let adds = Arc::new(Mutex::new(0usize));
+    let adds_in_stub = Arc::clone(&adds);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut buf = [0u8; 8192];
+            let n = (&stream).read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = if request.starts_with("POST /api/add") {
+                *adds_in_stub.lock().unwrap() += 1;
+                r#"{"ok":true,"id":"q-auto"}"#
+            } else {
+                "[]"
+            };
+            let mut stream = &stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+
+    // 2) 目录布局：假桌面端 + 旧端点文件（pid=1，宿主必须认出它不是"新进程"）
+    let dir = harness::tmp_dir("host-autolaunch")?;
+    let fake_gui = dir.path().join("fake-gui.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_fake-dlm"), &fake_gui)?;
+    std::fs::write(
+        dir.path().join("fake-gui.json"),
+        format!(r#"{{"port":{port},"token":"tok"}}"#),
+    )?;
+    let endpoint = dir.path().join("endpoint.json");
+    std::fs::write(&endpoint, r#"{"port":1,"token":"tok","pid":1}"#)?;
+
+    let config = dir.path().join("native.json");
+    std::fs::write(
+        &config,
+        serde_json::json!({
+            "dlm_exe": dir.path().join("dlm.exe"),
+            "download_dir": dir.path().join("dl"),
+            "log_dir": dir.path().join("jobs"),
+            "gui_exe": fake_gui,
+            "gui_endpoint": endpoint,
+            "data_dir": dir.path(),
+        })
+        .to_string(),
+    )?;
+
+    // 3) 跑真宿主，喂一帧 download
+    let mut host = Command::new(env!("CARGO_BIN_EXE_dlm-native-host"))
+        .env("DLM_NATIVE_CONFIG", &config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let request = serde_json::json!({
+        "op": "download",
+        "url": "https://example.invalid/auto.bin",
+        "name": "auto.bin",
+    })
+    .to_string();
+    let mut frame = (request.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(request.as_bytes());
+    host.stdin
+        .take()
+        .context("宿主应有 stdin")?
+        .write_all(&frame)?;
+
+    // 4) 读一帧回复
+    let mut stdout = host.stdout.take().context("宿主应有 stdout")?;
+    let mut len_buf = [0u8; 4];
+    stdout.read_exact(&mut len_buf)?;
+    let mut body = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+    stdout.read_exact(&mut body)?;
+    let reply: serde_json::Value = serde_json::from_slice(&body)?;
+    let _ = host.kill();
+    let _ = host.wait();
+
+    // 5) 结论
+    assert_eq!(
+        reply["mode"], "queue",
+        "拉起桌面端之后应当把任务送进队列，实际回复：{reply}"
+    );
+    assert_eq!(reply["id"], "q-auto", "应当是重试的那一次成功的：{reply}");
+    assert_eq!(
+        *adds.lock().unwrap(),
+        1,
+        "第一次 /api/add 没打通、拉起之后重试才成功 —— 桩应当只见到 1 次成功请求"
+    );
+    assert!(
+        dir.path().join("gui").join("autolaunch.stamp").exists(),
+        "拉起之后必须记下时间戳，否则下次还会被反复拉起"
+    );
+
+    Ok(())
+}
+
 /// **下载时不许弹出黑色终端窗口**（2026-11-27 用户报的「有时下载会出现终端弹窗」）。
 ///
 /// 机制：`dlm.exe` 是控制台子系统、`dlm-gui.exe` 是 GUI 子系统。GUI 起控制台子进程
@@ -11046,6 +11161,10 @@ fn host_to_queue_end_to_end() -> anyhow::Result<()> {
         download_dir: dir.path().join("direct"),
         log_dir: dir.path().join("host-logs"),
         gui_endpoint: Some(endpoint.clone()),
+        // 不存在的 gui_exe：这条用例测的是"队列不可达时带 Cookie 也走直连"，
+        // 自动拉起必须在这里放弃（否则会去起一个真窗口）。
+        gui_exe: dir.path().join("no-such-gui.exe"),
+        data_dir: dir.path().to_path_buf(),
     });
     let reply: serde_json::Value = serde_json::from_slice(
         &host.handle(

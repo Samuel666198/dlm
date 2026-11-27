@@ -84,6 +84,7 @@ pub(crate) enum SettingKey {
     GrabTemplates,
     AutoCheckUpdate,
     WatchClipboard,
+    SuppressAutoLaunch,
 }
 
 /// 一条设置的静态描述。
@@ -322,6 +323,14 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "站点抓取",
         "抓取模板",
         "按站点记的深度与通配；在抓取窗口里「存为模板」就会记到这里",
+    ),
+    spec(
+        SettingKey::SuppressAutoLaunch,
+        "suppress_auto_launch",
+        Category::Advanced,
+        "浏览器",
+        "抑制重复自动拉起",
+        "浏览器下载发现桌面端没开时只自动打开一次；关掉则每次都尝试打开",
     ),
     spec(
         SettingKey::AutoCheckUpdate,

@@ -1800,3 +1800,26 @@ fn a_finished_or_paused_task_had_to_return_its_host_budget() {
         "不同 host 各算各的"
     );
 }
+
+/// **端点的 `pid` 是宿主"要不要拉起桌面端"的判据**，不能悄悄丢掉。
+///
+/// `host.rs` 的 `ensure_gui()` 靠"端点文件里的 pid 变了"判断新实例起来了 ——
+/// 只判"文件存在"会读到上次崩溃留下的死端口，然后误判成"已经开着了"，
+/// 于是一次下载都送不进队列。这个字段一旦被删，宿主侧只会表现为"永远超时"，
+/// 而宿主和 GUI 各自都有用例绿着，谁也不会红。所以在这里钉住。
+#[test]
+fn the_endpoint_file_carries_the_pid_the_native_host_needs() {
+    let endpoint = super::Endpoint {
+        port: 1234,
+        token: "tok".to_string(),
+        pid: std::process::id(),
+        started_at: 1,
+        api: super::AGENT_API,
+    };
+    let text = serde_json::to_string(&endpoint).expect("端点应当能序列化");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        value.get("pid").and_then(|v| v.as_u64()).is_some(),
+        "端点文件必须带 pid：宿主靠它区分「新实例」与「上次崩溃留下的旧文件」，实际：{text}"
+    );
+}
