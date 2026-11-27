@@ -10,6 +10,7 @@ pub mod host;
 pub mod json_out;
 pub mod native;
 pub mod probe;
+pub mod proc;
 pub mod proxy;
 pub mod queue;
 pub mod rate;

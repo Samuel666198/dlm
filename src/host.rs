@@ -531,8 +531,7 @@ impl Host {
             } else {
                 Stdio::null()
             });
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
+        crate::proc::no_window(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {

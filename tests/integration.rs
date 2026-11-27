@@ -9316,6 +9316,113 @@ fn gui_retries_a_failed_task_until_it_succeeds() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// **下载时不许弹出黑色终端窗口**（2026-11-27 用户报的「有时下载会出现终端弹窗」）。
+///
+/// 机制：`dlm.exe` 是控制台子系统、`dlm-gui.exe` 是 GUI 子系统。GUI 起控制台子进程
+/// 却不加 `CREATE_NO_WINDOW` 时，Windows 会给它**分配一个新控制台** —— 那就是黑窗口。
+///
+/// 判据不是看窗口（没法稳定地看），而是问子进程自己：假 dlm 启动时用
+/// `GetConsoleWindow()` 探测"我有没有控制台"，把 `1`/`0` 写进文件。
+/// 加了标志 ⇒ 该返回 NULL ⇒ 写 `0`。
+#[test]
+fn the_download_child_runs_without_a_console_window() -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+
+    struct GuiChild(std::process::Child);
+    impl Drop for GuiChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = harness::tmp_dir("gui-no-console")?;
+    let queue = dir.path().join("queue.json");
+    let out_dir = dir.path().join("dl");
+    let log_dir = dir.path().join("logs");
+    let endpoint = dir.path().join("endpoint.json");
+    let report = dir.path().join("console.txt");
+    let gui_stderr = std::fs::File::create(dir.path().join("gui-stderr.log"))?;
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = probe.local_addr()?.port();
+    drop(probe);
+    let token = "gui-console-token";
+    let base = format!("http://127.0.0.1:{port}");
+    let _child = GuiChild(
+        Command::new(env!("CARGO_BIN_EXE_dlm-gui"))
+            .args([
+                "--port",
+                &port.to_string(),
+                "--queue",
+                queue.to_str().context("queue utf8")?,
+                "--out-dir",
+                out_dir.to_str().context("out utf8")?,
+                "--log-dir",
+                log_dir.to_str().context("log utf8")?,
+                "--endpoint",
+                endpoint.to_str().context("endpoint utf8")?,
+                "--dlm",
+                fake_dlm_str(),
+                "--concurrency",
+                "1",
+                "--headless",
+                "--token",
+                token,
+            ])
+            .env("DLM_FAKE_CONSOLE_REPORT", &report)
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(gui_stderr))
+            .spawn()
+            .context("启动 dlm-gui 失败")?,
+    );
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(2))
+        .build()?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client
+            .get(format!("{base}/api/tasks?t={token}"))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() > ready {
+            panic!("dlm-gui HTTP 没起来");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    client
+        .post(format!("{base}/api/add?t={token}"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({"url": "https://example.invalid/noconsole.bin", "name": "noconsole.bin"})
+                .to_string(),
+        )
+        .send()?;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&report) {
+            assert_eq!(
+                text.trim(),
+                "0",
+                "子进程被分配了控制台（GetConsoleWindow 非 NULL）—— 用户屏幕上会弹出一个黑色\
+                 终端窗口；runner 起 dlm.exe 时必须走 crate::proc::no_window"
+            );
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            panic!("假 dlm 没有写下控制台探测结果：{}", report.display());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// **暂停之后「继续」必须真的接着下**（2026-11-27 用户报的"一直显示在排队"）。
 ///
 /// 根因：暂停时把子进程从 `children` 里移除并 kill，但**没归还 host 连接预算** ——

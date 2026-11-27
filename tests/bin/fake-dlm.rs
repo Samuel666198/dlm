@@ -12,6 +12,9 @@
 //!   （P2 的 reveal 只对 `done` 放行，需要一个真存在的文件）。
 //! - `DLM_FAKE_SLEEP_MS`：退出前先睡这么多毫秒。用来造"一个还在跑的任务"，
 //!   好让用例能在它跑着的时候暂停 —— 否则 `fake-dlm` 秒退，暂停永远抢不到时机。
+//! - `DLM_FAKE_CONSOLE_REPORT`：往里写一个 `1`/`0` —— 本进程**有没有被分配到控制台**。
+//!   用来钉"下载时不该弹出黑色终端窗口"：GUI 是 windows 子系统，若它起控制台子进程时
+//!   不加 `CREATE_NO_WINDOW`，Windows 就会分配一个新控制台，这里就会读到 `1`。
 //!
 //! 退出码 0/1/2/3 与 README「退出码」一节同义，本程序只是把它们按剧本发出去。
 
@@ -50,6 +53,12 @@ fn main() {
         let _ = fs::write(std::path::Path::new(&out_dir).join(name), b"FAKE");
     }
 
+    // 报告自己有没有控制台（见文件头 DLM_FAKE_CONSOLE_REPORT）。
+    if let Ok(path) = env::var("DLM_FAKE_CONSOLE_REPORT") {
+        let has = has_console();
+        let _ = fs::write(&path, if has { "1" } else { "0" });
+    }
+
     // 挂住一会儿：给"暂停"留出窗口（见文件头 DLM_FAKE_SLEEP_MS）。
     if let Ok(ms) = env::var("DLM_FAKE_SLEEP_MS")
         && let Ok(ms) = ms.trim().parse::<u64>()
@@ -73,4 +82,20 @@ fn arg_value(flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 本进程当前有没有控制台窗口。没被分配控制台时 `GetConsoleWindow` 返回 NULL。
+#[cfg(windows)]
+fn has_console() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+    }
+    // SAFETY: 只查一个全局状态，不传任何指针进去。
+    !unsafe { GetConsoleWindow() }.is_null()
+}
+
+#[cfg(not(windows))]
+fn has_console() -> bool {
+    false
 }

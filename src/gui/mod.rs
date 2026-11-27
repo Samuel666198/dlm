@@ -850,12 +850,7 @@ pub(crate) fn spawn_updater(view: &UpdateView, data_dir: &Path) -> Result<()> {
     // 现在是 windows 子系统、自己就没有控制台。控制台子进程在「父进程没有控制台」时
     // 会**新分配一个**窗口 —— 更新时屏幕上就会闪出一个黑窗口。
     // CREATE_NO_WINDOW 让它不分配控制台；输出本来就走 `--log` 那个文件。
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    crate::proc::no_window(&mut cmd);
     cmd.spawn()
         .with_context(|| format!("启动更新器失败：{}", staged_updater.display()))?;
     Ok(())

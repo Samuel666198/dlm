@@ -735,6 +735,9 @@ fn tick(
             None
         };
         let mut command = Command::new(&config.dlm_exe);
+        // 不加这个标志，这个 GUI 子系统进程起的控制台子进程会**分配一个新控制台**
+        // —— 用户看到的就是下载时突然弹出黑色终端窗口（2026-11-27 报的）。
+        crate::proc::no_window(&mut command);
         command
             .args(child_args(&task, quota_slice, tuning))
             .stdin(if cookie.is_some() {

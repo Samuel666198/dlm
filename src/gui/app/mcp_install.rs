@@ -230,12 +230,7 @@ impl Host for RealHost {
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--version");
         // 别在用户屏幕上闪一个黑框：这是后台探测，不是用户启动的程序。
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::proc::no_window(&mut cmd);
         let out = cmd.output().ok()?;
         if !out.status.success() {
             return None;
