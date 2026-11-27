@@ -221,6 +221,9 @@ fn columns(rect: egui::Rect) -> Columns {
 
 impl App {
     pub(super) fn list(&mut self, ui: &mut egui::Ui) {
+        // 右键高亮只活到菜单关掉为止：这一帧若有行把菜单画出来，`context_menu_for`
+        // 就会被重新置上；没置上说明菜单已经关了 ⇒ 把"菜单在说哪一行"收回去。
+        self.context_menu_for = None;
         let all = self.tasks();
         let rows: Vec<TaskView> = all.iter().filter(|t| self.visible(t)).cloned().collect();
 
@@ -257,6 +260,10 @@ impl App {
 
         // 悬浮岛**最后画**：它要盖在列表上面，而且不参与布局（列表位置不动）。
         self.batch_island(ui, &visible_ids);
+
+        if self.context_menu_for.is_none() {
+            self.context_target = None;
+        }
     }
 
     /// 一行**外部下载**（浏览器直连 / HLS）：与任务行同高同列，但没有勾选框、
@@ -348,7 +355,9 @@ impl App {
     /// 单击 = 在右栏查看它；Ctrl+单击 = 顺便把它勾进批量；勾复选框 = 只动批量。
     /// 三者的分工写在 `batch` 模块的文档里，这里只是照做。
     fn row(&mut self, ui: &mut egui::Ui, task: &TaskView) {
-        let selected = self.selected.as_deref() == Some(task.id.as_str());
+        // 高亮两种来源：左键选中的（打开右栏）与右键指向的（只高亮）。
+        let selected = self.selected.as_deref() == Some(task.id.as_str())
+            || self.context_target.as_deref() == Some(task.id.as_str());
         let checked = self.batch.contains(&task.id);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), theme::ROW_H),
@@ -465,8 +474,18 @@ impl App {
         // ---- 右键菜单 ----
         //
         // 右键先把这一行设为"正在查看"：否则菜单里的动作会作用在右栏那个看不见的任务上。
+        // 右键**只标出"菜单在说哪一行"**，不打开右栏。
+        //
+        // 踩过的坑：这里原先是 `self.selected = Some(...)`，于是右键的同一帧里
+        // 右栏张开、列表变窄，刚弹出来的菜单失去锚点、下一帧就被关掉 ——
+        // 用户报的「右键菜单只会在右侧栏打开时触发」正是这个
+        // （右栏本来就开着时不会重排，所以看着"只有那时才灵"）。
+        // 菜单里的动作本来就都用 `task`，不依赖 `selected`，去掉它没有副作用。
         if response.secondary_clicked() {
-            self.selected = Some(task.id.clone());
+            self.context_target = Some(task.id.clone());
+        }
+        if response.clicked() {
+            self.context_target = None;
         }
         let mut menu_action: Option<RowMenuAction> = None;
         let mut menu_opened = false;

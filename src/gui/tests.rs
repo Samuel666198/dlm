@@ -2268,3 +2268,108 @@ fn add_fields_only_accept_a_real_boolean_video_flag() {
     let no2 = parse_add_fields(with_one.as_bytes()).expect("数字也不该报错");
     assert!(!no2.video, "数字 1 不算");
 }
+
+/// **右键菜单必须在右栏关着时也活得下去。**
+///
+/// 用户 2026-11-27 报「右键菜单只会在右侧栏打开时触发」。三版观测才定位到：
+/// 一版看 `context_menu_for`（只记本帧）、一版查 `any_popup_open`（0.37 是私有的），
+/// 都不成立；最后用 `Memory::areas().visible_layer_ids()`（菜单是独立图层）才看清：
+///
+/// ```
+/// 修前 drawer_open=false: 点前 1 / 当帧 2 / 次帧 1 / 再一帧 1   ← 一帧就没了
+/// 修前 drawer_open=true : 点前 1 / 当帧 2 / 次帧 2 / 再一帧 2   ← 一直活着
+/// ```
+///
+/// 根因：右键顺带设了 `selected` ⇒ 右栏张开 ⇒ 列表同一帧变窄 ⇒ 弹窗失去锚点。
+/// 修法：右键只设 `context_target`（只做高亮），不碰 `selected`。
+#[test]
+fn the_row_menu_survives_a_right_click_with_the_drawer_closed() {
+    let (mut app, dir) = test_app(
+        "ctx-layers",
+        vec![task_view_named("a.bin", TaskStatus::Done)],
+    );
+    let ctx = egui::Context::default();
+    let mut clock = 0.0f64;
+    let frame = |app: &mut super::app::App, clock: &mut f64, events: Vec<egui::Event>| {
+        *clock += 0.2;
+        let mut input = frame_input();
+        input.time = Some(*clock);
+        input.events = events;
+        let mut out = ctx.run_ui(input, |ui| app.ui_frame(ui));
+        out.textures_delta.clear();
+        ctx.memory(|m| m.areas().visible_layer_ids().len())
+    };
+
+    let probe = |app: &mut super::app::App, clock: &mut f64, drawer_open: bool| -> (usize, usize) {
+        app.selected = if drawer_open {
+            Some("a.bin".to_string())
+        } else {
+            None
+        };
+        for _ in 0..6 {
+            frame(app, clock, Vec::new());
+        }
+        let before = frame(app, clock, Vec::new());
+        let pos = egui::pos2(400.0, 110.0);
+        let mut events = vec![egui::Event::PointerMoved(pos)];
+        for pressed in [true, false] {
+            events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        let on_click = frame(app, clock, events);
+        // 再看两帧：如果菜单被"右栏张开导致的重排"带走，这两帧之后层数会掉回来
+        let after1 = frame(app, clock, Vec::new());
+        let after2 = frame(app, clock, Vec::new());
+        println!(
+            "drawer_open={drawer_open}: 点前 {before} / 点当帧 {on_click} / 次帧 {after1} / 再一帧 {after2}"
+        );
+        (on_click, after2)
+    };
+
+    let (click_closed, later_closed) = probe(&mut app, &mut clock, false);
+    let (click_open, later_open) = probe(&mut app, &mut clock, true);
+
+    assert!(
+        click_closed > 0 || click_open > 0,
+        "一帧都没多出来 ⇒ 这个探针本身不成立（菜单不是独立图层？）"
+    );
+    assert_eq!(
+        click_closed, click_open,
+        "右栏开/关两种状态下，右键当帧多出来的图层数应当一致"
+    );
+    assert_eq!(
+        later_closed, later_open,
+        "两帧之后：右栏关着时菜单消失了、开着时还在 —— 这正是用户报的那个现象"
+    );
+    // 再钉一条读得懂的：右键**不该**把右栏打开（那正是菜单被带走的起因）
+    app.selected = None;
+    app.context_target = None;
+    for _ in 0..6 {
+        frame(&mut app, &mut clock, Vec::new());
+    }
+    let pos = egui::pos2(400.0, 110.0);
+    let mut events = vec![egui::Event::PointerMoved(pos)];
+    for pressed in [true, false] {
+        events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    frame(&mut app, &mut clock, events);
+    assert!(
+        app.selected.is_none(),
+        "右键把右栏打开了 —— 列表会因此变窄、菜单下一帧就被带走"
+    );
+    assert_eq!(
+        app.context_target.as_deref(),
+        Some("a.bin"),
+        "右键该把「菜单在说哪一行」标出来（只高亮）"
+    );
+    let _ = fs::remove_dir_all(dir);
+}

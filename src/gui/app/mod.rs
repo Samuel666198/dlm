@@ -221,6 +221,12 @@ pub struct App {
     pub(super) externals: Vec<crate::queue::External>,
     /// 上一帧哪个任务的行菜单打开了。给用例定位"右键为什么不灵"用。
     pub(super) context_menu_for: Option<String>,
+    /// 右键点到的那一行：**只用来高亮**，不参与"右栏显示谁"。
+    ///
+    /// 为什么不能复用 `selected`：右键把它一设，右栏就张开，列表**同一帧变窄**，
+    /// 刚弹出来的菜单因此失去锚点、下一帧就被关掉 —— 用户看到的就是
+    /// 「右键菜单只会在右侧栏打开时触发」（2026-11-27 报的，2026-11-28 复现定案）。
+    pub(super) context_target: Option<String>,
     /// 表头 / 行各自拿到的宽度。用例靠它证明"两边排布同源"。
     pub(super) thead_w: f32,
     pub(super) row_w: f32,
@@ -369,6 +375,7 @@ impl App {
             palette_scroll_seen: false,
             externals: Vec::new(),
             context_menu_for: None,
+            context_target: None,
             thead_w: 0.0,
             row_w: 0.0,
             externals_next_at: None,
