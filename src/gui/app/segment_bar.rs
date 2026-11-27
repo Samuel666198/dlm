@@ -67,6 +67,39 @@ pub fn spans(total: u64, segments: &[(u64, u64)], width: f32) -> Vec<(f32, f32)>
 }
 
 /// 画到给定的轨道矩形里。没有分段信息时什么都不画（轨道本身由调用方画）。
+/// 覆盖集有没有**空洞**（也就是"还有哪一段没下"）。
+///
+/// 列表里的进度条只有在有空洞时才画成分段 —— 否则一百多个相邻段会显示成一串碎块，
+/// 看着像"进度条坏了"，其实它是连续的。用户 2026-11-27 说
+/// 「列表进度条显示整体进度、侧边栏再显示更详细的分块」，这就是那条的判据。
+pub fn has_holes(total: u64, segments: &[(u64, u64)]) -> bool {
+    if total == 0 || segments.is_empty() {
+        return false;
+    }
+    let mut rows: Vec<(u64, u64)> = segments
+        .iter()
+        .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+        .filter(|(s, _)| *s < total)
+        .map(|(s, e)| (s, e.min(total - 1)))
+        .collect();
+    if rows.is_empty() {
+        return false;
+    }
+    rows.sort_unstable();
+    // 闭区间口径，与 `spans` 一致：中间隔了一格才算空洞。
+    if rows[0].0 > 0 {
+        return true;
+    }
+    let mut reach = rows[0].1;
+    for (s, e) in rows.into_iter().skip(1) {
+        if s > reach.saturating_add(1) {
+            return true;
+        }
+        reach = reach.max(e);
+    }
+    reach + 1 < total
+}
+
 pub fn draw(ui: &egui::Ui, track: egui::Rect, task: &TaskView) {
     let Some(total) = task.total_len else {
         return;
@@ -92,6 +125,33 @@ pub fn draw(ui: &egui::Ui, track: egui::Rect, task: &TaskView) {
 
 #[cfg(test)]
 mod tests {
+
+    /// 列表进度条只在**真有空洞**时才分段（用户 2026-11-27 的决定）。
+    #[test]
+    fn only_a_gapped_coverage_counts_as_holes() {
+        use super::has_holes;
+        let total = 100u64;
+        assert!(!has_holes(total, &[]), "没有覆盖集就不分段");
+        assert!(
+            !has_holes(total, &[(0, 99)]),
+            "整条覆盖完 ⇒ 一条实心条，不许画成碎块"
+        );
+        assert!(
+            !has_holes(total, &[(0, 49), (50, 99)]),
+            "两段正好相邻（50 接着 49）⇒ 仍然算连续"
+        );
+        assert!(!has_holes(total, &[(0, 49), (48, 99)]), "重叠也算连续");
+        assert!(has_holes(total, &[(0, 49)]), "后一半没下 ⇒ 有空洞");
+        assert!(has_holes(total, &[(10, 99)]), "开头没下 ⇒ 有空洞");
+        assert!(
+            has_holes(total, &[(0, 19), (40, 99)]),
+            "中间断了一截 ⇒ 有空洞"
+        );
+        assert!(
+            !has_holes(total, &[(0, 99), (200, 300)]),
+            "越界的段被过滤掉，剩下 (0,99) 本身就是全覆盖 ⇒ 没有空洞"
+        );
+    }
 
     /// **文字里的块数必须与画出来的块数一致。**
     ///

@@ -698,9 +698,15 @@ fn draw_progress(ui: &mut egui::Ui, rect: egui::Rect, task: &TaskView) {
     );
     painter.rect_filled(track_rect, 99.0, theme::track());
 
-    // 有覆盖集就画**分段条**：一眼能看出"哪几段下完了、中间空多宽"。
-    // 没有就当普通进度条 —— 不许用百分比画一条假的分段。
-    if task.segments.is_empty() {
+    // 列表只画**整体进度**：连续下完的就是一条实心条。
+    //
+    // 只有真的存在"还没下的段"时才画成分段 —— 否则一百多个相邻段会铺成一串碎块，
+    // 看着像进度条坏了。分块的细节留给右侧详情（用户 2026-11-27 的决定）。
+    let show_segments = !task.segments.is_empty()
+        && task
+            .total_len
+            .is_some_and(|t| super::segment_bar::has_holes(t, &task.segments));
+    if !show_segments {
         let pct = (task.progress / 100.0).clamp(0.0, 1.0) as f32;
         if pct > 0.0 {
             let fill = egui::Rect::from_min_size(
