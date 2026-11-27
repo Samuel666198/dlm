@@ -140,12 +140,38 @@ function connect() {
       console.log("dlm job done", msg);
     } else if (msg && msg.op === "accepted") {
       const mode = msg.mode || "direct";
+      // ---- 接管的"收网"----
+      //
+      // 2026-11-27：这段以前**根本不存在**。watchDownloads 登记了 pendingTakeover，
+      // 却没有任何地方在回执到达时去取消浏览器那份下载 —— 于是开着接管开关时，
+      // 浏览器和 dlm 会各下一遍，用户看到两个文件。
+      //
+      // 顺序也不能反：chrome.downloads.cancel 之后没法恢复，
+      // 万一 dlm 没接住，这次下载就白丢了。所以是「先投递 → 收到 accepted → 才取消」。
+      const taken = msg.request_id ? pendingTakeover.get(msg.request_id) : null;
+      if (taken) {
+        clearTimeout(taken.timer);
+        pendingTakeover.delete(msg.request_id);
+        chrome.downloads.cancel(taken.downloadId, () => {
+          void chrome.runtime.lastError;
+          // erase 只是把取消掉的那条从下载列表里清走，失败无所谓。
+          chrome.downloads.erase({ id: taken.downloadId }, () => void chrome.runtime.lastError);
+        });
+        store({ lastTakeover: { ok: true, mode, at: Date.now() } });
+      }
       store({ lastJob: { ...msg, mode }, lastResult: null, lastError: null });
       chrome.action.setBadgeText({ text: "↓" });
       chrome.action.setBadgeBackgroundColor({ color: "#c06340" });
       sendToJobTab(msg.tab, { ...msg, mode, op: "job-accepted" });
       console.log("dlm job accepted", mode, msg);
     } else if (msg && msg.op === "error") {
+      // 没接住：**什么都不取消**，浏览器那份照常下。只记一笔原因给选项页看。
+      const failed = msg.request_id ? pendingTakeover.get(msg.request_id) : null;
+      if (failed) {
+        clearTimeout(failed.timer);
+        pendingTakeover.delete(msg.request_id);
+        store({ lastTakeover: { ok: false, reason: msg.message || "error" } });
+      }
       store({ lastPong: null, lastError: msg.message || "native host error" });
       chrome.action.setBadgeText({ text: "!" });
       chrome.action.setBadgeBackgroundColor({ color: "#c62828" });
@@ -406,17 +432,23 @@ function watchDownloads() {
       store({ lastTakeover: { ok: false, reason: "no-ack" } });
     }, TAKEOVER_ACK_MS);
     pendingTakeover.set(requestId, { downloadId: item.id, timer });
-    const sent = submitTask({
-      op: "download",
-      request_id: requestId,
-      url: item.finalUrl || item.url,
-      referer: item.referrer || "",
-      tab: item.tabId,
+    const url = item.finalUrl || item.url;
+    // 带 cookie：接管下来的下载和右键下载是同一种下载，站点要求登录时
+    // 没有 cookie 只会拿到一个登录页。队列从 2026-11-27 起收得下凭证（加密落盘）。
+    cookieHeader(url).then((cookie) => {
+      const sent = submitTask({
+        op: "download",
+        request_id: requestId,
+        url,
+        referer: item.referrer || "",
+        tab: item.tabId,
+        cookie,
+      });
+      if (!sent) {
+        clearTimeout(timer);
+        pendingTakeover.delete(requestId);
+      }
     });
-    if (!sent) {
-      clearTimeout(timer);
-      pendingTakeover.delete(requestId);
-    }
   });
 }
 

@@ -121,10 +121,17 @@ if ($Node) {
     # 钉住"扩展重载后旧脚本不许刷 `Extension context invalidated`"这件事 ——
     # 它是纯逻辑，用 vm 沙箱跑，不启动浏览器。
     Invoke-Gate -Name 'ext-guard' -Note 'verify-content-guard.mjs' -Body { & $Node browser/test/verify-content-guard.mjs }
+
+    # 浏览器下载接管的**判定逻辑**（2026-11-27）。
+    # 这些规则决定“要不要抢浏览器自己那份下载”，判错的代价是两边都没下成，
+    # 而且保守这件事不会自己保持 —— 后来的人很容易为了覆盖更多去放宽某一条件。
+    # takeover.js 本身无 chrome 依赖、导出 module.exports，所以直接 require 进来逐个分支打。
+    Invoke-Gate -Name 'takeover' -Note 'verify-takeover.mjs' -Body { & $Node browser/test/verify-takeover.mjs }
 }
 else {
     $script:Results += [pscustomobject]@{ Gate = 'extension'; Result = 'SKIP'; Detail = 'node not found' }
     $script:Results += [pscustomobject]@{ Gate = 'ext-guard'; Result = 'SKIP'; Detail = 'node not found' }
+    $script:Results += [pscustomobject]@{ Gate = 'takeover'; Result = 'SKIP'; Detail = 'node not found' }
 }
 
 # PowerShell 5.1 decodes a .ps1 WITHOUT a UTF-8 BOM using the local code page.

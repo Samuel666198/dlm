@@ -57,11 +57,35 @@ for (const token of directTokens) {
   }
 }
 
+// 4) 接管必须"收网"。
+//
+// 2026-11-27：watchDownloads 会登记 pendingTakeover，但当时**没有任何地方在回执到达时
+// 取消浏览器那份下载** —— 开着接管开关时浏览器和 dlm 会各下一遍。这类"登记了却没人收网"
+// 的缺口不会报错、不会崩，只是用户突然发现同一文件下了两份，所以必须由检查钉住。
+const bgSrc = existsSync(join(ext, sw)) ? readFileSync(join(ext, sw), "utf8") : "";
+if (!/importScripts\(\s*["']takeover\.js["']\s*\)/.test(bgSrc)) {
+  failures.push(`${sw} 没有 importScripts("takeover.js")（接管判定逻辑没接上）`);
+}
+if (/pendingTakeover\.set/.test(bgSrc)) {
+  // 必须带括号：光在注释里提到 `chrome.downloads.cancel 之后没法恢复` 不算数。
+  if (!/chrome\.downloads\.cancel\s*\(/.test(bgSrc)) {
+    failures.push(`${sw} 登记了 pendingTakeover 却从不 chrome.downloads.cancel —— 会下两遍`);
+  }
+  if (!/chrome\.downloads\.erase\s*\(/.test(bgSrc)) {
+    failures.push(`${sw} 取消了下载却没 chrome.downloads.erase（列表里会留一条红叉）`);
+  }
+  if (!/lastTakeover/.test(bgSrc)) {
+    failures.push(`${sw} 接管结果没写 lastTakeover（选项页的"最近一次接管"永远是空的）`);
+  }
+} else {
+  failures.push(`${sw} 里找不到 pendingTakeover.set（接管登记不见了）`);
+}
+
 if (failures.length) {
   console.error("extension static check FAILED");
   for (const f of failures) console.error(`- ${f}`);
   process.exit(1);
 }
 console.log(
-  `extension static check ok: version=${manifest.version}, sw=${sw}, suffix-regex 双份一致, direct-reason ${directTokens.length} 个对齐`,
+  `extension static check ok: version=${manifest.version}, sw=${sw}, suffix-regex 双份一致, direct-reason ${directTokens.length} 个对齐, 接管收网在位`,
 );
