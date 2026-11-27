@@ -519,6 +519,38 @@ fn interval_rows(v: &serde_json::Value) -> Option<Vec<(u64, u64)>> {
     Some(out)
 }
 
+/// 覆盖集**合并后**的区间数（纯展示用）。
+///
+/// 断点里存的是调度器实际写下的原始行：8 条连接并行推进、中途还会重分片，
+/// 一个 10.9 GiB 的文件碎成三五百段是正常的。但**相邻/重叠的那些在条上就是一个整块**，
+/// 所以画图时会合并（`segment_bar::spans`）。不合并就出现自相矛盾：
+/// 文字说「断点里 353 个区间」、图上看着像一整条 —— 用户 2026-11-27 就是这么问的
+/// （「区间是不是分太多了」）。
+///
+/// 口径：闭区间，`next.start <= current.end` 就算相邻/重叠（与 `segment_bar::spans` 一致）。
+pub fn merged_count(rows: &[(u64, u64)]) -> usize {
+    let mut sorted: Vec<(u64, u64)> = rows
+        .iter()
+        // 写反的区间按 min/max 摆正（数据来自文件，不许 panic，也不许算成两块）
+        .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+        .collect();
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted.sort_unstable();
+    let mut count = 1;
+    let mut reach = sorted[0].1;
+    for (start, end) in sorted.into_iter().skip(1) {
+        // `+1`：闭区间相邻（5..=9 与 10..=14）视觉上是连着的，要算一块。
+        // 这个口径必须与 `segment_bar::spans` 一致，否则文字和图形又对不上。
+        if start > reach.saturating_add(1) {
+            count += 1;
+        }
+        reach = reach.max(end);
+    }
+    count
+}
+
 /// 读断点里的 `(total_len, 覆盖集)`；没有 total 或没有文件交 `None`。
 ///
 /// 与 [`progress`] 分开而不是复用它：`progress` 在 `total_len` 缺失时仍然会给出
@@ -545,6 +577,24 @@ fn tmp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 覆盖集的合并计数：碎行要按"视觉上几块"来数。
+    #[test]
+    fn merged_count_counts_blocks_not_raw_rows() {
+        assert_eq!(merged_count(&[]), 0, "空覆盖集是 0 块");
+        assert_eq!(merged_count(&[(0, 10)]), 1);
+        // 相邻（闭区间）与重叠都算同一块
+        assert_eq!(merged_count(&[(0, 10), (11, 20)]), 1, "紧邻算一块");
+        assert_eq!(merged_count(&[(0, 10), (5, 20)]), 1, "重叠算一块");
+        // 中间断开才算两块
+        assert_eq!(merged_count(&[(0, 10), (12, 20)]), 2);
+        // 乱序输入也要给出同样的答案
+        assert_eq!(merged_count(&[(12, 20), (0, 10)]), 2);
+        // 被整体包含的行不该让块数变多
+        assert_eq!(merged_count(&[(0, 100), (10, 20), (30, 40)]), 1);
+        // 逆区间（end < start）摆正后照常算（40..=50 与 0..=10 是两块），不许 panic
+        assert_eq!(merged_count(&[(50, 40), (0, 10)]), 2);
+    }
 
     fn temp_queue(tag: &str) -> (PathBuf, QueueStore) {
         let dir = std::env::temp_dir().join(format!("dlm-queue-{tag}-{}", std::process::id()));

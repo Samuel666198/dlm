@@ -1282,6 +1282,17 @@ fn frame_input() -> egui::RawInput {
     }
 }
 
+/// 同上，但视口大小可以指定 —— 用来复现"窗口很矮"的情形。
+fn frame_input_sized(width: f32, height: f32) -> egui::RawInput {
+    egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(width, height),
+        )),
+        ..Default::default()
+    }
+}
+
 /// **整帧渲染**（0.6.0 阶段 1）：工具条的自绘按钮与 `⋯` 菜单、上下文动作条、
 /// 状态栏的限速胶囊，全都只在"真的画一帧"时才被走到。
 ///
@@ -1821,5 +1832,48 @@ fn the_endpoint_file_carries_the_pid_the_native_host_needs() {
     assert!(
         value.get("pid").and_then(|v| v.as_u64()).is_some(),
         "端点文件必须带 pid：宿主靠它区分「新实例」与「上次崩溃留下的旧文件」，实际：{text}"
+    );
+}
+
+/// **命令面板在矮窗口里不许冲出视口**（2026-11-27 用户截图：面板底部被裁，
+/// 「打开保存目录」「检查更新」那几条看不见）。
+///
+/// 根因是 `egui::Window` 默认随内容长高，而这里既没 `max_height` 也没 `ScrollArea`。
+/// 修法是「加滚动、不做分页」（命令总数固定十几条，分页要多两个交互，不值）。
+///
+/// 这条用例断言的是**上一帧面板的真实上下边**，不是"代码里写了 max_height"。
+#[test]
+fn the_command_palette_stays_inside_a_short_window() {
+    let (mut app, dir) = test_app("palette-short", vec![]);
+    let ctx = egui::Context::default();
+    app.palette_open = true;
+    app.palette_query.clear();
+
+    // 420 高：比"15 条命令 + 每条一行说明"矮得多，修之前底边会远超这个数。
+    let mut output = ctx.run_ui(frame_input_sized(900.0, 420.0), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+    // 第二帧：窗口尺寸要一帧才稳（首帧还在测量）。
+    let mut output = ctx.run_ui(frame_input_sized(900.0, 420.0), |ui| app.ui_frame(ui));
+    output.textures_delta.clear();
+
+    let (top, bottom) = app.palette_last_rect.expect("命令面板应当画出来了");
+    assert!(top >= 0.0, "面板上边 {top} 跑出视口");
+    assert!(
+        bottom <= 420.5,
+        "面板底边 {bottom} 超出 420 高的视口 —— 用户会看不见最后几条命令"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// 高度上限的算术：矮窗口压到下限，常规窗口按视口让出锚点与底部呼吸。
+#[test]
+fn palette_height_is_clamped_to_the_viewport() {
+    use super::app::palette::palette_max_height;
+    assert_eq!(palette_max_height(700.0), 586.0, "700 - 90 - 24");
+    assert_eq!(
+        palette_max_height(200.0),
+        180.0,
+        "极小窗口也要有个下限，别塌成一条缝"
     );
 }

@@ -206,6 +206,13 @@ pub struct App {
     pub(super) palette_sel: usize,
     /// 面板刚打开：下一帧把焦点给输入框。
     pub(super) palette_take_focus: bool,
+    /// 上下键刚挪过选中项：下一帧要把选中项滚进可视区。
+    ///
+    /// 键盘处理在绘制**之后**跑，所以只能在下一帧兑现 —— 只加滚动条不接这个，
+    /// 就会出现"滚轮能用、方向键却走到看不见的地方"。
+    pub(super) palette_scroll_to_sel: bool,
+    /// 上一帧命令面板的 `(上边, 下边)`，给用例断言"没有冲出视口"用。
+    pub(super) palette_last_rect: Option<(f32, f32)>,
     /// 启动时是纯托盘模式（`--autostart`）：倒数几帧后把窗口藏起来。
     ///
     /// 用计数器而不是 bool：首帧窗口可能还没建好，`Visible(false)` 会被丢掉。
@@ -344,6 +351,8 @@ impl App {
             palette_open: false,
             palette_query: String::new(),
             palette_sel: 0,
+            palette_scroll_to_sel: false,
+            palette_last_rect: None,
             palette_take_focus: false,
             start_hidden: 0,
             clipboard_hit: None,

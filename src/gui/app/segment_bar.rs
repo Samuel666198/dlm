@@ -92,6 +92,34 @@ pub fn draw(ui: &egui::Ui, track: egui::Rect, task: &TaskView) {
 
 #[cfg(test)]
 mod tests {
+
+    /// **文字里的块数必须与画出来的块数一致。**
+    ///
+    /// 这两处各有各的合并实现（`queue::merged_count` 报数、`spans` 画条），
+    /// 口径一旦走样就会出现"文字说 353 段、图上像一整条"的自相矛盾 ——
+    /// 2026-11-27 用户就是看着这个问「区间是不是分太多了」。
+    #[test]
+    fn the_displayed_block_count_matches_the_drawn_blocks() {
+        let total = 1000u64;
+        let cases: Vec<Vec<(u64, u64)>> = vec![
+            vec![],
+            vec![(0, 10)],
+            vec![(0, 10), (11, 20)],    // 闭区间相邻：视觉上连着
+            vec![(0, 10), (12, 20)],    // 中间断开
+            vec![(500, 600), (0, 100)], // 乱序
+            vec![(0, 100), (10, 20)],   // 被包含
+            vec![(0, 999)],             // 整条
+        ];
+        for rows in cases {
+            let drawn = spans(total, &rows, 600.0).len();
+            let counted = crate::queue::merged_count(&rows);
+            assert_eq!(
+                drawn, counted,
+                "画出来 {drawn} 块、文字却要报 {counted}：{rows:?}"
+            );
+        }
+    }
+
     use super::spans;
 
     #[test]

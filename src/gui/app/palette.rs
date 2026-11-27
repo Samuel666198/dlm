@@ -33,6 +33,16 @@ pub(crate) struct Command {
 }
 
 /// 四个分组，顺序即面板里的顺序。
+/// 命令面板的高度上限：**按视口算**，不写死。
+///
+/// 15 条命令每条还带一行说明，加起来 700+ 点；在 733 高的窗口里必然冲出底边被裁，
+/// 后面几条（打开保存目录、检查更新）就是这么"消失"的（2026-11-27 用户截图）。
+/// 减去 90（顶部锚点）+ 24（底部呼吸），再兜一个下限，
+/// 免得窗口被拉得极小时面板塌成一条缝。
+pub(crate) fn palette_max_height(viewport_height: f32) -> f32 {
+    (viewport_height - 90.0 - 24.0).max(180.0)
+}
+
 pub(crate) const GROUPS: [&str; 4] = ["新建", "视图", "任务操作", "系统"];
 
 /// 全部命令。**顺序就是面板里的顺序**：常用的在前。
@@ -147,11 +157,20 @@ impl App {
         // **不要传 `.open(&mut close)`**：egui 把这个 bool 的初值当成"窗口是否打开"，
         // 初值 `false` 会让它每帧直接跳过绘制 —— 快捷键明明触发了，面板却不出现
         // （0.6.0 发布版就是这个症状）。面板本来没有标题栏，也就没有X按钮需要这个参数。
-        egui::Window::new("命令面板")
+        // 高度上限**按视口算**，不写死：15 条命令每条还带一行说明，
+        // 加起来 700+ 点，在 733 高的窗口里必然冲出底边被裁 —— 后面几条
+        // （打开保存目录、检查更新）就是这么"消失"的。
+        // 减去 90（顶部锚点）+ 24（给底部留点呼吸），再兜一个最小值，
+        // 免得窗口被拉得极小时面板塌成一条缝。
+        // egui 0.37 里 `Context` 已经没有 `screen_rect()` 了，用 `content_rect()`
+        // （= 可用内容区；`viewport_rect()` 含安全边距，会让上限偏大）。
+        let max_height = palette_max_height(ctx.content_rect().height());
+        let shown = egui::Window::new("命令面板")
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
             .default_width(460.0)
+            .max_height(max_height)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0))
             .show(ctx, |ui| {
                 let resp = ui.add(
@@ -173,50 +192,64 @@ impl App {
                             .color(super::theme::ink_3()),
                     );
                 }
+                // 列表滚动：命令总数是固定的十几条，做分页要多出翻页和页码两个交互，
+                // 收益不抵成本（VS Code / Spotlight 这类面板都是滚动）。
+                // 高度 = 窗口上限 - 输入框 - 底部提示，留出呼吸。
+                let list_height = (max_height - 104.0).max(80.0);
                 let mut last_group: Option<&str> = None;
-                for (i, cmd) in hits.iter().enumerate() {
-                    // 组小标题：只在换组时出现一次。搜索态下它就是"这条命令住在哪"。
-                    if last_group != Some(cmd.group) {
-                        // 组名只能是那四个之一（调试版里当场炸，别等它悄悄画出个野组名）。
-                        debug_assert!(
-                            GROUPS.contains(&cmd.group),
-                            "命令 {} 的组名不在 GROUPS 里",
-                            cmd.id
-                        );
-                        if last_group.is_some() {
-                            ui.add_space(2.0);
+                egui::ScrollArea::vertical()
+                    .max_height(list_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, cmd) in hits.iter().enumerate() {
+                            // 组小标题：只在换组时出现一次。搜索态下它就是"这条命令住在哪"。
+                            if last_group != Some(cmd.group) {
+                                // 组名只能是那四个之一（调试版里当场炸，别等它悄悄画出个野组名）。
+                                debug_assert!(
+                                    GROUPS.contains(&cmd.group),
+                                    "命令 {} 的组名不在 GROUPS 里",
+                                    cmd.id
+                                );
+                                if last_group.is_some() {
+                                    ui.add_space(2.0);
+                                }
+                                ui.label(
+                                    egui::RichText::new(cmd.group)
+                                        .size(9.5)
+                                        .strong()
+                                        .color(super::theme::ink_3()),
+                                );
+                                last_group = Some(cmd.group);
+                            }
+                            let selected = i == self.palette_sel;
+                            let resp = ui
+                                .push_id(cmd.id, |ui| {
+                                    ui.selectable_label(
+                                        selected,
+                                        egui::RichText::new(format!("{}   {}", cmd.zh, cmd.en))
+                                            .size(12.0),
+                                    )
+                                })
+                                .inner;
+                            // 解释放右边，不挤在标题里。
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.label(
+                                    egui::RichText::new(cmd.hint)
+                                        .size(10.0)
+                                        .color(super::theme::ink_3()),
+                                );
+                            });
+                            // 键盘挪动之后必须把选中项滚进视野，否则"看不见自己在选第几条"。
+                            if selected && self.palette_scroll_to_sel {
+                                resp.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if resp.clicked() {
+                                self.palette_sel = i;
+                                chosen = Some(cmd.id);
+                            }
                         }
-                        ui.label(
-                            egui::RichText::new(cmd.group)
-                                .size(9.5)
-                                .strong()
-                                .color(super::theme::ink_3()),
-                        );
-                        last_group = Some(cmd.group);
-                    }
-                    let selected = i == self.palette_sel;
-                    let resp = ui
-                        .push_id(cmd.id, |ui| {
-                            ui.selectable_label(
-                                selected,
-                                egui::RichText::new(format!("{}   {}", cmd.zh, cmd.en)).size(12.0),
-                            )
-                        })
-                        .inner;
-                    // 解释放右边，不挤在标题里。
-                    ui.horizontal(|ui| {
-                        ui.add_space(16.0);
-                        ui.label(
-                            egui::RichText::new(cmd.hint)
-                                .size(10.0)
-                                .color(super::theme::ink_3()),
-                        );
                     });
-                    if resp.clicked() {
-                        self.palette_sel = i;
-                        chosen = Some(cmd.id);
-                    }
-                }
 
                 ui.add_space(4.0);
                 ui.label(
@@ -225,6 +258,11 @@ impl App {
                         .color(super::theme::ink_3()),
                 );
             });
+        // 记下这一帧面板实际占的上下边：用例靠它断言"在矮窗口里不会冲出视口"。
+        // （这是唯一能自动验证"没被裁掉"的途径 —— 光看代码只能说"我加了 max_height"。）
+        if let Some(inner) = shown {
+            self.palette_last_rect = Some((inner.response.rect.min.y, inner.response.rect.max.y));
+        }
 
         // 键盘：上下移动、回车执行、Esc 关闭。
         let (mut up, mut down, mut enter) = (false, false, false);
@@ -238,10 +276,14 @@ impl App {
         });
         if down && !hits.is_empty() {
             self.palette_sel = (self.palette_sel + 1) % hits.len();
+            self.palette_scroll_to_sel = true;
         }
         if up && !hits.is_empty() {
             self.palette_sel = (self.palette_sel + hits.len() - 1) % hits.len();
+            self.palette_scroll_to_sel = true;
         }
+        // 这一帧的绘制已经用过了，清掉 —— 免得不按键也每帧都往中间拽。
+        self.palette_scroll_to_sel = false;
         if enter
             && chosen.is_none()
             && let Some(cmd) = hits.get(self.palette_sel)

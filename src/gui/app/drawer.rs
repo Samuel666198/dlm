@@ -342,13 +342,20 @@ pub(crate) fn drawer_body(
             ui.add_space(16.0);
             ui.label(egui::RichText::new("分段").size(10.5).color(theme::ink_3()));
             ui.add_space(8.0);
+            // 文字必须说"视觉上几块"：断点里存的是调度器的原始行，几百段很常见，
+            // 而相邻的那些在下面的条上是**连着的一整块**。只报原始行数就会出现
+            // "文字说 353 段、图上像一整条"的自相矛盾（2026-11-27 用户问过这事）。
+            let raw = task.segments.len();
+            let blocks = crate::queue::merged_count(&task.segments);
+            let caption = if blocks == raw {
+                format!("断点里 {raw} 个区间 · 每 5 秒刷新")
+            } else {
+                format!("断点里 {raw} 段，合并后 {blocks} 块 · 每 5 秒刷新")
+            };
             ui.label(
-                egui::RichText::new(format!(
-                    "断点里 {} 个区间 · 每 5 秒刷新",
-                    task.segments.len()
-                ))
-                .size(10.0)
-                .color(theme::ink_3()),
+                egui::RichText::new(caption)
+                    .size(10.0)
+                    .color(theme::ink_3()),
             );
         });
         ui.horizontal(|ui| {
