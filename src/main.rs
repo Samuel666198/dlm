@@ -95,10 +95,12 @@ fn dispatch() -> Result<u8> {
         return Ok(
             // 把 `--out-name` 也交给视频这条：队列按这个名字认领文件，
             // 让 yt-dlp 按标题自己起名会变成"下完了但桌面端认不出"。
+            // Cookie 也交给视频这条：B 站高清 / 抖音 / 小红书都要登录态。
             match dlm::video::run(
                 &task.url,
                 &task.dir,
                 task.name.as_deref(),
+                task.cookies.as_deref(),
                 quiet,
                 wants_json,
             ) {

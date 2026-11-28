@@ -126,17 +126,63 @@ pub fn looks_like_video_page(url: &str) -> bool {
     HOSTS.iter().any(|host| lower.contains(host))
 }
 
+/// 把 `Cookie` 头（`a=1; b=2`）写成 yt-dlp 认的 Netscape cookies.txt 内容。
+///
+/// 为什么要转：yt-dlp 没有「直接给一串 Cookie 头」的参数，它只吃 Netscape 格式的
+/// cookies 文件。B 站高清、抖音、小红书这些要求登录的站点，没有 cookie 就只能
+/// 拿到低清甚至 403 —— 而宿主本来就把 cookie 带进来了（`--cookie-stdin`）。
+///
+/// `domain` 用请求的 host（不带前导点，表示只发给该主机）：
+/// 我们拿到的是**一个站点**的 cookie，不该谎称对全站有效。
+pub fn cookies_file(header: &str, host: &str) -> String {
+    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    for pair in header.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (name, value) = match pair.split_once('=') {
+            Some((n, v)) => (n.trim(), v.trim()),
+            None => continue,
+        };
+        if name.is_empty() {
+            continue;
+        }
+        // TAB 分隔的七列：domain / include_subdomains / path / secure / expiry / name / value
+        out.push_str(&format!("{host}\tFALSE\t/\tFALSE\t0\t{name}\t{value}\n"));
+    }
+    out
+}
+
+/// 从 URL 里取 host（取不到就给空串 —— 调用方据此决定还能不能用 cookie）。
+pub fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .map(|authority| {
+            // 去掉 userinfo 与端口
+            let no_user = authority.rsplit('@').next().unwrap_or(authority);
+            no_user.split(':').next().unwrap_or(no_user).to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// 问元信息用的参数。
-pub fn argv_info(url: &str) -> Vec<String> {
-    vec![
+pub fn argv_info(url: &str, cookies: Option<&Path>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "--dump-single-json".into(),
         "--no-playlist".into(),
         "--no-warnings".into(),
         // 只问元信息，别真下：`--simulate` 让它只做提取。
         "--simulate".into(),
-        "--".into(),
-        url.to_string(),
-    ]
+    ];
+    if let Some(path) = cookies {
+        args.push("--cookies".into());
+        args.push(path.display().to_string());
+    }
+    args.push("--".into());
+    args.push(url.to_string());
+    args
 }
 
 /// 视频任务的落点名字：队列是按 `task.name` 找文件的，所以这个名字必须**确定**。
@@ -161,12 +207,17 @@ pub fn force_out_name(name: &str) -> String {
 /// 下载用的参数：先选最好的视频+音频再合并成 mp4。
 ///
 /// `name` 给了就**钉死**输出文件名（队列要靠它认领文件）；没给才退回标题。
-pub fn argv_download(url: &str, dir: &Path, name: Option<&str>) -> Vec<String> {
+pub fn argv_download(
+    url: &str,
+    dir: &Path,
+    name: Option<&str>,
+    cookies: Option<&Path>,
+) -> Vec<String> {
     let template = match name {
         Some(n) => dir.join(force_out_name(n)),
         None => dir.join("%(title)s.%(ext)s"),
     };
-    vec![
+    let mut args: Vec<String> = vec![
         "-f".into(),
         "bv*+ba/b".into(),
         "--merge-output-format".into(),
@@ -177,9 +228,14 @@ pub fn argv_download(url: &str, dir: &Path, name: Option<&str>) -> Vec<String> {
         template.display().to_string(),
         // 钉死名字时 yt-dlp 仍可能给"临时后缀"，加这两条让它最后一定落到模板上。
         "--force-overwrites".into(),
-        "--".into(),
-        url.to_string(),
-    ]
+    ];
+    if let Some(path) = cookies {
+        args.push("--cookies".into());
+        args.push(path.display().to_string());
+    }
+    args.push("--".into());
+    args.push(url.to_string());
+    args
 }
 
 /// 把 `--dump-single-json` 的输出读成 [`VideoMeta`]。
@@ -226,7 +282,18 @@ pub fn parse_progress(line: &str) -> Option<f64> {
 }
 
 /// 跑一遍视频下载。返回给 `main` 的退出码（0 成功，1 失败）。
-pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: bool) -> Result<u8> {
+///
+/// `cookie`：浏览器带来的 `Cookie` 头（`a=1; b=2`）。给了就写成一份临时的
+/// Netscape cookies 文件交给 yt-dlp —— B 站高清 / 抖音 / 小红书要靠它，
+/// 否则只能拿到低清甚至 403。文件在函数返回前删掉，不留在用户机器上。
+pub fn run(
+    url: &str,
+    dir: &Path,
+    name: Option<&str>,
+    cookie: Option<&str>,
+    quiet: bool,
+    wants_json: bool,
+) -> Result<u8> {
     let Some(tool) = find_ytdlp() else {
         return Err(crate::failure::Failure::new(
             crate::json_out::Code::ToolMissing,
@@ -239,7 +306,31 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
     };
 
     // ① 元信息：先有名字，日志和落点才说得清。
-    let info_out = spawn_capture(&tool, &argv_info(url))?;
+    // Cookie 落成临时文件，用完即删。
+    let cookie_file = cookie
+        .filter(|c| !c.trim().is_empty())
+        .map(|header| -> Result<std::path::PathBuf> {
+            let host = host_of(url);
+            if host.is_empty() {
+                return Err(crate::failure::Failure::new(
+                    crate::json_out::Code::BadUrl,
+                    "无法从 URL 判断站点，Cookie 无法使用。",
+                )
+                .into());
+            }
+            let path = std::env::temp_dir().join(format!(
+                "dlm-ytdlp-{}-{}.txt",
+                std::process::id(),
+                crate::queue::now_secs()
+            ));
+            std::fs::write(&path, cookies_file(header, &host))
+                .with_context(|| format!("写临时 cookie 文件失败：{}", path.display()))?;
+            Ok(path)
+        })
+        .transpose()?;
+    let cookies = cookie_file.as_deref();
+
+    let info_out = spawn_capture(&tool, &argv_info(url, cookies))?;
     if !info_out.status.success() {
         bail!(
             "yt-dlp 提取信息失败（退出码 {:?}）：\n{}",
@@ -266,7 +357,7 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
     // ② 下载：进度逐行读出来。
     let mut child = Command::new(&tool);
     child
-        .args(argv_download(url, dir, name))
+        .args(argv_download(url, dir, name, cookies))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -368,6 +459,10 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
             None => println!("下载完成  目标目录：{}", dir.display()),
         }
     }
+    // 临时 cookie 文件不留痕：里面是登录态，比下载的文件更敏感。
+    if let Some(path) = &cookie_file {
+        let _ = std::fs::remove_file(path);
+    }
     Ok(0)
 }
 
@@ -448,7 +543,7 @@ mod tests {
 
         // 参数里真的用上了这个名字，而且不再是 %(title)s 模板
         let pinned = Path::new("D:/out");
-        let argv = argv_download("https://example.com/v/1", pinned, Some("BV1"));
+        let argv = argv_download("https://example.com/v/1", pinned, Some("BV1"), None);
         let template = argv
             .iter()
             .position(|a| a == "-o")
@@ -461,7 +556,7 @@ mod tests {
         );
 
         // 没给名字（命令行直下）才退回标题模板
-        let free = argv_download("https://example.com/v/1", pinned, None);
+        let free = argv_download("https://example.com/v/1", pinned, None, None);
         let free_template = free
             .iter()
             .position(|a| a == "-o")
@@ -497,12 +592,12 @@ mod tests {
     /// 参数形状：URL 一律放在 `--` 之后（避免被当成选项）。
     #[test]
     fn the_url_always_comes_after_a_double_dash() {
-        let info = argv_info("https://example.com/v/-x");
+        let info = argv_info("https://example.com/v/-x", None);
         assert_eq!(info.last().unwrap(), "https://example.com/v/-x");
         assert_eq!(info[info.len() - 2], "--", "URL 前的 -- 不能少");
 
         let dir = Path::new("D:/out");
-        let dl = argv_download("https://example.com/v/1", dir, None);
+        let dl = argv_download("https://example.com/v/1", dir, None, None);
         assert_eq!(dl.last().unwrap(), "https://example.com/v/1");
         assert_eq!(dl[dl.len() - 2], "--");
         let template = dl
@@ -517,6 +612,68 @@ mod tests {
         assert!(
             template.starts_with("D:/out"),
             "要落在指定目录里：{template}"
+        );
+    }
+
+    /// **Cookie 要能交给 yt-dlp**（B 站高清 / 抖音 / 小红书都靠它）。
+    ///
+    /// yt-dlp 只吃 Netscape cookies.txt，没有"直接给一串 Cookie 头"的参数，
+    /// 所以这一层要转格式。
+    #[test]
+    fn a_cookie_header_becomes_a_netscape_cookie_file() {
+        let text = cookies_file("SESSDATA=abc123; bili_jct=xyz", "www.bilibili.com");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("# Netscape HTTP Cookie File"));
+        let first = lines.next().expect("至少一条 cookie");
+        let cols: Vec<&str> = first.split('\t').collect();
+        assert_eq!(cols.len(), 7, "Netscape 是七列：{first}");
+        assert_eq!(cols[0], "www.bilibili.com", "域名用请求的 host");
+        assert_eq!(cols[5], "SESSDATA");
+        assert_eq!(cols[6], "abc123");
+        assert!(text.contains("bili_jct\txyz"), "第二条也要在：{text}");
+
+        // 空值/坏片段不该造出半条记录
+        let sparse = cookies_file("a=1; ; =2; junk", "x.example");
+        assert_eq!(sparse.lines().count(), 2, "只有 a=1 是合法的：{sparse}");
+    }
+
+    #[test]
+    fn the_host_is_taken_without_port_or_userinfo() {
+        assert_eq!(
+            host_of("https://www.bilibili.com/video/BV1"),
+            "www.bilibili.com"
+        );
+        assert_eq!(host_of("https://u:p@x.example:8443/a"), "x.example");
+        assert_eq!(host_of("http://x.example"), "x.example");
+        assert_eq!(host_of("不是 URL"), "");
+    }
+
+    /// argv 里真的挂上了 `--cookies <文件>`，而且是放在 `--` 之前。
+    #[test]
+    fn the_cookie_file_is_attached_to_both_runs() {
+        let dir = Path::new("D:/out");
+        let cookies = Path::new("C:/temp/c.txt");
+        let info = argv_info("https://x.example/v/1", Some(cookies));
+        let at = info
+            .iter()
+            .position(|a| a == "--cookies")
+            .expect("要挂 --cookies");
+        assert_eq!(info[at + 1], "C:/temp/c.txt");
+        assert_eq!(info.last().unwrap(), "https://x.example/v/1");
+
+        let dl = argv_download("https://x.example/v/1", dir, Some("n"), Some(cookies));
+        let at = dl
+            .iter()
+            .position(|a| a == "--cookies")
+            .expect("下载也要挂");
+        assert_eq!(dl[at + 1], "C:/temp/c.txt");
+        assert_eq!(dl[dl.len() - 2], "--");
+
+        // 没给 cookie 时不许出现这个参数
+        assert!(
+            !argv_info("https://x.example/v/1", None)
+                .iter()
+                .any(|a| a == "--cookies")
         );
     }
 
