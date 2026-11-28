@@ -168,13 +168,34 @@ pub fn parse_out_dir_input(raw: &str) -> Result<Option<PathBuf>, String> {
 
 impl Settings {
     /// 从 `queue.json` 同目录读。文件不存在或读不懂都用默认值 ——
-    /// 设置坏了不该让程序起不来。
+    /// 设置坏了不该让程序起不来，但**也不该悄悄把用户配的东西当垃圾扔掉**。
+    ///
+    /// 2026-11-28 用户报「每次软件更新，设置里已经配过的配置会被重置」。查下来：
+    /// 这里是 `unwrap_or_default()` —— 任何解析失败都静默变成"全默认"，
+    /// 一个字都不记；随后界面一保存，就用这份默认值把好文件覆盖了。
+    ///
+    /// 现在：解析失败先**原样备份**成 `settings.json.bad`，再在 stderr 说清楚。
+    /// 程序照常起来（默认值），但用户的配置还在盘上，可以人工捡回来。
     pub fn load(dir: &Path) -> Self {
         let path = dir.join(FILE_NAME);
         let Ok(raw) = std::fs::read(&path) else {
             return Self::default();
         };
-        serde_json::from_slice(&raw).unwrap_or_default()
+        match serde_json::from_slice::<Self>(&raw) {
+            Ok(settings) => settings,
+            Err(err) => {
+                let backup = path.with_extension("json.bad");
+                let note = match std::fs::write(&backup, &raw) {
+                    Ok(()) => format!("已备份到 {}", backup.display()),
+                    Err(write_err) => {
+                        format!("备份失败（{write_err}），原文件仍在 {}", path.display())
+                    }
+                };
+                // stderr 而不是 UI：这一步在任何界面存在之前就跑了。
+                eprintln!("dlm-gui: 设置文件解析失败（{err}）；{note}；本次用默认值");
+                Self::default()
+            }
+        }
     }
 
     /// 原子写：tmp + rename，避免断电留半截文件。
@@ -254,10 +275,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dlm-settings-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(FILE_NAME), b"not json at all").unwrap();
+        let original = b"not json at all";
+        std::fs::write(dir.join(FILE_NAME), original).unwrap();
         let s = Settings::load(&dir);
         assert_eq!(s.connections, 8);
         assert!(!s.watch_clipboard);
+
+        // 坏文件要**原样备份**，不能就这么被默认值覆盖掉。
+        let backup = dir.join("settings.json.bad");
+        assert!(
+            backup.is_file(),
+            "解析失败必须留下备份：{}",
+            backup.display()
+        );
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            original,
+            "备份要逐字节等于原文件（用户得能从里面把配置捡回来）"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
