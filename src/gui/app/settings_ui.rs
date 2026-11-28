@@ -524,6 +524,49 @@ impl App {
         );
         sections.push(("外部依赖".to_string(), dep));
 
+        // ---- 浏览器扩展 ----
+        //
+        // 2026-11-28 用户报「网页插件不见了」：查下来是加载解压扩展的**源目录被删了**，
+        // 浏览器在目录不存在时会把该扩展从列表里移除。这一格把"目录在哪、还完好吗"写进
+        // 诊断包，下次一眼就能看出是"文件没了"还是"浏览器里没加载"。
+        let ext_dir = crate::gui::default_extension_dir();
+        let mut ext = String::new();
+        let manifest = ext_dir.join("manifest.json");
+        if !manifest.is_file() {
+            let _ = writeln!(ext, "目录：{}", ext_dir.display());
+            let _ = writeln!(ext, "manifest.json 不在 —— 扩展未安装或目录被删。");
+            let _ = writeln!(
+                ext,
+                "处理：重新安装 dlm（或从安装包复制 browser\\extension 到这里），"
+            );
+            let _ = writeln!(
+                ext,
+                "然后在浏览器的扩展页「加载已解压的扩展程序」选这个目录。"
+            );
+        } else {
+            let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+            let version = text
+                .split("\"version\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').nth(1))
+                .unwrap_or("?");
+            let _ = writeln!(ext, "目录：{}", ext_dir.display());
+            let _ = writeln!(ext, "manifest 版本：{version}");
+            // 关键文件在不在（浏览器会因缺文件而拒绝加载，而界面上只会显示"已损坏"）
+            for name in ["content.js", "page-hook.js", "takeover.js"] {
+                let _ = writeln!(
+                    ext,
+                    "{name}：{}",
+                    if ext_dir.join(name).is_file() {
+                        "在"
+                    } else {
+                        "**缺失**"
+                    }
+                );
+            }
+        }
+        sections.push(("浏览器扩展".to_string(), ext));
+
         // ---- 更新日志 ----
         let update_log = self.settings_dir.join("logs").join("update.log");
         sections.push(("更新日志".to_string(), diag::tail(&update_log, 40)));
