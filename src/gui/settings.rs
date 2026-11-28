@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 /// 设置文件名。与 `queue.json` 同目录。
 pub const FILE_NAME: &str = "settings.json";
 
+fn default_parallel() -> usize {
+    2
+}
+
 fn default_theme() -> String {
     "system".to_string()
 }
@@ -32,6 +36,12 @@ pub struct Settings {
     // ---- 下载 ----
     /// 每个任务的连接数。
     pub connections: usize,
+    /// 同时跑几个任务。
+    ///
+    /// 以前是 `dlm-gui.rs` 里写死的 2 —— 批量粘 50 条时用户没法调。
+    /// 现在它是设置项：1 最稳（一次只跑一个），上限 8（再多是给自己的带宽过不去）。
+    #[serde(default = "default_parallel")]
+    pub max_parallel: usize,
     /// 同一服务器的最大连接数（IDM `226`）。0 = 不限。
     pub per_host_connections: usize,
     /// 默认保存目录。`None` = `%USERPROFILE%\Downloads`。
@@ -122,6 +132,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             connections: 8,
+            max_parallel: default_parallel(),
             per_host_connections: 8,
             suppress_auto_launch: true,
             out_dir: None,

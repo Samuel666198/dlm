@@ -660,6 +660,14 @@ impl App {
             SettingKey::Connections => {
                 ui.add(egui::DragValue::new(&mut self.draft.connections).range(1..=32));
             }
+            SettingKey::MaxParallel => {
+                ui.add(egui::DragValue::new(&mut self.draft.max_parallel).range(1..=8));
+                ui.label(
+                    egui::RichText::new("1 = 排队一个个下")
+                        .size(theme::FONT_LABEL)
+                        .color(theme::ink_3()),
+                );
+            }
             SettingKey::PerHostConnections => {
                 ui.add(egui::DragValue::new(&mut self.draft.per_host_connections).range(0..=32));
                 ui.label(

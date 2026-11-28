@@ -395,6 +395,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 16,
         max_speed_kib: 2048,
         speed_windows: Vec::new(),
+        max_parallel: 2,
         proxy: None,
         per_host: 16,
         out_dir: std::path::PathBuf::new(),
@@ -422,6 +423,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 4,
         max_speed_kib: 0,
         speed_windows: Vec::new(),
+        max_parallel: 2,
         proxy: None,
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
@@ -447,6 +449,7 @@ fn e18_connections_and_speed_reach_the_child_argv() {
         connections: 0,
         max_speed_kib: 0,
         speed_windows: Vec::new(),
+        max_parallel: 2,
         proxy: None,
         per_host: 8,
         out_dir: std::path::PathBuf::new(),
@@ -476,6 +479,7 @@ fn e18_runtime_tuning_projects_settings_and_keeps_one_source_of_truth() {
         connections: 12,
         max_speed_kib: 512,
         speed_windows: Vec::new(),
+        max_parallel: 2,
         proxy: String::new(),
         per_host_connections: 24,
         ..Default::default()
@@ -2450,6 +2454,7 @@ fn the_proxy_setting_reaches_the_download_child() {
     assert!(plain.is_empty(), "没配代理时不该设任何代理变量：{plain:?}");
 
     let tuning = RuntimeTuning {
+        max_parallel: 2,
         proxy: crate::proxy::parse_proxy("http://127.0.0.1:7890").expect("写法合法"),
         ..RuntimeTuning::default()
     };
@@ -2501,4 +2506,42 @@ fn the_update_check_falls_back_to_the_proxy_when_direct_fails() {
     let err = view.error.unwrap_or_default();
     assert!(err.contains("直连失败") || err.contains("error"), "{err}");
     assert!(!err.contains("改用代理"), "没配代理就别提代理：{err}");
+}
+
+/// **同时跑几个任务**现在是设置项（以前写死 2），而且要能搜到、范围合理。
+#[test]
+fn the_parallel_task_limit_is_a_setting_with_sane_bounds() {
+    // 默认值：与旧行为一致（2），不能让老用户升级后突然变成一次跑 8 个
+    let fresh = crate::gui::settings::Settings::default();
+    assert_eq!(fresh.max_parallel, 2, "默认值要等于旧行为");
+
+    // 旧的 settings.json 没有这一位，必须还能读出来并落到默认值
+    let old = r#"{"connections":4}"#;
+    let parsed: crate::gui::settings::Settings =
+        serde_json::from_str(old).expect("缺字段不该让整个文件失效");
+    assert_eq!(parsed.max_parallel, 2);
+
+    // 设置页能搜到它
+    let hits = super::app::settings_spec::search("同时");
+    assert!(
+        hits.iter()
+            .any(|s| s.key == super::app::settings_spec::SettingKey::MaxParallel),
+        "标题里提到「同时」就该搜到"
+    );
+
+    // RuntimeTuning 真的把它带过去（否则改了设置不生效）
+    let tuned =
+        super::RuntimeTuning::from_settings_with(&fresh, std::path::Path::new("D:/x"), false);
+    assert_eq!(tuned.max_parallel, fresh.max_parallel);
+
+    // 改设置 ⇒ tuning 跟着变。这是"改完立刻生效"的前提：
+    // 派发那一步读的是 `tuning.max_parallel`，这里没接上就永远是默认值。
+    let mut bumped = fresh.clone();
+    bumped.max_parallel = 5;
+    let tuned =
+        super::RuntimeTuning::from_settings_with(&bumped, std::path::Path::new("D:/x"), false);
+    assert_eq!(
+        tuned.max_parallel, 5,
+        "设置改了 tuning 没跟着变，说明没接线"
+    );
 }

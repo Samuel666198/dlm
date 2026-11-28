@@ -666,7 +666,9 @@ fn tick(
     //    夜间批次关着时 `may_dispatch_now()` 恒真，这段与以前完全一样；
     //    开着且此刻在窗口外 ⇒ 一单都不派（排队的继续排队，已经在跑的照跑）。
     let may_dispatch = tuning.may_dispatch_now();
-    while may_dispatch && children.len() < config.concurrency {
+    // 上限来自**设置**（1..=8），改设置立刻生效；`config.concurrency` 是启动时的默认。
+    let max_parallel = tuning.max_parallel.max(1);
+    while may_dispatch && children.len() < max_parallel {
         // E18：连接数从设置（或命中规则）来，不再是编译期常量。
         // 0.6.0：`want` 按**候选任务自己的**规则算 —— `plan_for_task` 与
         // `child_args` 是同一个出口，所以 host 预算与实际开的条数不会分成两本账。
@@ -697,7 +699,7 @@ fn tick(
                 .limit
                 .saturating_sub(quota.used)
                 .saturating_sub(reserved_total);
-            let free_slots = (config.concurrency - children.len()).max(1);
+            let free_slots = (max_parallel - children.len()).max(1);
             let Some(slice) = quota_slice(available, free_slots) else {
                 break;
             };

@@ -68,6 +68,7 @@ pub(crate) enum SettingKey {
     OnComplete,
     ScanAfterDone,
     Connections,
+    MaxParallel,
     PerHostConnections,
     MaxSpeedKiB,
     SpeedWindows,
@@ -193,6 +194,14 @@ pub(crate) const SPECS: &[SettingSpec] = &[
         "用 Windows Defender 扫一遍；失败只记日志，不影响任务成败",
     ),
     // ---- 连接与速度 ----
+    spec(
+        SettingKey::MaxParallel,
+        "max_parallel",
+        Category::Connection,
+        "连接",
+        "同时下载的任务数",
+        "一次跑几个任务；设成 1 就是排队一个个下",
+    ),
     spec(
         SettingKey::Connections,
         "connections",

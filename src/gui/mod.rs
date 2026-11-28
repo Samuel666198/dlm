@@ -200,6 +200,9 @@ pub(crate) struct RuntimeTuning {
     pub max_speed_kib: u64,
     /// 限速计划（已解析）。派发前用 `max_speed_now()` 取"此刻该用多少"。
     pub speed_windows: Vec<speed_schedule::SpeedWindow>,
+    /// 同时跑几个任务。设置页改了**立刻生效**（不用重启）——
+    /// 与 `connections` 一样走 `RuntimeTuning`，而不是启动时的 `GuiConfig`。
+    pub max_parallel: usize,
     /// 代理（None = 直连）。子进程通过环境变量拿到它。
     pub proxy: Option<crate::proxy::ProxySpec>,
     /// 队列层的每 host 连接预算。
@@ -279,6 +282,7 @@ impl RuntimeTuning {
                 .iter()
                 .filter_map(|w| speed_schedule::SpeedWindow::parse(w).ok())
                 .collect(),
+            max_parallel: s.max_parallel,
             proxy: crate::proxy::parse_proxy(&s.proxy).ok().flatten(),
             per_host: s.per_host_connections,
             out_dir: s
