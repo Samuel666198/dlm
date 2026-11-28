@@ -222,6 +222,18 @@ impl Host {
             // 所以由宿主代转一次 `POST /api/resume`。直连模式的任务不走这里 ——
             // 它们没有队列 id，续的办法是重投同一个 URL（见 `resume` 的实现说明）。
             Some("resume") => self.resume(&value),
+            // 扩展那边对"已加入队列"的任务给的是「打开」而不是「继续」：
+            // 任务已经在跑了，能做的有意义的事只有把桌面端窗口叫出来看进度。
+            // 复用自动拉起那一套（冷却 + 等待队列就绪），不另写一遍。
+            Some("open-gui") => {
+                let ok = self.ensure_gui();
+                serde_json::to_vec(&json!({
+                    "op": "open-gui",
+                    "ok": ok,
+                    "message": if ok { Value::Null } else { json!("无法打开桌面端（冷却中或找不到程序）") },
+                }))
+                .expect("json! serializable")
+            }
             // 扩展连上来第一件事就是 ping/hello：顺手把它的运行版本转给 GUI。
             // 回执仍由 `native::respond` 生成（宿主不自造协议）。
             Some(op @ ("ping" | "hello")) => {

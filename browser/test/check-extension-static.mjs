@@ -204,6 +204,23 @@ if (!/if \(isVideoPage\(url\)\) task\.video = true;/.test(bgSrc)) {
   failures.push(`${sw} 没有在投递时设置 task.video = true（视频页会被当普通文件下）`);
 }
 
+// 11) 「已加入队列」必须是成功记录。
+//
+// 用户 2026-11-28 指着截图问「已加入队列前面显示个 x 是什么意思」——
+// 因为那条记录漏了 `ok: true`，渲染按 `item.ok ? ✓ : ✕` 画成了红叉。
+if (!/queue: msg\.id,[\s\S]{0,80}?ok: true|ok: true,[\s\S]{0,80}?queue: msg\.id/.test(contentSrc)) {
+  failures.push(
+    "content.js 的「已加入队列」记录没有带 ok:true —— 它会显示成红色的 ✕ 而不是 ✓",
+  );
+}
+// 队列任务不该给「继续」（任务已在跑），应给「打开」。
+if (!/dataset\.openGui = "1"/.test(contentSrc)) {
+  failures.push("content.js 没有「打开桌面端」按钮（queue 任务的白名单动作）");
+}
+if (/if \(item\.queue\) return true;/.test(contentSrc)) {
+  failures.push("canResume 仍把「有队列 id」当成「可以继续」——队列任务会同时出现继续和打开");
+}
+
 if (failures.length) {
   console.error("extension static check FAILED");
   for (const f of failures) console.error(`- ${f}`);

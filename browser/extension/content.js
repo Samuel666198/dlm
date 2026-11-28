@@ -855,6 +855,13 @@ function renderFinished() {
     else text = "失败（退出码 " + (item.code ?? "?") + "）";
     row.appendChild(el("span", "meta", text));
 
+    // 队列任务已经在跑，「继续」对它没有意义 —— 有意义的是把桌面端叫出来看进度。
+    if (item.queue) {
+      const open = el("button", "ghost", "打开");
+      open.type = "button";
+      open.dataset.openGui = "1";
+      row.appendChild(open);
+    }
     // E16：暂停/停止/失败之后要能接着下。
     //
     // 之前这一行只有一个 <span>，一个按钮都没有 —— 用户停了就再也点不到"继续"，
@@ -894,7 +901,9 @@ function renderFinished() {
 /// - 完成的（ok）不给按钮：没什么可续的，点了只会重新下一份。
 function canResume(item) {
   if (!item || item.ok) return false;
-  if (item.queue) return true;
+  // 队列任务归「打开」那一支管（见 renderFinished）；这里返回 false，
+  // 否则同一行会同时出现「继续」和「打开」两个按钮。
+  if (item.queue) return false;
   return !!item.url && (item.canceled || item.failed);
 }
 
@@ -1380,6 +1389,21 @@ function runHostAction(ev) {
     if (index >= 0) resumeJob(state.finished[index], index);
     return true;
   }
+  if (data.openGui) {
+    sendMessage({ op: "open-gui" }, (reply) => {
+      if (!reply || reply.ok === false) {
+        state.finished.unshift({
+          name: "桌面端",
+          ok: false,
+          code: null,
+          message: (reply && reply.message) || "打开失败",
+        });
+        state.finished = state.finished.slice(0, 3);
+        render();
+      }
+    });
+    return true;
+  }
   if (data.copyUrl) {
     const btn = el.closest ? el.closest("[data-copy-url]") : el;
     copyText(data.copyUrl).then((ok) => {
@@ -1485,7 +1509,13 @@ guarded(() =>
   if (msg.op === "job-accepted") {
     markActivity();
     if (msg.mode === "queue") {
-      state.finished.unshift({ name: msg.name || "下载任务", queue: msg.id });
+      // `ok: true` 不能漏：渲染按 `item.ok ? ✓ : ✕` 画图标，漏了就是
+    // 一条明明成功的记录顶着红叉（2026-11-28 用户指出）。
+    state.finished.unshift({
+      name: msg.name || "下载任务",
+      ok: true,
+      queue: msg.id,
+    });
       state.finished = state.finished.slice(0, 3);
       state.collapsed = false;
       state.tab = "recent";

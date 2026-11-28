@@ -368,6 +368,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: submitPage(msg.url, msg.referer, !!msg.hls, tab) });
     return true;
   }
+  if (msg && msg.op === "open-gui") {
+    if (!port) connect();
+    if (!port) {
+      sendResponse({ ok: false, message: "native host unavailable" });
+      return true;
+    }
+    try {
+      port.postMessage({ op: "open-gui" });
+      sendResponse({ ok: true });
+    } catch (err) {
+      sendResponse({ ok: false, message: String(err) });
+    }
+    return true;
+  }
   if (msg && msg.op === "cancel") {
     if (!port) {
       sendResponse({ ok: false, message: "native host unavailable" });
