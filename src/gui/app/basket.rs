@@ -17,12 +17,98 @@ use eframe::egui;
 use super::App;
 use crate::gui::Ticket;
 
+/// 一次批量最多展开多少条。
+///
+/// 上限不是为了省内存，而是为了**别一次把队列塞爆**：`[1-100000]` 这种手滑
+/// 会生成十万个任务，界面和调度都受不了。超过就整行丢弃并计数（见返回值）。
+pub const MAX_EXPAND: usize = 500;
+
+/// `[001-100]` 这样的区间写法：IDM 的经典批量形态。
+///
+/// 语义：
+/// - `[1-5]` ⇒ 1..=5；`[001-100]` ⇒ **保留前导零**（001、002…100）
+/// - 起止可以倒着写（`[5-1]` 当 `[1-5]`）
+/// - 一行里可以有**多个**区间，取笛卡尔积（`a[1-2]b[1-2]` ⇒ 4 条）
+///
+/// 认不出的一律原样返回 —— 宁可少展开，也不要把用户的 URL 改坏。
+pub(crate) fn expand_ranges(line: &str) -> Vec<String> {
+    // 先找出全部区间（byte 位置，方便原地替换）
+    let mut spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let Some(close_rel) = line[i..].find(']') else {
+            break;
+        };
+        let close = i + close_rel;
+        let inner = &line[i + 1..close];
+        match range_values(inner) {
+            // `Some(空)` 表示"是区间但超了上限" ⇒ 整行丢弃（交给调用方计数）。
+            // 不能当成"认不出"混过去：那样 `[1-2000]` 会被原样当成一个 URL 收下。
+            Some(values) if values.is_empty() => return Vec::new(),
+            Some(values) => {
+                spans.push((i, close + 1, values));
+                i = close + 1;
+            }
+            None => i += 1,
+        }
+    }
+    if spans.is_empty() {
+        return vec![line.to_string()];
+    }
+
+    // 笛卡尔积：从右往左折叠，替换一处就复制一份
+    let mut current: Vec<String> = vec![line.to_string()];
+    for (start, end, values) in spans.iter().rev() {
+        let mut next = Vec::new();
+        for base in &current {
+            for value in values {
+                next.push(format!("{}{}{}", &base[..*start], value, &base[*end..]));
+            }
+            if next.len() > MAX_EXPAND {
+                return Vec::new(); // 超上限：整行丢弃，由调用方计数
+            }
+        }
+        current = next;
+    }
+    current
+}
+
+/// `1-5` / `001-100` ⇒ 展开后的字符串；不是区间就 `None`。
+fn range_values(inner: &str) -> Option<Vec<String>> {
+    let (from, to) = inner.split_once('-')?;
+    let from = from.trim();
+    let to = to.trim();
+    let a: u64 = from.parse().ok()?;
+    let b: u64 = to.parse().ok()?;
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    if hi - lo >= MAX_EXPAND as u64 {
+        return Some(Vec::new()); // 让调用方按"超限"处理
+    }
+    // 前导零：按起点写了几位就补几位（`001` ⇒ 3 位）
+    let width = if from.len() > 1 && from.starts_with('0') {
+        from.len()
+    } else {
+        0
+    };
+    Some((lo..=hi).map(|n| format!("{n:0width$}")).collect())
+}
+
 /// 从多行文本里摘出要下载的 URL。
 ///
-/// 顺带的活：去掉首尾空白、跳过空行与 `#` 注释、去重（同一个链接粘两次只建一个任务）。
-pub(crate) fn parse_urls(text: &str) -> Vec<String> {
+/// 顺带的活：去掉首尾空白、跳过空行与 `#` 注释、展开 `[001-100]` 区间、
+/// 去重（同一个链接粘两次只建一个任务）。
+///
+/// 返回 `(urls, 因超上限被丢弃的行数)` —— 后者要显示出来，
+/// 否则用户会以为"我粘了 100 行怎么只有 30 条"。
+pub(crate) fn parse_urls(text: &str) -> (Vec<String>, usize) {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    let mut dropped = 0usize;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -31,11 +117,18 @@ pub(crate) fn parse_urls(text: &str) -> Vec<String> {
         if !(line.starts_with("http://") || line.starts_with("https://")) {
             continue;
         }
-        if seen.insert(line.to_string()) {
-            out.push(line.to_string());
+        let expanded = expand_ranges(line);
+        if expanded.is_empty() {
+            dropped += 1;
+            continue;
+        }
+        for url in expanded {
+            if seen.insert(url.clone()) {
+                out.push(url);
+            }
         }
     }
-    out
+    (out, dropped)
 }
 
 impl App {
@@ -66,8 +159,21 @@ impl App {
                         .desired_rows(6),
                 );
                 ui.add_space(8.0);
+                // 超上限被跳过的行数要说出来，否则用户会以为"我粘了 100 行怎么只有 30 条"。
+                {
+                    let (_, dropped) = parse_urls(&self.basket_text);
+                    if dropped > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "有 {dropped} 行超过单行 {MAX_EXPAND} 条的上限，已跳过"
+                            ))
+                            .size(super::super::theme::FONT_LABEL)
+                            .color(super::super::theme::warn()),
+                        );
+                    }
+                }
                 ui.horizontal(|ui| {
-                    let urls = parse_urls(&self.basket_text);
+                    let (urls, _dropped) = parse_urls(&self.basket_text);
                     let label = if urls.is_empty() {
                         "添加".to_string()
                     } else {
@@ -88,7 +194,8 @@ impl App {
                 });
             });
         if submit {
-            for url in parse_urls(&self.basket_text) {
+            let (urls, _) = parse_urls(&self.basket_text);
+            for url in urls {
                 self.send(Ticket::Add {
                     url: url.clone(),
                     // 名字交给队列从 URL 推导 —— 这里不猜，猜错了 E1/E2 还得再改一次名。
@@ -119,7 +226,7 @@ mod tests {
     fn blank_lines_comments_and_duplicates_are_dropped() {
         let text = "\n  https://a.example/1.zip  \n# 注释\n\nhttps://a.example/1.zip\nhttp://b.example/2.bin\nftp://c/x\n";
         assert_eq!(
-            parse_urls(text),
+            parse_urls(text).0,
             vec![
                 "https://a.example/1.zip".to_string(),
                 "http://b.example/2.bin".to_string()
@@ -130,8 +237,43 @@ mod tests {
 
     #[test]
     fn nothing_usable_yields_no_tasks() {
-        assert!(parse_urls("").is_empty());
-        assert!(parse_urls("# 只有注释\n\n").is_empty());
-        assert!(parse_urls("magnet:?xt=urn:btih:x").is_empty());
+        assert!(parse_urls("").0.is_empty());
+        assert!(parse_urls("# 只有注释\n\n").0.is_empty());
+        assert!(parse_urls("magnet:?xt=urn:btih:x").0.is_empty());
+    }
+
+    /// `[001-100]` 这种写法是 IDM 的经典批量形态，要能展开。
+    #[test]
+    fn bracket_ranges_expand_and_keep_leading_zeros() {
+        use super::expand_ranges;
+        assert_eq!(
+            expand_ranges("https://x/f[1-3].zip"),
+            vec!["https://x/f1.zip", "https://x/f2.zip", "https://x/f3.zip"]
+        );
+        // 前导零按起点写了几位就补几位
+        let padded = expand_ranges("https://x/f[008-010].zip");
+        assert_eq!(padded.len(), 3);
+        assert_eq!(padded[0], "https://x/f008.zip");
+        assert_eq!(padded[2], "https://x/f010.zip");
+        // 倒着写当正着
+        assert_eq!(
+            expand_ranges("a[3-1]"),
+            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()]
+        );
+        // 一行多处区间取笛卡尔积
+        assert_eq!(expand_ranges("a[1-2]b[1-2]").len(), 4);
+        // 认不出的原样返回，绝不改坏用户的 URL
+        assert_eq!(expand_ranges("a[b-c].zip"), vec!["a[b-c].zip".to_string()]);
+        assert_eq!(expand_ranges("a[1].zip"), vec!["a[1].zip".to_string()]);
+        assert_eq!(expand_ranges("no-range"), vec!["no-range".to_string()]);
+    }
+
+    /// 超上限要**整行丢弃并计数**，否则 `[1-100000]` 会把队列塞爆。
+    #[test]
+    fn an_oversized_range_is_dropped_and_counted() {
+        let text = "https://x/f[1-2000].zip\nhttps://y/ok.zip";
+        let (urls, dropped) = parse_urls(text);
+        assert_eq!(dropped, 1, "超限那一行要被计数");
+        assert_eq!(urls, vec!["https://y/ok.zip".to_string()]);
     }
 }
