@@ -367,6 +367,9 @@ pub fn run(config: GuiConfig) -> Result<()> {
         (Some(url), true) => {
             let url = url.clone();
             let delay = config.update_check_delay_secs;
+            // 检查更新失败时改用代理再试一次（用户 2026-11-28 的要求）。
+            // 代理串只在这里取一次：线程里没有 settings。
+            let proxy = crate::proxy::parse_proxy(&settings.proxy).ok().flatten();
             let local = local.clone();
             let snapshot = Arc::clone(&update_snapshot);
             std::thread::Builder::new()
@@ -376,7 +379,7 @@ pub fn run(config: GuiConfig) -> Result<()> {
                     if delay > 0 {
                         std::thread::sleep(Duration::from_secs(delay));
                     }
-                    let view = check_update(&url, &local);
+                    let view = check_update(&url, &local, proxy.as_ref());
                     install_update_view(&snapshot, view);
                 })
                 .context("启动更新检查线程失败")?;
@@ -613,7 +616,16 @@ fn version_is_newer(current: &str, latest: &str) -> bool {
     version_key(latest) > version_key(current)
 }
 
-fn check_update(url: &str, local: &updater::LocalState) -> UpdateView {
+/// 取一次更新清单。**先按当前网络配置试，失败且用户配了代理时再用代理重试一次。**
+///
+/// 用户 2026-11-28：「若检查更新失败，可以尝试使用代理地址下载代替」。
+/// 这里的取舍是"只在失败时才走代理"——代理通常比直连慢，
+/// 直连能成的场景不该被它拖累；而直连不成时它往往是唯一的出路。
+fn check_update(
+    url: &str,
+    local: &updater::LocalState,
+    proxy: Option<&crate::proxy::ProxySpec>,
+) -> UpdateView {
     let fail = |error: String| UpdateView {
         enabled: true,
         current: local.release.clone(),
@@ -621,28 +633,42 @@ fn check_update(url: &str, local: &updater::LocalState) -> UpdateView {
         error: Some(error),
         ..UpdateView::disabled()
     };
-    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
-    if reqwest::Url::parse(url)
+    let loopback = reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
-        .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"))
-    {
-        builder = builder.no_proxy();
-    }
-    let client = match builder.build() {
-        Ok(client) => client,
-        Err(err) => return fail(format!("{err}")),
+        .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"));
+
+    // 取一次清单；`via_proxy` 为真时才显式套代理。
+    let fetch = |via_proxy: Option<&crate::proxy::ProxySpec>| -> Result<String, String> {
+        let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
+        if loopback {
+            builder = builder.no_proxy();
+        } else if let Some(spec) = via_proxy {
+            builder = builder.proxy(reqwest::Proxy::all(spec.to_url()).map_err(|e| e.to_string())?);
+        }
+        let client = builder.build().map_err(|e| e.to_string())?;
+        let response = client.get(url).send().map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", response.status()));
+        }
+        response.text().map_err(|e| format!("读更新清单失败：{e}"))
     };
-    let response = match client.get(url).send() {
-        Ok(response) => response,
-        Err(err) => return fail(format!("{err}")),
-    };
-    if !response.status().is_success() {
-        return fail(format!("HTTP {}", response.status()));
-    }
-    let text = match response.text() {
+
+    let text = match fetch(None) {
         Ok(text) => text,
-        Err(err) => return fail(format!("读更新清单失败：{err}")),
+        Err(direct) => match proxy {
+            // 回环地址没有"走代理"这回事，重试一次也一样。
+            Some(spec) if !loopback => match fetch(Some(spec)) {
+                Ok(text) => text,
+                Err(via) => {
+                    return fail(format!(
+                        "直连失败：{direct}；改用代理（{}）仍失败：{via}",
+                        spec.to_url()
+                    ));
+                }
+            },
+            _ => return fail(direct),
+        },
     };
     let value: Value = match serde_json::from_str(&text) {
         Ok(value) => value,

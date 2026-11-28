@@ -687,6 +687,7 @@ fn update_check_reads_a_local_manifest() {
     let view = check_update(
         &format!("http://127.0.0.1:{port}/update.json"),
         &local_now(),
+        None,
     );
     handle.join().unwrap();
     assert!(view.enabled, "{view:?}");
@@ -2463,4 +2464,41 @@ fn the_proxy_setting_reaches_the_download_child() {
             .unwrap();
         assert!(value.contains("127.0.0.1:7890"), "{want} 的值不对：{value}");
     }
+}
+
+/// **检查更新失败时要改用代理再试一次**（用户 2026-11-28 的要求）。
+///
+/// 这条在两个死端口上验：直连端口没人听、代理端口也没人听，
+/// 于是最终错误里必须**同时**提到"直连失败"与"改用代理"，并且带上代理地址。
+/// 它证明的是"第二条路真的走了"，而不是"报了错"。
+#[test]
+fn the_update_check_falls_back_to_the_proxy_when_direct_fails() {
+    // 两个"必然没人听"的端口：先要一个，再要一个，避免撞上同一个。
+    let free_port = || {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("要临时端口");
+        l.local_addr().expect("addr").port()
+    };
+    // 用 `.invalid` 域名而不是回环地址：回环地址按设计**不走代理**（那是本机 API），
+    // 拿它测会永远走"直连失败就算完"那一支。`.invalid` 是保留 TLD，DNS 必然解析失败，
+    // 所以既触发回退、又不需要真联网。
+    let url = "http://dlm-update-fallback.invalid/latest.json".to_string();
+    let proxy_text = format!("http://127.0.0.1:{}", free_port());
+    let proxy = crate::proxy::parse_proxy(&proxy_text)
+        .expect("写法合法")
+        .expect("是 Some");
+
+    let view = super::check_update(&url, &local_now(), Some(&proxy));
+    let err = view.error.unwrap_or_default();
+    assert!(err.contains("直连失败"), "要说明第一次是怎么失败的：{err}");
+    assert!(err.contains("改用代理"), "要说明试过代理：{err}");
+    assert!(
+        err.contains(&proxy_text),
+        "要带出用的是哪个代理（脱敏后）：{err}"
+    );
+
+    // 没配代理时不该出现"代理"字样 —— 那条路不存在。
+    let view = super::check_update(&url, &local_now(), None);
+    let err = view.error.unwrap_or_default();
+    assert!(err.contains("直连失败") || err.contains("error"), "{err}");
+    assert!(!err.contains("改用代理"), "没配代理就别提代理：{err}");
 }

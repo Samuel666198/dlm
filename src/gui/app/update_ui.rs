@@ -69,10 +69,14 @@ impl App {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let local = self.local.clone();
+        // 手动检查也遵守同一条规则：直连失败才改用代理。
+        let proxy = crate::proxy::parse_proxy(&self.settings.proxy)
+            .ok()
+            .flatten();
         let spawned = std::thread::Builder::new()
             .name("dlm-gui-update-manual".into())
             .spawn(move || {
-                let _ = tx.send(crate::gui::check_update(&url, &local));
+                let _ = tx.send(crate::gui::check_update(&url, &local, proxy.as_ref()));
             });
         if spawned.is_ok() {
             self.update_rx = Some(rx);
