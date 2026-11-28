@@ -249,12 +249,18 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
     }
     let info_json = String::from_utf8_lossy(&info_out.stdout);
     let meta = parse_info(&info_json)?;
-    if !quiet && !wants_json {
+    // **`--quiet` 只管进度行，不管"这是什么"。**
+    //
+    // 踩过的坑（2026-11-28）：GUI 派发永远带 `--quiet`，于是视频任务的日志
+    // 全程零字节 —— 用户看到的是一条没有大小、没有进度、日志空白的任务，
+    // 自然以为"视频下载无效"。
+    if !wants_json {
         let size = match meta.filesize {
             Some(bytes) => format!("约 {}", human(bytes)),
             None => "体积未知".to_string(),
         };
-        println!("视频：{}（{}，{}）", meta.title, meta.ext, size);
+        println!("视频下载：{}（{}，{}）", meta.title, meta.ext, size);
+        println!("工具：{}", tool.display());
     }
 
     // ② 下载：进度逐行读出来。
@@ -299,11 +305,26 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
     });
 
     let mut last_pct: Option<f64> = None;
+    // quiet 模式下已经打过的那个百分数（用来去重，不是 5% 的格）。
+    let mut shown_step: i64 = -1;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(pct) = parse_progress(&line) {
                 last_pct = Some(pct);
-                if !quiet && !wants_json {
+                if wants_json {
+                    continue;
+                }
+                if quiet {
+                    // 每 5% 一档、独立成行：这几行会落进任务日志，
+                    // 用户翻日志就能看出"在下、下到哪了"。
+                    // 按"四舍五入后的百分数"去重：99.9 与 100 都会印成 100，
+                    // 不该连着打两行。
+                    let shown = pct.round() as i64;
+                    if shown != shown_step {
+                        shown_step = shown;
+                        println!("进度 {shown}%");
+                    }
+                } else {
                     print!("\r{:>5.1}%", pct);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
@@ -313,6 +334,7 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
     }
     let status = child.wait().context("等待 yt-dlp 结束失败")?;
     if !quiet && !wants_json && last_pct.is_some() {
+        // 原地覆盖那一行要换行收尾；quiet 模式每档都是独立行，不需要。
         println!();
     }
 
@@ -339,13 +361,11 @@ pub fn run(url: &str, dir: &Path, name: Option<&str>, quiet: bool, wants_json: b
                     .display().to_string(),
             })))
         );
-    } else if !quiet {
+    } else {
+        // 结尾也**不看 quiet**：日志要能回答"下到哪了"，这是排查的第一手材料。
         match name {
-            Some(n) => println!(
-                "下载已完成  目标：{}",
-                dir.join(force_out_name(n)).display()
-            ),
-            None => println!("下载已完成  目标目录：{}", dir.display()),
+            Some(n) => println!("下载完成  目标：{}", dir.join(force_out_name(n)).display()),
+            None => println!("下载完成  目标目录：{}", dir.display()),
         }
     }
     Ok(0)

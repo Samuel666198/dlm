@@ -11852,3 +11852,54 @@ fn video_mode_surfaces_the_tool_reason_when_info_extraction_fails() -> anyhow::R
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+/// **`--quiet` 不许把视频任务的日志吞空**（2026-11-28：用户看到的就是一片空白）。
+///
+/// GUI 派发永远带 `--quiet`；如果所有输出都被它挡住，一条正在下 154 MB 的任务
+/// 在界面上就是"没有大小、没有进度、日志空的"，看起来像没在动。
+#[test]
+fn a_quiet_video_run_still_records_what_it_is_doing() -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join(format!("dlm-video-quiet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let fake = env!("CARGO_BIN_EXE_fake-ytdlp");
+    let dir_arg = dir.to_string_lossy().to_string();
+
+    let out = run_dlm_with_ytdlp(
+        &[
+            "--video",
+            "--quiet",
+            "--url",
+            "https://example.com/v/1",
+            "--out-dir",
+            &dir_arg,
+            "--out-name",
+            "quiet-probe",
+        ],
+        fake,
+        &[],
+    )?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "假 yt-dlp 正常退 0：{stderr}");
+    eprintln!("---- quiet 下的 stdout ----\n{stdout}");
+
+    // 序言：这是什么（标题/格式/体积）与用的哪个工具
+    assert!(stdout.contains("视频下载：示例 视频"), "要有序言：{stdout}");
+    assert!(stdout.contains("工具："), "要写明用的哪个 yt-dlp：{stdout}");
+    // 进度：至少有几档百分比，落在日志里可查
+    assert!(stdout.contains("进度 25%"), "要有分档进度：{stdout}");
+    assert!(stdout.contains("进度 100%"), "最终进度也要有：{stdout}");
+    // 结尾：下到哪了
+    assert!(
+        stdout.contains("下载完成  目标："),
+        "要有结尾落点：{stdout}"
+    );
+    assert!(
+        stdout.contains("quiet-probe.mp4"),
+        "结尾要给出实际落点（--out-name 被钉死）：{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
